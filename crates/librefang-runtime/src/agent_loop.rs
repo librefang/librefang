@@ -1231,6 +1231,14 @@ pub struct LoopOptions {
     /// the `tool_use` block) but cannot actually invoke it — same
     /// defense-in-depth as libre-code's `createAutoMemCanUseTool`.
     pub allowed_tools: Option<Vec<String>>,
+    /// Per-session interrupt handle.  When `Some`, long-running tools
+    /// (shell_exec, sub-process tools) poll this flag and abort promptly
+    /// when it is set.  When `None`, no interrupt checking is performed.
+    ///
+    /// The handle is created once per session/turn and cloned into each
+    /// `ToolExecutionContext` so that cancelling the parent session
+    /// interrupts all its in-flight tools without affecting other sessions.
+    pub interrupt: Option<crate::interrupt::SessionInterrupt>,
 }
 
 /// Result of an agent loop execution.
@@ -3073,10 +3081,7 @@ pub async fn run_agent_loop(
                         streaming: false,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
-                        // No interrupt wired at this call site yet; callers that
-                        // need session-scoped cancellation should pass one through
-                        // LoopOptions or a dedicated field on the enclosing context.
-                        interrupt: None,
+                        interrupt: opts.interrupt.clone(),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -4249,9 +4254,7 @@ pub async fn run_agent_loop_streaming(
                         streaming: true,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
-                        // No interrupt wired at this call site yet; see non-streaming
-                        // path above for the same note.
-                        interrupt: None,
+                        interrupt: opts.interrupt.clone(),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 

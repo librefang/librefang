@@ -23,6 +23,7 @@ use librefang_runtime::agent_loop::{
 };
 use librefang_runtime::audit::AuditLog;
 use librefang_runtime::drivers;
+use librefang_runtime::interrupt::SessionInterrupt;
 use librefang_runtime::kernel_handle::{self, KernelHandle};
 use librefang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
@@ -3756,7 +3757,11 @@ system_prompt = "You are a helpful assistant."
             None, // no proactive memory
             None, // no context engine
             None, // no pending messages
-            &librefang_runtime::agent_loop::LoopOptions::default(),
+            &librefang_runtime::agent_loop::LoopOptions {
+                is_fork: false,
+                allowed_tools: None,
+                interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
+            },
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -4352,6 +4357,10 @@ system_prompt = "You are a helpful assistant."
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,
+            // Fork inherits the parent's interrupt via child_token() so that
+            // cancelling the parent also cancels the fork's in-flight tools.
+            // For now, create a fresh interrupt until kernel stores the parent's.
+            interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -4374,13 +4383,19 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+        let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+            is_fork: false,
+            allowed_tools: None,
+            interrupt: Some(session_interrupt),
+        };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
             message,
             kernel_handle,
             sender_context,
             thinking_override,
-            librefang_runtime::agent_loop::LoopOptions::default(),
+            loop_opts,
         )
     }
 
@@ -6274,6 +6289,17 @@ system_prompt = "You are a helpful assistant."
         // Set up mid-turn injection channel (#956)
         let injection_rx = self.setup_injection_channel(agent_id);
 
+        // Session-scoped interrupt for tool-level cancellation.  Cloned into
+        // each ToolExecutionContext so that cancelling the session (via
+        // interrupt.cancel()) aborts in-flight tools without affecting other
+        // concurrent sessions.
+        let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+        let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+            is_fork: false,
+            allowed_tools: None,
+            interrupt: Some(session_interrupt),
+        };
+
         // Build a per-execution MCP pool that includes the agent workspace as
         // a root. Falls back to the global pool if the workspace adds nothing
         // new or if all connections fail.
@@ -6333,7 +6359,7 @@ system_prompt = "You are a helpful assistant."
             proactive_memory,
             self.context_engine_for_agent(&manifest),
             Some(&injection_rx),
-            &librefang_runtime::agent_loop::LoopOptions::default(),
+            &loop_opts,
         )
         .await;
 
