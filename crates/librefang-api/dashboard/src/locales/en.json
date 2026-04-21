@@ -2387,7 +2387,8 @@
       "help_new": "New tab",
       "help_new_key": "＋"
     },
-    "install_tmux": "Install tmux"
+    "install_tmux": "Install tmux",
+    "reconnected": "Reconnected"
   },
   "mcp": {
     "title": "MCP Servers",

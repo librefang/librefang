@@ -2390,7 +2390,8 @@
       "help_new": "新建标签",
       "help_new_key": "＋"
     },
-    "install_tmux": "安装 tmux"
+    "install_tmux": "安装 tmux",
+    "reconnected": "已重新连接"
   },
   "mcp": {
     "title": "MCP 服务器",

@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Plus, X, HelpCircle } from "lucide-react";
+import { Plus, X, HelpCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useTerminalWindows } from "../lib/queries/terminal";
 import {
@@ -213,6 +213,31 @@ export function TerminalTabs({
     [deleteMutation, displayedActiveWindowId, ws, onSwitchWindow, addToast, t]
   );
 
+  // ── Tab overflow indicators ───────────────────────────────────────────────
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [showLeftArrow, setShowLeftArrow] = useState(false);
+  const [showRightArrow, setShowRightArrow] = useState(false);
+
+  const updateOverflowArrows = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    setShowLeftArrow(el.scrollLeft > 0);
+    setShowRightArrow(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    updateOverflowArrows();
+    el.addEventListener("scroll", updateOverflowArrows, { passive: true });
+    const ro = new ResizeObserver(updateOverflowArrows);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", updateOverflowArrows);
+      ro.disconnect();
+    };
+  }, [updateOverflowArrows]);
+
   const [showHelp, setShowHelp] = useState(false);
   const helpRef = useRef<HTMLDivElement>(null);
 
@@ -236,6 +261,11 @@ export function TerminalTabs({
     });
   }, [windows, tabOrder]);
 
+  // Re-check arrows when the windows list changes (tabs added/removed).
+  useEffect(() => {
+    updateOverflowArrows();
+  }, [sortedWindows, updateOverflowArrows]);
+
   if (!tmuxAvailable) return null;
 
   const atLimit = windows.length >= maxWindows;
@@ -243,7 +273,18 @@ export function TerminalTabs({
 
   return (
     <div className="flex items-end bg-[#161b22] border-b border-gray-700/60 shrink-0">
-      <div className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      <div className="relative flex-1 min-w-0">
+        {showLeftArrow && (
+          <div className="pointer-events-none absolute left-0 inset-y-0 flex items-center pl-0.5 z-10">
+            <ChevronLeft className="h-3 w-3 text-gray-500" />
+          </div>
+        )}
+        {showRightArrow && (
+          <div className="pointer-events-none absolute right-0 inset-y-0 flex items-center pr-0.5 z-10">
+            <ChevronRight className="h-3 w-3 text-gray-500" />
+          </div>
+        )}
+      <div ref={tabScrollRef} className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
@@ -343,6 +384,7 @@ export function TerminalTabs({
       >
         <Plus className="h-3.5 w-3.5" />
       </button>
+      </div>
       </div>
 
       <div className="flex items-center gap-1 shrink-0 self-center pr-2 pb-0.5">
