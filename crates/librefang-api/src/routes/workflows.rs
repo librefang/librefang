@@ -972,12 +972,30 @@ pub async fn create_trigger(
         },
     };
 
+    let cooldown_secs: Option<u64> = req["cooldown_secs"].as_u64();
+
+    let session_mode: Option<librefang_types::agent::SessionMode> =
+        match req.get("session_mode").and_then(|v| v.as_str()) {
+            None => None,
+            Some(s) => match serde_json::from_value(serde_json::json!(s)) {
+                Ok(m) => Some(m),
+                Err(_) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Invalid 'session_mode': '{s}' (expected 'persistent' or 'new')"
+                    ))
+                    .into_json_tuple();
+                }
+            },
+        };
+
     match state.kernel.register_trigger_with_target(
         agent_id,
         pattern,
         prompt_template,
         max_fires,
         target_agent,
+        cooldown_secs,
+        session_mode,
     ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({

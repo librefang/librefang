@@ -220,7 +220,12 @@ impl TriggerEngine {
             let id = trigger.id;
             let agent_id = trigger.agent_id;
             self.triggers.insert(id, trigger);
-            self.agent_triggers.entry(agent_id).or_default().push(id);
+            // Guard against duplicate IDs in a corrupted file: only add to the
+            // per-agent index if this ID isn't already present.
+            let mut ids = self.agent_triggers.entry(agent_id).or_default();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
         }
         info!(count, "Loaded trigger jobs from disk");
         Ok(count)
@@ -271,7 +276,15 @@ impl TriggerEngine {
         prompt_template: String,
         max_fires: u64,
     ) -> TriggerId {
-        self.register_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Register a trigger with an optional target agent for cross-session wake.
@@ -286,6 +299,8 @@ impl TriggerEngine {
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> TriggerId {
         let trigger = Trigger {
             id: TriggerId::new(),
@@ -297,8 +312,8 @@ impl TriggerEngine {
             fire_count: 0,
             max_fires,
             target_agent,
-            cooldown_secs: None,
-            session_mode: None,
+            cooldown_secs,
+            session_mode,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -463,6 +478,7 @@ impl TriggerEngine {
     pub fn update(&self, trigger_id: TriggerId, patch: TriggerPatch) -> Option<Trigger> {
         let mut entry = self.triggers.get_mut(&trigger_id)?;
         let t = entry.value_mut();
+        let pattern_changed = patch.pattern.is_some();
         if let Some(pattern) = patch.pattern {
             t.pattern = pattern;
         }
@@ -481,7 +497,13 @@ impl TriggerEngine {
         if let Some(session_mode) = patch.session_mode {
             t.session_mode = session_mode;
         }
-        Some(t.clone())
+        let id = t.id;
+        drop(entry);
+        // Pattern change means the trigger is logically new — clear any stale cooldown timer.
+        if pattern_changed {
+            self.last_fired.remove(&id);
+        }
+        self.triggers.get(&id).map(|t| t.clone())
     }
 
     /// Get a single trigger by ID.

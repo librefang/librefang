@@ -8152,6 +8152,8 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
         if self.registry.get(agent_id).is_none() {
@@ -8173,6 +8175,8 @@ system_prompt = "You are a helpful assistant."
             prompt_template,
             max_fires,
             target_agent,
+            cooldown_secs,
+            session_mode,
         );
         if let Err(e) = self.triggers.persist() {
             warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
