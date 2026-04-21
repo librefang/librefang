@@ -1897,6 +1897,13 @@ impl LibreFangKernel {
             &config.registry.registry_mirror,
         );
 
+        // One-shot: reclaim the duplicate registry checkout that older
+        // librefang versions maintained under `~/.librefang/cache/registry/`.
+        // Catalog sync now reads directly from `~/.librefang/registry/` (the
+        // directory registry_sync already maintains), so the duplicate is
+        // pure waste.
+        librefang_runtime::catalog_sync::remove_legacy_cache_dirs(&config.home_dir);
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
@@ -8767,21 +8774,28 @@ system_prompt = "You are a helpful assistant."
         {
             let mut missing: Vec<String> = Vec::new();
 
-            // Default LLM provider — prefer explicit api_key_env, then resolve
-            let llm_env = if !cfg.default_model.api_key_env.is_empty() {
-                cfg.default_model.api_key_env.clone()
-            } else {
-                cfg.resolve_api_key_env(&cfg.default_model.provider)
-            };
-            if std::env::var(&llm_env).unwrap_or_default().is_empty() {
-                missing.push(format!(
-                    "LLM ({}): ${}",
-                    cfg.default_model.provider, llm_env
-                ));
+            // Default LLM provider — prefer explicit api_key_env, then resolve.
+            // Skip providers that run locally (ollama, vllm, lmstudio, …) —
+            // they don't need a key and flagging them confuses operators.
+            if !librefang_runtime::provider_health::is_local_provider(&cfg.default_model.provider) {
+                let llm_env = if !cfg.default_model.api_key_env.is_empty() {
+                    cfg.default_model.api_key_env.clone()
+                } else {
+                    cfg.resolve_api_key_env(&cfg.default_model.provider)
+                };
+                if std::env::var(&llm_env).unwrap_or_default().is_empty() {
+                    missing.push(format!(
+                        "LLM ({}): ${}",
+                        cfg.default_model.provider, llm_env
+                    ));
+                }
             }
 
-            // Fallback LLM providers — prefer explicit api_key_env, then resolve
+            // Fallback LLM providers — same local-provider exemption.
             for fb in &cfg.fallback_providers {
+                if librefang_runtime::provider_health::is_local_provider(&fb.provider) {
+                    continue;
+                }
                 let env_var = if !fb.api_key_env.is_empty() {
                     fb.api_key_env.clone()
                 } else {
@@ -9268,16 +9282,30 @@ system_prompt = "You are a helpful assistant."
                                 > = kernel.clone();
                                 // Cron jobs use a synthetic SenderContext so they
                                 // get their own isolated session (channel="cron").
-                                let cron_sender = SenderContext {
-                                    channel: "cron".to_string(),
-                                    user_id: job.peer_id.clone().unwrap_or_default(),
-                                    display_name: "cron".to_string(),
-                                    is_group: false,
-                                    was_mentioned: false,
-                                    thread_id: None,
-                                    account_id: None,
-                                    ..Default::default()
+                                //
+                                // Exception: when `session_mode = "new"` the job
+                                // requested per-fire isolation. In that case we
+                                // skip the fixed channel session and instead pass
+                                // a `session_mode_override` of `New` so each fire
+                                // receives its own fresh SessionId.
+                                let wants_new_session = job.session_mode
+                                    == Some(librefang_types::agent::SessionMode::New);
+                                let (sender_ctx_owned, mode_override) = if wants_new_session {
+                                    (None, Some(librefang_types::agent::SessionMode::New))
+                                } else {
+                                    let cron_sender = SenderContext {
+                                        channel: "cron".to_string(),
+                                        user_id: job.peer_id.clone().unwrap_or_default(),
+                                        display_name: "cron".to_string(),
+                                        is_group: false,
+                                        was_mentioned: false,
+                                        thread_id: None,
+                                        account_id: None,
+                                        ..Default::default()
+                                    };
+                                    (Some(cron_sender), None)
                                 };
+                                let sender_ctx = sender_ctx_owned.as_ref();
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -9285,8 +9313,8 @@ system_prompt = "You are a helpful assistant."
                                         message,
                                         Some(kh),
                                         None,
-                                        Some(&cron_sender),
-                                        None,
+                                        sender_ctx,
+                                        mode_override,
                                         None,
                                     ),
                                 )
@@ -12687,6 +12715,14 @@ impl KernelHandle for LibreFangKernel {
             uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
         );
 
+        let session_mode: Option<librefang_types::agent::SessionMode> =
+            if job_json["session_mode"].is_string() {
+                serde_json::from_value(job_json["session_mode"].clone())
+                    .map_err(|e| format!("Invalid session_mode: {e}"))?
+            } else {
+                None
+            };
+
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
@@ -12695,6 +12731,7 @@ impl KernelHandle for LibreFangKernel {
             action,
             delivery,
             peer_id: None,
+            session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
             next_run: None,

@@ -755,10 +755,30 @@ fn draw_list(f: &mut Frame, area: Rect, state: &mut ChannelState) {
         }
     }
 
-    f.render_widget(
-        widgets::hint_bar("  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh"),
-        chunks[4],
-    );
+    // Build a context-sensitive hint line based on the currently selected channel.
+    let selected_ch = state.list_state.selected().and_then(|sel| {
+        let filtered = state.filtered_channels();
+        filtered.get(sel).copied()
+    });
+    let hint_text: String = if let Some(ch) = selected_ch {
+        let toggle_hint = if ch.enabled {
+            "[d] Disable"
+        } else {
+            "[e] Enable"
+        };
+        let status_hint = match ch.status {
+            ChannelStatus::Ready => "ready",
+            ChannelStatus::MissingEnv => "missing env",
+            ChannelStatus::NotConfigured => "not configured",
+        };
+        format!(
+            "  \u{25b9} {}  ({})  [Enter] Setup  [t] Test  {}  [Tab] Category  [r] Refresh",
+            ch.display_name, status_hint, toggle_hint
+        )
+    } else {
+        "  [\u{2191}\u{2193}] Navigate  [Tab] Category  [Enter] Setup  [t] Test  [e/d] Enable/Disable  [r] Refresh".to_string()
+    };
+    f.render_widget(widgets::hint_bar(&hint_text), chunks[4]);
 }
 
 fn draw_setup(f: &mut Frame, area: Rect, state: &ChannelState) {

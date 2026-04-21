@@ -86,6 +86,19 @@ export const clawhubKeys = {
   detail: (slug: string) => [...clawhubKeys.details(), slug] as const,
 };
 
+export const clawhubCnKeys = {
+  all: ["clawhub-cn"] as const,
+  browse: (filters: {
+    sort?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}) => [...clawhubCnKeys.all, "browse", filters] as const,
+  search: (query: string) =>
+    [...clawhubCnKeys.all, "search", query] as const,
+  details: () => [...clawhubCnKeys.all, "detail"] as const,
+  detail: (slug: string) => [...clawhubCnKeys.details(), slug] as const,
+};
+
 export const skillhubKeys = {
   all: ["skillhub"] as const,
   browse: (sort?: string) => [...skillhubKeys.all, "browse", sort] as const,

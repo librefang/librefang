@@ -197,6 +197,7 @@ function TotpSection() {
     setupTotp.isPending || confirmTotp.isPending || revokeTotp.isPending;
 
   async function handleSetup(currentCode?: string) {
+    if (loading) return;
     setError(null);
     setSuccess(null);
     try {
@@ -220,6 +221,7 @@ function TotpSection() {
   }
 
   async function handleRevoke() {
+    if (loading) return;
     if (!revokeCode) return;
     setError(null);
     setSuccess(null);
@@ -236,6 +238,7 @@ function TotpSection() {
   }
 
   async function handleConfirm() {
+    if (loading) return;
     if (confirmCode.length !== 6) return;
     setError(null);
     setSuccess(null);
@@ -303,7 +306,7 @@ function TotpSection() {
                 onChange={(e) => setResetCode(e.target.value)}
                 placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
                 className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                onKeyDown={(e) => e.key === "Enter" && resetCode && handleSetup(resetCode)}
+                onKeyDown={(e) => e.key === "Enter" && resetCode && !loading && handleSetup(resetCode)}
               />
               <Button variant="primary" size="sm" onClick={() => handleSetup(resetCode)} disabled={!resetCode || loading} isLoading={loading}>
                 {t("settings.totp_verify_reset", "Verify & Reset")}
@@ -320,7 +323,7 @@ function TotpSection() {
                 onChange={(e) => setRevokeCode(e.target.value)}
                 placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
                 className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                onKeyDown={(e) => e.key === "Enter" && revokeCode && handleRevoke()}
+                onKeyDown={(e) => e.key === "Enter" && revokeCode && !loading && handleRevoke()}
               />
               <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
                 {t("settings.totp_confirm_revoke", "Confirm Revoke")}
@@ -365,8 +368,8 @@ function TotpSection() {
                     {t("settings.totp_recovery_title", "Recovery Codes (save these somewhere safe):")}
                   </p>
                   <div className="grid grid-cols-2 gap-1 bg-main border border-border-subtle rounded-lg p-3">
-                    {setupData.recovery_codes.map((code, i) => (
-                      <code key={i} className="text-sm font-mono text-center select-all">{code}</code>
+                    {setupData.recovery_codes.map((code) => (
+                      <code key={code} className="text-sm font-mono text-center select-all">{code}</code>
                     ))}
                   </div>
                 </div>
@@ -381,7 +384,7 @@ function TotpSection() {
                   onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   placeholder="000000"
                   className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                  onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
+                  onKeyDown={(e) => e.key === "Enter" && !loading && handleConfirm()}
                 />
                 <Button variant="primary" size="sm" onClick={handleConfirm} disabled={confirmCode.length !== 6 || loading} isLoading={loading}>
                   {t("settings.totp_confirm", "Confirm")}
@@ -425,11 +428,13 @@ function ConfigBackupSection() {
             "Download a backup of your current config.toml settings file"
           )}
         >
-          <a href="/api/config/export" download="librefang-config.toml">
-            <Button variant="secondary" size="sm">
-              <Download className="w-3.5 h-3.5 mr-1.5" />
-              {t("settings.export_config_btn", "Download")}
-            </Button>
+          <a
+            href="/api/config/export"
+            download="librefang-config.toml"
+            className="inline-flex items-center justify-center gap-2 rounded-xl font-bold transition-all duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.96] active:duration-100 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1 border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-brand/20 shadow-sm px-3 py-1.5 text-xs"
+          >
+            <Download className="w-3.5 h-3.5 mr-1.5" />
+            {t("settings.export_config_btn", "Download")}
           </a>
         </SettingRow>
       </div>

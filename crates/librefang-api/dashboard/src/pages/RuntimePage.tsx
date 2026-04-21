@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { useUIStore } from "../lib/store";
 import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -93,6 +94,7 @@ function ProtectionBadge({ name, enabled }: { name: string; enabled: boolean }) 
 
 export function RuntimePage() {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
   const [reloadResult, setReloadResult] = useState<string | null>(null);
@@ -527,24 +529,42 @@ export function RuntimePage() {
               </div>
 
               {auditEntries.length > 0 ? (
-                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                <div className="max-h-80 overflow-y-auto rounded-lg border border-border-subtle/60 divide-y divide-border-subtle/40">
                   {auditEntries.map((entry: AuditEntry, i: number) => (
-                    <div key={entry.seq ?? i} className="flex items-start gap-2 text-xs py-1.5 px-2 rounded-lg bg-main/30">
-                      <Badge variant={entry.outcome === "ok" ? "success" : entry.outcome === "denied" ? "error" : "warning"}>
-                        {entry.outcome || "-"}
-                      </Badge>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-[10px] truncate">{entry.action || "-"}</span>
-                          {entry.agent_id && entry.agent_id !== "system" && (
-                            <span className="text-[9px] text-text-dim truncate">@{entry.agent_id.slice(0, 8)}</span>
-                          )}
+                    <div
+                      key={entry.seq ?? i}
+                      className="px-3 py-2.5 hover:bg-main/20 transition-colors"
+                    >
+                      {/* Header row: outcome badge (fixed gutter so entries
+                          stay column-aligned regardless of word length) +
+                          action + agent + timestamp on one line. */}
+                      <div className="flex items-center gap-3">
+                        <div className="w-20 shrink-0">
+                          <Badge variant={entry.outcome === "ok" ? "success" : entry.outcome === "denied" ? "error" : "warning"}>
+                            {entry.outcome || "-"}
+                          </Badge>
                         </div>
-                        <p className="text-[10px] text-text-dim truncate">{entry.detail || "-"}</p>
+                        <span className="flex-1 font-mono text-[11px] font-bold truncate">
+                          {entry.action || "-"}
+                        </span>
+                        {entry.agent_id && entry.agent_id !== "system" && (
+                          <span className="text-[10px] text-text-dim font-mono shrink-0">
+                            @{entry.agent_id.slice(0, 8)}
+                          </span>
+                        )}
+                        <span className="text-[10px] text-text-dim shrink-0 tabular-nums">
+                          {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "-"}
+                        </span>
                       </div>
-                      <span className="text-[9px] text-text-dim shrink-0">
-                        {entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "-"}
-                      </span>
+                      {/* Detail gets its own line under the badge column so
+                          long messages wrap cleanly instead of fighting for
+                          space on the header row. `ml-[5.75rem]` matches
+                          the 5rem badge gutter plus the 0.75rem gap above. */}
+                      {entry.detail && (
+                        <p className="mt-1 ml-[5.75rem] text-[11px] text-text-dim leading-snug line-clamp-2">
+                          {entry.detail}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -552,14 +572,58 @@ export function RuntimePage() {
                 <p className="text-xs text-text-dim">{t("runtime.no_audit")}</p>
               )}
 
-              {auditVerifyQuery.data ? (
-                <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between">
-                  <span className="text-xs text-text-dim">{t("runtime.audit_entries", { count: auditVerifyQuery.data.entries ?? 0 })}</span>
-                  <Button variant="ghost" size="sm" onClick={() => auditVerifyQuery.refetch()}>
-                    {t("runtime.audit_verify")}
-                  </Button>
-                </div>
-              ) : null}
+              {/* Verify button is always rendered so the user can trigger a
+                  chain verification even before any automatic fetch has
+                  landed. `refetchInterval: false` means the query no longer
+                  polls in the background, so the previous "hidden until
+                  data arrives" gating left the button invisible on first
+                  paint. `isFetching` also provides a visible loading state
+                  so repeated clicks don't look like they did nothing. */}
+              <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between">
+                <span className="text-xs text-text-dim">
+                  {auditVerifyQuery.data
+                    ? t("runtime.audit_entries", { count: auditVerifyQuery.data.entries ?? 0 })
+                    : t("runtime.audit_not_verified", { defaultValue: "Chain not verified yet" })}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={auditVerifyQuery.isFetching}
+                  onClick={async () => {
+                    // Fire a toast on completion so the user gets obvious
+                    // feedback — the `valid` badge at the top of the card
+                    // already updates, but it's easy to miss when the
+                    // result didn't change. `refetch()` resolves with the
+                    // fresh query state whether the request succeeded
+                    // or errored; react-query never throws from it.
+                    const res = await auditVerifyQuery.refetch();
+                    if (res.isSuccess) {
+                      const valid = res.data?.valid;
+                      const count = res.data?.entries ?? 0;
+                      addToast(
+                        valid
+                          ? t("runtime.audit_verified_ok", {
+                              defaultValue: `Audit chain verified (${count} entries)`,
+                              count,
+                            })
+                          : t("runtime.audit_verified_invalid", {
+                              defaultValue: "Audit chain INVALID — tampering detected",
+                            }),
+                        valid ? "success" : "error",
+                      );
+                    } else if (res.isError) {
+                      addToast(
+                        res.error instanceof Error ? res.error.message : t("common.error"),
+                        "error",
+                      );
+                    }
+                  }}
+                >
+                  {auditVerifyQuery.isFetching
+                    ? t("common.loading")
+                    : t("runtime.audit_verify")}
+                </Button>
+              </div>
             </Card>
           </div>
 

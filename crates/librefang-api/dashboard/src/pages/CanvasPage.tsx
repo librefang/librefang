@@ -1179,9 +1179,10 @@ function CanvasPageInner() {
     const detail = await getWorkflow(workflowId);
     let wfNodes: Node[];
     let wfEdges: Edge[];
-    if (detail.layout?.nodes) {
-      wfNodes = detail.layout.nodes;
-      wfEdges = detail.layout.edges || [];
+    const layout = detail.layout as { nodes?: Node[]; edges?: Edge[] } | undefined;
+    if (layout?.nodes) {
+      wfNodes = layout.nodes;
+      wfEdges = layout.edges || [];
     } else {
       const steps = Array.isArray(detail.steps) ? detail.steps : [];
       wfNodes = steps.map((s: any, idx: number) => ({

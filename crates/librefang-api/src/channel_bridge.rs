@@ -428,6 +428,11 @@ fn start_stream_text_bridge_with_status(
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             debug!("Streaming bridge: filtered leaked tool call text at ContentComplete");
+                        } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
+                        {
+                            debug!(
+                                "Streaming bridge: suppressed NO_REPLY sentinel at ContentComplete"
+                            );
                         } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                             break;
                         }
@@ -494,10 +499,12 @@ fn start_stream_text_bridge_with_status(
         }
 
         if !iter_buf.is_empty() && !saw_tool_use {
-            if !looks_like_tool_call(&iter_buf) {
-                let _ = tx.send(iter_buf).await;
-            } else {
+            if looks_like_tool_call(&iter_buf) {
                 debug!("Streaming bridge: filtered leaked tool call text in final flush");
+            } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
+                debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
+            } else {
+                let _ = tx.send(iter_buf).await;
             }
         }
     });
@@ -1256,6 +1263,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
                     peer_id: None,
+                    session_mode: None,
                     created_at: chrono::Utc::now(),
                     last_run: None,
                     next_run: None,
