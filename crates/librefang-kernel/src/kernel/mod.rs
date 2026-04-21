@@ -5678,6 +5678,39 @@ system_prompt = "You are a helpful assistant."
                 label: None,
             });
 
+        // ── Session auto-reset policy check ────────────────────────────────
+        // Evaluate the global session reset policy against this agent's
+        // last_active timestamp.  The `suspended` flag on the entry acts as
+        // an operator-forced hard-wipe signal that always wins regardless of
+        // the configured mode.
+        //
+        // When a reset is required:
+        //   - `session.messages` is cleared so the LLM starts a fresh context.
+        //   - The registry entry's `suspended` / `resume_pending` flags and
+        //     `reset_reason` are updated in-place.
+        //
+        // `mode = "off"` (the default) is a no-op — fully backward compatible.
+        {
+            use crate::session_policy::SessionResetPolicy as KernelPolicy;
+            let policy: KernelPolicy = cfg.session.reset.clone().into();
+            let last_active: std::time::SystemTime = entry.last_active.into();
+            if let Some(reason) = policy.should_reset(last_active, entry.suspended) {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    agent = %entry.name,
+                    reason = %reason,
+                    event = "session_reset",
+                    "Auto-resetting session per policy"
+                );
+                session.messages.clear();
+                let types_reason: librefang_types::config::SessionResetReason = reason.into();
+                let _ = self
+                    .registry
+                    .update_session_reset_state(agent_id, types_reason);
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
+
         let tools = self.available_tools(agent_id);
         let tools = entry.mode.filter_tools((*tools).clone());
 

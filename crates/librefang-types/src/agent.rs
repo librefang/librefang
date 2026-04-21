@@ -901,6 +901,28 @@ pub struct AgentEntry {
     /// Whether this agent was spawned by a Hand (true) or is a regular agent (false).
     #[serde(default)]
     pub is_hand: bool,
+
+    // -----------------------------------------------------------------------
+    // Session auto-reset state (mirrors hermes-agent SessionEntry flags)
+    // -----------------------------------------------------------------------
+    /// When `true`, the next call to `execute_llm_agent` will force a hard
+    /// reset (new session_id, cleared history) before processing the message.
+    /// Set by operator action or stuck-loop recovery.  Takes priority over
+    /// `resume_pending`.
+    #[serde(default)]
+    pub suspended: bool,
+
+    /// When `true`, the agent was interrupted by a restart/shutdown but
+    /// recovery is expected.  Unlike `suspended`, the existing `session_id`
+    /// is preserved and the agent continues on the same transcript.
+    /// Cleared after the next successful turn.
+    #[serde(default)]
+    pub resume_pending: bool,
+
+    /// The reason for the most recent automatic session reset, if any.
+    /// `None` until the first auto-reset occurs.
+    #[serde(default)]
+    pub reset_reason: Option<crate::config::SessionResetReason>,
 }
 
 /// A stored prompt version for an agent.

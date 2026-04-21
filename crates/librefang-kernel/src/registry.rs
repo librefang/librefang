@@ -457,6 +457,53 @@ impl AgentRegistry {
         entry.last_active = chrono::Utc::now();
         Ok(())
     }
+
+    /// Update the session auto-reset state flags on an agent entry.
+    ///
+    /// Called after a policy-driven session reset or a manual reset:
+    /// - `suspended` is cleared (the forced-wipe has been applied).
+    /// - `resume_pending` is cleared.
+    /// - `reset_reason` records why the reset happened.
+    ///
+    /// Does **not** update `last_active` — that is a separate concern.
+    pub fn update_session_reset_state(
+        &self,
+        id: AgentId,
+        reason: librefang_types::config::SessionResetReason,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.suspended = false;
+        entry.resume_pending = false;
+        entry.reset_reason = Some(reason);
+        Ok(())
+    }
+
+    /// Mark an agent's session as `suspended` so the next invocation performs
+    /// a hard reset.  Used by operator action or stuck-loop recovery.
+    pub fn suspend_session(&self, id: AgentId) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.suspended = true;
+        Ok(())
+    }
+
+    /// Mark an agent's session as `resume_pending` after an interrupted
+    /// restart.  Ignored when `suspended` is already set (hard-wipe wins).
+    pub fn mark_resume_pending(&self, id: AgentId) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        if !entry.suspended {
+            entry.resume_pending = true;
+        }
+        Ok(())
+    }
 }
 
 impl Default for AgentRegistry {
