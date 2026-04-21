@@ -3,6 +3,7 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useMemo,
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -44,6 +45,15 @@ interface TerminalTabsProps {
 // Match backend validate_window_name: any Unicode except control chars and '|', 1–64 chars.
 const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
 
+const ORDER_KEY = "terminal.tabOrder";
+
+function loadOrder(): string[] {
+  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]"); } catch { return []; }
+}
+function saveOrder(ids: string[]) {
+  localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+}
+
 export function TerminalTabs({
   ws,
   tmuxAvailable,
@@ -59,6 +69,8 @@ export function TerminalTabs({
   const renameMutation = useRenameTerminalWindow();
   const deleteMutation = useDeleteTerminalWindow();
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [tabOrder, setTabOrder] = useState<string[]>(loadOrder);
+  const [dragId, setDragId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
   const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -66,6 +78,18 @@ export function TerminalTabs({
 
   useEffect(() => {
     windowsRef.current = windows;
+  }, [windows]);
+
+  // Keep tab order in sync with server windows list.
+  useEffect(() => {
+    setTabOrder(prev => {
+      const existing = new Set(windows.map(w => w.id));
+      const filtered = prev.filter(id => existing.has(id));
+      const newIds = windows.map(w => w.id).filter(id => !filtered.includes(id));
+      const next = [...filtered, ...newIds];
+      saveOrder(next);
+      return next;
+    });
   }, [windows]);
 
   const addToast = useUIStore((s) => s.addToast);
@@ -201,6 +225,15 @@ export function TerminalTabs({
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [showHelp]);
 
+  const sortedWindows = useMemo(() => {
+    const orderMap = new Map(tabOrder.map((id, i) => [id, i]));
+    return [...windows].sort((a, b) => {
+      const ai = orderMap.get(a.id) ?? Infinity;
+      const bi = orderMap.get(b.id) ?? Infinity;
+      return ai - bi;
+    });
+  }, [windows, tabOrder]);
+
   if (!tmuxAvailable) return null;
 
   const atLimit = windows.length >= maxWindows;
@@ -208,7 +241,7 @@ export function TerminalTabs({
 
   return (
     <div className="flex items-end gap-0.5 px-2 pt-1.5 bg-[#161b22] border-b border-gray-700/60 overflow-x-auto shrink-0 scrollbar-thin">
-      {windows.map((w) => {
+      {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
         return (
@@ -225,12 +258,31 @@ export function TerminalTabs({
                 void handleCloseTab(w.id, e);
               }
             }}
+            draggable={!isEditing}
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (!dragId || dragId === w.id) return;
+              setTabOrder(prev => {
+                const next = [...prev];
+                const fromIdx = next.indexOf(dragId);
+                const toIdx = next.indexOf(w.id);
+                if (fromIdx < 0 || toIdx < 0) return prev;
+                next.splice(fromIdx, 1);
+                next.splice(toIdx, 0, dragId);
+                saveOrder(next);
+                return next;
+              });
+              setDragId(null);
+            }}
+            onDragEnd={() => setDragId(null)}
             title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
             className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors cursor-pointer select-none rounded-t-md border-t border-x ${
               isActive
                 ? "bg-[#0d1117] text-gray-200 border-gray-700/70 -mb-px pb-[7px]"
                 : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/40 mb-0"
-            }`}
+            } ${dragId === w.id ? "opacity-50" : ""}`}
           >
             {isEditing ? (
               <input

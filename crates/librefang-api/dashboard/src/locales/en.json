@@ -2211,6 +2211,13 @@
     "enter_fullscreen": "Enter fullscreen",
     "exit_fullscreen": "Exit fullscreen (Esc)",
     "dismiss_error": "Dismiss",
+    "search_placeholder": "Search… (Enter: next, Shift+Enter: prev)",
+    "search_prev": "Previous match",
+    "search_next": "Next match",
+    "search_close": "Close search",
+    "font_decrease": "Decrease font size",
+    "font_increase": "Increase font size",
+    "copy_paste_hint": "Tip: use Ctrl+Shift+C / Ctrl+Shift+V to copy and paste in the terminal",
     "tabs": {
       "new": "New tab",
       "unnamed": "Unnamed",

@@ -1,8 +1,10 @@
 import "@xterm/xterm/css/xterm.css";
+import "@xterm/addon-search/css/xterm-search.css";
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
@@ -90,6 +92,8 @@ export function TerminalPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false);
@@ -105,8 +109,16 @@ export function TerminalPage() {
   const [pendingWindowId, setPendingWindowId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const stored = localStorage.getItem("terminal.fontSize");
+    const parsed = stored ? parseInt(stored, 10) : NaN;
+    return Number.isFinite(parsed) ? Math.max(10, Math.min(20, parsed)) : 13;
+  });
 
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const addToast = useUIStore((s) => s.addToast);
   const {
     data: terminalHealth,
     isError: terminalHealthError,
@@ -166,6 +178,11 @@ export function TerminalPage() {
       }
       if (desiredWindowIdRef.current) {
         ws.send(JSON.stringify({ type: "switch_window", window: desiredWindowIdRef.current }));
+      }
+      const hintKey = "terminal.copyPasteHintShown";
+      if (!localStorage.getItem(hintKey)) {
+        localStorage.setItem(hintKey, "1");
+        addToast(t("terminal.copy_paste_hint"), "info");
       }
     };
 
@@ -301,6 +318,29 @@ export function TerminalPage() {
     setIsFullscreen((v) => !v);
   }, []);
 
+  // Focus search input when search bar becomes visible.
+  useEffect(() => {
+    if (!searchVisible) return;
+    const raf = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [searchVisible]);
+
+  // Update terminal font size when fontSize state changes.
+  useEffect(() => {
+    const term = terminalRef.current;
+    const fit = fitAddonRef.current;
+    if (!term || !fit) return;
+    term.options.fontSize = fontSize;
+    try { fit.fit(); } catch { /* ignore */ }
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      const size = clampTermSize(term.cols, term.rows);
+      if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
+    }
+  }, [fontSize]);
+
   // Refit the terminal after fullscreen toggles.
   useEffect(() => {
     if (!terminalRef.current || !fitAddonRef.current) return;
@@ -340,7 +380,7 @@ export function TerminalPage() {
 
     const term = new Terminal({
       theme: TERMINAL_THEME,
-      fontSize: 13,
+      fontSize: fontSize,
       fontFamily:
         "'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, 'Liberation Mono', monospace",
       lineHeight: 1.2,
@@ -351,11 +391,24 @@ export function TerminalPage() {
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+
+    const searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
+
     term.open(containerRef.current);
     fitAddon.fit();
 
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.key === "f") {
+        setSearchVisible(true);
+        return false; // prevent xterm default
+      }
+      return true;
+    });
 
     term.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -428,6 +481,18 @@ export function TerminalPage() {
           {t("terminal.install_tmux")}
         </Button>
       )}
+      <div className="flex items-center gap-0.5">
+        <button
+          onClick={() => setFontSize(s => { const n = Math.max(10, s - 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
+          title={t("terminal.font_decrease")}
+        >A-</button>
+        <button
+          onClick={() => setFontSize(s => { const n = Math.min(20, s + 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          className="flex items-center justify-center w-7 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
+          title={t("terminal.font_increase")}
+        >A+</button>
+      </div>
       {isConnected ? (
         <Button onClick={disconnect} variant="secondary" size="sm">
           {t("terminal.disconnect")}
@@ -480,6 +545,48 @@ export function TerminalPage() {
           >
             <X className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+      {searchVisible && (
+        <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 bg-[#1c2128] border-b border-gray-700/50">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              searchAddonRef.current?.findNext(e.target.value, { incremental: true });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.shiftKey
+                  ? searchAddonRef.current?.findPrevious(searchQuery)
+                  : searchAddonRef.current?.findNext(searchQuery);
+              }
+              if (e.key === "Escape") {
+                setSearchVisible(false);
+                terminalRef.current?.focus();
+              }
+              e.stopPropagation();
+            }}
+            placeholder={t("terminal.search_placeholder")}
+            className="flex-1 min-w-0 bg-gray-900/60 text-gray-200 text-xs px-2 py-1 rounded border border-gray-700/60 outline-none focus:border-blue-500/60 placeholder:text-gray-600"
+          />
+          <button
+            onClick={() => searchAddonRef.current?.findPrevious(searchQuery)}
+            className="text-gray-500 hover:text-gray-300 transition-colors text-xs px-1.5 py-1 rounded hover:bg-gray-700/40"
+            title={t("terminal.search_prev")}
+          >↑</button>
+          <button
+            onClick={() => searchAddonRef.current?.findNext(searchQuery)}
+            className="text-gray-500 hover:text-gray-300 transition-colors text-xs px-1.5 py-1 rounded hover:bg-gray-700/40"
+            title={t("terminal.search_next")}
+          >↓</button>
+          <button
+            onClick={() => { setSearchVisible(false); terminalRef.current?.focus(); }}
+            className="text-gray-500 hover:text-gray-300 transition-colors"
+            aria-label={t("terminal.search_close")}
+          ><X className="h-3.5 w-3.5" /></button>
         </div>
       )}
       <TerminalTabs
