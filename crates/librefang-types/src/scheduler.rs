@@ -3,7 +3,7 @@
 //! Defines the core types for recurring and one-shot scheduled jobs that can
 //! trigger agent turns, system events, or webhook deliveries.
 
-use crate::agent::AgentId;
+use crate::agent::{AgentId, SessionMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -191,6 +191,15 @@ pub struct CronJob {
     /// (empty user_id — backward-compatible behaviour).
     #[serde(default)]
     pub peer_id: Option<String>,
+    /// Per-job session mode override.
+    ///
+    /// * `None` / `Some(Persistent)` — all fires for this job share one
+    ///   dedicated session (`channel="cron"`), matching the historical
+    ///   default.
+    /// * `Some(New)` — every fire creates a fresh, isolated session so
+    ///   history from previous fires cannot influence the current run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<SessionMode>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).
@@ -431,6 +440,7 @@ mod tests {
             },
             delivery: CronDelivery::None,
             peer_id: None,
+            session_mode: None,
             created_at: Utc::now(),
             last_run: None,
             next_run: None,

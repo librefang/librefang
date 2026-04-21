@@ -316,6 +316,17 @@ pub struct SenderContext {
     /// this field still deserialize cleanly.
     #[serde(default)]
     pub group_participants: Vec<ParticipantRef>,
+    /// When true, the kernel session resolver treats this invocation as
+    /// non-channel for *storage* purposes: messages persist to
+    /// `entry.session_id` instead of `SessionId::for_channel(agent, channel)`.
+    /// `channel` itself is still used for routing cache keys so the assistant
+    /// auto-router stays per-surface (`webui` vs `telegram` etc.).
+    ///
+    /// Set by the dashboard WebSocket handler so the webui chat view shares a
+    /// session with `agent_send` / triggers and so `list_agent_sessions` /
+    /// `switch_agent_session` actually affect what the user sees.
+    #[serde(default)]
+    pub use_canonical_session: bool,
 }
 
 /// Reference to a participant in a group chat.

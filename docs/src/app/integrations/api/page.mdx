@@ -199,9 +199,10 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/workflows/{id}/run` | Run workflow |
 | GET | `/api/workflows/{id}/runs` | List workflow runs |
 | **Triggers** | | |
-| GET | `/api/triggers` | List triggers |
+| GET | `/api/triggers` | List triggers (optional `?agent_id=`) |
 | POST | `/api/triggers` | Create trigger |
-| PUT | `/api/triggers/{id}` | Update trigger |
+| GET | `/api/triggers/{id}` | Get trigger detail |
+| PATCH | `/api/triggers/{id}` | Partially update trigger |
 | DELETE | `/api/triggers/{id}` | Delete trigger |
 | **Schedules** | | |
 | GET | `/api/schedules` | List schedules |

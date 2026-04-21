@@ -7,8 +7,10 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
+use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::event::{Event, EventPayload, LifecycleEvent, SystemEvent};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -46,7 +48,7 @@ impl std::fmt::Display for TriggerId {
 }
 
 /// What kind of events a trigger matches on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerPattern {
     /// Match any lifecycle event (agent spawned, started, terminated, etc.).
@@ -121,6 +123,26 @@ pub struct TriggerMatch {
     pub session_mode_override: Option<librefang_types::agent::SessionMode>,
 }
 
+/// Patch payload for updating an existing trigger.
+///
+/// All fields are optional — `None` means "leave unchanged".
+/// `cooldown_secs` and `session_mode` use `Option<Option<T>>` so callers can
+/// explicitly clear a value by passing `Some(None)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TriggerPatch {
+    pub pattern: Option<TriggerPattern>,
+    pub prompt_template: Option<String>,
+    pub enabled: Option<bool>,
+    pub max_fires: Option<u64>,
+    /// `Some(None)` clears the override (reverts to engine default).
+    pub cooldown_secs: Option<Option<u64>>,
+    /// `Some(None)` clears the override (inherits from agent manifest).
+    pub session_mode: Option<Option<librefang_types::agent::SessionMode>>,
+    /// `Some(None)` clears the target (reverts to owner routing).
+    /// `Some(Some(id))` sets a new cross-session wake target.
+    pub target_agent: Option<Option<AgentId>>,
+}
+
 /// The trigger engine manages event-to-agent routing.
 pub struct TriggerEngine {
     /// All registered triggers.
@@ -133,10 +155,13 @@ pub struct TriggerEngine {
     max_triggers_per_event: usize,
     /// Default cooldown duration (seconds) applied when a trigger has no override.
     default_cooldown_secs: u64,
+    /// Path to the persistence file (`<home>/trigger_jobs.json`).
+    /// `None` means no persistence (used in tests).
+    persist_path: Option<PathBuf>,
 }
 
 impl TriggerEngine {
-    /// Create a new trigger engine with default settings.
+    /// Create a new trigger engine with default settings and no persistence.
     pub fn new() -> Self {
         Self {
             triggers: DashMap::new(),
@@ -144,17 +169,22 @@ impl TriggerEngine {
             last_fired: DashMap::new(),
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            persist_path: None,
         }
     }
 
-    /// Create a trigger engine configured from a `TriggersConfig`.
-    pub fn with_config(config: &librefang_types::config::TriggersConfig) -> Self {
+    /// Create a trigger engine configured from a `TriggersConfig`, with persistence.
+    ///
+    /// `home_dir` is the LibreFang data directory; triggers are persisted to
+    /// `<home_dir>/trigger_jobs.json`.
+    pub fn with_config(config: &librefang_types::config::TriggersConfig, home_dir: &Path) -> Self {
         Self {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
             max_triggers_per_event: config.max_per_event.max(1),
             default_cooldown_secs: config.cooldown_secs,
+            persist_path: Some(home_dir.join("trigger_jobs.json")),
         }
     }
 
@@ -170,7 +200,78 @@ impl TriggerEngine {
         }
     }
 
+    // -- Persistence ----------------------------------------------------------
+
+    /// Load persisted triggers from disk and rebuild the agent index.
+    ///
+    /// Returns the number of triggers loaded. Returns `Ok(0)` if the
+    /// persistence file does not exist or no path is configured.
+    pub fn load(&self) -> LibreFangResult<usize> {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to read trigger jobs: {e}")))?;
+        let triggers: Vec<Trigger> = serde_json::from_str(&data)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
+        let count = triggers.len();
+        for trigger in triggers {
+            let id = trigger.id;
+            let agent_id = trigger.agent_id;
+            self.triggers.insert(id, trigger);
+            // Guard against duplicate IDs in a corrupted file: only add to the
+            // per-agent index if this ID isn't already present.
+            let mut ids = self.agent_triggers.entry(agent_id).or_default();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        info!(count, "Loaded trigger jobs from disk");
+        Ok(count)
+    }
+
+    /// Persist all triggers to disk via atomic write (write to `.tmp`, then rename).
+    ///
+    /// Does nothing when no persistence path is configured.
+    pub fn persist(&self) -> LibreFangResult<()> {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let triggers: Vec<Trigger> = self.triggers.iter().map(|e| e.value().clone()).collect();
+        let data = serde_json::to_string_pretty(&triggers).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to serialize trigger jobs: {e}"))
+        })?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to write trigger jobs temp file: {e}"))
+        })?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to rename trigger jobs file: {e}"))
+        })?;
+        debug!(count = triggers.len(), "Persisted trigger jobs");
+        Ok(())
+    }
+
     /// Register a new trigger.
+    /// Returns `true` if `agent_id` already has an enabled trigger with this exact pattern.
+    /// Used to skip duplicate registration of proactive triggers on restart.
+    pub fn agent_has_pattern(&self, agent_id: AgentId, pattern: &TriggerPattern) -> bool {
+        let Some(ids) = self.agent_triggers.get(&agent_id) else {
+            return false;
+        };
+        ids.iter().any(|id| {
+            self.triggers
+                .get(id)
+                .map(|t| &t.pattern == pattern)
+                .unwrap_or(false)
+        })
+    }
+
     pub fn register(
         &self,
         agent_id: AgentId,
@@ -178,7 +279,15 @@ impl TriggerEngine {
         prompt_template: String,
         max_fires: u64,
     ) -> TriggerId {
-        self.register_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Register a trigger with an optional target agent for cross-session wake.
@@ -186,6 +295,7 @@ impl TriggerEngine {
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner (`agent_id`). The owner still "owns" the
     /// trigger for management purposes (list, remove, etc.).
+    #[allow(clippy::too_many_arguments)]
     pub fn register_with_target(
         &self,
         agent_id: AgentId,
@@ -193,6 +303,8 @@ impl TriggerEngine {
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> TriggerId {
         let trigger = Trigger {
             id: TriggerId::new(),
@@ -204,8 +316,8 @@ impl TriggerEngine {
             fire_count: 0,
             max_fires,
             target_agent,
-            cooldown_secs: None,
-            session_mode: None,
+            cooldown_secs,
+            session_mode,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -224,7 +336,7 @@ impl TriggerEngine {
         pattern: TriggerPattern,
         prompt_template: String,
     ) -> TriggerId {
-        self.register_with_target(owner, pattern, prompt_template, 0, Some(target))
+        self.register_with_target(owner, pattern, prompt_template, 0, Some(target), None, None)
     }
 
     /// Remove a trigger.
@@ -363,6 +475,49 @@ impl TriggerEngine {
         }
     }
 
+    /// Patch mutable fields of an existing trigger.
+    ///
+    /// Only `Some` fields are updated; `None` leaves the current value intact.
+    /// Returns the updated trigger, or `None` if the ID was not found.
+    pub fn update(&self, trigger_id: TriggerId, patch: TriggerPatch) -> Option<Trigger> {
+        let mut entry = self.triggers.get_mut(&trigger_id)?;
+        let t = entry.value_mut();
+        let pattern_changed = patch.pattern.is_some();
+        if let Some(pattern) = patch.pattern {
+            t.pattern = pattern;
+        }
+        if let Some(prompt_template) = patch.prompt_template {
+            t.prompt_template = prompt_template;
+        }
+        if let Some(enabled) = patch.enabled {
+            t.enabled = enabled;
+        }
+        if let Some(max_fires) = patch.max_fires {
+            t.max_fires = max_fires;
+        }
+        if let Some(cooldown_secs) = patch.cooldown_secs {
+            t.cooldown_secs = cooldown_secs;
+        }
+        if let Some(session_mode) = patch.session_mode {
+            t.session_mode = session_mode;
+        }
+        if let Some(target_agent) = patch.target_agent {
+            t.target_agent = target_agent;
+        }
+        let id = t.id;
+        drop(entry);
+        // Pattern change means the trigger is logically new — clear any stale cooldown timer.
+        if pattern_changed {
+            self.last_fired.remove(&id);
+        }
+        self.triggers.get(&id).map(|t| t.clone())
+    }
+
+    /// Get a single trigger by ID.
+    pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<Trigger> {
+        self.triggers.get(&trigger_id).map(|t| t.clone())
+    }
+
     /// List all triggers for an agent.
     pub fn list_agent_triggers(&self, agent_id: AgentId) -> Vec<Trigger> {
         self.agent_triggers
@@ -389,9 +544,10 @@ impl TriggerEngine {
     ///    on a trigger to disable its cooldown.
     /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
     ///    from a single event evaluation. Excess matches are dropped with a warning.
-    pub fn evaluate(&self, event: &Event) -> Vec<TriggerMatch> {
+    pub fn evaluate(&self, event: &Event) -> (Vec<TriggerMatch>, bool) {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
+        let mut state_mutated = false;
         let now = Instant::now();
 
         for mut entry in self.triggers.iter_mut() {
@@ -404,6 +560,8 @@ impl TriggerEngine {
             // Check max fires
             if trigger.max_fires > 0 && trigger.fire_count >= trigger.max_fires {
                 trigger.enabled = false;
+                // enabled=false must be persisted even if this event produces no match.
+                state_mutated = true;
                 continue;
             }
 
@@ -460,6 +618,7 @@ impl TriggerEngine {
                     session_mode_override: trigger.session_mode,
                 });
                 trigger.fire_count += 1;
+                state_mutated = true;
                 self.last_fired.insert(trigger.id, now);
 
                 debug!(
@@ -472,7 +631,7 @@ impl TriggerEngine {
             }
         }
 
-        matches
+        (matches, state_mutated)
     }
 
     /// Get a trigger by ID.
@@ -718,7 +877,7 @@ mod tests {
             }),
         );
 
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].agent_id, watcher);
         assert!(matches[0].message.contains("new-agent"));
@@ -746,7 +905,7 @@ mod tests {
                 name: "coder".to_string(),
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
 
         // This should NOT match
         let event2 = Event::new(
@@ -757,7 +916,7 @@ mod tests {
                 name: "researcher".to_string(),
             }),
         );
-        assert_eq!(engine.evaluate(&event2).len(), 0);
+        assert_eq!(engine.evaluate(&event2).0.len(), 0);
     }
 
     #[test]
@@ -782,10 +941,10 @@ mod tests {
         );
 
         // First two should match
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
         // Third should not
-        assert_eq!(engine.evaluate(&event).len(), 0);
+        assert_eq!(engine.evaluate(&event).0.len(), 0);
     }
 
     #[test]
@@ -831,7 +990,7 @@ mod tests {
                 usage_percent: 85.0,
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
     }
 
     // -- reassign_agent_triggers (#519) ------------------------------------
@@ -857,7 +1016,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 2);
         assert!(matches.iter().all(|m| m.agent_id == new_agent));
     }
@@ -978,7 +1137,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
             matches[0].agent_id, owner,
@@ -997,6 +1156,8 @@ mod tests {
             "Cross-wake: {{event}}".to_string(),
             0,
             Some(target),
+            None,
+            None,
         );
 
         let event = Event::new(
@@ -1006,7 +1167,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
             matches[0].agent_id, target,
@@ -1043,7 +1204,7 @@ mod tests {
                 name: "worker-1".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].agent_id, target);
     }
@@ -1061,6 +1222,8 @@ mod tests {
             "sys: {{event}}".to_string(),
             0,
             Some(target),
+            None,
+            None,
         );
 
         let taken = engine.take_agent_triggers(old_owner);
@@ -1100,9 +1263,9 @@ mod tests {
         );
 
         // First evaluation fires
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
         // Immediate second evaluation should be suppressed by cooldown
-        assert_eq!(engine.evaluate(&event).len(), 0);
+        assert_eq!(engine.evaluate(&event).0.len(), 0);
     }
 
     #[test]
@@ -1126,9 +1289,9 @@ mod tests {
             }),
         );
 
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
     }
 
     #[test]
@@ -1158,7 +1321,7 @@ mod tests {
         );
 
         // Only 3 should fire due to budget
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 3);
     }
 
@@ -1283,7 +1446,7 @@ mod tests {
             EventTarget::Broadcast,
             EventPayload::Custom(payload),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(
             matches.len(),
             1,
@@ -1313,7 +1476,7 @@ mod tests {
                 agent_id: AgentId::new(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert!(matches[0].message.contains("user.prefs"));
     }
@@ -1341,7 +1504,7 @@ mod tests {
                 agent_id: AgentId::new(),
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
 
         // Should NOT match (different key)
         let event2 = Event::new(
@@ -1357,6 +1520,6 @@ mod tests {
         for mut entry in engine.triggers.iter_mut() {
             entry.cooldown_secs = Some(0);
         }
-        assert_eq!(engine.evaluate(&event2).len(), 0);
+        assert_eq!(engine.evaluate(&event2).0.len(), 0);
     }
 }

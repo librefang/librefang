@@ -1592,7 +1592,8 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "object",
                         "description": "Delivery target: {\"kind\":\"none\"} or {\"kind\":\"channel\",\"channel\":\"telegram\"} or {\"kind\":\"last_channel\"}"
                     },
-                    "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" }
+                    "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" },
+                    "session_mode": { "type": "string", "enum": ["persistent", "new"], "description": "Session behaviour for AgentTurn actions. 'persistent' (default): all fires share one dedicated cron session, preserving history across runs. 'new': each fire gets a fresh isolated session with no memory of previous runs." }
                 },
                 "required": ["name", "schedule", "action"]
             }),
@@ -1632,6 +1633,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "file_path": { "type": "string", "description": "Local file path to send as attachment (reads from disk; use instead of file_url for local files)" },
                     "filename": { "type": "string", "description": "Filename for file attachments (defaults to the basename of file_path, or 'file')" },
                     "thread_id": { "type": "string", "description": "Thread/topic ID to reply in (e.g., Telegram message_thread_id, Slack thread_ts)" },
+                    "account_id": { "type": "string", "description": "Optional account_id of the specific configured bot to send through (e.g., 'admin-bot'). When omitted, uses the first configured adapter for this channel." },
                     "poll_question": { "type": "string", "description": "Question for a poll (starts a poll, mutually exclusive with image_url/file_url/file_path)" },
                     "poll_options": { "type": "array", "items": { "type": "string" }, "description": "Answer options for the poll (2-10 items, required with poll_question)" },
                     "poll_is_quiz": { "type": "boolean", "description": "Set to true for a quiz mode (one correct answer)" },
@@ -3200,6 +3202,7 @@ async fn tool_channel_send(
     }
 
     let thread_id = input["thread_id"].as_str().filter(|s| !s.is_empty());
+    let account_id = input["account_id"].as_str().filter(|s| !s.is_empty());
 
     // Check for media content (image_url, file_url, or file_path)
     let image_url = input["image_url"].as_str().filter(|s| !s.is_empty());
@@ -3214,7 +3217,9 @@ async fn tool_channel_send(
             }
         }
         return kh
-            .send_channel_media(&channel, recipient, "image", url, caption, None, thread_id)
+            .send_channel_media(
+                &channel, recipient, "image", url, caption, None, thread_id, account_id,
+            )
             .await;
     }
 
@@ -3228,7 +3233,7 @@ async fn tool_channel_send(
         }
         return kh
             .send_channel_media(
-                &channel, recipient, "file", url, caption, filename, thread_id,
+                &channel, recipient, "file", url, caption, filename, thread_id, account_id,
             )
             .await;
     }
@@ -3284,7 +3289,9 @@ async fn tool_channel_send(
         };
 
         return kh
-            .send_channel_file_data(&channel, recipient, data, &filename, mime_type, thread_id)
+            .send_channel_file_data(
+                &channel, recipient, data, &filename, mime_type, thread_id, account_id,
+            )
             .await;
     }
 
@@ -3352,6 +3359,7 @@ async fn tool_channel_send(
             is_quiz,
             correct_option_id,
             explanation,
+            account_id,
         )
         .await?;
 
@@ -3394,7 +3402,7 @@ async fn tool_channel_send(
         return Err(violation);
     }
 
-    kh.send_channel_message(&channel, recipient, &final_message, thread_id)
+    kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
         .await
 }
 

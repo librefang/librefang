@@ -122,6 +122,7 @@ impl PiiFilter {
                     .account_id
                     .as_ref()
                     .map(|_| REDACTED_PLACEHOLDER.to_string()),
+                use_canonical_session: sender.use_canonical_session,
                 ..Default::default()
             },
             PrivacyMode::Pseudonymize => {
@@ -138,6 +139,7 @@ impl PiiFilter {
                         .account_id
                         .as_ref()
                         .map(|id| self.get_or_create_pseudonym(id, "account")),
+                    use_canonical_session: sender.use_canonical_session,
                     ..Default::default()
                 }
             }

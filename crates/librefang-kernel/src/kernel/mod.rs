@@ -652,6 +652,146 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Build the default list of root directories to advertise to MCP servers
+    /// via the MCP Roots capability.
+    ///
+    /// Includes the librefang home directory and the agent workspaces directory
+    /// so that filesystem-aware MCP servers (e.g. morphllm, filesystem) know
+    /// which paths they are allowed to operate on without needing hard-coded
+    /// allowed-directories in their own server args.
+    fn default_mcp_roots(&self) -> Vec<String> {
+        // Advertise only the workspaces directory, not the entire home dir.
+        // Scoping roots to workspaces_dir means per-agent pools are actually
+        // created for agent-specific workspaces (which are subdirectories of
+        // workspaces_dir), giving MCP servers an appropriately narrow view.
+        // Advertising home_dir would cause every agent workspace to be "already
+        // covered", silently disabling per-agent workspace scoping.
+        let mut roots = Vec::new();
+        let workspaces = self.config.load().effective_workspaces_dir();
+        // Use to_str() rather than to_string_lossy() so that non-UTF-8 paths
+        // are silently skipped instead of being silently corrupted (U+FFFD).
+        if let Some(ws) = workspaces.to_str() {
+            roots.push(ws.to_owned());
+        }
+        roots
+    }
+
+    /// Create a fresh, per-execution MCP connection pool for a single agent run.
+    ///
+    /// Adds `agent_workspace` to the default roots so filesystem-aware MCP
+    /// servers (morphllm, filesystem, …) scope their access to the agent's
+    /// specific working directory rather than the broad workspace base.
+    ///
+    /// Returns `None` — and callers fall back to the daemon-global pool — when:
+    /// - no MCP servers are configured,
+    /// - `agent_workspace` is `None` (no workspace to scope),
+    /// - the workspace is already a sub-path of an existing default root
+    ///   (per-agent pool would be identical to the global pool), or
+    /// - all per-agent connections fail.
+    async fn build_agent_mcp_pool(
+        &self,
+        agent_workspace: Option<&std::path::Path>,
+    ) -> Option<tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>> {
+        use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+        use librefang_types::config::McpTransportEntry;
+
+        let servers = self
+            .effective_mcp_servers
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+
+        if servers.is_empty() {
+            return None;
+        }
+
+        let mut roots = self.default_mcp_roots();
+
+        // Add the agent workspace only when it genuinely extends the default
+        // roots.  Use Path::starts_with (component-level comparison) rather
+        // than str::starts_with so that "/project2" is not mistakenly treated
+        // as a sub-path of "/project".
+        //
+        // When there is no workspace, or when the workspace is already covered,
+        // the roots would be identical to those in the daemon-global pool —
+        // creating a fresh per-agent pool would be pure overhead.
+        match agent_workspace {
+            None => return None,
+            Some(ws) => {
+                let already_covered = roots
+                    .iter()
+                    .any(|r| ws.starts_with(std::path::Path::new(r)));
+                if already_covered {
+                    return None;
+                }
+                // Use to_str() for consistency with default_mcp_roots(); non-UTF-8
+                // workspace paths fall back to the global pool.
+                let ws_str = match ws.to_str() {
+                    Some(s) => s.to_owned(),
+                    None => return None,
+                };
+                if !roots.contains(&ws_str) {
+                    roots.push(ws_str);
+                }
+            }
+        }
+
+        let mut connections = Vec::new();
+        for server_config in &servers {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
+                McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
+                    command: command.clone(),
+                    args: args.clone(),
+                },
+                McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+                McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
+                McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => McpTransport::HttpCompat {
+                    base_url: base_url.clone(),
+                    headers: headers.clone(),
+                    tools: tools.clone(),
+                },
+            };
+
+            let mcp_config = McpServerConfig {
+                name: server_config.name.clone(),
+                transport,
+                timeout_secs: server_config.timeout_secs,
+                env: server_config.env.clone(),
+                headers: server_config.headers.clone(),
+                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_config: server_config.oauth.clone(),
+                taint_scanning: server_config.taint_scanning,
+                roots: roots.clone(),
+            };
+
+            match McpConnection::connect(mcp_config).await {
+                Ok(conn) => connections.push(conn),
+                Err(e) => warn!(
+                    server = %server_config.name,
+                    error = %e,
+                    "Per-agent MCP connection failed; agent will lack this server's tools"
+                ),
+            }
+        }
+
+        if connections.is_empty() {
+            None
+        } else {
+            Some(tokio::sync::Mutex::new(connections))
+        }
+    }
+
     /// Relocate any legacy `<home>/agents/<name>/` directories into the
     /// canonical `workspaces/agents/<name>/` layout. This is the same pass
     /// that runs at boot and is exposed so runtime flows (e.g. the migrate
@@ -1362,6 +1502,9 @@ impl LibreFangKernel {
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
+        migrate_root_backups(&config.home_dir);
+        migrate_root_state_files(&config.home_dir);
+        cleanup_legacy_root_logs(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
@@ -1757,8 +1900,13 @@ impl LibreFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
-        model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
-        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
+        model_catalog.load_suppressed(
+            &config
+                .home_dir
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1793,8 +1941,8 @@ impl LibreFangKernel {
                 config.provider_proxy_urls.len()
             );
         }
-        // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
-        let custom_models_path = config.home_dir.join("custom_models.json");
+        // Load user's custom models from ~/.librefang/data/custom_models.json (highest priority)
+        let custom_models_path = config.home_dir.join("data").join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
         let available_count = model_catalog.available_models().len();
         let total_count = model_catalog.list_models().len();
@@ -2144,6 +2292,19 @@ impl LibreFangKernel {
             }
         }
 
+        // Initialize trigger engine and reload persisted triggers
+        let trigger_engine = TriggerEngine::with_config(&config.triggers, &config.home_dir);
+        match trigger_engine.load() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Loaded {count} trigger job(s) from disk");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load trigger jobs: {e}");
+            }
+        }
+
         // Initialize execution approval manager
         let approval_manager = crate::approval::ApprovalManager::new_with_db(
             config.approval.clone(),
@@ -2219,7 +2380,6 @@ impl LibreFangKernel {
 
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
-        let trigger_config = config.triggers.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -2250,7 +2410,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::with_config(&trigger_config),
+            triggers: trigger_engine,
             background,
             audit_log: Arc::new(AuditLog::with_db_anchored(
                 memory.usage_conn(),
@@ -2631,6 +2791,84 @@ impl LibreFangKernel {
             }
         }
 
+        // One-time webui → canonical session migration.
+        //
+        // Before the unify fix, the dashboard WS wrote to
+        // `SessionId::for_channel(agent, "webui")` while GET /session and the
+        // sessions management endpoints read `entry.session_id`. Any agent
+        // with recent dashboard chat therefore has two sessions: the stale
+        // canonical and the active webui one. Adopt the webui session as the
+        // canonical pointer when it has strictly more messages, so existing
+        // conversations show up after the fix.
+        //
+        // Idempotent: once `entry.session_id` matches the webui session id
+        // (or canonical overtakes it), this is a no-op on subsequent boots.
+        {
+            let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .registry
+                .list()
+                .iter()
+                .map(|e| (e.id, e.session_id))
+                .collect();
+            for (agent_id, canonical_session_id) in registry_snapshot {
+                let webui_session_id = SessionId::for_channel(agent_id, "webui");
+                if webui_session_id == canonical_session_id {
+                    continue;
+                }
+                let webui_msgs = match kernel.memory.get_session(webui_session_id) {
+                    Ok(Some(s)) => s.messages.len(),
+                    _ => continue,
+                };
+                if webui_msgs == 0 {
+                    continue;
+                }
+                // Inspect canonical: if the user has deliberately labeled it
+                // (via create_agent_session / switch_agent_session from the
+                // sessions UI), treat that as an explicit choice and don't
+                // override it — they can still find the orphaned webui session
+                // in `list_agent_sessions` and switch manually if desired.
+                let canonical_session = kernel
+                    .memory
+                    .get_session(canonical_session_id)
+                    .ok()
+                    .flatten();
+                if canonical_session
+                    .as_ref()
+                    .and_then(|s| s.label.as_ref())
+                    .is_some()
+                {
+                    info!(
+                        agent_id = %agent_id,
+                        webui_messages = webui_msgs,
+                        "Skipping webui adoption — canonical session is labeled (user-managed)"
+                    );
+                    continue;
+                }
+                let canonical_msgs = canonical_session.map(|s| s.messages.len()).unwrap_or(0);
+                if webui_msgs <= canonical_msgs {
+                    continue;
+                }
+                if let Err(e) = kernel
+                    .registry
+                    .update_session_id(agent_id, webui_session_id)
+                {
+                    warn!(agent_id = %agent_id, "Failed to adopt webui session: {e}");
+                    continue;
+                }
+                if let Some(entry) = kernel.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                        warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
+                    }
+                }
+                info!(
+                    agent_id = %agent_id,
+                    webui_messages = webui_msgs,
+                    canonical_messages = canonical_msgs,
+                    "Adopted webui channel session as canonical (one-time migration)"
+                );
+            }
+        }
+
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
@@ -2955,15 +3193,26 @@ system_prompt = "You are a helpful assistant."
             "ok",
         );
 
-        // For proactive agents spawned at runtime, auto-register triggers
+        // For proactive agents spawned at runtime, auto-register triggers.
+        // Skip any pattern already present (e.g. reloaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = &entry.manifest.schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
+                }
+            }
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, "Failed to persist proactive triggers: {e}");
                 }
             }
         }
@@ -2978,7 +3227,12 @@ system_prompt = "You are a helpful assistant."
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
-        let _triggered = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after spawn event: {e}");
+            }
+        }
 
         Ok(agent_id)
     }
@@ -3621,7 +3875,18 @@ system_prompt = "You are a helpful assistant."
                 // Cooldown: per-agent, at most one review every SKILL_REVIEW_COOLDOWN_SECS.
                 let now_epoch = chrono::Utc::now().timestamp();
                 let agent_id_str = agent_id.to_string();
-                // Pre-claim gate 0: Stable mode / frozen registry. Skip
+                // Pre-claim gate 0a: per-agent opt-out. A2A worker agents
+                // and any agent where trigger responsiveness matters more
+                // than automatic skill distillation can set
+                // `auto_evolve = false` in agent.toml to skip the review
+                // entirely — no LLM call, no semaphore, no cooldown slot.
+                if !entry.manifest.auto_evolve {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        "Skipping background skill review — auto_evolve disabled for this agent"
+                    );
+                }
+                // Pre-claim gate 0b: Stable mode / frozen registry. Skip
                 // spawning a review task entirely when the operator
                 // chose a no-skill-mutations posture — the review would
                 // write to disk and the reload_skills() call afterwards
@@ -3635,9 +3900,11 @@ system_prompt = "You are a helpful assistant."
                 // Pre-claim gate 1: eligibility. Only consider claiming
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
-                // AND the registry isn't frozen.
-                let eligible =
-                    result.skill_evolution_suggested && !used_evolution_tool && !registry_frozen;
+                // AND the registry isn't frozen AND auto_evolve is on.
+                let eligible = result.skill_evolution_suggested
+                    && !used_evolution_tool
+                    && !registry_frozen
+                    && entry.manifest.auto_evolve;
                 // Pre-claim gate 2: budget. Background reviews are
                 // optional work — if the global budget is exhausted we
                 // want to skip WITHOUT burning the 5-minute cooldown
@@ -4116,8 +4383,13 @@ system_prompt = "You are a helpful assistant."
         // (channel, chat_id). Including chat_id prevents context bleed between
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations, respect the agent's session_mode.
+        //
+        // `use_canonical_session` short-circuits the channel branch: the sender
+        // wants routing-cache scoping (per-channel assistant auto-router) but
+        // storage to land in `entry.session_id`. Used by the dashboard WS so
+        // webui chat shares history with agent_send / session management.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -4485,6 +4757,13 @@ system_prompt = "You are a helpful assistant."
             // Snapshot config for the duration of the agent loop call
             // (load_full returns Arc so the data stays alive across .await).
             let loop_cfg = kernel_clone.config.load_full();
+
+            // Per-agent MCP pool (workspace-scoped roots).
+            let agent_mcp = kernel_clone
+                .build_agent_mcp_pool(manifest.workspace.as_deref())
+                .await;
+            let effective_mcp = agent_mcp.as_ref().unwrap_or(&kernel_clone.mcp_connections);
+
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -4495,7 +4774,7 @@ system_prompt = "You are a helpful assistant."
                 kernel_handle,
                 tx,
                 Some(&skill_snapshot),
-                Some(&kernel_clone.mcp_connections),
+                Some(effective_mcp),
                 Some(&kernel_clone.web_ctx),
                 Some(&kernel_clone.browser_ctx),
                 kernel_clone.embedding_driver.as_deref(),
@@ -4908,7 +5187,7 @@ system_prompt = "You are a helpful assistant."
             for (channel, platform_id) in &bindings {
                 if kernel.channel_adapters.contains_key(channel.as_str()) {
                     if let Err(e) = kernel
-                        .send_channel_message(channel, platform_id, &message, None)
+                        .send_channel_message(channel, platform_id, &message, None, None)
                         .await
                     {
                         warn!(channel = %channel, error = %e, "Failed to send owner notification");
@@ -5366,8 +5645,12 @@ system_prompt = "You are a helpful assistant."
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations (background ticks, triggers, agent_send), resolve the
         // effective session mode: per-trigger override > agent manifest default.
+        //
+        // `use_canonical_session` short-circuits the channel branch so the
+        // dashboard WS (channel="webui") persists to `entry.session_id` while
+        // still scoping routing caches per-surface.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -5783,6 +6066,14 @@ system_prompt = "You are a helpful assistant."
         // Set up mid-turn injection channel (#956)
         let injection_rx = self.setup_injection_channel(agent_id);
 
+        // Build a per-execution MCP pool that includes the agent workspace as
+        // a root. Falls back to the global pool if the workspace adds nothing
+        // new or if all connections fail.
+        let agent_mcp = self
+            .build_agent_mcp_pool(manifest.workspace.as_deref())
+            .await;
+        let effective_mcp = agent_mcp.as_ref().unwrap_or(&self.mcp_connections);
+
         let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
@@ -5793,7 +6084,7 @@ system_prompt = "You are a helpful assistant."
             &tools,
             kernel_handle,
             Some(&skill_snapshot),
-            Some(&self.mcp_connections),
+            Some(effective_mcp),
             Some(&self.web_ctx),
             Some(&self.browser_ctx),
             self.embedding_driver.as_deref(),
@@ -7127,6 +7418,9 @@ system_prompt = "You are a helpful assistant."
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
         self.triggers.remove_agent_triggers(agent_id);
+        if let Err(e) = self.triggers.persist() {
+            warn!("Failed to persist trigger jobs after agent deletion: {e}");
+        }
 
         // Remove cron jobs so they don't linger as orphans (#504)
         let cron_removed = self.cron_scheduler.remove_agent_jobs(agent_id);
@@ -7545,6 +7839,9 @@ system_prompt = "You are a helpful assistant."
                     );
                 }
             }
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after hand reactivation: {e}");
+            }
         }
 
         // Link all agents to instance
@@ -7620,7 +7917,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
@@ -8067,7 +8364,12 @@ system_prompt = "You are a helpful assistant."
         let _guard = DepthGuard;
 
         // Evaluate triggers before publishing (so describe_event works on the event)
-        let triggered = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after fire: {e}");
+            }
+        }
 
         // Publish to the event bus
         self.event_bus.publish(event).await;
@@ -8102,13 +8404,22 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_trigger_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Register a trigger with an optional cross-session target agent.
     ///
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner. Both owner and target must exist.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_trigger_with_target(
         &self,
         agent_id: AgentId,
@@ -8116,6 +8427,8 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
         target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
         if self.registry.get(agent_id).is_none() {
@@ -8131,23 +8444,41 @@ system_prompt = "You are a helpful assistant."
                 )));
             }
         }
-        Ok(self.triggers.register_with_target(
+        let id = self.triggers.register_with_target(
             agent_id,
             pattern,
             prompt_template,
             max_fires,
             target_agent,
-        ))
+            cooldown_secs,
+            session_mode,
+        );
+        if let Err(e) = self.triggers.persist() {
+            warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
+        }
+        Ok(id)
     }
 
     /// Remove a trigger by ID.
     pub fn remove_trigger(&self, trigger_id: TriggerId) -> bool {
-        self.triggers.remove(trigger_id)
+        let removed = self.triggers.remove(trigger_id);
+        if removed {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after remove: {e}");
+            }
+        }
+        removed
     }
 
     /// Enable or disable a trigger. Returns true if found.
     pub fn set_trigger_enabled(&self, trigger_id: TriggerId, enabled: bool) -> bool {
-        self.triggers.set_enabled(trigger_id, enabled)
+        let found = self.triggers.set_enabled(trigger_id, enabled);
+        if found {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after set_enabled: {e}");
+            }
+        }
+        found
     }
 
     /// List all triggers (optionally filtered by agent).
@@ -8156,6 +8487,26 @@ system_prompt = "You are a helpful assistant."
             Some(id) => self.triggers.list_agent_triggers(id),
             None => self.triggers.list_all(),
         }
+    }
+
+    /// Get a single trigger by ID.
+    pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<crate::triggers::Trigger> {
+        self.triggers.get_trigger(trigger_id)
+    }
+
+    /// Update mutable fields of an existing trigger.
+    pub fn update_trigger(
+        &self,
+        trigger_id: TriggerId,
+        patch: crate::triggers::TriggerPatch,
+    ) -> Option<crate::triggers::Trigger> {
+        let result = self.triggers.update(trigger_id, patch);
+        if result.is_some() {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after update: {e}");
+            }
+        }
+        result
     }
 
     /// Register a workflow definition.
@@ -8275,7 +8626,7 @@ system_prompt = "You are a helpful assistant."
     pub async fn start_background_agents(self: &Arc<Self>) {
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
@@ -8358,6 +8709,11 @@ system_prompt = "You are a helpful assistant."
                                             migrated = t_migrated,
                                             "Reassigned triggers after restart"
                                         );
+                                        if let Err(e) = self.triggers.persist() {
+                                            warn!(
+                                                "Failed to persist trigger jobs after hand restore: {e}"
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -8411,21 +8767,28 @@ system_prompt = "You are a helpful assistant."
         {
             let mut missing: Vec<String> = Vec::new();
 
-            // Default LLM provider — prefer explicit api_key_env, then resolve
-            let llm_env = if !cfg.default_model.api_key_env.is_empty() {
-                cfg.default_model.api_key_env.clone()
-            } else {
-                cfg.resolve_api_key_env(&cfg.default_model.provider)
-            };
-            if std::env::var(&llm_env).unwrap_or_default().is_empty() {
-                missing.push(format!(
-                    "LLM ({}): ${}",
-                    cfg.default_model.provider, llm_env
-                ));
+            // Default LLM provider — prefer explicit api_key_env, then resolve.
+            // Skip providers that run locally (ollama, vllm, lmstudio, …) —
+            // they don't need a key and flagging them confuses operators.
+            if !librefang_runtime::provider_health::is_local_provider(&cfg.default_model.provider) {
+                let llm_env = if !cfg.default_model.api_key_env.is_empty() {
+                    cfg.default_model.api_key_env.clone()
+                } else {
+                    cfg.resolve_api_key_env(&cfg.default_model.provider)
+                };
+                if std::env::var(&llm_env).unwrap_or_default().is_empty() {
+                    missing.push(format!(
+                        "LLM ({}): ${}",
+                        cfg.default_model.provider, llm_env
+                    ));
+                }
             }
 
-            // Fallback LLM providers — prefer explicit api_key_env, then resolve
+            // Fallback LLM providers — same local-provider exemption.
             for fb in &cfg.fallback_providers {
+                if librefang_runtime::provider_health::is_local_provider(&fb.provider) {
+                    continue;
+                }
                 let env_var = if !fb.api_key_env.is_empty() {
                     fb.api_key_env.clone()
                 } else {
@@ -8912,16 +9275,30 @@ system_prompt = "You are a helpful assistant."
                                 > = kernel.clone();
                                 // Cron jobs use a synthetic SenderContext so they
                                 // get their own isolated session (channel="cron").
-                                let cron_sender = SenderContext {
-                                    channel: "cron".to_string(),
-                                    user_id: job.peer_id.clone().unwrap_or_default(),
-                                    display_name: "cron".to_string(),
-                                    is_group: false,
-                                    was_mentioned: false,
-                                    thread_id: None,
-                                    account_id: None,
-                                    ..Default::default()
+                                //
+                                // Exception: when `session_mode = "new"` the job
+                                // requested per-fire isolation. In that case we
+                                // skip the fixed channel session and instead pass
+                                // a `session_mode_override` of `New` so each fire
+                                // receives its own fresh SessionId.
+                                let wants_new_session = job.session_mode
+                                    == Some(librefang_types::agent::SessionMode::New);
+                                let (sender_ctx_owned, mode_override) = if wants_new_session {
+                                    (None, Some(librefang_types::agent::SessionMode::New))
+                                } else {
+                                    let cron_sender = SenderContext {
+                                        channel: "cron".to_string(),
+                                        user_id: job.peer_id.clone().unwrap_or_default(),
+                                        display_name: "cron".to_string(),
+                                        is_group: false,
+                                        was_mentioned: false,
+                                        thread_id: None,
+                                        account_id: None,
+                                        ..Default::default()
+                                    };
+                                    (Some(cron_sender), None)
                                 };
+                                let sender_ctx = sender_ctx_owned.as_ref();
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -8929,8 +9306,8 @@ system_prompt = "You are a helpful assistant."
                                         message,
                                         Some(kh),
                                         None,
-                                        Some(&cron_sender),
-                                        None,
+                                        sender_ctx,
+                                        mode_override,
                                         None,
                                     ),
                                 )
@@ -9253,18 +9630,29 @@ system_prompt = "You are a helpful assistant."
         name: &str,
         schedule: &ScheduleMode,
     ) {
-        // For proactive agents, auto-register triggers from conditions
+        // For proactive agents, auto-register triggers from conditions.
+        // Skip patterns already present (loaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
                 }
             }
-            info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, id = %agent_id, "Failed to persist proactive triggers: {e}");
+                }
+                info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            }
         }
 
         // Start continuous/periodic loops
@@ -9632,6 +10020,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9779,6 +10168,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -9901,6 +10291,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             self.mcp_health.register(&server_config.name);
@@ -10045,6 +10436,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -11582,7 +11974,7 @@ async fn cron_deliver_response(
                 .memory
                 .structured_set(agent_id, "delivery.last_channel", kv_val);
             if let Err(e) = kernel
-                .send_channel_message(channel, to, response, None)
+                .send_channel_message(channel, to, response, None, None)
                 .await
             {
                 tracing::warn!(channel = %channel, to = %to, error = %e, "Cron channel delivery failed");
@@ -11603,7 +11995,7 @@ async fn cron_deliver_response(
                             "Cron: delivering to last channel"
                         );
                         if let Err(e) = kernel
-                            .send_channel_message(channel, recipient, response, None)
+                            .send_channel_message(channel, recipient, response, None, None)
                             .await
                         {
                             tracing::warn!(channel = %channel, recipient = %recipient, error = %e, "Cron last_channel delivery failed");
@@ -11736,6 +12128,7 @@ impl LibreFangKernel {
                 &target.recipient,
                 message,
                 target.thread_id.as_deref(),
+                None,
             )
             .await
         {
@@ -12124,14 +12517,18 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-        // Resolve `agent_id` as either a UUID (used directly) or an agent
-        // name (looked up via the registry → its UUID). Tasks are stored
-        // under the canonical UUID, so name-based callers used to silently
-        // get zero matches. Issue #2330.
-        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
-            Ok(_) => agent_id.to_string(),
+        // Resolve `agent_id` to a canonical UUID and also capture the name.
+        // Both are forwarded to `memory.task_claim` so that tasks whose
+        // `assigned_to` field was stored as either a UUID *or* a name string
+        // are correctly matched (issue #2841).
+        let (resolved, resolved_name) = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(parsed_id) => {
+                // Caller passed a UUID — look up the name from the registry.
+                let name = self.registry.get(parsed_id).map(|e| e.name.clone());
+                (agent_id.to_string(), name)
+            }
             Err(_) => match self.registry.find_by_name(agent_id) {
-                Some(entry) => entry.id.to_string(),
+                Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
                     return Err(format!(
                         "Task claim failed: agent {agent_id:?} not found by UUID or name"
@@ -12141,7 +12538,7 @@ impl KernelHandle for LibreFangKernel {
         };
         let result = self
             .memory
-            .task_claim(&resolved)
+            .task_claim(&resolved, resolved_name.as_deref())
             .await
             .map_err(|e| format!("Task claim failed: {e}"))?;
 
@@ -12311,6 +12708,14 @@ impl KernelHandle for LibreFangKernel {
             uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
         );
 
+        let session_mode: Option<librefang_types::agent::SessionMode> =
+            if job_json["session_mode"].is_string() {
+                serde_json::from_value(job_json["session_mode"].clone())
+                    .map_err(|e| format!("Invalid session_mode: {e}"))?
+            } else {
+                None
+            };
+
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
@@ -12319,6 +12724,7 @@ impl KernelHandle for LibreFangKernel {
             action,
             delivery,
             peer_id: None,
+            session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
             next_run: None,
@@ -12840,21 +13246,32 @@ impl KernelHandle for LibreFangKernel {
         recipient: &str,
         message: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
         let cfg = self.config.load_full();
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12904,20 +13321,31 @@ impl KernelHandle for LibreFangKernel {
         caption: Option<&str>,
         filename: Option<&str>,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12962,6 +13390,7 @@ impl KernelHandle for LibreFangKernel {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_channel_file_data(
         &self,
         channel: &str,
@@ -12970,20 +13399,31 @@ impl KernelHandle for LibreFangKernel {
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13026,11 +13466,21 @@ impl KernelHandle for LibreFangKernel {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
-            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .get(&lookup_key)
+            .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
+                Some(aid) => {
+                    format!("Channel adapter '{channel}' with account_id '{aid}' not found")
+                }
+                None => format!("Channel adapter '{channel}' not found"),
+            })?
             .clone();
 
         let user = librefang_channels::types::ChannelUser {

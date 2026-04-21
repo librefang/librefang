@@ -87,13 +87,121 @@ pub(super) fn migrate_legacy_agent_dirs(home_dir: &Path, workspaces_agents_dir: 
     }
 }
 
+/// One-shot migration: relocate stray `*.bak*` files left behind by older
+/// versions at the home-dir root into `backups/`. Known producers:
+/// `config.toml.bak`, `config.toml.bak.<ts>`, `integrations.toml.bak.<ts>`.
+pub(super) fn migrate_root_backups(home_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(home_dir) else {
+        return;
+    };
+    let candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config.toml.bak") || name.starts_with("integrations.toml.bak") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let backups_dir = home_dir.join("backups");
+    if std::fs::create_dir_all(&backups_dir).is_err() {
+        return;
+    }
+    for src in candidates {
+        let Some(name) = src.file_name().map(|n| n.to_os_string()) else {
+            continue;
+        };
+        let dest = backups_dir.join(&name);
+        if dest.exists() {
+            // Already relocated in a prior run — discard the stray duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate backup: {e}"
+            );
+        }
+    }
+}
+
+/// One-shot cleanup: remove stray log files left at the home-dir root by
+/// older CLI builds. Both were created (and truncated) by every CLI
+/// invocation via a `tracing_subscriber` file layer, so they never held
+/// useful history — modern CLI builds write to `logs/` (or drop the layer
+/// entirely for one-shot commands) and the real daemon logs already live
+/// in `logs/daemon.log`.
+pub(super) fn cleanup_legacy_root_logs(home_dir: &Path) {
+    for name in ["daemon.log", "tui.log"] {
+        let path = home_dir.join(name);
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// One-shot migration: relocate runtime state JSON files that older versions
+/// wrote at the home-dir root into `data/`. Moves only the filenames LibreFang
+/// is known to produce; unknown files are left alone.
+pub(super) fn migrate_root_state_files(home_dir: &Path) {
+    const STATE_FILES: &[&str] = &[
+        "cron_jobs.json",
+        "hand_state.json",
+        "sessions.json",
+        "workflow_runs.json",
+        "custom_models.json",
+        "model_overrides.json",
+        "suppressed_providers.json",
+        "webhooks.json",
+    ];
+    let data_dir = home_dir.join("data");
+    let mut created_data_dir = false;
+    for name in STATE_FILES {
+        let src = home_dir.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        if !created_data_dir {
+            if std::fs::create_dir_all(&data_dir).is_err() {
+                return;
+            }
+            created_data_dir = true;
+        }
+        let dest = data_dir.join(name);
+        if dest.exists() {
+            // Newer version already wrote the canonical copy — discard the
+            // stale root duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate state file: {e}"
+            );
+        }
+    }
+}
+
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
         return;
     }
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(home_dir)
         .status()
         .is_ok_and(|s| s.success());
@@ -104,7 +212,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\ndaemon.log\nhand_state.json\nsessions.json\nworkflow_runs.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
     let _ = std::process::Command::new("git")
