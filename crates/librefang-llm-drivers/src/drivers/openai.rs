@@ -2,6 +2,7 @@
 //!
 //! Works with OpenAI, Ollama, vLLM, and any other OpenAI-compatible endpoint.
 
+use crate::backoff::jittered_backoff;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use async_trait::async_trait;
@@ -644,9 +645,14 @@ impl LlmDriver for OpenAIDriver {
             let status = resp.status().as_u16();
             if status == 429 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let delay = jittered_backoff(
+                        attempt + 1,
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(60),
+                        0.5,
+                    );
+                    warn!(status, delay_ms = delay.as_millis(), "Rate limited, retrying");
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(LlmError::RateLimited {
@@ -667,9 +673,14 @@ impl LlmDriver for OpenAIDriver {
                     }
                     // If parsing fails, retry on next attempt
                     if attempt < max_retries {
-                        let retry_ms = (attempt + 1) as u64 * 1500;
-                        warn!(status, attempt, retry_ms, "tool_use_failed, retrying");
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                        let delay = jittered_backoff(
+                            attempt + 1,
+                            std::time::Duration::from_millis(1500),
+                            std::time::Duration::from_secs(60),
+                            0.5,
+                        );
+                        warn!(status, attempt, delay_ms = delay.as_millis(), "tool_use_failed, retrying");
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                 }
@@ -984,9 +995,14 @@ impl LlmDriver for OpenAIDriver {
             let status = resp.status().as_u16();
             if status == 429 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited (stream), retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let delay = jittered_backoff(
+                        attempt + 1,
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(60),
+                        0.5,
+                    );
+                    warn!(status, delay_ms = delay.as_millis(), "Rate limited (stream), retrying");
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(LlmError::RateLimited {
@@ -1005,12 +1021,19 @@ impl LlmDriver for OpenAIDriver {
                         return Ok(response);
                     }
                     if attempt < max_retries {
-                        let retry_ms = (attempt + 1) as u64 * 1500;
+                        let delay = jittered_backoff(
+                            attempt + 1,
+                            std::time::Duration::from_millis(1500),
+                            std::time::Duration::from_secs(60),
+                            0.5,
+                        );
                         warn!(
                             status,
-                            attempt, retry_ms, "tool_use_failed (stream), retrying"
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            "tool_use_failed (stream), retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                 }

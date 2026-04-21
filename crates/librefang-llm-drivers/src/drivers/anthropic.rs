@@ -3,6 +3,7 @@
 //! Full implementation of the Anthropic Messages API with tool use support,
 //! system prompt extraction, and retry on 429/529 errors.
 
+use crate::backoff::jittered_backoff;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -337,9 +338,14 @@ impl LlmDriver for AnthropicDriver {
 
             if status == 429 || status == 529 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let delay = jittered_backoff(
+                        attempt + 1,
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(60),
+                        0.5,
+                    );
+                    warn!(status, delay_ms = delay.as_millis(), "Rate limited, retrying");
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {
@@ -407,9 +413,14 @@ impl LlmDriver for AnthropicDriver {
 
             if status == 429 || status == 529 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited (stream), retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let delay = jittered_backoff(
+                        attempt + 1,
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(60),
+                        0.5,
+                    );
+                    warn!(status, delay_ms = delay.as_millis(), "Rate limited (stream), retrying");
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {

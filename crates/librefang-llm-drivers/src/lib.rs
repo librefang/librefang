@@ -5,5 +5,6 @@
 
 pub use librefang_llm_driver as llm_driver;
 pub use librefang_llm_driver::llm_errors;
+pub mod backoff;
 pub mod drivers;
 pub mod think_filter;
