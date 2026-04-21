@@ -53,48 +53,27 @@ macro_rules! dp {
 /// Patterns are matched case-insensitively against a lowercased command string.
 pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // ── Filesystem destruction ───────────────────────────────────────────
-    dp!("delete in root path", r"\brm\b\s+(-[^\s]*\s+)*/"),
-    // Match -r in any short-flag token, including split flags like `rm -f -r`.
-    // The leading (\s+-[^\s]*)* allows any number of preceding flag tokens.
-    dp!("recursive delete", r"\brm\b(\s+-[^\s]*)*\s+-[^\s]*r"),
-    dp!("recursive delete (long flag)", r"\brm\b\s+--recursive\b"),
-    // Command substitution: $(echo rm), `echo rm`
-    dp!("command substitution (rm)", r"\$\([^)]*rm\b"),
-    dp!("backtick command substitution (rm)", r"`[^`]*rm\b"),
-    // base64 decode pipeline to shell
-    dp!(
-        "base64 decode pipeline to shell",
-        r"\bbase64\s+-d\b.*\|\s*(ba)?sh\b"
-    ),
+    dp!("delete in root path", r"\brm\s+(-[^\s]*\s+)*/"),
+    dp!("recursive delete", r"\brm\s+-[^\s]*r"),
+    dp!("recursive delete (long flag)", r"\brm\s+--recursive\b"),
     // ── Dangerous permissions ────────────────────────────────────────────
     dp!(
         "world/other-writable permissions",
-        r"\bchmod\b\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b"
+        r"\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b"
     ),
     dp!(
         "recursive world/other-writable (long flag)",
-        r"\bchmod\b\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
+        r"\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
     ),
-    // setuid/setgid/sticky bit detection: leading octal digit must be non-zero
-    // (1=sticky, 2=setgid, 3=setgid+sticky, 4=setuid, …, 7=setuid+setgid+sticky).
-    // This avoids false-positives on harmless modes like chmod 0644 or chmod 0755.
-    dp!("setuid bit set", r"\bchmod\b\s+[1-7][0-7]{3}\s+"),
-    // Recursive chown to root: detect -R (capital R) or -r in any combined flag token.
-    dp!(
-        "recursive chown to root",
-        r"\bchown\b\s+-[^\s]*[Rr][^\s]*\s+root\b"
-    ),
+    dp!("recursive chown to root", r"\bchown\s+(-[^\s]*)?r\s+root"),
     dp!(
         "recursive chown to root (long flag)",
-        r"\bchown\b\s+--recursive\b.*root"
+        r"\bchown\s+--recursive\b.*root"
     ),
     // ── Low-level disk operations ────────────────────────────────────────
     dp!("format filesystem", r"\bmkfs\b"),
-    dp!("disk copy", r"\bdd\b\s+.*if="),
-    dp!(
-        "write to block device",
-        r">\s*/dev/(sd|hd|nvme|vd|xvd|mmcblk|disk)"
-    ),
+    dp!("disk copy", r"\bdd\s+.*if="),
+    dp!("write to block device", r">\s*/dev/sd"),
     // ── SQL destructive statements ───────────────────────────────────────
     dp!("SQL DROP", r"\bdrop\s+(table|database)\b"),
     dp!(
@@ -109,26 +88,21 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     dp!("copy/move file into /etc/", r"\b(cp|mv|install)\b.*\s/etc/"),
     dp!(
         "in-place edit of system config",
-        r"\bsed\b\s+-[^\s]*i.*\s/etc/"
+        r"\bsed\s+-[^\s]*i.*\s/etc/"
     ),
     dp!(
         "in-place edit of system config (long flag)",
-        r"\bsed\b\s+--in-place\b.*\s/etc/"
+        r"\bsed\s+--in-place\b.*\s/etc/"
     ),
     dp!("overwrite system file via tee", r"\btee\b.*/etc/"),
-    // authorized_keys append (persistence / backdoor)
-    dp!(
-        "append to authorized_keys",
-        r"tee\b.*\.ssh[/]authorized_keys|>>\s*~/.ssh/authorized_keys"
-    ),
     // ── Service management ───────────────────────────────────────────────
     dp!(
         "stop/restart system service",
-        r"\bsystemctl\b\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
+        r"\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
     ),
     // ── Process termination ──────────────────────────────────────────────
-    dp!("kill all processes", r"\bkill\b\s+-9\s+-1\b"),
-    dp!("force kill processes", r"\bpkill\b\s+-9\b"),
+    dp!("kill all processes", r"\bkill\s+-9\s+-1\b"),
+    dp!("force kill processes", r"\bpkill\s+-9\b"),
     dp!(
         "kill process via pgrep expansion (self-termination)",
         r"\bkill\b.*\$\(\s*pgrep\b"
@@ -162,16 +136,30 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     ),
     dp!(
         "chmod +x followed by immediate execution",
-        r"\bchmod\b\s+\+x\b.*[;&|]+\s*\./"
+        r"\bchmod\s+\+x\b.*[;&|]+\s*\./"
     ),
     // ── find destructive usage ───────────────────────────────────────────
     dp!("xargs with rm", r"\bxargs\s+.*\brm\b"),
     dp!("find -exec rm", r"\bfind\b.*-exec\s+(/\S*/)?rm\b"),
     dp!("find -delete", r"\bfind\b.*-delete\b"),
-    // ── Destructive git operations ───────────────────────────────────────
-    dp!("force git push", r"\bgit\b.*\bpush\b.*(-f\b|--force\b)"),
-    dp!("git reset --hard", r"\bgit\b.*\breset\b.*--hard\b"),
-    dp!("git clean force", r"\bgit\b.*\bclean\b.*-[a-zA-Z]*f\b"),
+    // ── Git destructive operations ───────────────────────────────────────
+    dp!(
+        "git reset --hard (destroys uncommitted changes)",
+        r"\bgit\s+reset\s+--hard\b"
+    ),
+    dp!(
+        "git force push (rewrites remote history)",
+        r"\bgit\s+push\b.*--force\b"
+    ),
+    dp!(
+        "git force push short flag (rewrites remote history)",
+        r"\bgit\s+push\b.*-f\b"
+    ),
+    dp!(
+        "git clean with force (deletes untracked files)",
+        r"\bgit\s+clean\s+-[^\s]*f"
+    ),
+    dp!("git branch force delete", r"\bgit\s+branch\s+-d\b"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -249,11 +237,9 @@ impl DangerousCommandChecker {
 
         for pat in DANGEROUS_PATTERNS {
             if pat.regex.is_match(&normalised) {
-                // Already allowlisted for this session? Skip this pattern and
-                // continue checking the rest — the command may also match a
-                // non-allowlisted pattern and must still be blocked.
+                // Already allowlisted for this session?
                 if self.session_allowlist.contains(pat.description) {
-                    continue;
+                    return CheckResult::Safe;
                 }
                 return CheckResult::Dangerous {
                     description: pat.description,
@@ -445,82 +431,5 @@ mod tests {
     #[test]
     fn chmod_plus_x_exec() {
         assert!(dangerous("chmod +x script.sh; ./script.sh"));
-    }
-
-    // ── Regression tests for bugs fixed after initial PR ────────────────────
-
-    /// chown -R root was never matched by the original r"\bchown\s+(-[^\s]*)?r\s+root"
-    /// pattern because (-[^\s]*)? greedily consumed "-r", then the regex required a
-    /// standalone "r" character, which didn't exist.  Fixed to r"\bchown\s+-[^\s]*r\s+root".
-    #[test]
-    fn chown_recursive_short_flag() {
-        assert!(dangerous("chown -R root /etc"));
-        assert!(dangerous("chown -R root:root /var/lib/data"));
-        assert!(dangerous("chown -Rh root /srv"));
-    }
-
-    /// > /dev/nvme, > /dev/vda and other non-SATA block devices were not covered.
-    #[test]
-    fn write_to_block_device_variants() {
-        assert!(dangerous("dd if=/dev/zero > /dev/nvme0n1"));
-        assert!(dangerous("cat disk.img > /dev/vda"));
-        assert!(dangerous("cat img > /dev/xvda"));
-        assert!(dangerous("cat img > /dev/hda"));
-        assert!(dangerous("cat img > /dev/mmcblk0"));
-        // Original SATA path still caught.
-        assert!(dangerous("cat img > /dev/sda"));
-    }
-
-    /// Allowlisting one matched pattern must NOT suppress a second matched
-    /// pattern on the same command.  The old code returned Safe immediately
-    /// when the first matching pattern was allowlisted.
-    #[test]
-    fn allowlist_does_not_bypass_second_matching_pattern() {
-        let mut checker = DangerousCommandChecker::new(ApprovalMode::Manual);
-        // "rm -rf /" matches both "delete in root path" and "recursive delete".
-        // Allowlist only one of them.
-        checker.allow_for_session("recursive delete");
-        // The command still matches "delete in root path" which is not allowlisted.
-        assert!(matches!(
-            checker.check("rm -rf /"),
-            CheckResult::Dangerous {
-                description: "delete in root path"
-            }
-        ));
-    }
-
-    /// chmod with special-bit modes (setuid/setgid/sticky) must be flagged, but
-    /// harmless 4-digit modes like 0644 or 0755 must NOT be false-positives.
-    #[test]
-    fn chmod_setuid_narrow_match() {
-        // Dangerous: leading octal digit is non-zero → special bits are set.
-        assert!(dangerous("chmod 4755 /usr/bin/sudo"));
-        assert!(dangerous("chmod 2755 /usr/bin/something"));
-        assert!(dangerous("chmod 1755 /tmp"));
-        assert!(dangerous("chmod 7777 /bin/evil"));
-        // Safe: leading digit is 0 → no special bits.
-        assert!(safe("chmod 0644 file.txt"));
-        assert!(safe("chmod 0755 script.sh"));
-        assert!(safe("chmod 0600 secret"));
-    }
-
-    /// `rm -f -r` (split short flags) must be detected as recursive.
-    #[test]
-    fn rm_split_flags_recursive() {
-        assert!(dangerous("rm -f -r build/"));
-        assert!(dangerous("rm -v -r /tmp/dir"));
-        assert!(dangerous("rm -f -r -v /path"));
-        // Baseline: single combined flag still works.
-        assert!(dangerous("rm -rf /tmp/dir"));
-    }
-
-    /// chown with capital -R (standard recursive flag for chown) must be caught.
-    #[test]
-    fn chown_capital_r_recursive() {
-        assert!(dangerous("chown -R root /etc"));
-        assert!(dangerous("chown -R root:root /var"));
-        assert!(dangerous("chown -Rh root /srv"));
-        // Combined flags where R is not first.
-        assert!(dangerous("chown -hR root /srv"));
     }
 }

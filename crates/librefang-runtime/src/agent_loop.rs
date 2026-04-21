@@ -756,6 +756,8 @@ async fn execute_single_tool_call(
             ctx.sender_channel,
             ctx.checkpoint_manager,
             ctx.interrupt.clone(),
+            Some(ctx.session.id.to_string()).as_deref(),
+            ctx.dangerous_command_checker,
         ),
     )
     .await
