@@ -2232,8 +2232,6 @@ impl LibreFangKernel {
 
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
-        let trigger_config = config.triggers.clone();
-        let trigger_home_dir = config.home_dir.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
