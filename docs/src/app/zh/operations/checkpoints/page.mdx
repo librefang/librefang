@@ -13,7 +13,7 @@
 
 ---
 
-## 存储布局 {#storage-layout}
+## 存储布局
 
 ```
 ~/.librefang/checkpoints/
@@ -25,13 +25,13 @@
 
 ---
 
-## 快照命名规则 {#snapshot-naming}
+## 快照命名规则
 
 子目录名称是工作目录绝对路径（UTF-8，无尾部斜杠）的 SHA-256 哈希值的前 16 个十六进制字符。
 
 ---
 
-## 查看快照 {#viewing-snapshots}
+## 查看快照
 
 ```bash
 PROJECT_DIR="/home/user/myproject"
@@ -49,7 +49,7 @@ git -C "$SHADOW" diff HEAD~1 HEAD
 
 ---
 
-## 恢复快照 {#restoring-a-snapshot}
+## 恢复快照
 
 ```bash
 curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
@@ -64,7 +64,7 @@ curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
 
 ---
 
-## 排除项与大小限制 {#exclusions-and-size-limits}
+## 排除项与大小限制
 
 硬性排除项：
 | 排除路径 | 原因 |
@@ -80,13 +80,13 @@ curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
 
 ---
 
-## 失败行为 {#failure-behavior}
+## 失败行为
 
 快照创建采用尽力而为策略。失败会记录为 WARN，工具调用照常继续执行。
 
 ---
 
-## 最佳实践 {#best-practices}
+## 最佳实践
 
 - 将影子仓库用作短期安全网，而非主要备份手段
 - 将工作目录聚焦于正在修改的具体子目录

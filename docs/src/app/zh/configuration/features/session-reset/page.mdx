@@ -12,7 +12,7 @@
 
 ---
 
-## 配置 {#configuration}
+## 配置
 
 ```toml
 [session_reset]
@@ -29,7 +29,7 @@ daily_at_hour = 3
 
 ---
 
-## 重置模式 {#reset-modes}
+## 重置模式
 
 | 模式 | 行为 |
 |---|---|
@@ -40,7 +40,7 @@ daily_at_hour = 3
 
 ---
 
-## 暂停状态 {#suspended-state}
+## 暂停状态
 
 ```bash
 curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
@@ -64,7 +64,7 @@ curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/r
 
 ---
 
-## 重置记录 {#reset-record}
+## 重置记录
 
 | `reset_reason` | 触发原因 |
 |---|---|
@@ -75,7 +75,7 @@ curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/r
 
 ---
 
-## 使用场景 {#use-cases}
+## 使用场景
 
 - 交互式助手的空闲重置（`mode = "idle"`，`idle_minutes = 60`）
 - 定时任务驱动 agent 的每日重置（`mode = "daily"`，`daily_at_hour = 2`）
@@ -83,7 +83,7 @@ curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/r
 
 ---
 
-## 与 session_mode 的关系 {#relation-to-session_mode}
+## 与 session_mode 的关系
 
 | 设置 | 位置 | 控制内容 |
 |---|---|---|

@@ -14,7 +14,7 @@
 
 ---
 
-## 目录结构 {#directory-layout}
+## 目录结构
 
 将每个 hook 放在 `~/.librefang/hooks/` 下的独立子目录中：
 
@@ -32,7 +32,7 @@
 
 ---
 
-## HOOK.yaml 格式 {#hookyaml-format}
+## HOOK.yaml 格式
 
 ```yaml
 name: notify-on-agent-end
@@ -51,7 +51,7 @@ command: ./run.sh
 
 ---
 
-## 支持的事件 {#supported-events}
+## 支持的事件
 
 | 事件 | 触发时机 |
 |---|---|
@@ -72,7 +72,7 @@ command: ./run.sh
 
 ---
 
-## 环境变量 {#environment-variables}
+## 环境变量
 
 | 变量 | 类型 | 内容 |
 |---|---|---|
@@ -81,7 +81,7 @@ command: ./run.sh
 
 ---
 
-## 载荷参考 {#payload-reference}
+## 载荷参考
 
 ### `agent:start`
 | 字段 | 类型 | 说明 |
@@ -138,7 +138,7 @@ command: ./run.sh
 
 ---
 
-## 示例脚本 {#example-script}
+## 示例脚本
 
 ```bash
 #!/usr/bin/env bash
@@ -164,14 +164,14 @@ curl -s -X POST "$WEBHOOK_URL" \
 
 ---
 
-## 错误处理 {#error-handling}
+## 错误处理
 - 非零退出码：记录 WARN 并继续
 - 5 秒墙钟超时；超时后将被终止
 - 可执行文件缺失：记录为 WARN，其他 hook 仍正常触发
 
 ---
 
-## 限制 {#limitations}
+## 限制
 - hook 内部无法调用 LLM
 - 无返回值——hook 不能修改 agent 的响应
 - 无密钥注入
