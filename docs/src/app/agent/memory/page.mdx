@@ -4,6 +4,25 @@ LibreFang's memory system provides persistent storage, semantic search, and know
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Session Management](#session-management)
+- [Memory Operations](#memory-operations)
+- [Vector Search](#vector-search)
+- [Knowledge Graph](#knowledge-graph)
+- [Session Compaction](#session-compaction)
+- [Background Consolidation (Auto-Dream)](#background-consolidation-auto-dream)
+- [Memory Provider Plugin API](#memory-provider-plugin-api)
+- [Usage Tracking](#usage-tracking)
+- [API Endpoints](#api-endpoints)
+- [Best Practices](#best-practices)
+- [Troubleshooting](#troubleshooting)
+
+---
+
 ## Overview
 
 The LibreFang memory system includes:
@@ -303,6 +322,80 @@ auto_dream_min_sessions = 1     # after every session, for a chatty one
 - Scheduled dreams run inline and cannot be interrupted individually — they'll hit `timeout_secs` (default 600s) or finish.
 
 See [`[auto_dream]`](/configuration/core#auto_dream) for every field, default, and manifest override, plus how the runtime tool allowlist is enforced.
+
+---
+
+## Memory Provider Plugin API
+
+The `MemoryProvider` trait allows integrating external memory backends — such as vector databases, knowledge graphs, or remote storage services — alongside LibreFang's built-in SQLite memory.
+
+### Architecture
+
+- There is always **one built-in provider** (the default SQLite-backed store). It cannot be removed.
+- At most **one external provider** can be registered at a time. External providers supplement the built-in store; they do not replace it.
+- If an external provider fails, the built-in provider continues operating normally. Errors from external providers are captured, logged at `WARN` level, and never propagated to the agent loop.
+
+### Trait interface
+
+```rust
+#[async_trait]
+pub trait MemoryProvider: Send + Sync {
+    /// A short, unique name for this provider (e.g. "pinecone", "weaviate").
+    fn name(&self) -> &str;
+
+    /// Returns `true` for the built-in provider, `false` for all external providers.
+    fn is_builtin(&self) -> bool;
+
+    /// Returns a text block to inject into the agent system prompt at session start,
+    /// or `None` if there is nothing to inject for this session.
+    async fn system_prompt_block(&self, session_id: &str) -> Option<String>;
+
+    /// Fetches relevant context for the given query string before an LLM call.
+    /// The returned string is appended to the context window.
+    async fn prefetch(&self, query: &str, session_id: &str) -> Result<String, MemoryError>;
+
+    /// Called after each agent turn completes. Use this hook to index new content,
+    /// synchronize state, or flush write buffers to the external backend.
+    async fn on_turn_complete(&self, session_id: &str, turn_summary: &str) -> Result<(), MemoryError>;
+}
+```
+
+### Registering an external provider
+
+Pass your implementation to the kernel's memory subsystem during initialization:
+
+```rust
+use librefang_memory::{MemoryManager, MemoryProvider};
+
+// Build your custom provider
+let my_provider: Arc<dyn MemoryProvider> = Arc::new(MyVectorDbProvider::new(config));
+
+// Register it with the memory manager
+memory_manager.set_external_provider(my_provider).await;
+```
+
+Only one external provider can be registered at a time. Calling `set_external_provider` again replaces the previous one.
+
+### Aggregated context with `prefetch_all`
+
+The memory manager exposes `prefetch_all(query, session_id)`, which calls `prefetch` on every registered provider and concatenates the results:
+
+```rust
+// Called internally by the agent loop before each LLM request
+let context = memory_manager.prefetch_all(&user_query, &session_id).await;
+```
+
+Results from each provider are separated by a blank line and prepended with the provider name as a label. If any provider returns an error, that provider's result is skipped (with a `WARN` log) and the remaining providers are still queried.
+
+### Error isolation
+
+External provider errors never surface to the agent or the user:
+
+1. `prefetch` errors → logged at `WARN`, empty string used for that provider's contribution.
+2. `on_turn_complete` errors → logged at `WARN`, silently dropped.
+3. `system_prompt_block` errors (panics) → caught at the call site, `None` returned.
+
+This design ensures that a misconfigured or temporarily unavailable external backend cannot disrupt the agent loop.
 
 ---
 
