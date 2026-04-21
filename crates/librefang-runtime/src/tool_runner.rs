@@ -875,6 +875,7 @@ pub async fn execute_tool(
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     sender_id: Option<&str>,
     channel: Option<&str>,
 ) -> ToolResult {
@@ -1018,6 +1019,7 @@ pub async fn execute_tool(
         tts_engine,
         docker_config,
         process_manager,
+        process_registry,
         sender_id,
         channel,
     };
@@ -5823,6 +5825,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -5857,6 +5860,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -5888,6 +5892,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -5919,6 +5924,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -5949,6 +5955,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -5979,6 +5986,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6009,6 +6017,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6040,6 +6049,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6072,6 +6082,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6130,6 +6141,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6166,6 +6178,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6499,6 +6512,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6552,6 +6566,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6764,6 +6779,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6802,6 +6818,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6840,6 +6857,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6887,6 +6905,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -6938,6 +6957,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7032,6 +7052,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7069,6 +7090,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7115,6 +7137,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7151,6 +7174,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7187,6 +7211,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7222,6 +7247,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
@@ -7257,6 +7283,7 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
         )
