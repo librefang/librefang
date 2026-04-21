@@ -1897,6 +1897,13 @@ impl LibreFangKernel {
             &config.registry.registry_mirror,
         );
 
+        // One-shot: reclaim the duplicate registry checkout that older
+        // librefang versions maintained under `~/.librefang/cache/registry/`.
+        // Catalog sync now reads directly from `~/.librefang/registry/` (the
+        // directory registry_sync already maintains), so the duplicate is
+        // pure waste.
+        librefang_runtime::catalog_sync::remove_legacy_cache_dirs(&config.home_dir);
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);

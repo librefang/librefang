@@ -3,6 +3,7 @@ import {
   installSkill,
   uninstallSkill,
   clawhubInstall,
+  clawhubCnInstall,
   skillhubInstall,
   createSkill,
   reloadSkills,
@@ -40,6 +41,15 @@ export function useClawHubInstall() {
   return useMutation({
     mutationFn: ({ slug, version, hand }: { slug: string; version?: string; hand?: string }) =>
       clawhubInstall(slug, version, hand),
+    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+  });
+}
+
+export function useClawHubCnInstall() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, version, hand }: { slug: string; version?: string; hand?: string }) =>
+      clawhubCnInstall(slug, version, hand),
     onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
   });
 }

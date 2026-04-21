@@ -90,6 +90,9 @@ export {
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
+  clawhubCnBrowse,
+  clawhubCnSearch,
+  clawhubCnGetSkill,
   skillhubBrowse,
   skillhubSearch,
   skillhubGetSkill,
@@ -211,6 +214,7 @@ export {
   installSkill,
   uninstallSkill,
   clawhubInstall,
+  clawhubCnInstall,
   skillhubInstall,
   // workflows
   runWorkflow,

@@ -929,11 +929,16 @@ impl ModelCatalog {
         Ok(total_added)
     }
 
-    /// Load cached catalog from `home_dir/cache/catalog/providers/`.
+    /// Load cached catalog from the shared registry checkout at
+    /// `home_dir/registry/providers/`.
     ///
-    /// Merges community models synced from the remote model-catalog repo.
+    /// Prior to the registry-unify refactor this read from
+    /// `home_dir/cache/catalog/providers/`, which was a copy of the same
+    /// data. Reading `registry/providers/` directly eliminates the copy
+    /// step and guarantees the catalog is never staler than what
+    /// `registry_sync` last pulled.
     pub fn load_cached_catalog_for(&mut self, home_dir: &std::path::Path) {
-        let providers_dir = home_dir.join("cache").join("catalog").join("providers");
+        let providers_dir = home_dir.join("registry").join("providers");
         if providers_dir.exists() {
             match self.load_cached_catalog(&providers_dir) {
                 Ok(n) => {
@@ -1052,6 +1057,23 @@ mod tests {
     fn test_catalog_has_models() {
         let catalog = test_catalog();
         assert!(catalog.list_models().len() >= 30);
+    }
+
+    /// Mirrors the pre-refactor `catalog_sync::test_alias_catalog_parse` —
+    /// keeps direct coverage of `AliasesCatalogFile` deserialization, which
+    /// is now only consumed here in `model_catalog`.
+    #[test]
+    fn test_aliases_catalog_parse() {
+        let toml_str = r#"
+[aliases]
+sonnet = "claude-sonnet-4-20250514"
+gpt4 = "gpt-4o"
+"#;
+        let file: librefang_types::model_catalog::AliasesCatalogFile =
+            toml::from_str(toml_str).unwrap();
+        assert_eq!(file.aliases.len(), 2);
+        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
+        assert_eq!(file.aliases["gpt4"], "gpt-4o");
     }
 
     /// P2 regression: when registry classification is unavailable

@@ -1,4 +1,4 @@
-import { Link, Outlet } from "@tanstack/react-router";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -407,10 +407,15 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Routes that must fill the remaining viewport height without scrolling.
+const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
+
 export function App() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
+  const { location } = useRouterState();
+  const isFullHeightPage = FULL_HEIGHT_ROUTES.has(location.pathname);
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
@@ -794,10 +799,20 @@ export function App() {
           </div>
         </header>
 
-        <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
-          <div className="w-full p-3 sm:p-4 lg:p-8">
-            <Outlet />
-          </div>
+        <main
+          id="main-content"
+          className={`bg-main ${isFullHeightPage ? "flex flex-col flex-1 overflow-hidden" : "flex-1 overflow-y-auto overflow-x-hidden"}`}
+          tabIndex={-1}
+        >
+          {isFullHeightPage ? (
+            <div className="flex flex-col flex-1 min-h-0">
+              <Outlet />
+            </div>
+          ) : (
+            <div className="w-full p-3 sm:p-4 lg:p-8">
+              <Outlet />
+            </div>
+          )}
         </main>
       </div>
 
