@@ -2266,49 +2266,70 @@ async fn tool_shell_exec(
         reg.register(pid, command.to_string(), session_id.clone());
     }
 
-    // We use a channel-based approach: spawn a task that waits for the child
-    // and sends the Output through an mpsc channel.  The timeout wraps the
-    // receive, so when it fires we still hold a reference to `child_opt`
-    // and can properly kill + reap it (unlike the previous pattern where
-    // `child_opt.take().unwrap().wait_with_output()` inside the async block
-    // consumed the handle before the timeout branch could run).
-    use tokio::sync::mpsc;
+    // We use a channel-based approach: spawn a task that concurrently reads
+    // stdout/stderr and waits for the child, then sends the Output through an
+    // mpsc channel.  The timeout wraps the receive, so when it fires we can
+    // signal the child task to kill the process via a oneshot channel.
+    //
+    // Bug fixes vs. the naive pattern:
+    // 1. stdout/stderr are read concurrently with child.wait() — if we waited
+    //    first and read after, a child writing more than the pipe buffer (~64 KB)
+    //    would deadlock (child blocked on write, we blocked in wait).
+    // 2. The kill signal uses oneshot (send-once / recv-once) instead of mpsc so
+    //    kill_tx.send() can never block: it either succeeds or returns an error
+    //    immediately (receiver already gone), eliminating the mpsc send hang.
+    use tokio::io::AsyncReadExt;
+    use tokio::sync::{mpsc, oneshot};
     let (tx, mut rx) = mpsc::channel::<Result<std::process::Output, std::io::Error>>(1);
-    // Channel to signal timeout so the wait task can kill the child.
-    let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
-    let mut child_opt = Some(child);
-    let _child_pid = child_opt.as_mut().map(|c| c.id()).flatten();
-    let child_task = tokio::spawn({
-        let mut child = child_opt.take().unwrap();
-        async move {
-            // Drive both the wait and the kill signal concurrently.
-            let status = tokio::select! {
-                // Wait for the child to exit naturally.
-                s = child.wait() => s,
-                // Or respond to a timeout kill signal.
-                _ = kill_rx.recv() => {
-                    let _ = child.start_kill();
-                    child.wait().await?
-                }
-            };
-            use std::io::Read;
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
-            if let Some(mut s) = child.stdout.take() {
-                let _ = s.read_to_end(&mut stdout_buf);
+    // Oneshot channel to signal timeout kill — fired at most once, never blocks.
+    let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    let _child_task = tokio::spawn(async move {
+        let mut child = child;
+        // Take stdout/stderr handles before any waiting so we can read them
+        // concurrently — this prevents deadlock when the child produces more
+        // output than the OS pipe buffer can hold.
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        // Spawn background readers so the pipe buffers never fill up.
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stdout_handle {
+                let _ = s.read_to_end(&mut buf).await;
             }
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_end(&mut stderr_buf);
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stderr_handle {
+                let _ = s.read_to_end(&mut buf).await;
             }
-            let _code = status.code();
-            let output = std::process::Output {
-                status,
-                stdout: stdout_buf,
-                stderr: stderr_buf,
-            };
-            let _ = tx.send(Ok(output)).await;
-            Ok::<_, std::io::Error>(())
-        }
+            buf
+        });
+
+        // Drive both the wait and the kill signal concurrently.
+        let status = tokio::select! {
+            // Wait for the child to exit naturally.
+            s = child.wait() => s,
+            // Or respond to a timeout kill signal.
+            _ = kill_rx => {
+                let _ = child.start_kill();
+                child.wait().await?
+            }
+        };
+
+        // Collect output after the process has exited (readers finish quickly
+        // now that the write end of each pipe is closed).
+        let stdout_buf = stdout_task.await.unwrap_or_default();
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+
+        let output = std::process::Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        };
+        let _ = tx.send(Ok(output)).await;
+        Ok::<_, std::io::Error>(())
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
@@ -2358,11 +2379,10 @@ async fn tool_shell_exec(
         }
         Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
         Err(_) => {
-            // Timed out — signal the child task to kill the process, then wait
-            // for it to finish so we don't leave an orphan/zombie.
-            // The kill_rx task will send back an Ok with whatever output it
-            // managed to capture before the kill.
-            let _ = kill_tx.send(()).await;
+            // Timed out — signal the child task to kill the process via the
+            // oneshot channel (non-blocking, never hangs), then wait for the
+            // task to finish so we don't leave an orphan/zombie.
+            let _ = kill_tx.send(());
             // Wait for the task to finish (it sends the result back via rx even
             // though we already know the overall timeout expired).
             let _ = rx.recv().await;
