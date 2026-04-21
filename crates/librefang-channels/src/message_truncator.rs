@@ -157,7 +157,7 @@ pub fn truncate_to_utf16_limit(s: &str, limit: usize) -> &str {
             .iter()
             .map(|(_, c)| if (*c as u32) > 0xFFFF { 2 } else { 1 })
             .sum();
-        if count <= limit {
+        if count < limit {
             lo = mid;
         } else {
             hi = mid - 1;
