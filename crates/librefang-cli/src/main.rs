@@ -1199,9 +1199,18 @@ enum TriggerCommands {
         /// New maximum fires limit (0 = unlimited).
         #[arg(long)]
         max_fires: Option<u64>,
-        /// New cooldown in seconds (0 = no cooldown).
+        /// New cooldown in seconds between fires.
         #[arg(long)]
         cooldown: Option<u64>,
+        /// Remove the cooldown limit entirely.
+        #[arg(long)]
+        clear_cooldown: bool,
+        /// Override session mode for this trigger (persistent|new).
+        #[arg(long)]
+        session_mode: Option<String>,
+        /// Remove the session mode override (revert to agent default).
+        #[arg(long)]
+        clear_session_mode: bool,
     },
     /// Enable a trigger.
     #[command(
@@ -1912,6 +1921,9 @@ fn main() {
                 enabled,
                 max_fires,
                 cooldown,
+                clear_cooldown,
+                session_mode,
+                clear_session_mode,
             } => cmd_trigger_update(
                 &trigger_id,
                 pattern.as_deref(),
@@ -1919,6 +1931,9 @@ fn main() {
                 enabled,
                 max_fires,
                 cooldown,
+                clear_cooldown,
+                session_mode.as_deref(),
+                clear_session_mode,
             ),
             TriggerCommands::Enable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, true),
             TriggerCommands::Disable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, false),
@@ -5973,6 +5988,9 @@ fn cmd_trigger_update(
     enabled: Option<bool>,
     max_fires: Option<u64>,
     cooldown: Option<u64>,
+    clear_cooldown: bool,
+    session_mode: Option<&str>,
+    clear_session_mode: bool,
 ) {
     let base = require_daemon("trigger update");
     let client = daemon_client();
@@ -5994,8 +6012,15 @@ fn cmd_trigger_update(
     if let Some(m) = max_fires {
         payload["max_fires"] = serde_json::json!(m);
     }
-    if let Some(c) = cooldown {
+    if clear_cooldown {
+        payload["cooldown_secs"] = serde_json::Value::Null;
+    } else if let Some(c) = cooldown {
         payload["cooldown_secs"] = serde_json::json!(c);
+    }
+    if clear_session_mode {
+        payload["session_mode"] = serde_json::Value::Null;
+    } else if let Some(m) = session_mode {
+        payload["session_mode"] = serde_json::json!(m);
     }
 
     let body = daemon_json(

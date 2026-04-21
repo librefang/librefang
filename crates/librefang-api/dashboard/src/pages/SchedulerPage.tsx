@@ -7,7 +7,8 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
-import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight } from "lucide-react";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight, Pencil } from "lucide-react";
+import type { TriggerItem } from "../api";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -57,6 +58,13 @@ export function SchedulerPage() {
   const [triggerMaxFires, setTriggerMaxFires] = useState<number>(0);
   const [triggerTargetAgent, setTriggerTargetAgent] = useState("");
 
+  // Trigger-edit state
+  const [editTrigger, setEditTrigger] = useState<TriggerItem | null>(null);
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editMaxFires, setEditMaxFires] = useState<number>(0);
+  const [editCooldown, setEditCooldown] = useState<string>("");
+  const [editSessionMode, setEditSessionMode] = useState<string>("");
+
   const agentsQuery = useAgents();
   const schedulesQuery = useSchedules();
   const triggersQuery = useTriggers();
@@ -67,7 +75,7 @@ export function SchedulerPage() {
   const runMut = useRunSchedule();
   const deleteScheduleMut = useDeleteSchedule();
   const toggleScheduleMut = useUpdateSchedule();
-  const toggleTriggerMut = useUpdateTrigger();
+  const updateTriggerMut = useUpdateTrigger();
   const deleteTriggerMut = useDeleteTrigger();
 
   const agents = agentsQuery.data ?? [];
@@ -113,6 +121,26 @@ export function SchedulerPage() {
       });
       setShowCreate(false);
       setTriggerAgentId(""); setTriggerPatternPreset('"lifecycle"'); setTriggerPatternCustom(""); setTriggerPrompt(""); setTriggerMaxFires(0); setTriggerTargetAgent("");
+    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+  };
+
+  const openEditTrigger = (tr: TriggerItem) => {
+    setEditTrigger(tr);
+    setEditPrompt(tr.prompt_template ?? "");
+    setEditMaxFires(tr.max_fires ?? 0);
+    setEditCooldown(tr.cooldown_secs != null ? String(tr.cooldown_secs) : "");
+    setEditSessionMode(tr.session_mode ?? "");
+  };
+
+  const handleEditTrigger = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editTrigger) return;
+    const patch: Record<string, unknown> = { prompt_template: editPrompt, max_fires: editMaxFires };
+    patch.cooldown_secs = editCooldown === "" ? null : Number(editCooldown);
+    patch.session_mode = editSessionMode === "" ? null : editSessionMode;
+    try {
+      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any });
+      setEditTrigger(null);
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -249,8 +277,9 @@ export function SchedulerPage() {
           />
         ) : (
           <div className="space-y-2 stagger-children">
-            {triggers.map((tr: any) => {
+            {triggers.map((tr: TriggerItem) => {
               const isEnabled = tr.enabled !== false;
+              const targetAgent = agentMap.get(tr.target_agent_id ?? "");
               return (
                 <div key={tr.id} className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-colors space-y-1.5 ${isEnabled ? "border-border-subtle hover:border-warning/30" : "border-border-subtle/50 opacity-50"}`}>
                   <div className="flex items-center gap-2 sm:gap-3">
@@ -261,13 +290,16 @@ export function SchedulerPage() {
                       <h3 className="text-xs sm:text-sm font-bold truncate">{formatTriggerPattern(tr.pattern) || truncateId(tr.id, 12)}</h3>
                     </div>
                     <button
-                      onClick={() => toggleTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
+                      onClick={() => updateTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
-                      disabled={toggleTriggerMut.isPending && toggleTriggerMut.variables?.id === tr.id}
+                      disabled={updateTriggerMut.isPending && updateTriggerMut.variables?.id === tr.id}
                     >
                       {isEnabled ? t("common.active") : t("common.disabled", { defaultValue: "OFF" })}
                     </button>
                     <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => openEditTrigger(tr)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-brand hover:bg-brand/10 transition-colors">
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
                       {isConfirmingDelete("trigger", tr.id) ? (
                         <div className="flex items-center gap-1">
                           <button onClick={() => handleDeleteTrigger(tr.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
@@ -285,11 +317,20 @@ export function SchedulerPage() {
                       <p className="text-[9px] sm:text-[10px] text-text-dim/60 truncate">{tr.prompt_template}</p>
                     </div>
                   )}
-                  {tr.fire_count != null && (
-                    <div className="flex items-center gap-2 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/40">
-                      <span>{t("scheduler.fired", { defaultValue: "Fired" })}: {tr.fire_count}{tr.max_fires ? `/${tr.max_fires}` : ""}</span>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/40 flex-wrap">
+                    {tr.fire_count != null && (
+                      <span>Fired: {tr.fire_count}{tr.max_fires ? `/${tr.max_fires}` : ""}</span>
+                    )}
+                    {tr.cooldown_secs != null && (
+                      <span>Cooldown: {tr.cooldown_secs}s</span>
+                    )}
+                    {tr.session_mode && (
+                      <span className="font-mono">session: {tr.session_mode}</span>
+                    )}
+                    {targetAgent && (
+                      <span className="font-bold text-brand">→ {targetAgent.name}</span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -450,6 +491,65 @@ export function SchedulerPage() {
             </div>
           </form>
         )}
+      </Modal>
+
+      {/* Edit Trigger Modal */}
+      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md">
+        <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
+          {editTrigger && (
+            <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">
+              <span className="font-bold text-warning/80">Pattern: </span>
+              {formatTriggerPattern(editTrigger.pattern) || String(editTrigger.pattern)}
+            </div>
+          )}
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">Prompt template</label>
+            <textarea
+              value={editPrompt}
+              onChange={e => setEditPrompt(e.target.value)}
+              rows={3}
+              placeholder="Prompt sent to the agent when the event fires…"
+              className={`${inputClass} resize-none`}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">Max fires (0 = unlimited)</label>
+              <input
+                type="number" min={0} value={editMaxFires}
+                onChange={e => setEditMaxFires(Number(e.target.value))}
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">Cooldown (seconds, blank = none)</label>
+              <input
+                type="number" min={0} value={editCooldown}
+                onChange={e => setEditCooldown(e.target.value)}
+                placeholder="none"
+                className={inputClass}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">Session mode (blank = agent default)</label>
+            <select value={editSessionMode} onChange={e => setEditSessionMode(e.target.value)} className={inputClass}>
+              <option value="">agent default</option>
+              <option value="persistent">persistent</option>
+              <option value="new">new</option>
+            </select>
+          </div>
+          {updateTriggerMut.error && (
+            <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(updateTriggerMut.error as any)?.message}</div>
+          )}
+          <div className="flex gap-2 pt-2">
+            <Button type="submit" variant="primary" className="flex-1" disabled={updateTriggerMut.isPending}>
+              {updateTriggerMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Pencil className="w-4 h-4 mr-1" />}
+              Save changes
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => setEditTrigger(null)}>{t("common.cancel")}</Button>
+          </div>
+        </form>
       </Modal>
     </div>
   );
