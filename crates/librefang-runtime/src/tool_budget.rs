@@ -152,7 +152,7 @@ impl ToolBudgetEnforcer {
             .filter(|(_, r)| !r.content.starts_with(PERSISTED_MARKER))
             .map(|(i, r)| (i, r.content.len()))
             .collect();
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut running_total = total;
 
