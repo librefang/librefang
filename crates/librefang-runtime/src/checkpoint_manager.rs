@@ -642,7 +642,7 @@ mod tests {
         assert!(CheckpointManager::validate_commit_hash("").is_err());
         // Too long (65 chars)
         assert!(CheckpointManager::validate_commit_hash(
-            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2a1b2c3d4e5f6a1b2c3d4e5f6"
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2a1b2c3d4e5f6a1b2c3d4e5f6f"
         )
         .is_err());
     }

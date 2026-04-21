@@ -1374,9 +1374,13 @@ mod tests {
 
     #[test]
     fn window_name_rejects_shell_injection_in_create() {
-        assert!(!crate::terminal_tmux::validate_window_name("a;rm -rf /"));
-        assert!(!crate::terminal_tmux::validate_window_name("$(evil)"));
-        assert!(!crate::terminal_tmux::validate_window_name("`cmd`"));
+        // window names are passed via `Command::arg` (not a shell), so
+        // validate_window_name only rejects control chars and the pipe character
+        // used as the list-windows format separator. Shell metacharacters like
+        // `;`, `$()`, and backticks are allowed — they pose no injection risk
+        // when passed as a direct argument.
+        assert!(!crate::terminal_tmux::validate_window_name("a|b"));
+        assert!(!crate::terminal_tmux::validate_window_name("foo\0bar"));
     }
 
     #[test]
@@ -1393,10 +1397,10 @@ mod tests {
 
     #[test]
     fn window_name_rejects_all_special_chars() {
-        for bad in &[
-            "a;b", "a&b", "a|b", "a`b", "a$b", "a(b)", "a{b}", "a<b>", "a>b", "a/b", "a\\b",
-            "a\"b", "a'b", "a#b", "a!b", "a@b", "a=b", "a+b", "a~b",
-        ] {
+        // validate_window_name only rejects the pipe separator and control chars.
+        // Other punctuation is intentionally allowed (see 5d271afa which broadened
+        // the allowlist to support Unicode, CJK, emoji, and common punctuation).
+        for bad in &["a|b", "foo\0bar", "foo\x1fbar"] {
             assert!(
                 !crate::terminal_tmux::validate_window_name(bad),
                 "should reject: {bad:?}"
