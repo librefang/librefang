@@ -153,6 +153,12 @@ impl MemoryManager {
     ///
     /// This method takes `&self` so it can be called through `Arc<MemoryManager>`.
     pub fn register_external(&self, provider: Arc<dyn MemoryProvider>) -> Result<(), MemoryError> {
+        if provider.is_builtin() {
+            return Err(MemoryError::provider(
+                provider.name(),
+                "builtin providers cannot be registered as external",
+            ));
+        }
         let mut slot = self
             .external
             .write()
@@ -341,6 +347,20 @@ mod tests {
     fn register_external_once_succeeds() {
         let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
+    }
+
+    #[test]
+    fn register_external_rejects_builtin_provider() {
+        let mgr = MemoryManager::new(null_builtin());
+        let builtin_as_external = Arc::new(NullMemoryProvider::new("builtin-2", true));
+        let err = mgr.register_external(builtin_as_external).unwrap_err();
+        match err {
+            MemoryError::ProviderError { provider, reason } => {
+                assert_eq!(provider, "builtin-2");
+                assert!(reason.contains("builtin providers cannot be registered as external"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
