@@ -2680,6 +2680,12 @@ pub async fn run_agent_loop(
     let mut loop_guard = LoopGuard::new(loop_guard_config);
     let mut consecutive_max_tokens: u32 = 0;
 
+    // Per-session dangerous command checker — shared across all tool executions
+    // in this loop so that session allowlist entries are honored throughout.
+    let session_checker = Arc::new(tokio::sync::RwLock::new(
+        crate::dangerous_command::DangerousCommandChecker::default(),
+    ));
+
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
@@ -3127,7 +3133,7 @@ pub async fn run_agent_loop(
                         agent_id_str: agent_id_str.as_str(),
                         opts,
                         interrupt: opts.interrupt.clone(),
-                        dangerous_command_checker: None,
+                        dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -3852,6 +3858,12 @@ pub async fn run_agent_loop_streaming(
     let mut loop_guard = LoopGuard::new(loop_guard_config);
     let mut consecutive_max_tokens: u32 = 0;
 
+    // Per-session dangerous command checker — shared across all tool executions
+    // in this loop so that session allowlist entries are honored throughout.
+    let session_checker = Arc::new(tokio::sync::RwLock::new(
+        crate::dangerous_command::DangerousCommandChecker::default(),
+    ));
+
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
@@ -4340,7 +4352,7 @@ pub async fn run_agent_loop_streaming(
                         agent_id_str: agent_id_str.as_str(),
                         opts,
                         interrupt: opts.interrupt.clone(),
-                        dangerous_command_checker: None,
+                        dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 

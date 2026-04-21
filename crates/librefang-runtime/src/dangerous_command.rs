@@ -160,6 +160,10 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     dp!("xargs with rm", r"\bxargs\s+.*\brm\b"),
     dp!("find -exec rm", r"\bfind\b.*-exec\s+(/\S*/)?rm\b"),
     dp!("find -delete", r"\bfind\b.*-delete\b"),
+    // ── Destructive git operations ───────────────────────────────────────
+    dp!("force git push", r"\bgit\b.*\bpush\b.*(-f\b|--force\b)"),
+    dp!("git reset --hard", r"\bgit\b.*\breset\b.*--hard\b"),
+    dp!("git clean force", r"\bgit\b.*\bclean\b.*-[a-zA-Z]*f\b"),
 ];
 
 // ---------------------------------------------------------------------------
