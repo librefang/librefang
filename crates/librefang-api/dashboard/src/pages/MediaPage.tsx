@@ -518,6 +518,7 @@ function VideoPanel({
       errorToastShown.current = status.error;
       onToast(status.error, "error");
     }
+    // Keep deps narrowed to used fields; add more `status` deps if this effect starts reading them.
   }, [onToast, status?.status, status?.error, t, taskId]);
 
   const isPolling = !!(taskId && taskProvider)

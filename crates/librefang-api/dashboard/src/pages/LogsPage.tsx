@@ -60,6 +60,7 @@ export function LogsPage() {
     a.href = url;
     a.download = `audit-log-${new Date().toISOString().split("T")[0]}.json`;
     a.click();
+    // Delay revoke so Safari does not lose blob URL during async download handoff.
     setTimeout(() => URL.revokeObjectURL(url), 100);
   };
 

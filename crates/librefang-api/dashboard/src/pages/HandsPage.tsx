@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import type { UseQueryResult } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { router } from "../router";
@@ -291,8 +292,6 @@ function HandDetailPanel({
               isActive={isActive}
               settings={settings}
               settingsQuery={settingsQuery}
-              stats={stats}
-              statsQuery={statsQuery}
             />
           </div>
         </div>
@@ -390,9 +389,10 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   );
 }
 
-function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats: _stats, statsQuery: _statsQuery }: {
+function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   hand: HandDefinitionItem; instance: HandInstanceItem | undefined; isActive: boolean;
-  settings: HandSettingsResponse; settingsQuery: any; stats: HandStatsResponse; statsQuery: any;
+  settings: HandSettingsResponse;
+  settingsQuery: UseQueryResult<HandSettingsResponse, Error>;
 }) {
   const { t } = useTranslation();
 
@@ -724,7 +724,12 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
     <div className="space-y-2">
       {cronJobs.map((job) => {
         const isEnabled = job.enabled !== false;
-        const schedule = typeof job.schedule === "string" ? job.schedule : (job.schedule as any)?.expr || (job.schedule as any)?.every_secs ? `every ${(job.schedule as any).every_secs}s` : "-";
+        const scheduleConfig = typeof job.schedule === "object" && job.schedule !== null
+          ? job.schedule as { expr?: string; every_secs?: number }
+          : null;
+        const schedule = typeof job.schedule === "string"
+          ? job.schedule
+          : scheduleConfig?.expr ?? (scheduleConfig?.every_secs != null ? `every ${scheduleConfig.every_secs}s` : "-");
         return (
           <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>

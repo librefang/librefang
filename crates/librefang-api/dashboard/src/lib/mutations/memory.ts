@@ -9,7 +9,7 @@ export function useAddMemory() {
       addMemoryFromText(content, { level, agentId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: memoryKeys.lists() });
-      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+      qc.invalidateQueries({ queryKey: memoryKeys.statsAll() });
     },
   });
 }
@@ -21,7 +21,7 @@ export function useUpdateMemory() {
       updateMemory(id, content),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: memoryKeys.lists() });
-      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+      qc.invalidateQueries({ queryKey: memoryKeys.statsAll() });
     },
   });
 }
@@ -32,7 +32,7 @@ export function useDeleteMemory() {
     mutationFn: deleteMemory,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: memoryKeys.lists() });
-      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+      qc.invalidateQueries({ queryKey: memoryKeys.statsAll() });
     },
   });
 }
@@ -43,7 +43,7 @@ export function useCleanupMemories() {
     mutationFn: cleanupMemories,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: memoryKeys.lists() });
-      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+      qc.invalidateQueries({ queryKey: memoryKeys.statsAll() });
     },
   });
 }

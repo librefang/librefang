@@ -127,14 +127,14 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
 function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   const { t } = useTranslation();
 
-  if (!stats) return null;
-
   const kpis = useMemo(() => [
-    { icon: Database, label: t("memory.total_memories"), value: stats.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
-    { icon: Sparkles, label: t("memory.episodic"), value: stats.episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
-    { icon: Zap, label: t("memory.semantic"), value: stats.semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
-    { icon: Clock, label: t("memory.working"), value: stats.working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
+    { icon: Database, label: t("memory.total_memories"), value: stats?.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
+    { icon: Sparkles, label: t("memory.episodic"), value: stats?.episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
+    { icon: Zap, label: t("memory.semantic"), value: stats?.semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
+    { icon: Clock, label: t("memory.working"), value: stats?.working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
   ], [stats, t]);
+
+  if (!stats) return null;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
@@ -190,17 +190,20 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const handleSave = async () => {
     if (!form) return;
     try {
+      const decayRate = Number(form.decay_rate);
+      const maxRetrieve = Number.parseInt(form.pm_max_retrieve, 10);
+
       await updateConfig.mutateAsync({
         embedding_provider: form.embedding_provider || undefined,
         embedding_model: form.embedding_model || undefined,
         embedding_api_key_env: form.embedding_api_key_env || undefined,
-        decay_rate: parseFloat(form.decay_rate) || 0.05,
+        decay_rate: Number.isFinite(decayRate) ? decayRate : 0.05,
         proactive_memory: {
           enabled: form.pm_enabled,
           auto_memorize: form.pm_auto_memorize,
           auto_retrieve: form.pm_auto_retrieve,
           extraction_model: form.pm_extraction_model || undefined,
-          max_retrieve: parseInt(form.pm_max_retrieve) || 10,
+          max_retrieve: Number.isFinite(maxRetrieve) ? maxRetrieve : 10,
         },
       });
       addToast(t("common.success"), "success");
