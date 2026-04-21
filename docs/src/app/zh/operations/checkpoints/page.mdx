@@ -1,0 +1,94 @@
+# 检查点管理器
+
+在每次 `file_write` 或 `apply_patch` 工具调用之前，LibreFang 会自动将受影响的工作目录快照到一个轻量级影子 Git 仓库中。如果某次 agent 运行出现问题，你可以查看完整的文件历史记录并恢复任意历史状态，而不会中断其他会话中正在进行的工作。
+
+## 目录
+- [存储布局](#storage-layout)
+- [快照命名规则](#snapshot-naming)
+- [查看快照](#viewing-snapshots)
+- [恢复快照](#restoring-a-snapshot)
+- [排除项与大小限制](#exclusions-and-size-limits)
+- [失败行为](#failure-behavior)
+- [最佳实践](#best-practices)
+
+---
+
+## 存储布局 {#storage-layout}
+
+```
+~/.librefang/checkpoints/
+  a3f2b91c4d8e7f05/    ← /home/user/myproject 的影子仓库
+    .git/
+  8c14e30a2b9d6f71/    ← /tmp/scratch 的影子仓库
+    .git/
+```
+
+---
+
+## 快照命名规则 {#snapshot-naming}
+
+子目录名称是工作目录绝对路径（UTF-8，无尾部斜杠）的 SHA-256 哈希值的前 16 个十六进制字符。
+
+---
+
+## 查看快照 {#viewing-snapshots}
+
+```bash
+PROJECT_DIR="/home/user/myproject"
+HASH=$(python3 -c "
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])
+" "$PROJECT_DIR")
+
+SHADOW="$HOME/.librefang/checkpoints/$HASH"
+
+git -C "$SHADOW" log --oneline
+git -C "$SHADOW" show --stat HEAD
+git -C "$SHADOW" diff HEAD~1 HEAD
+```
+
+---
+
+## 恢复快照 {#restoring-a-snapshot}
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
+  -H "Content-Type: application/json" \
+  -d '{"working_dir": "/home/user/myproject", "commit": "a3f2b91"}'
+```
+
+| 字段 | 是否必填 | 说明 |
+|---|---|---|
+| `working_dir` | 是 | 项目目录的绝对路径 |
+| `commit` | 是 | 影子仓库中的完整或缩写 commit SHA |
+
+---
+
+## 排除项与大小限制 {#exclusions-and-size-limits}
+
+硬性排除项：
+| 排除路径 | 原因 |
+|---|---|
+| `node_modules/` | 包缓存，可重新生成 |
+| `target/` | Rust 构建产物 |
+| `.venv/`、`venv/`、`env/` | Python 虚拟环境 |
+| `.git/` | 嵌套 git 仓库 |
+| `__pycache__/` | Python 字节码缓存 |
+| `dist/`、`build/` | 编译输出 |
+
+单文件大小限制：50 KB。
+
+---
+
+## 失败行为 {#failure-behavior}
+
+快照创建采用尽力而为策略。失败会记录为 WARN，工具调用照常继续执行。
+
+---
+
+## 最佳实践 {#best-practices}
+
+- 将影子仓库用作短期安全网，而非主要备份手段
+- 将工作目录聚焦于正在修改的具体子目录
+- 使用 `git log --grep` 将 commit 与 agent ID 关联
+- 在重新运行前先恢复快照，为 agent 提供干净的基线

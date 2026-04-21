@@ -1,0 +1,91 @@
+# 会话自动重置
+
+长期运行的会话会积累消息历史。随着历史记录增长，prompt token 数量上升，上下文窗口被填满，每次请求的费用也随之增加。会话自动重置会按计划清除历史记录，使 agent 在每个工作时间窗口都能以全新的上下文开始。
+
+## 目录
+- [配置](#configuration)
+- [重置模式](#reset-modes)
+- [暂停状态](#suspended-state)
+- [重置记录](#reset-record)
+- [使用场景](#use-cases)
+- [与 session_mode 的关系](#relation-to-session_mode)
+
+---
+
+## 配置 {#configuration}
+
+```toml
+[session_reset]
+mode = "idle"
+idle_minutes = 30
+daily_at_hour = 3
+```
+
+| 字段 | 默认值 | 约束 |
+|---|---|---|
+| `mode` | `"off"` | `"off"`、`"idle"`、`"daily"`、`"both"` |
+| `idle_minutes` | `30` | `1`–`1440` |
+| `daily_at_hour` | `0` | `0`–`23`（UTC） |
+
+---
+
+## 重置模式 {#reset-modes}
+
+| 模式 | 行为 |
+|---|---|
+| `off` | 禁用自动重置。 |
+| `idle` | 在空闲 `idle_minutes` 分钟后重置。 |
+| `daily` | 每天在 `daily_at_hour`（UTC）时刻重置一次。 |
+| `both` | 两个条件均可触发——以先到达的为准。 |
+
+---
+
+## 暂停状态 {#suspended-state}
+
+```bash
+curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
+  -H "Content-Type: application/json" \
+  -d '{"suspended": true}'
+
+curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
+  -H "Content-Type: application/json" \
+  -d '{"suspended": false}'
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `suspended` | boolean | 为 true 时，消息进入队列但不处理 |
+| `resume_pending` | boolean（只读） | 暂停期间有消息到达时为 true |
+
+手动重置：
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/reset
+```
+
+---
+
+## 重置记录 {#reset-record}
+
+| `reset_reason` | 触发原因 |
+|---|---|
+| `idle` | 空闲超时到期 |
+| `daily` | 每日时钟边界跨越 |
+| `suspended` | 会话处于暂停状态时触发了重置 |
+| `manual` | API 调用 |
+
+---
+
+## 使用场景 {#use-cases}
+
+- 交互式助手的空闲重置（`mode = "idle"`，`idle_minutes = 60`）
+- 定时任务驱动 agent 的每日重置（`mode = "daily"`，`daily_at_hour = 2`）
+- 高流量共享 bot 同时启用两种模式（`mode = "both"`）
+
+---
+
+## 与 session_mode 的关系 {#relation-to-session_mode}
+
+| 设置 | 位置 | 控制内容 |
+|---|---|---|
+| `session_mode` | `agent.toml`（每个 agent） | 自动化调用是创建新会话还是复用持久会话 |
+| `session_reset` | `config.toml`（全局） | 现有持久会话的历史记录是否按计划清除 |
