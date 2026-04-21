@@ -104,23 +104,25 @@ export function AnalyticsPage() {
 
   const modelKpis = useMemo(() => {
     if (modelPerformance.length === 0) return null;
-    let totalLatency = 0;
-    let totalCostPerCall = 0;
     let totalCalls = 0;
+    let weightedLatency = 0;
+    let totalCost = 0;
     let fastest = modelPerformance[0];
     for (const m of modelPerformance) {
-      totalLatency += m.avg_latency_ms ?? 0;
-      totalCostPerCall += m.cost_per_call ?? 0;
-      totalCalls += m.call_count ?? 0;
+      const callCount = m.call_count ?? 0;
+      totalCalls += callCount;
+      weightedLatency += (m.avg_latency_ms ?? 0) * callCount;
+      totalCost += (m.cost_per_call ?? 0) * callCount;
       if ((m.avg_latency_ms ?? Infinity) < (fastest.avg_latency_ms ?? Infinity)) {
         fastest = m;
       }
     }
-    const n = modelPerformance.length;
+    const avgLatency = totalCalls > 0 ? weightedLatency / totalCalls : 0;
+    const avgCostPerCall = totalCalls > 0 ? totalCost / totalCalls : 0;
     return [
-      { icon: Activity, label: t("analytics.avg_latency") || "Avg Latency", value: `${(totalLatency / n).toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
+      { icon: Activity, label: t("analytics.avg_latency") || "Avg Latency", value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
       { icon: Gauge, label: t("analytics.fastest_model") || "Fastest Model", value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
-      { icon: Target, label: t("analytics.cheapest_call") || "Cheapest/Call", value: `$${(totalCostPerCall / n).toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
+      { icon: Target, label: t("analytics.cheapest_call") || "Cheapest/Call", value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
       { icon: Clock, label: t("analytics.total_calls") || "Total Calls", value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
     ];
   }, [modelPerformance, t]);

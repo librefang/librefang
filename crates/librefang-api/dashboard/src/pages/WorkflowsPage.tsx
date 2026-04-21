@@ -69,8 +69,8 @@ export function WorkflowsPage() {
   );
   const allWorkflows = workflowsQuery.data ?? [];
   const scheduledWf = useMemo(
-    () => workflows.find(w => w.id === scheduleWorkflowId),
-    [workflows, scheduleWorkflowId]
+    () => allWorkflows.find(w => w.id === scheduleWorkflowId),
+    [allWorkflows, scheduleWorkflowId]
   );
 
   useEffect(() => {
