@@ -2682,13 +2682,29 @@ impl LibreFangKernel {
                 if webui_msgs == 0 {
                     continue;
                 }
-                let canonical_msgs = kernel
+                // Inspect canonical: if the user has deliberately labeled it
+                // (via create_agent_session / switch_agent_session from the
+                // sessions UI), treat that as an explicit choice and don't
+                // override it — they can still find the orphaned webui session
+                // in `list_agent_sessions` and switch manually if desired.
+                let canonical_session = kernel
                     .memory
                     .get_session(canonical_session_id)
                     .ok()
-                    .flatten()
-                    .map(|s| s.messages.len())
-                    .unwrap_or(0);
+                    .flatten();
+                if canonical_session
+                    .as_ref()
+                    .and_then(|s| s.label.as_ref())
+                    .is_some()
+                {
+                    info!(
+                        agent_id = %agent_id,
+                        webui_messages = webui_msgs,
+                        "Skipping webui adoption — canonical session is labeled (user-managed)"
+                    );
+                    continue;
+                }
+                let canonical_msgs = canonical_session.map(|s| s.messages.len()).unwrap_or(0);
                 if webui_msgs <= canonical_msgs {
                     continue;
                 }
