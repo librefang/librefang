@@ -194,6 +194,7 @@ impl SetupWizard {
             auto_dream_min_hours: None,
             auto_dream_min_sessions: None,
             show_progress: true,
+            auto_evolve: true,
         };
 
         let skills_to_install: Vec<String> = intent

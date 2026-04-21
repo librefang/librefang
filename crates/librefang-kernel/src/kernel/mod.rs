@@ -3657,7 +3657,18 @@ system_prompt = "You are a helpful assistant."
                 // Cooldown: per-agent, at most one review every SKILL_REVIEW_COOLDOWN_SECS.
                 let now_epoch = chrono::Utc::now().timestamp();
                 let agent_id_str = agent_id.to_string();
-                // Pre-claim gate 0: Stable mode / frozen registry. Skip
+                // Pre-claim gate 0a: per-agent opt-out. A2A worker agents
+                // and any agent where trigger responsiveness matters more
+                // than automatic skill distillation can set
+                // `auto_evolve = false` in agent.toml to skip the review
+                // entirely — no LLM call, no semaphore, no cooldown slot.
+                if !entry.manifest.auto_evolve {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        "Skipping background skill review — auto_evolve disabled for this agent"
+                    );
+                }
+                // Pre-claim gate 0b: Stable mode / frozen registry. Skip
                 // spawning a review task entirely when the operator
                 // chose a no-skill-mutations posture — the review would
                 // write to disk and the reload_skills() call afterwards
@@ -3671,9 +3682,11 @@ system_prompt = "You are a helpful assistant."
                 // Pre-claim gate 1: eligibility. Only consider claiming
                 // the cooldown slot if this loop actually suggested a
                 // review AND the agent didn't already evolve a skill
-                // AND the registry isn't frozen.
-                let eligible =
-                    result.skill_evolution_suggested && !used_evolution_tool && !registry_frozen;
+                // AND the registry isn't frozen AND auto_evolve is on.
+                let eligible = result.skill_evolution_suggested
+                    && !used_evolution_tool
+                    && !registry_frozen
+                    && entry.manifest.auto_evolve;
                 // Pre-claim gate 2: budget. Background reviews are
                 // optional work — if the global budget is exhausted we
                 // want to skip WITHOUT burning the 5-minute cooldown
