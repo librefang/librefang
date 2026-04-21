@@ -1151,6 +1151,8 @@ mod tests {
             "Cross-wake: {{event}}".to_string(),
             0,
             Some(target),
+            None,
+            None,
         );
 
         let event = Event::new(
@@ -1215,6 +1217,8 @@ mod tests {
             "sys: {{event}}".to_string(),
             0,
             Some(target),
+            None,
+            None,
         );
 
         let taken = engine.take_agent_triggers(old_owner);
