@@ -388,7 +388,7 @@ capability and taint checks.
 | **System file overwrites** | Writing directly to critical OS paths | `> /etc/passwd`, `> /etc/shadow`, `> /boot/` |
 | **Service management** | Stopping or disabling system services | `systemctl stop`, `service … stop`, `kill -9 1` |
 | **Process kill** | Sending fatal signals to processes | `kill -9`, `killall`, `pkill -9` |
-| **Fork bomb** | Self-replicating processes that exhaust resources | `:(){ :|:& };:` and variants |
+| **Fork bomb** | Self-replicating processes that exhaust resources | `:()&#123; :\|:& &#125;;:` and variants |
 | **Arbitrary code execution** | Piping remote content directly into a shell | `curl … \| bash`, `wget … \| sh`, `eval $(…)` |
 | **Destructive find** | Using `find` to delete or overwrite files | `find … -exec rm`, `find … -delete` |
 | **Destructive git** | Force-pushing or history-destroying git operations | `git push --force`, `git reset --hard HEAD~`, `git clean -fdx` |
