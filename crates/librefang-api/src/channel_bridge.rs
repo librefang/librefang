@@ -3693,6 +3693,7 @@ mod tests {
             "en",
         );
 
+        // Iteration 1: the tool-call content block.
         event_tx
             .send(StreamEvent::ToolUseStart {
                 id: "tool_1".to_string(),
@@ -3701,6 +3702,14 @@ mod tests {
             .await
             .unwrap();
         event_tx
+            .send(StreamEvent::ContentComplete {
+                stop_reason: librefang_types::message::StopReason::ToolUse,
+                usage: librefang_types::message::TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+        // Tool executes; result feeds back into the next LLM iteration.
+        event_tx
             .send(StreamEvent::ToolExecutionResult {
                 name: "web_search".to_string(),
                 result_preview: "irrelevant".to_string(),
@@ -3708,6 +3717,7 @@ mod tests {
             })
             .await
             .unwrap();
+        // Iteration 2: model's prose response after seeing the tool result.
         event_tx
             .send(StreamEvent::TextDelta {
                 text: "Final answer.".to_string(),
@@ -3819,7 +3829,7 @@ mod tests {
         use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
-        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
             Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
                 LibreFangError::Internal("rate limit hit".to_string()).into(),
@@ -3863,7 +3873,7 @@ mod tests {
         use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
-        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
             Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
                 LibreFangError::Internal("some internal failure".to_string()).into(),
@@ -3908,7 +3918,7 @@ mod tests {
         use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
-        let (_event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
+        let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
             // Mirror the kernel-side error format: a string that contains
             // the timeout marker constant.

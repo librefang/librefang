@@ -22,6 +22,13 @@ fi
 
 # Railway/Render/Fly inject PORT — reapply on every boot since a rescheduled
 # machine may land on a different port.
+# In Docker, 127.0.0.1 is the container's own loopback and is unreachable from
+# the host. Force wildcard bind unless the user has already customised it.
+if grep -q '^api_listen = "127.0.0.1:' "$CONFIG" 2>/dev/null; then
+  sed -i 's|^api_listen = "127.0.0.1:|api_listen = "0.0.0.0:|' "$CONFIG"
+  chown node:node "$CONFIG"
+fi
+
 if [ -n "$PORT" ]; then
   sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
   chown node:node "$CONFIG"

@@ -26,6 +26,27 @@ type SortDir = "asc" | "desc";
 const GRID_COLS = "grid-cols-[minmax(140px,1fr)_90px_70px_70px_70px_70px_40px_40px_40px_40px_70px]";
 const GRID_MIN_W = "min-w-[860px]";
 
+type SortHeaderProps = {
+  field: SortField;
+  active: boolean;
+  dir: SortDir;
+  onToggle: (field: SortField) => void;
+  children: React.ReactNode;
+  className?: string;
+};
+
+function SortHeader({ field, active, dir, onToggle, children, className = "" }: SortHeaderProps) {
+  return (
+    <button type="button" onClick={() => onToggle(field)}
+      className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
+      {children}
+      {active
+        ? <ArrowUpDown className={`w-3 h-3 text-brand ${dir === "desc" ? "rotate-180" : ""}`} />
+        : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
+    </button>
+  );
+}
+
 export function ModelsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -57,7 +78,6 @@ export function ModelsPage() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Form state
   const [formId, setFormId] = useState("");
   const [formProvider, setFormProvider] = useState("");
   const [formDisplayName, setFormDisplayName] = useState("");
@@ -106,8 +126,9 @@ export function ModelsPage() {
       });
       addToast(t("models.model_added"), "success");
       resetForm();
-    } catch (err: any) {
-      addToast(err?.message || t("common.error"), "error");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
     }
   };
 
@@ -120,10 +141,12 @@ export function ModelsPage() {
       await deleteMut.mutateAsync(id);
       addToast(t("models.model_deleted"), "success");
       if (key && hiddenModelKeys.includes(key)) unhideModelAction(key);
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
-  // Available models first, unavailable last
   const allModels = useMemo(
     () => [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
       if (a.available && !b.available) return -1;
@@ -134,14 +157,17 @@ export function ModelsPage() {
   );
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
-  const providers = useMemo(
-    () => ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()],
-    [allModels],
-  );
-  const tiers = useMemo(
-    () => ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()],
-    [allModels],
-  );
+  const { providers, tiers } = useMemo(() => {
+    const providerSet = new Set<string>();
+    const tierSet = new Set<string>();
+    for (const m of allModels) {
+      providerSet.add(m.provider);
+      if (m.tier) tierSet.add(m.tier);
+    }
+    const providers = ["all", ...Array.from(providerSet).sort()];
+    const tiers = ["all", ...Array.from(tierSet).sort()];
+    return { providers, tiers };
+  }, [allModels]);
 
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
 
@@ -169,7 +195,6 @@ export function ModelsPage() {
 
   const hiddenCount = useMemo(() => allModels.filter(m => hiddenSet.has(modelKey(m))).length, [allModels, hiddenSet]);
 
-  // Sort
   const sortedFiltered = useMemo(() => {
     const sorted = [...filtered];
     const dir = sortDir === "asc" ? 1 : -1;
@@ -188,7 +213,6 @@ export function ModelsPage() {
     return sorted;
   }, [filtered, sortField, sortDir]);
 
-  // Group by provider when showing all providers
   const grouped = useMemo(() => {
     if (providerFilter !== "all") return null;
     const map = new Map<string, ModelItem[]>();
@@ -235,24 +259,21 @@ export function ModelsPage() {
     return formatCompact(tokens);
   };
 
-  const SortHeader = ({ field, children, className = "" }: { field: SortField; children: React.ReactNode; className?: string }) => (
-    <button type="button" onClick={() => toggleSort(field)}
-      className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
-      {children}
-      {sortField === field
-        ? <ArrowUpDown className="w-3 h-3 text-brand" />
-        : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
-    </button>
-  );
+
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
-  // Collapsed provider summary: tier badges + cheapest cost
   const providerSummary = (models: ModelItem[]) => {
-    const tierSet = new Set(models.map(m => m.tier).filter(Boolean));
+    const tierSet = new Set<string>();
+    let minCost: number | null = null;
+    for (const m of models) {
+      if (m.tier) tierSet.add(m.tier);
+      const cost = m.input_cost_per_m ?? 0;
+      if (cost > 0 && (minCost === null || cost < minCost)) {
+        minCost = cost;
+      }
+    }
     const tiers = Array.from(tierSet).sort();
-    const costs = models.map(m => m.input_cost_per_m ?? 0).filter(c => c > 0);
-    const minCost = costs.length > 0 ? Math.min(...costs) : null;
     return (
       <div className="flex items-center gap-1.5 ml-auto mr-2">
         {tiers.slice(0, 4).map(tier => (
@@ -266,7 +287,6 @@ export function ModelsPage() {
     );
   };
 
-  // Mobile card for a single model
   const renderMobileCard = (m: ModelItem) => {
     const isCustom = m.tier === "custom";
     const mKey = `${m.provider}:${m.id}`;
@@ -330,7 +350,6 @@ export function ModelsPage() {
     );
   };
 
-  // Desktop table row
   const renderRow = (m: ModelItem, i: number) => {
     const isCustom = m.tier === "custom";
     const mKey = `${m.provider}:${m.id}`;
@@ -436,12 +455,12 @@ export function ModelsPage() {
 
   const colHeader = (
     <div className={`grid ${GRID_COLS} ${GRID_MIN_W} gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase`}>
-      <SortHeader field="model">{t("models.col_model")}</SortHeader>
-      <SortHeader field="provider">{t("models.col_provider")}</SortHeader>
-      <SortHeader field="tier">{t("models.col_tier")}</SortHeader>
-      <SortHeader field="context">{t("models.col_context")}</SortHeader>
-      <SortHeader field="input_cost">{t("models.col_input")}</SortHeader>
-      <SortHeader field="output_cost">{t("models.col_output")}</SortHeader>
+      <SortHeader field="model" active={sortField === "model"} dir={sortDir} onToggle={toggleSort}>{t("models.col_model")}</SortHeader>
+      <SortHeader field="provider" active={sortField === "provider"} dir={sortDir} onToggle={toggleSort}>{t("models.col_provider")}</SortHeader>
+      <SortHeader field="tier" active={sortField === "tier"} dir={sortDir} onToggle={toggleSort}>{t("models.col_tier")}</SortHeader>
+      <SortHeader field="context" active={sortField === "context"} dir={sortDir} onToggle={toggleSort}>{t("models.col_context")}</SortHeader>
+      <SortHeader field="input_cost" active={sortField === "input_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_input")}</SortHeader>
+      <SortHeader field="output_cost" active={sortField === "output_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_output")}</SortHeader>
       <span className="text-center" title={t("models.col_tools")}><Wrench className="w-3.5 h-3.5 inline" /></span>
       <span className="text-center" title={t("models.col_vision")}><Eye className="w-3.5 h-3.5 inline" /></span>
       <span className="text-center" title={t("models.col_streaming")}><Zap className="w-3.5 h-3.5 inline" /></span>
@@ -699,7 +718,6 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   const [saving, setSaving] = useState(false);
 
-  // Form state
   const [modelType, setModelType] = useState<"chat" | "speech" | "embedding">("chat");
   const [temperature, setTemperature] = useState(0.7);
   const [tempEnabled, setTempEnabled] = useState(false);
@@ -751,8 +769,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
       await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       onSaved();
       onClose();
-    } catch (e: any) {
-      onError(e?.message);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onError(msg);
     } finally {
       setSaving(false);
     }
@@ -763,8 +782,9 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
       await deleteMut.mutateAsync(overrideKey);
       onReset();
       onClose();
-    } catch (e: any) {
-      onError(e?.message);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onError(msg);
     }
   }, [overrideKey, onReset, onClose, onError, deleteMut]);
 

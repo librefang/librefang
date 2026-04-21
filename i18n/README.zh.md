@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
   <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+  <a href="https://deepwiki.com/librefang/librefang"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ---
@@ -220,7 +221,8 @@ cargo fmt --all -- --check                               # 格式化检查
 
 <p align="center">
   我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
-  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
+  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！<br/>
+  您也可以访问 <a href="https://leszek3737.github.io/librefang-WIki/">非官方 wiki</a>，其中更新了面向新贡献者的有用信息。
 </p>
 
 <p align="center">

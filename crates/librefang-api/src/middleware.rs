@@ -388,7 +388,13 @@ pub async fn auth(
     // deployments keep a public shell so the SPA can load its own API-key
     // entry UI; the individual `/api/*` endpoints still require a Bearer
     // token, which is the real security boundary.
-    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
+    //
+    // Dashboard assets (JS/CSS/font chunks) are always public — they contain
+    // no sensitive data and the SPA shell needs them to render even the
+    // inline login page returned for unauthenticated browsers.
+    let is_dashboard_asset = path.starts_with("/dashboard/assets/");
+    let dashboard_shell_public =
+        (!auth_state.dashboard_auth_enabled && is_dashboard_path) || is_dashboard_asset;
 
     let always_public_get_only = is_get
         && (matches!(
