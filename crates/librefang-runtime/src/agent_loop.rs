@@ -2766,7 +2766,10 @@ pub async fn run_agent_loop(
                     }
                     Some(EndTurnRetry::HallucinatedAction) => {
                         hallucination_retried = true;
-                        warn!(
+                        // One-shot corrective retry — expected in mixed-capability
+                        // model fleets and not an error condition. Keep as info
+                        // so operators can still see how often it fires.
+                        info!(
                             agent = %manifest.name,
                             iteration,
                             "Detected hallucinated action — agent claimed action without tool calls, retrying"
@@ -2780,7 +2783,7 @@ pub async fn run_agent_loop(
                     }
                     Some(EndTurnRetry::ActionIntent) => {
                         action_nudge_retried = true;
-                        warn!(
+                        info!(
                             agent = %manifest.name,
                             iteration,
                             "User requested action but LLM responded without tool calls — nudging retry"
@@ -3818,7 +3821,7 @@ pub async fn run_agent_loop_streaming(
                     }
                     Some(EndTurnRetry::HallucinatedAction) => {
                         hallucination_retried = true;
-                        warn!(
+                        info!(
                             agent = %manifest.name,
                             iteration,
                             "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
@@ -3832,7 +3835,7 @@ pub async fn run_agent_loop_streaming(
                     }
                     Some(EndTurnRetry::ActionIntent) => {
                         action_nudge_retried = true;
-                        warn!(
+                        info!(
                             agent = %manifest.name,
                             iteration,
                             "User requested action but LLM responded without tool calls (streaming) — nudging retry"
