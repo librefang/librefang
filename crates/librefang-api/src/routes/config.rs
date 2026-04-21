@@ -1984,10 +1984,14 @@ pub async fn config_set(
         );
     }
 
-    // Backup before write
-    let backup_path = config_path.with_extension("toml.bak");
+    // Backup under backups/ before write (single rolling copy).
     if config_path.exists() {
-        let _ = std::fs::copy(&config_path, &backup_path);
+        if let Some(home_dir) = config_path.parent() {
+            let backups_dir = home_dir.join("backups");
+            if std::fs::create_dir_all(&backups_dir).is_ok() {
+                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+            }
+        }
     }
 
     // Write back — preserves comments, whitespace, and key ordering

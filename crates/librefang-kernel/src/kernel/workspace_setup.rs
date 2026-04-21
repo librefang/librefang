@@ -87,13 +87,62 @@ pub(super) fn migrate_legacy_agent_dirs(home_dir: &Path, workspaces_agents_dir: 
     }
 }
 
+/// One-shot migration: relocate stray `*.bak*` files left behind by older
+/// versions at the home-dir root into `backups/`. Known producers:
+/// `config.toml.bak`, `config.toml.bak.<ts>`, `integrations.toml.bak.<ts>`.
+pub(super) fn migrate_root_backups(home_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(home_dir) else {
+        return;
+    };
+    let candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config.toml.bak") || name.starts_with("integrations.toml.bak") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let backups_dir = home_dir.join("backups");
+    if std::fs::create_dir_all(&backups_dir).is_err() {
+        return;
+    }
+    for src in candidates {
+        let Some(name) = src.file_name().map(|n| n.to_os_string()) else {
+            continue;
+        };
+        let dest = backups_dir.join(&name);
+        if dest.exists() {
+            // Already relocated in a prior run — discard the stray duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate backup: {e}"
+            );
+        }
+    }
+}
+
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
         return;
     }
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(home_dir)
         .status()
         .is_ok_and(|s| s.success());

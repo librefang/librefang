@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
 import { useFullConfig } from "../lib/queries/config";
@@ -68,23 +69,32 @@ const SLASH_COMMANDS = [
   { cmd: "/clear",   descKey: "cmd_clear",   noArgs: true },
   { cmd: "/agents",  descKey: "cmd_agents",  noArgs: true },
   { cmd: "/info",    descKey: "cmd_info",    noArgs: true },
-  { cmd: "/new",     descKey: "cmd_new",     noArgs: true },
-  { cmd: "/compact", descKey: "cmd_compact", noArgs: true },
-  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true },
-  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true },
-  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true },
-  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>" },
-  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true },
-  { cmd: "/context", descKey: "cmd_context", noArgs: true },
-  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]" },
-  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true },
-  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true },
-  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true },
-  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true },
+  { cmd: "/new",     descKey: "cmd_new",     noArgs: true, backend: true },
+  { cmd: "/compact", descKey: "cmd_compact", noArgs: true, backend: true },
+  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true, backend: true },
+  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true, backend: true },
+  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true, backend: true },
+  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>", backend: true },
+  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true, backend: true },
+  { cmd: "/context", descKey: "cmd_context", noArgs: true, backend: true },
+  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]", backend: true },
+  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true, backend: true },
+  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true, backend: true },
+  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true, backend: true },
+  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true, backend: true },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
-const BACKEND_COMMANDS = ["new", "reset", "reboot", "compact", "stop", "model", "usage", "context", "verbose", "budget", "peers", "a2a", "queue"];
+const BACKEND_COMMANDS = SLASH_COMMANDS.filter(c => c.backend).map(c => c.cmd.slice(1));
+
+const REMARK_PLUGINS = [remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
+
+let _nextMessageId = 0;
+function makeMessageId(prefix: string): string {
+  _nextMessageId += 1;
+  return `${prefix}-${Date.now()}-${_nextMessageId}`;
+}
 
 
 // WebSocket hook with auto-reconnect
@@ -165,7 +175,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -258,13 +268,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   const messagesRef = useRef<ChatMessage[]>(messages);
   messagesRef.current = messages;
   useEffect(() => {
+    if (!agentId) {
+      prevAgentRef.current = null;
+      return;
+    }
+
+    prevAgentRef.current = agentId;
+    const ownedAgentId = agentId;
+
     return () => {
-      if (prevAgentRef.current) {
-        sessionCache.set(prevAgentRef.current, messagesRef.current);
-      }
+      sessionCache.set(ownedAgentId, messagesRef.current);
     };
   }, [agentId]);
-  useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
   // Load history — use cache if available, otherwise fetch
   // sessionVersion changes force a fresh load (skip cache)
@@ -326,7 +341,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           }
         }
       })
-      .catch(() => {})
+      .catch(() => { /* Session load failure — user will see empty chat */ })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
@@ -356,8 +371,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     if (trimmed.startsWith("/")) {
       const sysMsg = (text: string) => {
         setMessages(prev => [...prev,
-          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
-          { id: `sys-${Date.now()}`, role: "system" as const, content: text, timestamp: new Date() }
+          { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
+          { id: makeMessageId("sys"), role: "system" as const, content: text, timestamp: new Date() }
         ]);
       };
       if (trimmed === "/help") {
@@ -387,7 +402,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       const cmdArgs = trimmed.slice(1 + cmd.length).trim();
       if (BACKEND_COMMANDS.includes(cmd)) {
         setMessages(prev => [...prev,
-          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
+          { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
         ]);
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
           const handleCmdResponse = (event: MessageEvent) => {
@@ -399,11 +414,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 // /new and /reset clear the backend session, so clear frontend too
                 if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
                   setMessages([
-                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
                 } else {
                   setMessages(prev => [...prev,
-                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
                 }
                 // Refresh agent data so model/provider badge reflects the change
@@ -430,14 +445,14 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     const sendAgentId = agentId;
 
     const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
+      id: makeMessageId("user"),
       role: "user",
       content: trimmed,
       timestamp: new Date(),
     };
 
     const botMsg: ChatMessage = {
-      id: `bot-${Date.now()}`,
+      id: makeMessageId("bot"),
       role: "assistant",
       content: "",
       timestamp: new Date(),
@@ -557,7 +572,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             } else if (data.type === "tool_start") {
               // Agent started a tool call — add a running tool entry
               const toolName = typeof data.tool === "string" ? data.tool : "unknown";
-              const toolId = data.id || `tool-${Date.now()}`;
+              const toolId = data.id || makeMessageId("tool");
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
@@ -847,8 +862,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
-              remarkPlugins={[remarkMath]}
-              rehypePlugins={[rehypeKatex]}
+              remarkPlugins={REMARK_PLUGINS}
+              rehypePlugins={REHYPE_PLUGINS}
             >
               {displayContent}
             </MarkdownContent>
@@ -1797,7 +1812,7 @@ export function ChatPage() {
 
   const agentsQuery = useAgents({ includeHands: showHandAgents });
   // Check if web search is available (any search API key configured)
-  const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
+  const webSearchAvailable = ((configQuery.data as Record<string, unknown>)?.web as Record<string, unknown> | undefined)?.search_available === true;
   const handsQuery = useActiveHandsWhen(showHandAgents);
 
   const sortedAgents = useMemo(
@@ -1861,7 +1876,7 @@ export function ChatPage() {
       "",
     ];
     for (const m of messages) {
-      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as any).toISOString();
+      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as string).toISOString();
       const role = m.role === "assistant" ? agentName : m.role;
       lines.push(`### ${role} · ${ts}`);
       lines.push("");
@@ -1883,7 +1898,7 @@ export function ChatPage() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
@@ -1891,7 +1906,7 @@ export function ChatPage() {
   // Per-agent session list
   const sessionsQuery = useAgentSessions(selectedAgentId);
   const activeSessionId = useMemo(() => {
-    const active = sessionsQuery.data?.find((s: any) => s.active);
+    const active = sessionsQuery.data?.find((s: SessionListItem) => s.active);
     return active?.session_id;
   }, [sessionsQuery.data]);
 
@@ -2131,7 +2146,7 @@ export function ChatPage() {
                     config: { web_search_augmentation: mode },
                   });
                   await agentsQuery.refetch();
-                } catch {}
+                } catch { /* Config update failure — non-critical */ }
               }}
             />
           )}
@@ -2205,4 +2220,4 @@ export function ChatPage() {
     </div>
   );
 }
-import { useQueryClient } from "@tanstack/react-query";
+

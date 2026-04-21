@@ -2,6 +2,12 @@
 //!
 //! Each API operation has a token cost (e.g., health=1, spawn=50, message=30).
 //! The GCRA algorithm allows 500 tokens per minute per IP address.
+//!
+//! Non-API paths (dashboard SPA assets, locale JSON, favicon, logo, root) are
+//! exempt from rate limiting — a single dashboard page load fans out to dozens
+//! of static-asset requests, and accounting them at the default fallback cost
+//! drains the budget before the page finishes rendering. See
+//! [`is_rate_limit_exempt`].
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
@@ -10,6 +16,23 @@ use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, Rate
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+
+/// Paths exempt from rate limiting.
+///
+/// The dashboard SPA and its static support files are served from the same
+/// Axum router as the API, so the rate-limit middleware sees every asset
+/// request. Counting each one at `operation_cost`'s fallback of 5 tokens
+/// exhausts the default 500-token/minute budget after roughly 20 assets —
+/// well under what a cold SPA load fetches. These paths short-circuit the
+/// limiter entirely; protocol, webhook, and `/api/*` paths continue to be
+/// metered.
+pub fn is_rate_limit_exempt(path: &str) -> bool {
+    path == "/"
+        || path == "/favicon.ico"
+        || path == "/logo.png"
+        || path.starts_with("/dashboard/")
+        || path.starts_with("/locales/")
+}
 
 pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
     match (method, path) {
@@ -56,12 +79,19 @@ pub fn create_rate_limiter(tokens_per_minute: u32) -> Arc<KeyedRateLimiter> {
 ///
 /// Extracts the client IP from `ConnectInfo`, computes the cost for the
 /// requested operation, and checks the GCRA limiter. Returns 429 if the
-/// client has exhausted its token budget.
+/// client has exhausted its token budget. Paths flagged by
+/// [`is_rate_limit_exempt`] (static SPA assets, locale files, root, favicon,
+/// logo) bypass the limiter entirely.
 pub async fn gcra_rate_limit(
     axum::extract::State(state): axum::extract::State<GcraState>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    let path = request.uri().path().to_string();
+    if is_rate_limit_exempt(&path) {
+        return next.run(request).await;
+    }
+
     let ip = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
@@ -69,7 +99,6 @@ pub async fn gcra_rate_limit(
         .unwrap_or(IpAddr::from([127, 0, 0, 1]));
 
     let method = request.method().as_str().to_string();
-    let path = request.uri().path().to_string();
     let cost = operation_cost(&method, &path);
 
     // `check_key_n` returns a nested `Result<Result<(), NotUntil>, InsufficientCapacity>`:
@@ -111,6 +140,9 @@ pub async fn gcra_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
 
     /// Regression: a small-quota limiter must actually start rejecting
     /// after the burst is drained. Before this fix the nested-Result
@@ -137,6 +169,115 @@ mod tests {
         assert!(
             matches!(r, Ok(Err(_))),
             "post-burst call must surface the NotUntil variant, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_static_assets_are_exempt() {
+        // Root + common top-level assets.
+        assert!(is_rate_limit_exempt("/"));
+        assert!(is_rate_limit_exempt("/favicon.ico"));
+        assert!(is_rate_limit_exempt("/logo.png"));
+        // Dashboard SPA bundle and support files.
+        assert!(is_rate_limit_exempt("/dashboard/index.html"));
+        assert!(is_rate_limit_exempt("/dashboard/manifest.json"));
+        assert!(is_rate_limit_exempt("/dashboard/sw.js"));
+        assert!(is_rate_limit_exempt(
+            "/dashboard/assets/ChatPage-ChE_yUYu.js"
+        ));
+        assert!(is_rate_limit_exempt("/dashboard/icon-192.png"));
+        // Locale files loaded by the dashboard on boot.
+        assert!(is_rate_limit_exempt("/locales/en.json"));
+        assert!(is_rate_limit_exempt("/locales/ja.json"));
+        assert!(is_rate_limit_exempt("/locales/zh-CN.json"));
+    }
+
+    #[test]
+    fn test_metered_paths_are_not_exempt() {
+        // Versioned + unversioned API.
+        assert!(!is_rate_limit_exempt("/api/health"));
+        assert!(!is_rate_limit_exempt("/api/v1/agents"));
+        assert!(!is_rate_limit_exempt("/api/openapi.json"));
+        assert!(!is_rate_limit_exempt("/api/versions"));
+        // OpenAI-compatible layer, MCP, webhooks, channels — all must be
+        // metered even though they live outside `/api/*`.
+        assert!(!is_rate_limit_exempt("/v1/chat/completions"));
+        assert!(!is_rate_limit_exempt("/v1/models"));
+        assert!(!is_rate_limit_exempt("/mcp"));
+        assert!(!is_rate_limit_exempt("/hooks/wake"));
+        assert!(!is_rate_limit_exempt("/hooks/agent"));
+        assert!(!is_rate_limit_exempt("/channels/feishu/webhook"));
+        // Prefix discipline: the exempt list must not leak onto siblings.
+        assert!(!is_rate_limit_exempt("/dashboard-login"));
+        assert!(!is_rate_limit_exempt("/dashboardz"));
+        assert!(!is_rate_limit_exempt("/localesX/en.json"));
+    }
+
+    fn router_with_limiter(tokens_per_minute: u32) -> Router {
+        let state = GcraState {
+            limiter: create_rate_limiter(tokens_per_minute),
+            retry_after_secs: 60,
+        };
+        Router::new()
+            .route("/dashboard/{*path}", get(|| async { "asset" }))
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, gcra_rate_limit))
+    }
+
+    /// Regression for the production 429 storm on `dash.librefang.ai`:
+    /// a cold dashboard load fans out to ~20 static-asset requests, and
+    /// the default fallback cost of 5 tokens drained the 500-token/min
+    /// budget before the page finished rendering. With the exempt list
+    /// in place, even a tiny budget must pass dashboard traffic through.
+    #[tokio::test]
+    async fn dashboard_burst_bypasses_rate_limit() {
+        let app = router_with_limiter(1); // intentionally starved
+        for i in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/dashboard/manifest.json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "dashboard request #{i} should bypass the limiter, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    /// Paired with the dashboard test above: the limiter *must* still
+    /// bite on metered paths, otherwise the exempt list would be a
+    /// blanket disable in disguise.
+    #[tokio::test]
+    async fn metered_api_burst_still_rate_limits() {
+        let app = router_with_limiter(1);
+        let mut saw_429 = false;
+        for _ in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "metered /api/health burst must eventually hit 429 under a 1-token/min quota"
         );
     }
 
