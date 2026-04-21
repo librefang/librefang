@@ -3657,6 +3657,7 @@ system_prompt = "You are a helpful assistant."
             None, // no hooks
             ctx_window,
             None, // no process manager
+            None, // no process registry
             None, // no content blocks
             None, // no proactive memory
             None, // no context engine

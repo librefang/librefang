@@ -490,13 +490,6 @@ pub trait KernelHandle: Send + Sync {
         5
     }
 
-    /// Background process registry for fire-and-forget shell_exec processes.
-    fn process_registry(
-        &self,
-    ) -> Option<Arc<librefang_runtime::process_registry::ProcessRegistry>> {
-        None
-    }
-
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
     fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {

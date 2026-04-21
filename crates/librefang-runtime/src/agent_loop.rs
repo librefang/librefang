@@ -730,7 +730,7 @@ async fn execute_single_tool_call(
             ctx.tts_engine,
             ctx.docker_config,
             ctx.process_manager,
-            None, // process_registry
+            ctx.process_registry,
             ctx.sender_user_id,
             ctx.sender_channel,
         ),
@@ -6290,6 +6290,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6349,6 +6350,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6407,6 +6409,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6684,6 +6687,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6817,6 +6821,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6869,6 +6874,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6929,6 +6935,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7711,6 +7718,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7851,6 +7859,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8149,6 +8158,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8206,6 +8216,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8264,6 +8275,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8323,6 +8335,7 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
