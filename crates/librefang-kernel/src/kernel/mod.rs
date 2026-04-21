@@ -9020,21 +9020,22 @@ system_prompt = "You are a helpful assistant."
                                 // receives its own fresh SessionId.
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
-                                let cron_sender = SenderContext {
-                                    channel: "cron".to_string(),
-                                    user_id: job.peer_id.clone().unwrap_or_default(),
-                                    display_name: "cron".to_string(),
-                                    is_group: false,
-                                    was_mentioned: false,
-                                    thread_id: None,
-                                    account_id: None,
-                                    ..Default::default()
-                                };
-                                let (sender_ctx, mode_override) = if wants_new_session {
+                                let (sender_ctx_owned, mode_override) = if wants_new_session {
                                     (None, Some(librefang_types::agent::SessionMode::New))
                                 } else {
-                                    (Some(&cron_sender), None)
+                                    let cron_sender = SenderContext {
+                                        channel: "cron".to_string(),
+                                        user_id: job.peer_id.clone().unwrap_or_default(),
+                                        display_name: "cron".to_string(),
+                                        is_group: false,
+                                        was_mentioned: false,
+                                        thread_id: None,
+                                        account_id: None,
+                                        ..Default::default()
+                                    };
+                                    (Some(cron_sender), None)
                                 };
+                                let sender_ctx = sender_ctx_owned.as_ref();
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(

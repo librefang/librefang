@@ -1442,7 +1442,9 @@ pub async fn create_schedule(
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
         peer_id: None,
-        session_mode: None,
+        session_mode: req["session_mode"]
+            .as_str()
+            .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok()),
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,
