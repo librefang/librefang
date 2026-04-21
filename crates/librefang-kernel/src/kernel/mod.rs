@@ -347,6 +347,13 @@ pub struct LibreFangKernel {
     pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
     /// Tracks running agent tasks for cancellation support.
     pub(crate) running_tasks: dashmap::DashMap<AgentId, tokio::task::AbortHandle>,
+    /// Tracks per-agent session interrupts so `stop_agent_run` can signal
+    /// `cancel()` in addition to aborting the tokio task.  Without this,
+    /// `SessionInterrupt` is moved into `LoopOptions` and the external handle
+    /// is lost, making all `is_cancelled()` checks inside tool futures
+    /// permanently return `false`.
+    pub(crate) session_interrupts:
+        dashmap::DashMap<AgentId, librefang_runtime::interrupt::SessionInterrupt>,
     /// MCP server connections (lazily initialized at start_background_agents).
     pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
     /// Per-server MCP OAuth authentication state.
@@ -2506,6 +2513,7 @@ impl LibreFangKernel {
             model_catalog: std::sync::RwLock::new(model_catalog),
             skill_registry: std::sync::RwLock::new(skill_registry),
             running_tasks: dashmap::DashMap::new(),
+            session_interrupts: dashmap::DashMap::new(),
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_oauth_provider: Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
@@ -4357,9 +4365,11 @@ system_prompt = "You are a helpful assistant."
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,
-            // Fork inherits the parent's interrupt via child_token() so that
-            // cancelling the parent also cancels the fork's in-flight tools.
-            // For now, create a fresh interrupt until kernel stores the parent's.
+            // TODO: fork should inherit parent's interrupt so cancelling the
+            // parent also cancels in-flight tools inside the fork.  For now,
+            // each fork gets an independent interrupt; the fork is short-lived
+            // (dream / auto_memorize) and driven by its own JoinHandle, so
+            // external cancellation via stop_agent_run is not wired for forks.
             interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
         };
         self.send_message_streaming_with_sender_and_opts(
@@ -4384,6 +4394,10 @@ system_prompt = "You are a helpful assistant."
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+        // Retain a clone in `session_interrupts` so `stop_agent_run` can call
+        // `cancel()`.  The original is moved into `LoopOptions` below.
+        self.session_interrupts
+            .insert(agent_id, session_interrupt.clone());
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             allowed_tools: None,
@@ -5103,11 +5117,17 @@ system_prompt = "You are a helpful assistant."
                         kernel_clone.reload_skills();
                     }
 
+                    // Task is finishing normally — remove the interrupt handle
+                    // so the map doesn't grow without bound.
+                    kernel_clone.session_interrupts.remove(&agent_id);
+                    kernel_clone.running_tasks.remove(&agent_id);
                     Ok(result)
                 }
                 Err(e) => {
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
+                    kernel_clone.session_interrupts.remove(&agent_id);
+                    kernel_clone.running_tasks.remove(&agent_id);
                     Err(KernelError::LibreFang(e))
                 }
             }
@@ -7578,7 +7598,18 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Cancel an agent's currently running LLM task.
+    ///
+    /// Two signals are sent:
+    /// 1. `AbortHandle::abort()` — terminates the tokio task at the next
+    ///    `.await` point (fast but coarse).
+    /// 2. `SessionInterrupt::cancel()` — sets the per-session atomic flag so
+    ///    in-flight tool futures that poll `is_cancelled()` can bail out
+    ///    gracefully before the task is actually dropped.
     pub fn stop_agent_run(&self, agent_id: AgentId) -> KernelResult<bool> {
+        // Signal the interrupt first so tools see it before the task is aborted.
+        if let Some((_, interrupt)) = self.session_interrupts.remove(&agent_id) {
+            interrupt.cancel();
+        }
         if let Some((_, handle)) = self.running_tasks.remove(&agent_id) {
             handle.abort();
             info!(agent_id = %agent_id, "Agent run cancelled");
