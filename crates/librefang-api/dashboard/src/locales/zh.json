@@ -65,6 +65,10 @@
     "back": "返回",
     "retry": "重试",
     "create": "创建",
+    "creating": "创建中...",
+    "name": "名称",
+    "description": "描述",
+    "detail": "详情",
     "actions": "操作",
     "clear": "清空",
     "load": "加载",
@@ -112,7 +116,25 @@
       "minutes_short": "分",
       "seconds_short": "秒"
     },
-    "copy": "复制"
+    "copy": "复制",
+    "add_more": "添加更多…",
+    "always": "始终",
+    "auto": "自动",
+    "clear_filters": "清除筛选",
+    "continue": "继续",
+    "disabled": "关闭",
+    "error": "错误",
+    "help": "帮助",
+    "next": "下一步",
+    "no_results": "无结果",
+    "off": "关闭",
+    "previous": "上一步",
+    "saved": "已保存",
+    "sort_by": "排序",
+    "sort_created": "创建时间",
+    "sort_last_active": "最近活跃",
+    "sort_name": "名称",
+    "viewAll": "查看全部"
   },
   "status": {
     "running": "运行中",
@@ -163,7 +185,8 @@
     "setup_description": "未检测到配置文件，点击自动检测 LLM 供应商并生成默认配置。",
     "setup_button": "初始化",
     "setup_running": "初始化中...",
-    "setup_wizard": "使用向导"
+    "setup_wizard": "使用向导",
+    "last_updated": "最后更新"
   },
   "agents": {
     "title": "智能体",
@@ -477,7 +500,42 @@
         "name": "写作助手",
         "description": "内容写作智能体，创建文档、文章和技术写作。"
       }
-    }
+    },
+    "clone_failed": "克隆智能体失败",
+    "delete_failed": "删除智能体失败",
+    "delete_success": "智能体已删除",
+    "delete_title": "删除智能体？",
+    "edit_name": "智能体名称",
+    "model_save_failed": "更新模型失败",
+    "model_saved": "模型已更新",
+    "rename_failed": "重命名智能体失败",
+    "rename_hand_disabled": "Hand 管理的智能体不能重命名",
+    "rename_hint": "点击重命名",
+    "rename_success": "智能体已重命名",
+    "reset_title": "重置会话？",
+    "resume_failed": "恢复智能体失败",
+    "suspend_failed": "暂停智能体失败",
+    "tools_allowed_count": "已允许",
+    "tools_allowlist_desc": "这些工具被明确允许。留空表示允许所有工具（被屏蔽的除外）。",
+    "tools_allowlist_title": "允许列表",
+    "tools_available": "个工具可用",
+    "tools_blocked_count": "已屏蔽",
+    "tools_blocklist_desc": "这些工具始终被屏蔽，即使出现在允许列表中也无效。",
+    "tools_blocklist_title": "屏蔽列表",
+    "tools_conflict_warning": "{{count}} 个工具同时出现在两个列表中。屏蔽列表优先，保存时这些工具将从允许列表中移除。",
+    "tools_disabled_hint": "工具当前已启用。下方的允许/屏蔽列表控制哪些工具可用。",
+    "tools_disabled_hint_active": "此智能体已禁用所有工具，允许/屏蔽过滤器不可编辑。请在智能体配置中重新启用工具后再管理过滤器。",
+    "tools_disabled_label": "禁用全部工具",
+    "tools_disabled_save_blocked": "此智能体已禁用所有工具。若要重新启用，请直接编辑智能体清单或配置——此编辑器仅管理允许/屏蔽过滤器。",
+    "tools_disabled_save_hint": "请在智能体配置中重新启用工具后再修改过滤器",
+    "tools_edit_aria": "编辑工具",
+    "tools_editor_desc": "查看此智能体的当前工具状态。允许列表为空表示不限制；屏蔽列表仍会移除所选工具。",
+    "tools_editor_title": "智能体工具",
+    "tools_load_failed": "加载工具失败",
+    "tools_save_failed": "更新工具失败",
+    "tools_saved": "工具已更新",
+    "tools_saved_conflicts": "工具已更新，冲突已按屏蔽列表优先原则解决。",
+    "tools_search_placeholder": "搜索工具..."
   },
   "providers": {
     "title": "供应商",
@@ -606,7 +664,9 @@
     "reload": "重新加载",
     "reload_success": "通道已重新加载",
     "qr_failed": "获取二维码失败",
-    "login_success": "登录成功！正在保存配置..."
+    "login_success": "登录成功！正在保存配置...",
+    "config_failed": "配置失败",
+    "config_success": "配置已保存"
   },
   "skills": {
     "title": "技能",
@@ -622,6 +682,12 @@
     "install": "安装",
     "installing": "安装中...",
     "installed_count": "已安装 {{count}} 个",
+    "browse": "浏览",
+    "browse_registry": "应用市场",
+    "source_fanghub": "FangHub",
+    "source_clawhub": "ClawHub",
+    "source_clawhub_cn": "ClawHub 国内版",
+    "source_skillhub": "SkillHub",
     "sort_trending": "热门",
     "sort_downloads": "下载量",
     "sort_stars": "星标",
@@ -708,7 +774,8 @@
     "err_prompt_too_large": "Prompt 上下文过大（最多 160,000 字符）。",
     "err_security_blocked": "内容被安全扫描拦截，请移除可疑模式。",
     "err_invalid_name": "技能名称非法：仅允许小写字母、数字、连字符、下划线。",
-    "err_create_failed": "创建技能失败，请重试。"
+    "err_create_failed": "创建技能失败，请重试。",
+    "outputs": "技能输出"
   },
   "hands": {
     "title": "Hands",
@@ -749,7 +816,13 @@
     "cat_data": "数据",
     "cat_development": "开发",
     "cat_productivity": "效率",
-    "help": "管理可组合的功能扩展包。激活、停用、暂停和恢复 Hands 以扩展智能体功能。"
+    "help": "管理可组合的功能扩展包。激活、停用、暂停和恢复 Hands 以扩展智能体功能。",
+    "settings_activate_first": "请先激活此 Hand 才能编辑其设置。",
+    "settings_default": "默认值",
+    "settings_save": "保存设置",
+    "settings_saved": "已保存",
+    "uninstall": "卸载此 Hand",
+    "uninstall_confirm": "确定要卸载此 Hand？其 HAND.toml 和工作区文件将被删除，此操作不可撤销。"
   },
   "analytics": {
     "title": "分析",
@@ -798,7 +871,16 @@
     "avg": "平均",
     "min": "最小",
     "max": "最大",
-    "cost_per_call_label": "每次调用费用"
+    "cost_per_call_label": "每次调用费用",
+    "calls": "调用次数",
+    "cost_call": "单次费用",
+    "export_csv": "导出 CSV",
+    "fastest_model": "最快模型",
+    "latency_by_model": "按模型延迟",
+    "min_max": "最小 / 最大",
+    "model": "模型",
+    "model_performance_table": "模型性能",
+    "tokens": "Token 数"
   },
   "memory": {
     "title": "记忆",
@@ -832,7 +914,12 @@
     "proactive_enabled": "启用",
     "auto_memorize": "自动记忆",
     "auto_retrieve": "自动召回",
-    "help": "管理智能体的记忆存储。添加、编辑、搜索和删除记忆，配置向量引擎和主动记忆设置。"
+    "help": "管理智能体的记忆存储。添加、编辑、搜索和删除记忆，配置向量引擎和主动记忆设置。",
+    "access_count": "访问次数",
+    "category": "分类",
+    "cleanup_success": "清理完成",
+    "delete_success": "记忆已删除",
+    "last_access": "最后访问"
   },
   "comms": {
     "bus": "通信总线",
@@ -997,7 +1084,21 @@
     "dry_run": "Dry Run",
     "dry_run_desc": "验证 Agent 并预览解析后的提示词，不调用任何 LLM。",
     "fullscreen": "全屏",
-    "exit_fullscreen": "退出全屏"
+    "exit_fullscreen": "退出全屏",
+    "browse_templates": "浏览模板",
+    "depends_on": "依赖节点",
+    "depends_on_hint": "此节点将在所选节点完成后才会运行。",
+    "load_error": "加载数据失败",
+    "logic_actions": "逻辑与动作",
+    "no_templates": "暂无模板",
+    "save_error": "创建工作流失败",
+    "scheduled": "计划已创建",
+    "template_instantiate_error": "实例化模板失败",
+    "template_load_error": "加载模板失败",
+    "template_params": "模板参数",
+    "template_search": "搜索模板...",
+    "use_template": "使用模板",
+    "workflow_load_error": "加载工作流失败"
   },
   "workflows": {
     "title": "工作流",
@@ -1072,7 +1173,11 @@
     "dry_run": "Dry Run",
     "dry_run_hint": "Dry Run — 验证但不调用 LLM",
     "dry_run_valid": "验证通过 — 所有 Agent 已解析",
-    "dry_run_warning": "警告 — 部分 Agent 未找到"
+    "dry_run_warning": "警告 — 部分 Agent 未找到",
+    "delete_failed": "删除失败",
+    "run_failed": "运行失败",
+    "run_started": "运行已启动",
+    "schedule_failed": "创建计划失败"
   },
   "scheduler": {
     "title": "调度器",
@@ -1144,7 +1249,11 @@
     "cron_weekdays": "工作日 {{time}}",
     "cron_daily": "每天 {{time}}",
     "cron_invalid": "无效表达式",
-    "help": "使用 Cron 表达式调度自动化任务。创建、运行和删除定时任务，触发智能体执行操作。"
+    "help": "使用 Cron 表达式调度自动化任务。创建、运行和删除定时任务，触发智能体执行操作。",
+    "next_run": "下次执行",
+    "save_success": "计划已保存",
+    "timezone": "时区",
+    "weekdays": "工作日"
   },
   "runtime": {
     "title": "运行时",
@@ -1356,7 +1465,11 @@
     "auto_dream_status_completed": "已完成",
     "auto_dream_status_failed": "失败",
     "auto_dream_status_aborted": "已中止",
-    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。"
+    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。",
+    "backup": "备份",
+    "export_config_btn": "导出配置",
+    "export_config_desc": "将当前配置下载为 TOML 文件。",
+    "export_config_title": "导出配置"
   },
   "config": {
     "title": "系统配置",
@@ -1699,7 +1812,11 @@
     "no_results": "没有匹配的字段",
     "reset_default": "恢复默认值",
     "unsaved_warning": "有未保存的修改，确定要丢弃吗？",
-    "save_failed": "保存失败"
+    "save_failed": "保存失败",
+    "changes": "未保存的更改",
+    "reset_all": "全部重置",
+    "reset_section": "重置本节",
+    "searching_all": "搜索所有配置项..."
   },
   "chat": {
     "title": "对话",
@@ -1789,7 +1906,17 @@
     "info_model": "模型",
     "info_provider": "提供商",
     "info_state": "状态",
-    "ws_not_connected": "WebSocket 未连接，请刷新页面。"
+    "ws_not_connected": "WebSocket 未连接，请刷新页面。",
+    "delete_session": "删除会话",
+    "export": "导出",
+    "export_markdown": "导出为 Markdown",
+    "new_session": "新建会话",
+    "search_providers": "搜索供应商...",
+    "select_provider": "选择供应商",
+    "tool_error": "错误",
+    "tool_input": "输入",
+    "tool_result": "结果",
+    "tool_running": "执行中…"
   },
   "goals": {
     "title": "目标",
@@ -1876,7 +2003,8 @@
       "showing": "显示第 {{from}}-{{to}} 条，共 {{total}} 条"
     },
     "loadError": "加载审批列表失败，请检查网络连接。",
-    "batch_disabled_totp": "TOTP 强制启用时不可批量审批"
+    "batch_disabled_totp": "TOTP 强制启用时不可批量审批",
+    "goToAgent": "跳转到 Agent"
   },
   "wizard": {
     "welcome": "欢迎使用 LibreFang",
@@ -1909,7 +2037,8 @@
     "done_desc": "默认供应商已配置，入门 Agent 已创建。现在可以开始聊天或进入控制台。",
     "go_overview": "进入总览",
     "start_chat": "开始聊天",
-    "skip": "跳过向导"
+    "skip": "跳过向导",
+    "replace_key_warning": "该供应商已连接一个有效密钥。提交后将覆盖旧密钥——测试失败无法恢复原密钥。勾选以确认。"
   },
   "models": {
     "section": "模型管理",
@@ -2149,7 +2278,17 @@
     "scaffold_desc": "这个插件做什么？",
     "create": "创建",
     "deps": "依赖",
-    "help": "安装和管理插件以扩展智能体能力。支持从插件市场、本地路径或 Git 仓库添加插件。"
+    "help": "安装和管理插件以扩展智能体能力。支持从插件市场、本地路径或 Git 仓库添加插件。",
+    "deps_failed": "依赖安装失败",
+    "deps_installed": "依赖已安装",
+    "install_failed": "安装失败",
+    "install_success": "插件已安装",
+    "no_description": "暂无描述。",
+    "runtime": "运行时",
+    "scaffold_failed": "创建失败",
+    "scaffold_success": "插件已创建",
+    "uninstall_failed": "卸载失败",
+    "uninstall_success": "插件已移除"
   },
   "telemetry": {
     "badge": "可观测性",
@@ -2196,7 +2335,8 @@
     "navigate": "导航",
     "open": "打开",
     "close": "关闭",
-    "registry": "注册表 (librefang.ai)"
+    "registry": "注册表 (librefang.ai)",
+    "all_shortcuts": "所有快捷键"
   },
   "terminal": {
     "badge": "终端",
