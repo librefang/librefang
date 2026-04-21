@@ -3355,6 +3355,9 @@ pub async fn start_channel_bridge_with_config(
                 // by an earlier adapter in this batch.
                 if owns_plain_key {
                     kernel.channel_adapters_ref().remove(&name);
+                    // Release ownership so the next adapter of the same channel
+                    // type can claim the plain key as fallback.
+                    plain_key_owners.remove(&name);
                 }
                 if let Some(ref aid) = account_id {
                     kernel
