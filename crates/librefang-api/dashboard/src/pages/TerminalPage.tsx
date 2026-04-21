@@ -95,6 +95,7 @@ export function TerminalPage() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false);
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
@@ -186,7 +187,13 @@ export function TerminalPage() {
         const toasts = useUIStore.getState().toasts;
         const latest = toasts[toasts.length - 1];
         if (latest) {
-          setTimeout(() => removeToast(latest.id), 3000);
+          if (toastDismissTimerRef.current) {
+            clearTimeout(toastDismissTimerRef.current);
+          }
+          toastDismissTimerRef.current = setTimeout(() => {
+            removeToast(latest.id);
+            toastDismissTimerRef.current = null;
+          }, 3000);
         }
       }
       const hintKey = "terminal.copyPasteHintShown";
@@ -460,6 +467,9 @@ export function TerminalPage() {
       ro.disconnect();
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (toastDismissTimerRef.current) {
+        clearTimeout(toastDismissTimerRef.current);
       }
       if (wsRef.current) {
         intentionalDisconnectRef.current = true;
