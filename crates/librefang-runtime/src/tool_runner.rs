@@ -317,6 +317,9 @@ pub struct ToolExecContext<'a> {
     pub tts_engine: Option<&'a crate::tts::TtsEngine>,
     pub docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    /// Background process registry — tracks fire-and-forget processes spawned by
+    /// `shell_exec` with a rolling 200 KB output buffer.
+    pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
 }
@@ -351,6 +354,7 @@ pub async fn execute_tool_raw(
         tts_engine,
         docker_config,
         process_manager,
+        process_registry,
         sender_id,
         channel: _,
     } = ctx;
@@ -508,6 +512,8 @@ pub async fn execute_tool_raw(
                 effective_allowed_env_vars.unwrap_or(&[]),
                 *workspace_root,
                 *exec_policy,
+                *process_registry,
+                caller_agent_id.map(|s| s.to_string()),
             )
             .await
         }
@@ -2155,6 +2161,8 @@ async fn tool_shell_exec(
     allowed_env: &[String],
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     let command = input["command"]
         .as_str()
@@ -2240,14 +2248,42 @@ async fn tool_shell_exec(
     // Prevent child from inheriting stdin (avoids blocking on Windows)
     cmd.stdin(std::process::Stdio::null());
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+    // Capture stdout/stderr so we can feed them into the process registry.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    // Spawn the child so we can obtain the OS PID before waiting.
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("Failed to execute command: {e}")),
+    };
+
+    // Register the process as soon as we have a PID.
+    let maybe_pid = child.id();
+    if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
+        reg.register(pid, command.to_string(), session_id.clone());
+    }
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await;
 
     match result {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
+
+            // Feed combined output into the registry then mark finished.
+            if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
+                let combined = format!("{stdout}{stderr}");
+                if !combined.is_empty() {
+                    reg.append_output(pid, &combined);
+                }
+                reg.mark_finished(pid, exit_code);
+            }
 
             // Truncate very long outputs to prevent memory issues
             let max_output = 100_000;
@@ -2275,7 +2311,14 @@ async fn tool_shell_exec(
             ))
         }
         Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
-        Err(_) => Err(format!("Command timed out after {timeout_secs}s")),
+        Err(_) => {
+            // Timed out — mark the process finished with a sentinel exit code
+            // so the registry doesn't leave it perpetually Running.
+            if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
+                reg.mark_finished(pid, -1);
+            }
+            Err(format!("Command timed out after {timeout_secs}s"))
+        }
     }
 }
 
