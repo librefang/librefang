@@ -14519,6 +14519,11 @@ impl LibreFangKernel {
             channel: deferred.channel.as_deref(),
             checkpoint_manager: self.checkpoint_manager.as_ref(),
             process_registry: Some(&self.process_registry),
+            // Deferred tool executions run after the originating session's turn
+            // has already ended (approval flow), so no live session interrupt is
+            // available.  We set None here; if a session interrupt is needed for
+            // deferred tools in the future, wire it through DeferredToolExecution.
+            interrupt: None,
         }
     }
 

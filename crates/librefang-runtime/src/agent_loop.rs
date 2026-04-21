@@ -585,6 +585,10 @@ struct ToolExecutionContext<'a> {
     streaming: bool,
     agent_id_str: &'a str,
     opts: &'a LoopOptions,
+    /// Per-session interrupt handle propagated into tool execution so that
+    /// long-running tools (shell_exec, agent_send, …) can observe a /stop
+    /// signal without polling a global flag.
+    interrupt: Option<crate::interrupt::SessionInterrupt>,
 }
 
 async fn execute_single_tool_call(
@@ -749,7 +753,7 @@ async fn execute_single_tool_call(
             ctx.sender_user_id,
             ctx.sender_channel,
             ctx.checkpoint_manager,
-            Some(ctx.session.id.to_string()).as_deref(),
+            ctx.interrupt.clone(),
         ),
     )
     .await
@@ -3069,6 +3073,10 @@ pub async fn run_agent_loop(
                         streaming: false,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
+                        // No interrupt wired at this call site yet; callers that
+                        // need session-scoped cancellation should pass one through
+                        // LoopOptions or a dedicated field on the enclosing context.
+                        interrupt: None,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -4241,6 +4249,9 @@ pub async fn run_agent_loop_streaming(
                         streaming: true,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
+                        // No interrupt wired at this call site yet; see non-streaming
+                        // path above for the same note.
+                        interrupt: None,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
