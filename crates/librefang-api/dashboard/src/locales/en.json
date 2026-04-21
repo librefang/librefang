@@ -65,6 +65,10 @@
     "back": "Back",
     "retry": "Retry",
     "create": "Create",
+    "creating": "Creating...",
+    "name": "Name",
+    "description": "Description",
+    "detail": "Detail",
     "actions": "Actions",
     "clear": "Clear",
     "load": "Load",
@@ -112,7 +116,25 @@
       "minutes_short": "m",
       "seconds_short": "s"
     },
-    "copy": "Copy"
+    "copy": "Copy",
+    "add_more": "Add more…",
+    "always": "Always",
+    "auto": "Auto",
+    "clear_filters": "Clear filters",
+    "continue": "Continue",
+    "disabled": "OFF",
+    "error": "Error",
+    "help": "Help",
+    "next": "Next",
+    "no_results": "No results",
+    "off": "Off",
+    "previous": "Previous",
+    "saved": "Saved",
+    "sort_by": "Sort",
+    "sort_created": "Created",
+    "sort_last_active": "Last active",
+    "sort_name": "Name",
+    "viewAll": "View All"
   },
   "status": {
     "running": "Running",
@@ -163,7 +185,8 @@
     "setup_description": "No configuration file detected. Click to auto-detect your LLM provider and generate a default config.",
     "setup_button": "Initialize",
     "setup_running": "Initializing...",
-    "setup_wizard": "Use Wizard"
+    "setup_wizard": "Use Wizard",
+    "last_updated": "Last updated"
   },
   "agents": {
     "title": "Agents",
@@ -477,7 +500,42 @@
         "name": "Writer",
         "description": "Content writer. Creates documentation, articles, and technical writing."
       }
-    }
+    },
+    "clone_failed": "Failed to clone agent",
+    "delete_failed": "Failed to delete agent",
+    "delete_success": "Agent deleted",
+    "delete_title": "Delete agent?",
+    "edit_name": "Agent name",
+    "model_save_failed": "Failed to update model",
+    "model_saved": "Model updated",
+    "rename_failed": "Failed to rename agent",
+    "rename_hand_disabled": "Hand-managed agents cannot be renamed",
+    "rename_hint": "Click to rename",
+    "rename_success": "Agent renamed",
+    "reset_title": "Reset session?",
+    "resume_failed": "Failed to resume agent",
+    "suspend_failed": "Failed to suspend agent",
+    "tools_allowed_count": "allowed",
+    "tools_allowlist_desc": "These tools are explicitly allowed. Leave empty to allow all tools except blocked ones.",
+    "tools_allowlist_title": "Allowlist",
+    "tools_available": "tools available",
+    "tools_blocked_count": "blocked",
+    "tools_blocklist_desc": "These tools are blocked even if they are present in the allowlist.",
+    "tools_blocklist_title": "Blocklist",
+    "tools_conflict_warning": "{{count}} tools are in both lists. Blocklist wins and those tools will be removed from the allowlist when you save.",
+    "tools_disabled_hint": "Tools are currently enabled. Allowlist and blocklist below control which tools remain available.",
+    "tools_disabled_hint_active": "Tools are disabled for this agent; editing allow/block filters is blocked here. Re-enable tools in the agent config to manage filters.",
+    "tools_disabled_label": "Disable all tools",
+    "tools_disabled_save_blocked": "All tools are disabled for this agent. To re-enable tools, edit the agent manifest or config directly — this editor only manages allow/block filters.",
+    "tools_disabled_save_hint": "Re-enable tools in the agent config to modify filters",
+    "tools_edit_aria": "Edit tools",
+    "tools_editor_desc": "Review the current tools state for this agent. Empty allowlist means no allow restriction; blocklist still removes selected tools.",
+    "tools_editor_title": "Agent Tools",
+    "tools_load_failed": "Failed to load tools",
+    "tools_save_failed": "Failed to update tools",
+    "tools_saved": "Tools updated",
+    "tools_saved_conflicts": "Tools updated. Conflicts were resolved in favor of the blocklist.",
+    "tools_search_placeholder": "Search tools..."
   },
   "providers": {
     "title": "Providers",
@@ -606,7 +664,9 @@
     "reload": "Reload",
     "reload_success": "Channels reloaded",
     "qr_failed": "Failed to get QR code",
-    "login_success": "Login successful! Saving configuration..."
+    "login_success": "Login successful! Saving configuration...",
+    "config_failed": "Configuration failed",
+    "config_success": "Configuration saved"
   },
   "skills": {
     "title": "Skills",
@@ -622,6 +682,12 @@
     "install": "Install",
     "installing": "Installing...",
     "installed_count": "{{count}} Installed",
+    "browse": "Browse",
+    "browse_registry": "Registry",
+    "source_fanghub": "FangHub",
+    "source_clawhub": "ClawHub",
+    "source_clawhub_cn": "ClawHub CN",
+    "source_skillhub": "SkillHub",
     "sort_trending": "Trending",
     "sort_downloads": "Downloads",
     "sort_stars": "Stars",
@@ -708,7 +774,8 @@
     "err_prompt_too_large": "Prompt context is too large (max 160,000 characters).",
     "err_security_blocked": "Content was blocked by security scan. Please remove potentially dangerous patterns.",
     "err_invalid_name": "Invalid skill name. Use lowercase letters, numbers, hyphens, and underscores only.",
-    "err_create_failed": "Failed to create skill. Please try again."
+    "err_create_failed": "Failed to create skill. Please try again.",
+    "outputs": "Skill Outputs"
   },
   "hands": {
     "title": "Hands",
@@ -749,7 +816,13 @@
     "cat_data": "Data",
     "cat_development": "Development",
     "cat_communication": "Communication",
-    "help": "Manage autonomous capability packages. Activate, deactivate, pause, and resume Hands to extend agent functionality."
+    "help": "Manage autonomous capability packages. Activate, deactivate, pause, and resume Hands to extend agent functionality.",
+    "settings_activate_first": "Activate this hand first to edit its settings.",
+    "settings_default": "default",
+    "settings_save": "Save settings",
+    "settings_saved": "Saved",
+    "uninstall": "Uninstall this hand",
+    "uninstall_confirm": "Uninstall this hand? Its HAND.toml and workspace files will be deleted. This cannot be undone."
   },
   "analytics": {
     "title": "Analytics",
@@ -798,7 +871,16 @@
     "avg": "Avg",
     "min": "Min",
     "max": "Max",
-    "cost_per_call_label": "Cost/Call"
+    "cost_per_call_label": "Cost/Call",
+    "calls": "Calls",
+    "cost_call": "Cost/Call",
+    "export_csv": "Export CSV",
+    "fastest_model": "Fastest Model",
+    "latency_by_model": "Latency by Model",
+    "min_max": "Min / Max",
+    "model": "Model",
+    "model_performance_table": "Model Performance",
+    "tokens": "Tokens"
   },
   "memory": {
     "title": "Memory",
@@ -832,7 +914,12 @@
     "proactive_enabled": "Enabled",
     "auto_memorize": "Auto Memorize",
     "auto_retrieve": "Auto Retrieve",
-    "help": "Manage agent memory storage. Add, edit, search, and delete memories. Configure embedding and proactive memory settings."
+    "help": "Manage agent memory storage. Add, edit, search, and delete memories. Configure embedding and proactive memory settings.",
+    "access_count": "Accessed",
+    "category": "Category",
+    "cleanup_success": "Cleanup complete",
+    "delete_success": "Memory deleted",
+    "last_access": "Last access"
   },
   "comms": {
     "bus": "Communication Bus",
@@ -994,7 +1081,24 @@
     "dry_run": "Dry Run",
     "dry_run_desc": "Validate agents and preview resolved prompts without calling any LLMs.",
     "fullscreen": "Fullscreen",
-    "exit_fullscreen": "Exit fullscreen"
+    "exit_fullscreen": "Exit fullscreen",
+    "browse_templates": "Browse Templates",
+    "depends_on": "Depends on",
+    "depends_on_hint": "This node will only run after the selected nodes complete.",
+    "load_error": "Failed to load data",
+    "logic_actions": "Logic & Actions",
+    "no_templates": "No templates available",
+    "save_as_template": "Save as Template",
+    "save_error": "Failed to create workflow",
+    "save_first_to_template": "Save the workflow first before saving as template",
+    "saved_as_template": "Saved as template",
+    "scheduled": "Schedule created",
+    "template_instantiate_error": "Failed to instantiate template",
+    "template_load_error": "Failed to load template",
+    "template_params": "Template Parameters",
+    "template_search": "Search templates...",
+    "use_template": "Use Template",
+    "workflow_load_error": "Failed to load workflow"
   },
   "workflows": {
     "title": "Workflows",
@@ -1068,7 +1172,12 @@
     "dry_run": "Dry Run",
     "dry_run_hint": "Dry Run — validate without calling LLMs",
     "dry_run_valid": "Valid — all agents resolved",
-    "dry_run_warning": "Warning — some agents not found"
+    "dry_run_warning": "Warning — some agents not found",
+    "delete_failed": "Delete failed",
+    "run_failed": "Run failed",
+    "run_started": "Run started",
+    "runs_label": "runs",
+    "schedule_failed": "Schedule creation failed"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -1137,7 +1246,11 @@
     "cron_weekly": "{{day}} {{time}}",
     "cron_weekdays": "Weekdays {{time}}",
     "cron_daily": "Daily {{time}}",
-    "help": "Schedule automated tasks with cron expressions. Create, run, and delete scheduled jobs that trigger agent actions."
+    "help": "Schedule automated tasks with cron expressions. Create, run, and delete scheduled jobs that trigger agent actions.",
+    "next_run": "Next",
+    "save_success": "Schedule saved",
+    "timezone": "Timezone",
+    "weekdays": "Weekdays"
   },
   "runtime": {
     "title": "Runtime",
@@ -1381,7 +1494,11 @@
     "auto_dream_status_completed": "Completed",
     "auto_dream_status_failed": "Failed",
     "auto_dream_status_aborted": "Aborted",
-    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools."
+    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools.",
+    "backup": "Backup",
+    "export_config_btn": "Export Config",
+    "export_config_desc": "Download your current configuration as a TOML file.",
+    "export_config_title": "Export Configuration"
   },
   "config": {
     "title": "Configuration",
@@ -1724,7 +1841,11 @@
     "no_results": "No fields match your search",
     "reset_default": "Reset to default",
     "unsaved_warning": "You have unsaved changes. Discard them?",
-    "save_failed": "Save failed"
+    "save_failed": "Save failed",
+    "changes": "Unsaved changes",
+    "reset_all": "Reset all",
+    "reset_section": "Reset section",
+    "searching_all": "Searching all sections..."
   },
   "chat": {
     "title": "Chat",
@@ -1814,7 +1935,17 @@
     "info_model": "Model",
     "info_provider": "Provider",
     "info_state": "State",
-    "ws_not_connected": "WebSocket not connected. Please refresh the page."
+    "ws_not_connected": "WebSocket not connected. Please refresh the page.",
+    "delete_session": "Delete session",
+    "export": "Export",
+    "export_markdown": "Export as Markdown",
+    "new_session": "New session",
+    "search_providers": "Search providers...",
+    "select_provider": "Select Provider",
+    "tool_error": "Error",
+    "tool_input": "Input",
+    "tool_result": "Result",
+    "tool_running": "Running…"
   },
   "goals": {
     "title": "Goals",
@@ -1901,7 +2032,8 @@
       "showing": "Showing {{from}}-{{to}} of {{total}}"
     },
     "loadError": "Failed to load approvals. Check your connection.",
-    "batch_disabled_totp": "Batch approve disabled when TOTP is enforced"
+    "batch_disabled_totp": "Batch approve disabled when TOTP is enforced",
+    "goToAgent": "Go to Agent"
   },
   "wizard": {
     "welcome": "Welcome to LibreFang",
@@ -1934,7 +2066,8 @@
     "done_desc": "Your default provider is configured and a starter agent has been created. You can now chat or jump into the dashboard.",
     "go_overview": "Go to Overview",
     "start_chat": "Start Chatting",
-    "skip": "Skip wizard"
+    "skip": "Skip wizard",
+    "replace_key_warning": "This provider is already connected with a working key. Submitting will overwrite it — a failed test cannot restore the previous key. Check to acknowledge."
   },
   "models": {
     "section": "Infrastructure",
@@ -2174,7 +2307,17 @@
     "scaffold_desc": "What does this plugin do?",
     "create": "Create",
     "deps": "Deps",
-    "help": "Install and manage plugins to extend agent capabilities. Add plugins from the marketplace, local paths, or Git repositories."
+    "help": "Install and manage plugins to extend agent capabilities. Add plugins from the marketplace, local paths, or Git repositories.",
+    "deps_failed": "Dependency install failed",
+    "deps_installed": "Dependencies installed",
+    "install_failed": "Install failed",
+    "install_success": "Plugin installed",
+    "no_description": "No description provided.",
+    "runtime": "Runtime",
+    "scaffold_failed": "Create failed",
+    "scaffold_success": "Plugin created",
+    "uninstall_failed": "Uninstall failed",
+    "uninstall_success": "Plugin removed"
   },
   "schema_form": {
     "select_option": "Select...",
@@ -2189,13 +2332,16 @@
     "navigate": "Navigate",
     "open": "Open",
     "close": "Close",
-    "registry": "Registry (librefang.ai)"
+    "registry": "Registry (librefang.ai)",
+    "all_shortcuts": "all shortcuts"
   },
   "terminal": {
     "badge": "Terminal",
     "title": "Terminal",
     "subtitle_connected": "Connected",
     "subtitle_disconnected": "Disconnected",
+    "subtitle_connecting": "Connecting…",
+    "subtitle_reconnecting": "Reconnecting… ({{attempt}}/{{max}})",
     "subtitle_error": "Error: {{error}}",
     "connect": "Connect",
     "disconnect": "Disconnect",
@@ -2208,6 +2354,14 @@
     "root_warning": "Warning: The daemon is running as root. Terminal commands execute with full privileges.",
     "enter_fullscreen": "Enter fullscreen",
     "exit_fullscreen": "Exit fullscreen (Esc)",
+    "dismiss_error": "Dismiss",
+    "search_placeholder": "Search… (Enter: next, Shift+Enter: prev)",
+    "search_prev": "Previous match",
+    "search_next": "Next match",
+    "search_close": "Close search",
+    "font_decrease": "Decrease font size",
+    "font_increase": "Increase font size",
+    "copy_paste_hint": "Tip: use Ctrl+Shift+C / Ctrl+Shift+V to copy and paste in the terminal",
     "tabs": {
       "new": "New tab",
       "unnamed": "Unnamed",
@@ -2220,10 +2374,21 @@
       "rename_hint": "Double-click to rename",
       "tmux_unavailable": "tmux is not available on this host",
       "name_label": "Window name",
-      "name_invalid": "Only letters, digits, space, . _ - are allowed (1–64 chars).",
-      "counter": "{{used}} / {{total}}"
+      "name_invalid": "Name must be 1–64 characters and cannot contain | or control characters.",
+      "counter": "{{used}} / {{total}}",
+      "help": "Keyboard shortcuts",
+      "help_title": "Tab shortcuts",
+      "help_switch": "Switch tab",
+      "help_switch_key": "Click",
+      "help_rename": "Rename tab",
+      "help_rename_key": "Double-click",
+      "help_close": "Close tab",
+      "help_close_key": "Middle-click / ✕",
+      "help_new": "New tab",
+      "help_new_key": "＋"
     },
-    "install_tmux": "Install tmux"
+    "install_tmux": "Install tmux",
+    "reconnected": "Reconnected"
   },
   "mcp": {
     "title": "MCP Servers",
