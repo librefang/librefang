@@ -1,0 +1,231 @@
+# Event Hook System
+
+Lifecycle hooks let external scripts react to agent and session events without modifying
+agent code. When an event fires, LibreFang spawns the configured executable, passes
+structured data through environment variables, and continues — regardless of whether the
+hook exits cleanly.
+
+## Included Topics
+
+- [Directory Layout](#directory-layout)
+- [HOOK.yaml Format](#hookyaml-format)
+- [Supported Events](#supported-events)
+- [Environment Variables](#environment-variables)
+- [Payload Reference](#payload-reference)
+- [Example Script](#example-script)
+- [Error Handling](#error-handling)
+- [Limitations](#limitations)
+
+---
+
+## Directory Layout
+
+Place each hook in its own subdirectory under `~/.librefang/hooks/`:
+
+```
+~/.librefang/hooks/
+  notify-on-end/
+    HOOK.yaml
+    run.sh
+  log-session-reset/
+    HOOK.yaml
+    run.py
+```
+
+Each subdirectory must contain exactly one `HOOK.yaml`. The executable named in `command`
+can be any file in the same directory or an absolute path on the system — it just needs to
+be executable (`chmod +x`).
+
+---
+
+## HOOK.yaml Format
+
+```yaml
+name: notify-on-agent-end
+description: "POST to a webhook when an agent finishes a run"
+
+# Events that trigger this hook. Wildcards are supported.
+events:
+  - agent:end
+
+# Relative path (from this file's directory) or absolute path.
+command: ./run.sh
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Human-readable identifier shown in logs |
+| `description` | no | Freeform notes for documentation purposes |
+| `events` | yes | List of event names or glob patterns (e.g. `agent:*`, `*`) |
+| `command` | yes | Executable to invoke when the event fires |
+
+---
+
+## Supported Events
+
+| Event | When it fires |
+|---|---|
+| `agent:start` | Agent loop begins processing a new request |
+| `agent:end` | Agent loop completes (success, error, or max-steps) |
+| `agent:step` | Each intermediate reasoning step inside a run |
+| `session:start` | A session is created or resumed for the first time in a daemon lifetime |
+| `session:end` | A session is explicitly closed |
+| `session:reset` | A session is cleared by the auto-reset policy or a manual API call |
+| `gateway:startup` | The LibreFang daemon finishes its boot sequence |
+
+**Wildcard patterns** are evaluated with standard glob rules:
+
+| Pattern | Matches |
+|---|---|
+| `agent:*` | `agent:start`, `agent:end`, `agent:step` |
+| `session:*` | `session:start`, `session:end`, `session:reset` |
+| `*` | All events |
+
+Hooks registered for a wildcard pattern receive the same payload as hooks registered for the
+exact event name.
+
+---
+
+## Environment Variables
+
+LibreFang passes two variables to every hook process:
+
+| Variable | Type | Content |
+|---|---|---|
+| `HOOK_EVENT` | string | The exact event name that fired, e.g. `agent:end` |
+| `HOOK_EVENT_DATA` | JSON string | Structured payload for the event (see below) |
+
+No other environment variables are injected. The hook inherits the daemon's process
+environment (including `PATH`), so system tools are available without extra setup.
+
+---
+
+## Payload Reference
+
+### `agent:start`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Agent that started the run |
+| `session_id` | string | Session associated with this run |
+| `sender` | string | Sender identifier that triggered the run |
+| `message_preview` | string | First 120 characters of the incoming message |
+
+### `agent:end`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Agent that finished |
+| `session_id` | string | Session associated with this run |
+| `status` | string | `"ok"`, `"error"`, or `"max_steps"` |
+| `tokens_used` | integer | Total tokens consumed (prompt + completion) |
+| `steps` | integer | Number of reasoning steps taken |
+| `duration_ms` | integer | Wall-clock time for the run in milliseconds |
+| `response_preview` | string | First 120 characters of the final response |
+
+### `agent:step`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Agent taking the step |
+| `session_id` | string | Session for this run |
+| `step_index` | integer | Zero-based step counter within the current run |
+| `tool_call` | string \| null | Name of the tool being invoked, if any |
+
+### `session:start`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Owner agent |
+| `session_id` | string | Newly started session |
+
+### `session:end`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Owner agent |
+| `session_id` | string | Session that was closed |
+
+### `session:reset`
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string (UUID) | Owner agent |
+| `session_id` | string | Session that was reset |
+| `reset_reason` | string | `"idle"`, `"daily"`, `"suspended"`, or `"manual"` |
+| `message_count_cleared` | integer | Number of history messages removed |
+
+### `gateway:startup`
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | string | LibreFang daemon version, e.g. `"2026.4.21-beta1"` |
+| `started_at` | string (ISO 8601) | UTC timestamp of boot completion |
+
+---
+
+## Example Script
+
+Send a Slack-compatible webhook notification when any agent finishes:
+
+```bash
+#!/usr/bin/env bash
+# ~/.librefang/hooks/notify-on-end/run.sh
+set -euo pipefail
+
+# Only act on agent:end
+if [ "$HOOK_EVENT" != "agent:end" ]; then
+  exit 0
+fi
+
+AGENT_ID=$(echo "$HOOK_EVENT_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['agent_id'])")
+STATUS=$(echo "$HOOK_EVENT_DATA"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
+TOKENS=$(echo "$HOOK_EVENT_DATA"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tokens_used'])")
+
+WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+if [ -z "$WEBHOOK_URL" ]; then
+  echo "SLACK_WEBHOOK_URL not set, skipping" >&2
+  exit 0
+fi
+
+curl -s -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d "{\"text\": \"Agent \`${AGENT_ID}\` finished with status *${STATUS}* (${TOKENS} tokens)\"}"
+```
+
+Make it executable before the daemon picks it up:
+
+```bash
+chmod +x ~/.librefang/hooks/notify-on-end/run.sh
+```
+
+The daemon scans the hooks directory at startup and after a `SIGHUP`. A running daemon does
+not hot-reload hook files mid-execution — restart or send `SIGHUP` after adding a new hook.
+
+---
+
+## Error Handling
+
+- If a hook exits with a non-zero code, LibreFang logs a `WARN` entry with the hook name,
+  event, and exit code, then continues normally.
+- Hooks have a **5-second wall-clock timeout**. A hook that exceeds this limit is killed and
+  a warning is emitted. Adjust long-running work to run asynchronously (e.g. spawn a
+  background process from the script and exit immediately).
+- A hook that fails to spawn (missing executable, bad permissions) is also logged as `WARN`.
+  The missing hook does not disable other hooks registered for the same event.
+
+Errors in hooks never propagate to the agent or caller.
+
+---
+
+## Limitations
+
+- **No LLM calls.** Hooks execute synchronously on the event dispatch path. Blocking on
+  network calls or spawning sub-agents from inside a hook will stall event delivery for
+  other listeners. Offload heavy work to a background queue or message broker.
+- **No return value.** Hooks cannot modify the agent response, inject messages into the
+  session, or signal the kernel. They are purely observational.
+- **No secrets injection.** LibreFang does not expose vault secrets to hook processes.
+  Pass credentials through the daemon's environment or a secrets manager of your choice.
+- **Single executable per hook.** Each `HOOK.yaml` specifies one command. Compose multiple
+  actions inside that script, or register multiple hooks for the same event.

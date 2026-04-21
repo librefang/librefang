@@ -589,3 +589,178 @@ Quick reference for all provider environment variables:
 - Provider API keys set via the REST API (`POST /api/providers/{name}/key`) follow the same zeroization policy.
 - The health endpoint (`/api/health`) never exposes provider auth status or API keys. Detailed info is behind `/api/health/detail` which requires authentication.
 - All `DriverConfig` and `KernelConfig` structs implement `Debug` with secret redaction -- API keys are printed as `"***"` in logs.
+
+---
+
+## Provider Fallback Chain
+
+**Source:** `librefang-llm-drivers/src/drivers/fallback_chain.rs`
+
+A `FallbackChain` lets you configure an ordered list of LLM providers that LibreFang
+tries in sequence. When a provider fails, the runtime classifies the failure and decides
+whether to advance to the next provider or surface the error immediately.
+
+### Failover Reasons
+
+LibreFang classifies each failure before deciding whether to fall forward:
+
+| `FailoverReason` | Description | Falls over? |
+|---|---|---|
+| `RateLimit` | HTTP 429 or `x-ratelimit-remaining: 0` | Yes — try next provider |
+| `Timeout` | Request exceeded the configured deadline | Yes |
+| `ServerError` | HTTP 5xx response | Yes |
+| `ModelNotFound` | HTTP 404 for the requested model ID | Yes |
+| `AuthError` | HTTP 401 / 403 | No — misconfigured key, stop immediately |
+| `Unknown` | Any other error | Yes |
+
+`AuthError` deliberately does not fall forward — a missing or revoked key requires
+operator attention and silently retrying with another provider can mask the problem.
+
+### Configuration
+
+Define the chain under `[[providers.fallback_chain]]` in `~/.librefang/config.toml`:
+
+```toml
+[[providers.fallback_chain]]
+name = "anthropic"
+model = "claude-sonnet-4-5"
+
+[[providers.fallback_chain]]
+name = "openai"
+model = "gpt-4o"
+
+[[providers.fallback_chain]]
+name = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+model = "llama3.1:8b"
+```
+
+LibreFang works through the list in order. If all providers fail for eligible reasons,
+the final error from the last provider is returned to the caller.
+
+### Interaction with Credential Pool
+
+Each entry in the fallback chain can itself have multiple keys managed by a
+[Credential Pool](#credential-pool). Rate-limit exhaustion on one key causes the pool
+to rotate to the next key before the chain advances to the next provider.
+
+---
+
+## Credential Pool
+
+**Source:** `librefang-llm-drivers/src/credential_pool.rs`
+
+A `CredentialPool` manages multiple API keys for a single provider and rotates between
+them automatically. This extends effective rate limits without manual intervention and
+provides continuity when individual keys are temporarily exhausted.
+
+### Rotation Strategies
+
+| Strategy | Behavior |
+|---|---|
+| `FillFirst` | Always use the first non-exhausted key. Keys are tried in order; exhausted keys are skipped. |
+| `RoundRobin` | Rotate through keys in a fixed cycle, skipping exhausted ones. |
+| `Random` | Pick a random non-exhausted key on each request. |
+| `LeastUsed` | Pick the key with the fewest total requests, skipping exhausted ones. |
+
+The default strategy is `RoundRobin`.
+
+### Configuration
+
+```toml
+[providers.anthropic]
+rotation_strategy = "round_robin"  # fill_first | round_robin | random | least_used
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-1"
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-2"
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-3"
+```
+
+### Exhaustion and Cooldown
+
+A key is marked **exhausted** when the response headers report zero remaining quota
+(`x-ratelimit-remaining-requests: 0` or `x-ratelimit-remaining-tokens: 0`). Exhausted
+keys are skipped by all rotation strategies.
+
+After **1 hour**, an exhausted key automatically re-enters the active pool. This
+cooldown is not configurable in the current release; it corresponds to the standard
+window used by most OpenAI-compatible providers.
+
+If all keys in the pool are simultaneously exhausted, the `CredentialPool` returns a
+`RateLimit` error, which triggers fallback to the next provider in the chain (if
+configured).
+
+### Usage Tracking
+
+Each key in the pool tracks:
+- Total request count
+- Total token count (prompt + completion)
+- Exhaustion timestamp (if currently exhausted)
+
+These counters are in-memory only and reset when the daemon restarts. Persistent usage
+tracking is available through the budget ledger (`/api/providers/{name}/usage`).
+
+---
+
+## Rate Limit Tracker
+
+**Source:** `librefang-llm-drivers/src/rate_limit_tracker.rs`
+
+After every LLM API response, LibreFang parses the provider's rate-limit headers into a
+`RateLimitSnapshot`. This snapshot is used by the credential pool to detect exhaustion
+and is surfaced in the dashboard and CLI for operator visibility.
+
+### Parsed Headers
+
+LibreFang recognizes **21 header variants** across major providers:
+
+| Header | Meaning |
+|---|---|
+| `x-ratelimit-limit-requests` | Per-window request ceiling |
+| `x-ratelimit-remaining-requests` | Requests remaining in current window |
+| `x-ratelimit-reset-requests` | Time until request quota resets |
+| `x-ratelimit-limit-tokens` | Per-window token ceiling |
+| `x-ratelimit-remaining-tokens` | Tokens remaining in current window |
+| `x-ratelimit-reset-tokens` | Time until token quota resets |
+| `ratelimit-limit` | Generic combined limit (some providers) |
+| `ratelimit-remaining` | Generic combined remaining |
+| `ratelimit-reset` | Generic reset time |
+| `retry-after` | Seconds until retry is safe (429 responses) |
+| `x-rate-limit-limit-requests` | Alternate spelling variant |
+| `x-rate-limit-remaining-requests` | Alternate spelling variant |
+| … and 9 more provider-specific variants | |
+
+### ASCII Progress Bar
+
+The CLI and dashboard display a compact progress bar for each active provider:
+
+```
+anthropic  [████████░░░░░░░░░░░░]  req: 847/1000  tok: 42.3K/90K
+openai     [██████████████░░░░░░]  req: 712/1000  tok: 61.1K/90K
+```
+
+The bar width is 20 characters. Each filled block (`█`) represents 5% of the limit
+consumed. An empty bar means no quota data is available from the provider.
+
+### Accessing the Snapshot
+
+```bash
+# Current rate-limit snapshot for all providers
+curl http://127.0.0.1:4545/api/providers/rate-limits
+```
+
+```json
+{
+  "anthropic": {
+    "requests": { "limit": 1000, "remaining": 153, "reset_in_seconds": 34 },
+    "tokens":   { "limit": 90000, "remaining": 47700, "reset_in_seconds": 34 }
+  }
+}
+```
+
+Fields are `null` when the provider did not return the corresponding header.

