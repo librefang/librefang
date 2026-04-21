@@ -660,22 +660,18 @@ impl LibreFangKernel {
     /// which paths they are allowed to operate on without needing hard-coded
     /// allowed-directories in their own server args.
     fn default_mcp_roots(&self) -> Vec<String> {
+        // Advertise only the workspaces directory, not the entire home dir.
+        // Scoping roots to workspaces_dir means per-agent pools are actually
+        // created for agent-specific workspaces (which are subdirectories of
+        // workspaces_dir), giving MCP servers an appropriately narrow view.
+        // Advertising home_dir would cause every agent workspace to be "already
+        // covered", silently disabling per-agent workspace scoping.
         let mut roots = Vec::new();
+        let workspaces = self.config.load().effective_workspaces_dir();
         // Use to_str() rather than to_string_lossy() so that non-UTF-8 paths
         // are silently skipped instead of being silently corrupted (U+FFFD).
-        if let Some(h) = self.home_dir_boot.to_str() {
-            roots.push(h.to_owned());
-        }
-        let workspaces = self.config.load().effective_workspaces_dir();
         if let Some(ws) = workspaces.to_str() {
-            // Use Path::starts_with so ~/.librefang/workspaces is not added
-            // when ~/.librefang is already in roots (it is covered by it).
-            let already_covered = roots
-                .iter()
-                .any(|r| workspaces.starts_with(std::path::Path::new(r)));
-            if !already_covered {
-                roots.push(ws.to_owned());
-            }
+            roots.push(ws.to_owned());
         }
         roots
     }

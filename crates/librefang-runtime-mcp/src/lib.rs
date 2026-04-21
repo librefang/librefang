@@ -287,17 +287,26 @@ impl RootsClientHandler {
         let mcp_roots: Vec<rmcp::model::Root> = roots
             .iter()
             .map(|path| {
+                // Use the `url` crate to build a well-formed file URI so that
+                // reserved characters (spaces, #, %) are percent-encoded and
+                // the Windows drive-letter triple-slash form is handled
+                // correctly.  Fall back to the raw string if the path is
+                // already a URI or cannot be parsed as a filesystem path.
                 let uri = if path.starts_with("file://") {
                     path.clone()
                 } else {
-                    // RFC 8089 requires forward slashes and three slashes before
-                    // a drive letter on Windows (file:///C:/Users/…).
-                    let forward = path.replace('\\', "/");
-                    if forward.starts_with('/') {
-                        format!("file://{forward}")
-                    } else {
-                        format!("file:///{forward}")
-                    }
+                    url::Url::from_file_path(path)
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|_| {
+                            // Url::from_file_path requires an absolute path;
+                            // for relative or exotic paths fall back gracefully.
+                            let forward = path.replace('\\', "/");
+                            if forward.starts_with('/') {
+                                format!("file://{forward}")
+                            } else {
+                                format!("file:///{forward}")
+                            }
+                        })
                 };
                 let name = std::path::Path::new(path)
                     .file_name()
@@ -1062,43 +1071,23 @@ impl McpConnection {
     /// Uses proper host parsing rather than substring matching to avoid false
     /// positives on attacker-controlled domains like `127.0.0.1.evil.com`.
     fn is_local_url(url: &str) -> bool {
-        // Extract the host portion (strip scheme, path, query, fragment).
-        let after_scheme = match url.find("://") {
-            Some(i) => &url[i + 3..],
+        // Delegate to the `url` crate so that all RFC 3986 authority components
+        // (userinfo, host, port) are parsed correctly.  This prevents attacks
+        // like `http://127.0.0.1@attacker.com/` and `http://localhost.evil.com/`
+        // that would fool substring or naive split-based checks.
+        let parsed = match url::Url::parse(url) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let host = match parsed.host() {
+            Some(h) => h,
             None => return false,
         };
-        // Strip path, query string, and fragment to isolate host[:port].
-        let host_port = after_scheme
-            .split(|c| c == '/' || c == '?' || c == '#')
-            .next()
-            .unwrap_or("");
-        // Handle bracketed IPv6 addresses: [::1]:3000 → ::1
-        let host = if host_port.starts_with('[') {
-            host_port
-                .trim_start_matches('[')
-                .split(']')
-                .next()
-                .unwrap_or("")
-        } else if host_port.matches(':').count() > 1 {
-            // Bare (unbracketed) IPv6 literal, e.g. "::1" — technically
-            // invalid per RFC 3986 but handle defensively.  split(':') would
-            // give an empty first token because the address starts with ':',
-            // so use the whole host_port.
-            host_port
-        } else {
-            // IPv4 or hostname with optional port: "127.0.0.1:8080" → "127.0.0.1"
-            host_port.split(':').next().unwrap_or(host_port)
-        };
-        let host_lower = host.to_lowercase();
-        if host_lower == "localhost" || host_lower == "::1" {
-            return true;
+        match host {
+            url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+            url::Host::Ipv4(addr) => addr.octets()[0] == 127,
+            url::Host::Ipv6(addr) => addr == std::net::Ipv6Addr::LOCALHOST,
         }
-        // Use the standard library IP parser — it rejects hostnames like
-        // "127.0.0.1.evil.com", which would fool a naive starts_with check.
-        if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
-            return addr.octets()[0] == 127;
-        }
-        false
     }
 
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
@@ -2346,16 +2335,23 @@ mod tests {
         assert!(McpConnection::is_local_url("http://localhost/mcp"));
         assert!(McpConnection::is_local_url("http://LOCALHOST/mcp"));
         assert!(McpConnection::is_local_url("http://[::1]:3000/mcp"));
-        assert!(McpConnection::is_local_url("http://::1/mcp"));
         // Full 127.0.0.0/8 range
         assert!(McpConnection::is_local_url("http://127.2.3.4/mcp"));
         assert!(McpConnection::is_local_url("http://127.255.255.255/mcp"));
         // Remote hosts
         assert!(!McpConnection::is_local_url("https://api.github.com/mcp"));
         assert!(!McpConnection::is_local_url("https://mcp.example.com/mcp"));
-        // Security: domain that starts with "127." must not match
+        // Security: domain spoofing — "127." prefix in domain name must not match
         assert!(!McpConnection::is_local_url(
             "https://127.0.0.1.evil.com/mcp"
+        ));
+        // Security: userinfo spoofing — "127.0.0.1@attacker.com" must not match
+        assert!(!McpConnection::is_local_url(
+            "http://127.0.0.1@attacker.com/mcp"
+        ));
+        // Security: subdomain of localhost must not match
+        assert!(!McpConnection::is_local_url(
+            "http://localhost.evil.com/mcp"
         ));
         // 0.0.0.0 is a listen address, not a loopback target
         assert!(!McpConnection::is_local_url("http://0.0.0.0:4545/mcp"));
