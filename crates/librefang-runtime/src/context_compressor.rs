@@ -30,7 +30,7 @@ use crate::compactor::{self, CompactionConfig};
 use crate::llm_driver::LlmDriver;
 use librefang_memory::session::Session;
 use librefang_types::agent::{AgentId, SessionId};
-use librefang_types::message::{Message, Role};
+use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -239,10 +239,22 @@ impl ContextCompressor {
     ) -> Result<(Vec<Message>, bool), String> {
         let n = messages.len();
         let head_end = self.config.protect_head.min(n);
-        let tail_start = if n > self.config.keep_recent {
+        let nominal_tail_start = if n > self.config.keep_recent {
             n - self.config.keep_recent
         } else {
             n
+        };
+
+        // Walk the tail boundary forward until it lands on a clean turn boundary
+        // so we never split a ToolUse/ToolResult pair.  A clean boundary is a
+        // message that is NOT a ToolResult-only user delivery (those must stay
+        // immediately after their matching assistant ToolUse).
+        let tail_start = {
+            let mut ts = nominal_tail_start;
+            while ts < n && msg_is_tool_result_delivery(&messages[ts]) {
+                ts += 1;
+            }
+            ts
         };
 
         // Ensure there is actually a middle section to compress.
@@ -280,29 +292,32 @@ impl ContextCompressor {
         let result =
             compactor::compact_session(driver, model, &temp_session, &compaction_config).await?;
 
-        // Build the summary message.  We use the `User` role because:
-        // - the head often ends with an `Assistant` message, and using `User`
-        //   avoids back-to-back same-role messages at the boundary, which some
-        //   providers reject
-        // - the tail usually starts with a `User` message, so if there is a
-        //   role collision we fall back to `Assistant`
+        // Choose the summary message role to maintain User/Assistant alternation.
+        //
+        // The only case where an Assistant summary produces clean alternation at
+        // BOTH boundaries is when head ends with User AND tail starts with User.
+        // In all other cases a User summary is chosen:
+        //  - head ends Assistant → User summary avoids back-to-back Assistant.
+        //  - head ends User, tail starts Assistant → User summary creates a
+        //    consecutive-User pair that session_repair will merge; inserting
+        //    an Assistant summary before an Assistant tail would be equally bad.
+        //
+        // The tail boundary was already adjusted above to skip ToolResult-only
+        // deliveries, so an Assistant summary placed before a User tail is safe
+        // (no risk of orphaning a ToolUse/ToolResult pair).
         let last_head_role = head.last().map(|m| m.role).unwrap_or(Role::User);
         let first_tail_role = tail.first().map(|m| m.role).unwrap_or(Role::User);
 
-        let summary_role = if last_head_role != Role::User {
-            Role::User
-        } else if first_tail_role != Role::Assistant {
+        let summary_role = if last_head_role == Role::User && first_tail_role == Role::User {
             Role::Assistant
         } else {
-            // Both boundaries are taken — use User and accept the minor
-            // protocol irregularity (most providers tolerate it).
             Role::User
         };
 
         let summary_content = format!("{}\n\n{}", SUMMARY_PREFIX, result.summary);
         let summary_msg = Message {
             role: summary_role,
-            content: librefang_types::message::MessageContent::Text(summary_content),
+            content: MessageContent::Text(summary_content),
             pinned: false,
         };
 
@@ -312,6 +327,30 @@ impl ContextCompressor {
         compressed.extend_from_slice(tail);
 
         Ok((compressed, result.used_fallback))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `msg` is a pure ToolResult delivery — a User-role
+/// message whose entire content consists of `ToolResult` blocks.
+///
+/// Such messages must remain immediately after their matching assistant
+/// `ToolUse` message; splitting them off into the tail would orphan the pair.
+fn msg_is_tool_result_delivery(msg: &Message) -> bool {
+    if msg.role != Role::User {
+        return false;
+    }
+    match &msg.content {
+        MessageContent::Blocks(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        }
+        _ => false,
     }
 }
 
