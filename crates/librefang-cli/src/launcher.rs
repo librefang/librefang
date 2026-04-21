@@ -280,15 +280,11 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
                                 state.screen = Screen::Menu;
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                if *scroll < max_scroll {
-                                    *scroll += 1;
-                                }
+                            KeyCode::Down | KeyCode::Char('j') if *scroll < max_scroll => {
+                                *scroll += 1;
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                if *scroll > 0 {
-                                    *scroll -= 1;
-                                }
+                            KeyCode::Up | KeyCode::Char('k') if *scroll > 0 => {
+                                *scroll -= 1;
                             }
                             KeyCode::PageDown => {
                                 *scroll = (*scroll + 20).min(max_scroll);

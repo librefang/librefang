@@ -9,6 +9,7 @@
 - Ed25519 清单签名
 - 密钥零化
 - 提示注入扫描器
+- 提示词注入防护
 
 ---
 
@@ -430,3 +431,90 @@ pub struct SkillWarning {
 ```
 
 ---
+
+## 提示词注入防护
+
+**源码：** `librefang-kernel/src/injection_guard.rs`
+
+用户输入在转发给 LLM 之前，内核会扫描消息中已知的提示词注入指标。与 skill 扫描不同，此防护作用于**运行时用户输入**而非静态 skill 内容，且**不会拒绝消息**——它会在消息前添加警告前缀并输出结构化日志，使模型（及任何下游审计系统）在完全知情的情况下处理可能存在的对抗性内容。
+
+### 检测方法
+
+防护检查两类不同的威胁：
+
+#### 1. 文本模式（15 条规则）
+
+常见的英文注入短语：
+
+| 模式 | 威胁类别 |
+|------|---------|
+| `ignore previous instructions` | 覆盖尝试 |
+| `ignore all previous` | 覆盖尝试 |
+| `disregard your instructions` | 覆盖尝试 |
+| `disregard previous` | 覆盖尝试 |
+| `forget your instructions` | 覆盖尝试 |
+| `you are now` | 人格劫持 |
+| `new instructions:` | 覆盖注入 |
+| `system:` | 系统提示注入 |
+| `system prompt override` | 覆盖尝试 |
+| `override system` | 覆盖尝试 |
+| `ignore the above` | 覆盖尝试 |
+| `do not follow` | 覆盖尝试 |
+| `act as if you have no restrictions` | 越狱尝试 |
+| `[system]` | 伪造系统轮次标记 |
+| `<system>` | 伪造系统轮次标记 |
+
+匹配不区分大小写，可捕获 `IGNORE PREVIOUS INSTRUCTIONS` 等变体。
+
+#### 2. 不可见 Unicode（10 个码位）
+
+对抗性内容有时使用视觉上不可见但在 tokenizer 中有语义的字符隐藏：
+
+| 码位 | 名称 | 类别 |
+|------|------|------|
+| U+200B | ZERO WIDTH SPACE | 零宽字符 |
+| U+200C | ZERO WIDTH NON-JOINER | 零宽字符 |
+| U+200D | ZERO WIDTH JOINER | 零宽字符 |
+| U+2060 | WORD JOINER | 零宽字符 |
+| U+FEFF | ZERO WIDTH NO-BREAK SPACE (BOM) | 零宽字符 |
+| U+202A | LEFT-TO-RIGHT EMBEDDING | 双向控制 |
+| U+202B | RIGHT-TO-LEFT EMBEDDING | 双向控制 |
+| U+202C | POP DIRECTIONAL FORMATTING | 双向控制 |
+| U+202D | LEFT-TO-RIGHT OVERRIDE | 双向控制 |
+| U+202E | RIGHT-TO-LEFT OVERRIDE | 双向控制 |
+
+Bidi 覆盖字符（U+202D、U+202E）尤其危险：在 UI 中可以视觉上颠倒文本，而 tokenizer 仍按原始字节序处理。
+
+### 检测响应
+
+任一检查触发时，内核会：
+
+1. **在用户消息前添加警告前缀**，再放入 LLM 上下文窗口：
+
+   ```
+   [Warning: potential prompt injection detected — proceeding with caution]
+   ```
+
+2. **通过 `tracing::warn!` 输出结构化警告日志**：
+
+   ```
+   prompt injection indicator detected: "ignore previous instructions" in message from user <id>
+   ```
+
+### 为何不拒绝？
+
+合法消息在无害场景下同样可能包含上述检测短语，例如：
+
+- 开发者要求 Agent *解释*短语 `"ignore previous instructions"`。
+- 安全研究员要求 Agent 编写包含注入字符串的测试用例。
+- 粘贴的文档中恰好包含作为 YAML 键的 `system:`。
+
+直接拒绝会静默破坏正常工作流。警告前缀方案在保持可用性的同时，为模型（及审计记录）提供了明确的信号。
+
+### 局限性
+
+基于规则的匹配无法覆盖完整的注入面：
+
+- 改写或多语言的覆盖尝试无法被检测。
+- 跨多条消息分割的注入可能绕过单消息扫描。
+- 编码技巧（如 base64 载荷在运行时由模型解码）无法被检测。

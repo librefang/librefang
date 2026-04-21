@@ -398,3 +398,58 @@ Features:
 - Agent selection (switch between running agents)
 - Token usage display
 - No authentication required on localhost (protected by CORS)
+
+---
+
+## Message Truncation for Platform Limits
+
+**Source:** `librefang-channels/src/message_truncator.rs`
+
+Messaging platforms impose hard character limits on outbound messages, counted in
+**UTF-16 code units** rather than bytes or Unicode code points. LibreFang measures
+message length in UTF-16 units and handles oversized messages automatically.
+
+### Platform Limits
+
+| Platform | UTF-16 unit limit | Behavior when exceeded |
+|---|---|---|
+| Telegram | 4 096 | Message is split into multiple sequential messages |
+| Discord | 2 000 | Message is split into multiple sequential messages |
+| Other channels | Configurable | Truncated by default unless split is enabled |
+
+### How UTF-16 Length Differs from Byte Length
+
+Most ASCII text has the same byte count and UTF-16 unit count. The difference matters
+for:
+
+- **Emoji** (`😀`): 2 UTF-16 units, but 4 bytes in UTF-8
+- **Supplementary CJK characters**: 2 UTF-16 units, 4 bytes in UTF-8
+- **Basic CJK / Korean / Arabic**: 1 UTF-16 unit, 3 bytes in UTF-8
+
+A string that fits in 2 000 bytes may still exceed 2 000 UTF-16 units, or vice versa.
+Using byte length as a proxy silently produces truncated or rejected messages.
+
+### Truncation
+
+`truncate_to_utf16_limit(text, limit)` uses binary search over the string's UTF-16
+unit positions to find the longest prefix that fits, then cuts at a valid Unicode scalar
+boundary. The result is never split mid-codepoint or mid-surrogate-pair.
+
+### Splitting
+
+`split_to_utf16_chunks(text, limit)` divides the message into sequential chunks, each
+within `limit` UTF-16 units. LibreFang sends the chunks as separate messages in order,
+preserving all content. The split boundary respects Unicode scalar boundaries — no
+chunk ends in the middle of a character.
+
+### Disabling Automatic Splitting
+
+If you want LibreFang to truncate rather than split long messages for a specific
+channel, set `split_long_messages = false` in the channel configuration:
+
+```toml
+[channels.telegram]
+split_long_messages = false   # truncate at 4096 instead of splitting
+```
+
+The default is `true` for Telegram and Discord.

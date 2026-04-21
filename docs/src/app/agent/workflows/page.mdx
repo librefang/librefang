@@ -1,5 +1,26 @@
 # Workflow Engine Guide
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Core Types](#core-types)
+- [Workflow Definition](#workflow-definition)
+- [Step Configuration](#step-configuration)
+- [Step Modes](#step-modes)
+- [Variable Substitution](#variable-substitution)
+- [Error Handling](#error-handling)
+- [Examples](#examples)
+- [Trigger Engine](#trigger-engine)
+- [Cron Jobs](#cron-jobs)
+  - [\[SILENT\] Marker](#silent-marker)
+- [API Endpoints](#api-endpoints)
+- [CLI Commands](#cli-commands)
+- [Execution Limits](#execution-limits)
+- [Workflow Data Flow Diagram](#workflow-data-flow-diagram)
+- [Internal Architecture Notes](#internal-architecture-notes)
+
+---
+
 ## Overview
 
 The LibreFang workflow engine enables multi-step agent pipelines -- orchestrated sequences of tasks where each step routes work to a specific agent, and output from one step flows as input to the next. Workflows let you compose complex behaviors from simple, single-purpose agents without writing any Rust code.
@@ -516,6 +537,66 @@ When `max_fires` is set to a value greater than 0, the trigger automatically dis
   "max_fires": 1
 }
 ```
+
+---
+
+## Cron Jobs
+
+Cron jobs let you schedule recurring messages to agents using standard cron expressions. Each cron entry is defined in the agent manifest (`.toml`) and fires independently of user-driven sessions.
+
+```toml
+[[cron]]
+name = "morning-brief"
+schedule = "0 8 * * *"
+message = "Summarize any new alerts from the last 24 hours."
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Human-readable name for the cron job, used in logs and audit events. |
+| `schedule` | string | Standard 5-field cron expression (minute, hour, day-of-month, month, day-of-week). |
+| `message` | string | Prompt sent to the agent on each scheduled fire. |
+| `session_mode` | string or null | `"persistent"` (default) or `"new"`. Determines whether consecutive fires reuse the same session or each gets a fresh one. |
+
+> **Note on sessions**: All cron fires for a given agent that use `session_mode = "persistent"` (the default) share a single session keyed `(agent, "cron")`. Setting `session_mode = "new"` in the agent manifest does **not** create a per-fire fresh session for cron — the cron dispatcher synthesizes a `SenderContext { channel: "cron" }`, which takes the channel branch before `session_mode` is consulted. See the architecture notes in `CLAUDE.md` for details.
+
+### [SILENT] Marker
+
+Prepend `[SILENT]` to a cron job's message to suppress the agent's response from the session history. The turn executes normally — tools run, metering is recorded, and an audit log entry is written — but the assistant's reply is never written back to the session.
+
+This is useful for periodic maintenance tasks (backup checks, cleanup routines, health probes) that would otherwise clutter the conversation history that human users or other agents read.
+
+#### Usage
+
+```toml
+[[cron]]
+name = "daily-cleanup"
+schedule = "0 3 * * *"
+message = "[SILENT] Run daily cleanup: remove temp files older than 7 days"
+
+[[cron]]
+name = "hourly-health-check"
+schedule = "0 * * * *"
+message = "[SILENT] Check system health and log any anomalies."
+```
+
+#### Behavior details
+
+- **Execution**: The agent turn runs to completion as normal. All tool calls are executed.
+- **Metering and cost**: Token usage and USD cost are recorded as usual in the budget ledger.
+- **Audit log**: A `CronFire` audit event is emitted with the agent response summary, regardless of the `[SILENT]` marker.
+- **Session history**: Only the **assistant response** is suppressed. The outbound cron message itself is never stored in the session (cron messages are always transient), so `[SILENT]` changes nothing about the user-visible prompt side.
+
+#### Difference from `session_mode = "new"`
+
+| Behavior | `[SILENT]` | `session_mode = "new"` |
+|----------|------------|------------------------|
+| Suppresses assistant response | Yes | No |
+| Creates isolated per-fire session | No (reuses `(agent,"cron")` session) | No effect for cron (see note above) |
+| Prevents history pollution | Yes | No |
+| Normal tool execution | Yes | Yes |
+
+Use `[SILENT]` when you want the agent to act but leave no trace in the conversation history. Use `session_mode` considerations for controlling session continuity across fires.
 
 ---
 

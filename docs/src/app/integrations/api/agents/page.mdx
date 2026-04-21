@@ -759,3 +759,53 @@ Get the last run result and next scheduled time for a cron job.
 
 ---
 
+## Interrupting a Running Agent Turn
+
+**Source:** `librefang-runtime/src/interrupt.rs`
+
+A `SessionInterrupt` is an `Arc<AtomicBool>` signal that the agent loop checks at every
+tool-call boundary. Setting the flag causes the loop to exit cleanly after the current
+tool call completes — it does not forcibly kill threads or cancel in-flight network
+requests.
+
+### Interrupt Endpoint
+
+```bash
+POST /api/agents/{agent_id}/sessions/{session_id}/interrupt
+```
+
+No request body is required. The response is `204 No Content` when the interrupt signal
+was accepted.
+
+```bash
+curl -X POST \
+  "http://127.0.0.1:4545/api/agents/${AGENT_ID}/sessions/${SESSION_ID}/interrupt"
+```
+
+### Behavior
+
+| Situation | What happens |
+|---|---|
+| Agent is between tool calls | Loop exits at the next boundary check. The partial response up to that point is recorded. |
+| Agent is mid-LLM-call | The LLM call completes normally, then the loop checks the flag and exits before executing the next tool. |
+| Agent is mid-tool-execution | The tool runs to completion, then the loop exits. No tool call is abandoned mid-flight. |
+| Agent has already finished | The interrupt flag is ignored; no error is returned. |
+| No active turn | `204` is still returned; the flag is set and will take effect on the next turn. |
+
+### Automatic Clearing
+
+The interrupt flag is automatically cleared when:
+- A new incoming message starts a fresh agent turn
+- The session is reset
+
+You do not need to send a "resume" or "clear" request after the interrupted turn ends.
+
+### Use Cases
+
+- **User-initiated stop**: A user presses a "Stop" button in a UI. The frontend calls the
+  interrupt endpoint and the agent stops after the current tool call.
+- **Watchdog timeout**: An external monitor detects a long-running turn and interrupts
+  it to avoid token budget exhaustion.
+- **Graceful shutdown**: Before restarting the daemon, interrupt all active sessions so
+  they record a clean stop rather than an abrupt disconnect.
+

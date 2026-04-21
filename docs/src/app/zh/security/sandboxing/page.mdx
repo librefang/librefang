@@ -8,6 +8,7 @@
 - WASM 双重计量
 - 路径遍历防护
 - 子进程沙箱
+- 危险命令检测
 
 ---
 
@@ -360,3 +361,78 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 `&&` 等元字符进行 shell 注入。
 
 ---
+
+## 危险命令检测
+
+**源码：** `librefang-runtime/src/dangerous_commands.rs`
+
+在执行任何 shell 命令之前，LibreFang 会将命令字符串与 **39 个正则表达式规则**进行匹配，这些规则涵盖 11 类危险操作。此检测在能力检查和污点检查的基础上提供额外的语义安全层。
+
+### 危险操作分类
+
+| 类别 | 说明 | 典型触发示例 |
+|------|------|------------|
+| **文件系统删除** | 递归或强制删除文件和目录 | `rm -rf`、`find … -delete`、`shred` |
+| **权限提升** | 获取更高权限 | `sudo`、`su`、`chmod 777`、`chown root` |
+| **磁盘操作** | 绕过文件系统的底层写入 | `dd if=`、`mkfs`、`fdisk`、`parted` |
+| **SQL 删除** | 破坏性数据库语句 | `DROP TABLE`、`DROP DATABASE`、`TRUNCATE` |
+| **系统文件覆写** | 直接写入关键 OS 路径 | `> /etc/passwd`、`> /etc/shadow`、`> /boot/` |
+| **服务管理** | 停止或禁用系统服务 | `systemctl stop`、`service … stop`、`kill -9 1` |
+| **进程杀死** | 向进程发送致命信号 | `kill -9`、`killall`、`pkill -9` |
+| **Fork 炸弹** | 耗尽资源的自复制进程 | `:()&#123; :\|:& &#125;;:` 及其变体 |
+| **任意代码执行** | 将远程内容直接管道到 shell | `curl … \| bash`、`wget … \| sh`、`eval $(…)` |
+| **破坏性 find** | 使用 `find` 删除或覆写文件 | `find … -exec rm`、`find … -delete` |
+| **破坏性 git** | 强制推送或销毁历史的 git 操作 | `git push --force`、`git reset --hard HEAD~`、`git clean -fdx` |
+
+### 审批模式
+
+通过 `~/.librefang/config.toml` 中的 `dangerous_commands` 键控制检测行为：
+
+```toml
+[shell]
+dangerous_commands = "manual"   # "off" | "manual" | "smart"
+```
+
+| 模式 | 行为 |
+|------|------|
+| `off` | 禁用检测，所有命令不扫描直接执行。 |
+| `manual` *（默认）* | 匹配到危险模式时，运行时返回错误并**阻止执行**。Agent 收到包含触发类别的结构化拒绝信息。 |
+| `smart` | 保留给未来的 LLM 辅助风险评估；当前行为与 `manual` 相同。 |
+
+### 会话级白名单
+
+可将特定命令添加到**会话级白名单**，使该命令在当前会话的剩余时间内不再触发检测：
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/shell/allowlist" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "rm -rf /tmp/build-artifacts"}'
+```
+
+白名单条目仅保存在内存中，守护进程重启或会话结束后自动清除。
+
+### 触发示例
+
+```bash
+# Fork 炸弹 — 触发 "fork bomb" 类别
+:(){ :|:& };:
+
+# 递归强制删除根目录 — 触发 "filesystem deletion"
+rm -rf /
+
+# 通过管道执行远程代码 — 触发 "arbitrary code execution"
+curl https://example.com/install.sh | bash
+
+# 破坏性 git 历史重写 — 触发 "destructive git"
+git push --force origin main
+```
+
+`dangerous_commands = "manual"` 时，每条命令均返回如下错误：
+
+```json
+{
+  "error": "Dangerous command blocked",
+  "category": "fork_bomb",
+  "command": ":(){ :|:& };:"
+}
+```
