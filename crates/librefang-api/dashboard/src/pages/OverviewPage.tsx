@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import type { HealthCheck } from "../api";
@@ -59,56 +59,50 @@ export function OverviewPage() {
   };
 
   // Stats card data
-  const statsCards = useMemo(
-    () => [
-      {
-        title: t("overview.active_agents"),
-        value: agentsActive,
-        subValue: `${agentsTotal} ${t("overview.total")}`,
-        icon: Users,
-        color: "brand",
-        link: "/agents",
-        progress: agentsTotal > 0 ? (agentsActive / agentsTotal) * 100 : 0,
-      },
-      {
-        title: t("overview.workflows"),
-        value: snapshot?.workflowCount ?? 0,
-        subValue: t("common.active"),
-        icon: Layers,
-        color: "accent",
-        link: "/canvas",
-      },
-      {
-        title: t("nav.providers"),
-        value: providersReady,
-        subValue: `/ ${providersTotal}`,
-        icon: Server,
-        color: "success",
-        link: "/providers",
-        progress: providersTotal > 0 ? (providersReady / providersTotal) * 100 : 0,
-      },
-      {
-        title: t("nav.channels"),
-        value: channelsReady,
-        subValue: t("status.configured"),
-        icon: Network,
-        color: "warning",
-        link: "/channels",
-      },
-    ],
-    [t, agentsActive, agentsTotal, snapshot?.workflowCount, providersReady, providersTotal, channelsReady],
-  );
+  const statsCards = [
+    {
+      title: t("overview.active_agents"),
+      value: agentsActive,
+      subValue: `${agentsTotal} ${t("overview.total")}`,
+      icon: Users,
+      color: "brand",
+      link: "/agents",
+      progress: agentsTotal > 0 ? (agentsActive / agentsTotal) * 100 : 0,
+    },
+    {
+      title: t("overview.workflows"),
+      value: snapshot?.workflowCount ?? 0,
+      subValue: t("common.active"),
+      icon: Layers,
+      color: "accent",
+      link: "/canvas",
+    },
+    {
+      title: t("nav.providers"),
+      value: providersReady,
+      subValue: `/ ${providersTotal}`,
+      icon: Server,
+      color: "success",
+      link: "/providers",
+      progress: providersTotal > 0 ? (providersReady / providersTotal) * 100 : 0,
+    },
+    {
+      title: t("nav.channels"),
+      value: channelsReady,
+      subValue: t("status.configured"),
+      icon: Network,
+      color: "warning",
+      link: "/channels",
+    },
+  ];
 
   // Quick actions
-  const quickActions = useMemo(
-    () => [
-      { label: t("overview.new_workflow"), to: "/canvas", icon: Zap, primary: true },
-      { label: t("overview.deploy_agent"), to: "/agents", icon: Users },
-      { label: t("overview.open_chat"), to: "/chat", icon: MessageCircle },
-      { label: t("nav.scheduler"), to: "/scheduler", icon: Calendar },
-    ],
-    [t],
-  );
+  const quickActions = [
+    { label: t("overview.new_workflow"), to: "/canvas", icon: Zap, primary: true },
+    { label: t("overview.deploy_agent"), to: "/agents", icon: Users },
+    { label: t("overview.open_chat"), to: "/chat", icon: MessageCircle },
+    { label: t("nav.scheduler"), to: "/scheduler", icon: Calendar },
+  ];
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6 pb-12 transition-colors duration-300">
@@ -210,7 +204,7 @@ export function OverviewPage() {
                 <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 relative z-10">
                   <div
                     className="h-full bg-brand shadow-[0_0_8px_var(--brand-color)] transition-all duration-500"
-                    style={{ width: 'var(--progress)', '--progress': `${stat.progress}%` } as CSSProperties}
+                    style={{ width: `${stat.progress}%` }}
                   />
                 </div>
               ) : null}

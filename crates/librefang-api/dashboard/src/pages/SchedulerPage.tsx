@@ -9,7 +9,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight, Pencil } from "lucide-react";
-import type { TriggerItem } from "../api";
+import type { TriggerItem, TriggerPatch } from "../api";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -160,12 +160,12 @@ export function SchedulerPage() {
   const handleEditTrigger = async (e: FormEvent) => {
     e.preventDefault();
     if (!editTrigger) return;
-    const patch: Record<string, unknown> = { prompt_template: editPrompt, max_fires: editMaxFires };
+    const patch: TriggerPatch = { prompt_template: editPrompt, max_fires: editMaxFires };
     patch.cooldown_secs = editCooldown === "" ? null : Number(editCooldown);
     patch.session_mode = editSessionMode === "" ? null : editSessionMode;
     patch.target_agent_id = editTargetAgent === "" ? null : editTargetAgent;
     try {
-      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any, agentId: editTrigger.agent_id });
+      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch, agentId: editTrigger.agent_id });
       setEditTrigger(null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

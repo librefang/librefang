@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -39,6 +39,11 @@ import {
 import { useReloadConfig } from "../lib/mutations/config";
 
 const OK_STATUSES = new Set(["ok", "pass", "healthy"]);
+
+type BackupConfirmState = {
+  type: "restore" | "delete";
+  filename: string;
+};
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
@@ -89,10 +94,7 @@ function ProtectionBadge({ name, enabled }: { name: string; enabled: boolean }) 
 export function RuntimePage() {
   const { t } = useTranslation();
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
-  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
-  const [showDeleteBackupConfirm, setShowDeleteBackupConfirm] = useState(false);
-  const [pendingRestore, setPendingRestore] = useState<string | null>(null);
-  const [pendingDeleteBackup, setPendingDeleteBackup] = useState<string | null>(null);
+  const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
   const [reloadResult, setReloadResult] = useState<string | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -111,7 +113,7 @@ export function RuntimePage() {
   const securityQuery = useSecurityStatus({ refetchInterval: false }); // load once, no background polling
   const auditQuery = useAuditRecent(20);
   const auditVerifyQuery = useAuditVerify({ refetchInterval: false }); // load once, no background polling
-  const backupsQuery = useBackups({ refetchInterval: false }); // load once, no background polling
+  const backupsQuery = useBackups({ refetchInterval: false }); // no polling; backups created elsewhere stay stale until manual refresh
   const taskStatusQuery = useTaskQueueStatus();
   const taskListQuery = useTaskQueue();
 
@@ -153,39 +155,31 @@ export function RuntimePage() {
   const taskStatus = taskStatusQuery.data;
   const tasks = taskListQuery.data?.tasks ?? [];
 
-  // Derived: KPI cards
-  const kpiCards = useMemo(() => [
+  const kpiCards = [
     { icon: Timer, label: t("runtime.system_uptime"), value: uptimeStr, color: "text-success", bg: "bg-success/10" },
     { icon: Layers, label: t("runtime.active_agents"), value: `${status?.active_agent_count ?? 0} / ${status?.agent_count ?? 0}`, color: "text-brand", bg: "bg-brand/10" },
     { icon: Monitor, label: t("runtime.sessions"), value: String(status?.session_count ?? 0), color: "text-purple-500", bg: "bg-purple-500/10" },
     { icon: HardDrive, label: t("runtime.memory_used"), value: status?.memory_used_mb ? `${status.memory_used_mb} MB` : "-", color: "text-warning", bg: "bg-warning/10" },
-  ], [uptimeStr, status, t]);
+  ];
 
-  // Derived: Resource summary
-  const resourceSummary = useMemo(() => {
-    const providersCount = snapshot?.providers?.length ?? 0;
-    const configuredProviders = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
-    const channelsCount = snapshot?.channels?.length ?? 0;
-    const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
-    return [
-      { label: t("runtime.providers"), value: providersCount, sub: `${configuredProviders} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
-      { label: t("runtime.channels"), value: channelsCount, sub: `${configuredChannels} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
-      { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
-      { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
-    ];
-  }, [snapshot, t]);
+  const providersCount = snapshot?.providers?.length ?? 0;
+  const configuredProviders = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
+  const channelsCount = snapshot?.channels?.length ?? 0;
+  const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
+  const resourceSummary = [
+    { label: t("runtime.providers"), value: providersCount, sub: `${configuredProviders} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
+    { label: t("runtime.channels"), value: channelsCount, sub: `${configuredChannels} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
+    { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
+    { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
+  ];
 
-  // Derived: Task stats
-  const taskStats = useMemo(() => {
-    if (!taskStatus) return [];
-    return [
+  const taskStats = taskStatus ? [
       { label: t("runtime.total_tasks"), value: taskStatus.total ?? 0, color: "text-text" },
       { label: t("runtime.pending_count"), value: taskStatus.pending ?? 0, color: "text-warning" },
       { label: t("runtime.in_progress_count"), value: taskStatus.in_progress ?? 0, color: "text-brand" },
       { label: t("runtime.completed_count"), value: taskStatus.completed ?? 0, color: "text-success" },
       { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
-    ];
-  }, [taskStatus, t]);
+    ] : [];
 
   const refreshAll = () => {
     for (const q of [
@@ -201,7 +195,7 @@ export function RuntimePage() {
     ]) {
       q.refetch();
     }
-    // versionQuery has staleTime: Infinity, skip refetch
+    // Skip version refetch: effectively immutable for daemon lifetime, no value here.
   };
 
   return (
@@ -477,20 +471,23 @@ export function RuntimePage() {
 
               {tasks.length > 0 ? (
                 <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                  {tasks.slice(0, 10).map((task: TaskQueueItem) => (
-                    <div key={task.id} className="flex items-center gap-2 text-xs py-1 px-2 rounded-lg bg-main/30">
-                      <Badge variant={task.status === "failed" ? "error" : task.status === "completed" ? "success" : task.status === "in_progress" ? "brand" : "warning"}>
-                        {task.status || "-"}
-                      </Badge>
-                      <span className="flex-1 truncate font-mono text-[10px]">{task.id?.slice(0, 12)}</span>
-                      {task.status === "failed" && task.id && (
-                        <button onClick={() => retryTaskMutation.mutate(task.id!)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
-                      )}
-                      {(task.status === "pending" || task.status === "in_progress") && task.id && (
-                        <button onClick={() => deleteTaskMutation.mutate(task.id!)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
-                      )}
-                    </div>
-                  ))}
+                  {tasks.slice(0, 10).map((task: TaskQueueItem) => {
+                    const taskId = task.id;
+                    return (
+                      <div key={taskId ?? task.created_at ?? `${task.status}-${task.type ?? "task"}`} className="flex items-center gap-2 text-xs py-1 px-2 rounded-lg bg-main/30">
+                        <Badge variant={task.status === "failed" ? "error" : task.status === "completed" ? "success" : task.status === "in_progress" ? "brand" : "warning"}>
+                          {task.status || "-"}
+                        </Badge>
+                        <span className="flex-1 truncate font-mono text-[10px]">{taskId?.slice(0, 12)}</span>
+                        {task.status === "failed" && taskId && (
+                          <button onClick={() => retryTaskMutation.mutate(taskId)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
+                        )}
+                        {(task.status === "pending" || task.status === "in_progress") && taskId && (
+                          <button onClick={() => deleteTaskMutation.mutate(taskId)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-xs text-text-dim">{t("runtime.no_tasks")}</p>
@@ -600,8 +597,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setPendingRestore(b.filename);
-                            setShowRestoreConfirm(true);
+                            setBackupConfirm({ type: "restore", filename: b.filename });
                           }
                         }}
                         className="text-brand hover:text-brand/80 text-[10px] font-bold shrink-0"
@@ -612,8 +608,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setPendingDeleteBackup(b.filename);
-                            setShowDeleteBackupConfirm(true);
+                            setBackupConfirm({ type: "delete", filename: b.filename });
                           }
                         }}
                         className="text-error hover:text-error/80 shrink-0"
@@ -695,42 +690,34 @@ export function RuntimePage() {
 
       {/* Restore Confirm Dialog */}
       <ConfirmDialog
-        isOpen={showRestoreConfirm}
+        isOpen={backupConfirm?.type === "restore"}
         title={t("runtime.restore_confirm_title")}
         message={t("runtime.restore_confirm_desc")}
         confirmLabel={t("runtime.restore_confirm")}
         tone="destructive"
         onConfirm={() => {
-          if (pendingRestore) {
-            restoreMutation.mutate(pendingRestore);
+          if (backupConfirm?.type === "restore") {
+            restoreMutation.mutate(backupConfirm.filename);
           }
-          setShowRestoreConfirm(false);
-          setPendingRestore(null);
+          setBackupConfirm(null);
         }}
-        onClose={() => {
-          setShowRestoreConfirm(false);
-          setPendingRestore(null);
-        }}
+        onClose={() => setBackupConfirm(null)}
       />
 
       {/* Delete Backup Confirm Dialog */}
       <ConfirmDialog
-        isOpen={showDeleteBackupConfirm}
+        isOpen={backupConfirm?.type === "delete"}
         title={t("runtime.delete_backup_confirm_title")}
         message={t("runtime.delete_backup_confirm_desc")}
         confirmLabel={t("runtime.delete_backup_confirm")}
         tone="destructive"
         onConfirm={() => {
-          if (pendingDeleteBackup) {
-            deleteBackupMutation.mutate(pendingDeleteBackup);
+          if (backupConfirm?.type === "delete") {
+            deleteBackupMutation.mutate(backupConfirm.filename);
           }
-          setShowDeleteBackupConfirm(false);
-          setPendingDeleteBackup(null);
+          setBackupConfirm(null);
         }}
-        onClose={() => {
-          setShowDeleteBackupConfirm(false);
-          setPendingDeleteBackup(null);
-        }}
+        onClose={() => setBackupConfirm(null)}
       />
     </div>
   );
