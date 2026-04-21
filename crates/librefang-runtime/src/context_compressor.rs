@@ -251,7 +251,20 @@ impl ContextCompressor {
         driver: Arc<dyn LlmDriver>,
     ) -> Result<(Vec<Message>, bool), String> {
         let n = messages.len();
-        let head_end = self.config.protect_head.min(n);
+        // Extend the head boundary to avoid splitting a ToolUse/ToolResult pair:
+        // if the last message in protect_head is an assistant message that contains
+        // ToolUse blocks, the corresponding user ToolResult delivery falls into
+        // `middle` and would get summarised away.  Pull it into `head` so the pair
+        // travels together.
+        let mut head_end = self.config.protect_head.min(n);
+        if head_end < n {
+            let last_head = &messages[head_end - 1];
+            if last_head.role == Role::Assistant && msg_has_tool_use(last_head) {
+                // Include the next message (the ToolResult delivery) in the head.
+                head_end = (head_end + 1).min(n);
+            }
+        }
+
         let nominal_tail_start = if n > self.config.keep_recent {
             n - self.config.keep_recent
         } else {
@@ -260,8 +273,8 @@ impl ContextCompressor {
 
         // Walk the tail boundary forward until it lands on a clean turn boundary
         // so we never split a ToolUse/ToolResult pair.  A clean boundary is a
-        // message that is NOT a ToolResult-only user delivery (those must stay
-        // immediately after their matching assistant ToolUse).
+        // message that is NOT a ToolResult delivery (those must stay immediately
+        // after their matching assistant ToolUse).
         let tail_start = {
             let mut ts = nominal_tail_start;
             while ts < n && msg_is_tool_result_delivery(&messages[ts]) {
@@ -347,22 +360,35 @@ impl ContextCompressor {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when `msg` is a pure ToolResult delivery — a User-role
-/// message whose entire content consists of `ToolResult` blocks.
+/// Returns `true` when `msg` is a ToolResult delivery — a User-role message
+/// that contains AT LEAST ONE `ToolResult` block.
 ///
-/// Such messages must remain immediately after their matching assistant
-/// `ToolUse` message; splitting them off into the tail would orphan the pair.
+/// Using `any` (rather than `all`) is intentional: `finalize_tool_use_results`
+/// can append guidance `Text` blocks to the same user message for denied calls,
+/// producing a mixed `ToolResult + Text` message.  Such mixed messages are still
+/// boundary-sensitive and must remain immediately after their matching assistant
+/// `ToolUse` message; the tail must not start there.
 fn msg_is_tool_result_delivery(msg: &Message) -> bool {
     if msg.role != Role::User {
         return false;
     }
     match &msg.content {
-        MessageContent::Blocks(blocks) => {
-            !blocks.is_empty()
-                && blocks
-                    .iter()
-                    .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
-        }
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
+        _ => false,
+    }
+}
+
+/// Returns `true` when `msg` is an Assistant-role message that contains at
+/// least one `ToolUse` block.  Used to detect the head boundary case where
+/// extending `protect_head` is required to keep the ToolUse/ToolResult pair
+/// together.
+fn msg_has_tool_use(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
         _ => false,
     }
 }
