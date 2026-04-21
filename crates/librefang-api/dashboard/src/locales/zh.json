@@ -2231,7 +2231,17 @@
       "tmux_unavailable": "此主机不支持 tmux",
       "name_label": "窗口名称",
       "name_invalid": "只允许字母、数字、空格和 . _ -（1–64 个字符）。",
-      "counter": "{{used}} / {{total}}"
+      "counter": "{{used}} / {{total}}",
+      "help": "快捷操作说明",
+      "help_title": "标签页快捷操作",
+      "help_switch": "切换标签",
+      "help_switch_key": "单击",
+      "help_rename": "重命名标签",
+      "help_rename_key": "双击",
+      "help_close": "关闭标签",
+      "help_close_key": "中键单击 / ✕",
+      "help_new": "新建标签",
+      "help_new_key": "＋"
     },
     "install_tmux": "安装 tmux"
   },

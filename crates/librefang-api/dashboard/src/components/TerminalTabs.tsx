@@ -6,7 +6,7 @@ import {
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { Plus, X } from "lucide-react";
+import { Plus, X, HelpCircle } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useTerminalWindows } from "../lib/queries/terminal";
 import {
@@ -186,6 +186,20 @@ export function TerminalTabs({
     [deleteMutation, displayedActiveWindowId, ws, onSwitchWindow, addToast, t]
   );
 
+  const [showHelp, setShowHelp] = useState(false);
+  const helpRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showHelp) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (helpRef.current && !helpRef.current.contains(e.target as Node)) {
+        setShowHelp(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [showHelp]);
+
   if (!tmuxAvailable) return null;
 
   const atLimit = windows.length >= maxWindows;
@@ -274,11 +288,42 @@ export function TerminalTabs({
         <Plus className="h-3.5 w-3.5" />
       </button>
 
-      {nearLimit && (
-        <span className="ml-auto pr-1 pb-1 text-[10px] text-gray-600 shrink-0 tabular-nums self-center">
-          {windows.length}/{maxWindows}
-        </span>
-      )}
+      <div className="ml-auto flex items-center gap-1 shrink-0 self-center pr-1 pb-0.5">
+        {nearLimit && (
+          <span className="text-[10px] text-gray-600 tabular-nums">
+            {windows.length}/{maxWindows}
+          </span>
+        )}
+
+        <div ref={helpRef} className="relative">
+          <button
+            onClick={() => setShowHelp((v) => !v)}
+            aria-label={t("terminal.tabs.help")}
+            className="flex items-center justify-center w-5 h-5 rounded text-gray-600 hover:text-gray-400 transition-colors"
+          >
+            <HelpCircle className="h-3.5 w-3.5" />
+          </button>
+
+          {showHelp && (
+            <div className="absolute right-0 bottom-full mb-2 z-50 w-56 rounded-lg border border-gray-700/80 bg-[#1c2128] shadow-xl text-xs text-gray-300 p-3 space-y-2">
+              <p className="font-semibold text-gray-200 mb-1">{t("terminal.tabs.help_title")}</p>
+              {([
+                ["terminal.tabs.help_switch",  "terminal.tabs.help_switch_key"],
+                ["terminal.tabs.help_rename",  "terminal.tabs.help_rename_key"],
+                ["terminal.tabs.help_close",   "terminal.tabs.help_close_key"],
+                ["terminal.tabs.help_new",     "terminal.tabs.help_new_key"],
+              ] as const).map(([desc, key]) => (
+                <div key={key} className="flex items-start justify-between gap-2">
+                  <span className="text-gray-400 leading-snug">{t(desc)}</span>
+                  <kbd className="shrink-0 px-1.5 py-0.5 rounded bg-gray-700/60 text-[10px] text-gray-300 font-mono leading-tight whitespace-nowrap">
+                    {t(key)}
+                  </kbd>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
