@@ -443,11 +443,21 @@ impl ChatState {
                 ChatAction::Continue
             }
             KeyCode::Up => {
-                self.history_up();
+                // History navigation when input is non-empty or already in history mode;
+                // otherwise fall through to message-list scrolling.
+                if self.history_idx.is_some() || !self.input.is_empty() {
+                    self.history_up();
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_add(1);
+                }
                 ChatAction::Continue
             }
             KeyCode::Down => {
-                self.history_down();
+                if self.history_idx.is_some() {
+                    self.history_down();
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                }
                 ChatAction::Continue
             }
             KeyCode::PageUp => {
