@@ -1,8 +1,19 @@
-//! Catalog sync — fetch model catalog updates from the remote repository.
+//! Catalog sync — refresh the shared registry checkout and report what's on disk.
 //!
-//! Clones or pulls `github.com/librefang/librefang-registry` and copies TOML
-//! files to `~/.librefang/cache/catalog/`. Uses git directly to avoid CDN
-//! caching delays from `raw.githubusercontent.com`.
+//! Previously this module maintained its own git clone at
+//! `~/.librefang/cache/registry/`, copied `.toml` files into
+//! `~/.librefang/cache/catalog/providers/`, and the in-memory catalog
+//! reloader read from that copy. That was two redundant layers: the
+//! content was identical to what `registry_sync` already checks out at
+//! `~/.librefang/registry/`.
+//!
+//! Post-refactor: this module just drives `registry_sync` (force-refresh)
+//! and returns stats by scanning `~/.librefang/registry/providers/`. The
+//! `ModelCatalog::load_cached_catalog_for` consumer reads that same dir
+//! directly, so there's no intermediate copy. The only thing still
+//! living under `~/.librefang/cache/catalog/` is the `.last_sync`
+//! timestamp file, kept there so existing `GET /api/catalog/status`
+//! behaviour is unchanged.
 
 use librefang_types::model_catalog::ModelCatalogEntry;
 use serde::{Deserialize, Serialize};
@@ -22,244 +33,72 @@ struct ProviderCatalogFile {
     models: Vec<ModelCatalogEntry>,
 }
 
-/// Default remote repository for the model catalog.
-const CATALOG_REPO: &str = "librefang/librefang-registry";
-
-/// Sync the model catalog from the remote repository.
+/// Sync the model catalog.
 ///
-/// Clones or pulls the registry repo via git, then copies TOML files to
-/// `home_dir/cache/catalog/`.
+/// Triggers `registry_sync` (force-refresh, TTL=0) so `POST /api/catalog/update`
+/// and the periodic background task always see upstream's current state,
+/// then returns a count of what ended up on disk under
+/// `~/.librefang/registry/providers/`.
 ///
-/// `registry_mirror` is an optional proxy/mirror prefix for GitHub URLs.
-/// When non-empty, the clone URL is prefixed with this value.
+/// `registry_mirror` is forwarded to `registry_sync` (GitHub proxy prefix
+/// for CN / air-gapped users).
 pub async fn sync_catalog_to(
     home_dir: &std::path::Path,
     registry_mirror: &str,
 ) -> Result<CatalogSyncResult, String> {
-    let cache_dir = home_dir.join("cache").join("catalog");
-    let providers_dir = cache_dir.join("providers");
-    let repo_dir = home_dir.join("cache").join("registry");
+    let cache_meta_dir = home_dir.join("cache").join("catalog");
+    std::fs::create_dir_all(&cache_meta_dir)
+        .map_err(|e| format!("Failed to create cache meta dir: {e}"))?;
 
-    std::fs::create_dir_all(&providers_dir)
-        .map_err(|e| format!("Failed to create cache dir: {e}"))?;
-
-    let mirror = registry_mirror.trim_end_matches('/');
-    let repo_url = if mirror.is_empty() {
-        format!("https://github.com/{CATALOG_REPO}.git")
-    } else {
-        format!("{mirror}/https://github.com/{CATALOG_REPO}.git")
-    };
-
-    // Clone or pull the registry repo
-    let git_ok = if repo_dir.join(".git").exists() {
-        // Pull latest changes
-        tokio::task::spawn_blocking({
-            let repo_dir = repo_dir.clone();
-            move || {
-                let mut cmd = std::process::Command::new("git");
-                cmd.args(["pull", "--ff-only", "-q"])
-                    .current_dir(&repo_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                    cmd.creation_flags(CREATE_NO_WINDOW);
-                }
-                cmd.status().map(|s| s.success()).unwrap_or(false)
-            }
+    // Force a registry refresh. `registry_sync` is blocking (git
+    // subprocess + filesystem copies), so hop to a blocking task to
+    // keep the runtime responsive.
+    {
+        let home = home_dir.to_path_buf();
+        let mirror = registry_mirror.to_string();
+        let ok = tokio::task::spawn_blocking(move || {
+            crate::registry_sync::sync_registry(&home, 0, &mirror)
         })
         .await
-        .unwrap_or(false)
-    } else {
-        // Shallow clone (depth=1) to save bandwidth
-        tokio::task::spawn_blocking({
-            let repo_dir = repo_dir.clone();
-            let repo_url = repo_url.clone();
-            move || {
-                let mut cmd = std::process::Command::new("git");
-                cmd.args(["clone", "--depth", "1", "-q", &repo_url])
-                    .arg(&repo_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                    cmd.creation_flags(CREATE_NO_WINDOW);
-                }
-                cmd.status().map(|s| s.success()).unwrap_or(false)
-            }
-        })
-        .await
-        .unwrap_or(false)
-    };
-
-    if !git_ok {
-        // Fallback to HTTP API if git is not available
-        tracing::warn!("git clone/pull failed, falling back to HTTP API");
-        return sync_catalog_http(home_dir, registry_mirror).await;
+        .map_err(|e| format!("registry sync task failed: {e}"))?;
+        if !ok {
+            tracing::warn!(
+                "registry_sync returned false; proceeding with whatever is \
+                 already on disk (previous sync may still be valid)"
+            );
+        }
     }
 
-    // Copy TOML files from repo to cache
-    let mut downloaded = 0usize;
+    let repo_providers = home_dir.join("registry").join("providers");
+    let mut file_count = 0usize;
     let mut models_count = 0usize;
 
-    let repo_providers = repo_dir.join("providers");
     if repo_providers.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&repo_providers) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "toml") {
+                    file_count += 1;
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let dest = providers_dir.join(entry.file_name());
-                        if std::fs::write(&dest, &content).is_ok() {
-                            downloaded += 1;
-                            if let Ok(file) = toml::from_str::<ProviderCatalogFile>(&content) {
-                                models_count += file.models.len();
-                            }
+                        if let Ok(file) = toml::from_str::<ProviderCatalogFile>(&content) {
+                            models_count += file.models.len();
                         }
                     }
                 }
             }
         }
-    }
-
-    // Remove cached provider files that no longer exist in the upstream repo
-    if repo_providers.is_dir() {
-        if let Ok(cached_entries) = std::fs::read_dir(&providers_dir) {
-            for entry in cached_entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "toml")
-                    && !repo_providers.join(entry.file_name()).exists()
-                    && std::fs::remove_file(&path).is_ok()
-                {
-                    tracing::debug!(file = %path.display(), "removed stale catalog provider");
-                }
-            }
-        }
-    }
-
-    // Copy aliases.toml if present
-    let aliases_src = repo_dir.join("aliases.toml");
-    if aliases_src.is_file() {
-        let _ = std::fs::copy(&aliases_src, cache_dir.join("aliases.toml"));
-    }
-
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let _ = std::fs::write(cache_dir.join(".last_sync"), &timestamp);
-
-    Ok(CatalogSyncResult {
-        files_downloaded: downloaded,
-        models_count,
-        timestamp,
-    })
-}
-
-/// HTTP fallback — original implementation using GitHub API + raw URLs.
-/// Used when git is not available on the system.
-async fn sync_catalog_http(
-    home_dir: &std::path::Path,
-    registry_mirror: &str,
-) -> Result<CatalogSyncResult, String> {
-    let cache_dir = home_dir.join("cache").join("catalog");
-    let client = crate::http_client::proxied_client_builder()
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let mirror = registry_mirror.trim_end_matches('/');
-    let tree_url = if mirror.is_empty() {
-        format!("https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1")
     } else {
-        format!("{mirror}/https://api.github.com/repos/{CATALOG_REPO}/git/trees/main?recursive=1")
-    };
-    let tree_resp = client
-        .get(&tree_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch repo tree: {e}"))?;
-
-    if !tree_resp.status().is_success() {
-        return Err(format!("GitHub API returned {}", tree_resp.status()));
-    }
-
-    let tree: serde_json::Value = tree_resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse tree: {e}"))?;
-
-    let mut downloaded = 0usize;
-    let mut models_count = 0usize;
-    let mut upstream_provider_files = std::collections::HashSet::new();
-
-    if let Some(items) = tree["tree"].as_array() {
-        for item in items {
-            let path = item["path"].as_str().unwrap_or("");
-            if !path.contains("..")
-                && ((path.starts_with("providers/") && path.ends_with(".toml"))
-                    || path == "aliases.toml")
-            {
-                if path.starts_with("providers/") {
-                    if let Some(fname) = path.strip_prefix("providers/") {
-                        upstream_provider_files.insert(fname.to_string());
-                    }
-                }
-                let raw_url = if mirror.is_empty() {
-                    format!("https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}")
-                } else {
-                    format!("{mirror}/https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}")
-                };
-                match client.get(&raw_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(content) = resp.text().await {
-                            let dest = cache_dir.join(path);
-                            if let Some(parent) = dest.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            if std::fs::write(&dest, &content).is_ok() {
-                                downloaded += 1;
-                                if path.starts_with("providers/") {
-                                    if let Ok(file) =
-                                        toml::from_str::<ProviderCatalogFile>(&content)
-                                    {
-                                        models_count += file.models.len();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        tracing::warn!("Failed to download catalog file: {path}");
-                    }
-                }
-            }
-        }
-    }
-
-    // Remove cached provider files that no longer exist upstream
-    let providers_dir = cache_dir.join("providers");
-    if !upstream_provider_files.is_empty() {
-        if let Ok(cached_entries) = std::fs::read_dir(&providers_dir) {
-            for entry in cached_entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".toml")
-                        && !upstream_provider_files.contains(name)
-                        && std::fs::remove_file(&path).is_ok()
-                    {
-                        tracing::debug!(file = %path.display(), "removed stale catalog provider");
-                    }
-                }
-            }
-        }
+        tracing::warn!(
+            path = %repo_providers.display(),
+            "registry/providers missing — returning empty catalog result"
+        );
     }
 
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let _ = std::fs::write(cache_dir.join(".last_sync"), &timestamp);
+    let _ = std::fs::write(cache_meta_dir.join(".last_sync"), &timestamp);
 
     Ok(CatalogSyncResult {
-        files_downloaded: downloaded,
+        files_downloaded: file_count,
         models_count,
         timestamp,
     })
@@ -271,9 +110,60 @@ pub fn last_sync_time_for(home_dir: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Return the cache directory for the catalog.
+/// Return the cache metadata directory for the catalog.
 pub fn cache_dir_for(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("cache").join("catalog")
+}
+
+/// One-shot cleanup for directories obsoleted by the registry-unify
+/// refactor. Called from `LibreFangKernel::boot_with_config` so existing
+/// installs reclaim disk without any manual step.
+///
+/// Removes:
+/// - `~/.librefang/cache/registry/` — duplicate checkout of the upstream
+///   registry repo (now read from `~/.librefang/registry/`).
+/// - `~/.librefang/cache/catalog/providers/` — copy of
+///   `~/.librefang/registry/providers/` (consumer now reads the source).
+///
+/// Safe to call every boot — each step no-ops when the path is absent.
+pub fn remove_legacy_registry_checkout(home_dir: &std::path::Path) {
+    let legacy_repo = home_dir.join("cache").join("registry");
+    if legacy_repo.exists() {
+        match std::fs::remove_dir_all(&legacy_repo) {
+            Ok(()) => tracing::info!(
+                path = %legacy_repo.display(),
+                "Removed legacy duplicate registry checkout"
+            ),
+            Err(e) => tracing::warn!(
+                path = %legacy_repo.display(),
+                error = %e,
+                "Failed to remove legacy duplicate registry checkout"
+            ),
+        }
+    }
+
+    let legacy_providers = home_dir.join("cache").join("catalog").join("providers");
+    if legacy_providers.exists() {
+        match std::fs::remove_dir_all(&legacy_providers) {
+            Ok(()) => tracing::info!(
+                path = %legacy_providers.display(),
+                "Removed legacy cached catalog providers copy"
+            ),
+            Err(e) => tracing::warn!(
+                path = %legacy_providers.display(),
+                error = %e,
+                "Failed to remove legacy cached catalog providers copy"
+            ),
+        }
+    }
+
+    // `~/.librefang/cache/catalog/aliases.toml` was also a copy of
+    // registry/aliases.toml; the model catalog's alias loader already
+    // handles either location, so drop the stale copy too.
+    let legacy_aliases = home_dir.join("cache").join("catalog").join("aliases.toml");
+    if legacy_aliases.is_file() {
+        let _ = std::fs::remove_file(&legacy_aliases);
+    }
 }
 
 #[cfg(test)]
@@ -302,24 +192,6 @@ supports_streaming = true
     }
 
     #[test]
-    fn test_alias_catalog_parse() {
-        #[derive(serde::Deserialize)]
-        struct AliasFile {
-            #[serde(default)]
-            aliases: std::collections::HashMap<String, String>,
-        }
-
-        let toml_str = r#"
-[aliases]
-sonnet = "claude-sonnet-4-20250514"
-gpt4 = "gpt-4o"
-"#;
-        let file: AliasFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(file.aliases.len(), 2);
-        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
-    }
-
-    #[test]
     fn test_last_sync_time_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(last_sync_time_for(tmp.path()).is_none());
@@ -330,5 +202,42 @@ gpt4 = "gpt-4o"
         let tmp = tempfile::tempdir().unwrap();
         let d = cache_dir_for(tmp.path());
         assert!(d.ends_with("cache/catalog") || d.ends_with("cache\\catalog"));
+    }
+
+    #[test]
+    fn test_remove_legacy_noop_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        remove_legacy_registry_checkout(tmp.path());
+        assert!(!tmp.path().join("cache").join("registry").exists());
+    }
+
+    #[test]
+    fn test_remove_legacy_deletes_duplicate_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("cache").join("registry").join("sub");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("file.toml"), "x").unwrap();
+        remove_legacy_registry_checkout(tmp.path());
+        assert!(!tmp.path().join("cache").join("registry").exists());
+    }
+
+    #[test]
+    fn test_remove_legacy_deletes_cached_providers_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let providers = tmp.path().join("cache").join("catalog").join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(providers.join("ollama.toml"), "x").unwrap();
+        remove_legacy_registry_checkout(tmp.path());
+        assert!(!providers.exists());
+    }
+
+    #[test]
+    fn test_remove_legacy_preserves_last_sync_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_catalog = tmp.path().join("cache").join("catalog");
+        std::fs::create_dir_all(&cache_catalog).unwrap();
+        std::fs::write(cache_catalog.join(".last_sync"), "2026-04-21").unwrap();
+        remove_legacy_registry_checkout(tmp.path());
+        assert!(cache_catalog.join(".last_sync").exists());
     }
 }

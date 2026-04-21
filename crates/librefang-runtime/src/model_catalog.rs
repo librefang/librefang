@@ -929,11 +929,16 @@ impl ModelCatalog {
         Ok(total_added)
     }
 
-    /// Load cached catalog from `home_dir/cache/catalog/providers/`.
+    /// Load cached catalog from the shared registry checkout at
+    /// `home_dir/registry/providers/`.
     ///
-    /// Merges community models synced from the remote model-catalog repo.
+    /// Prior to the registry-unify refactor this read from
+    /// `home_dir/cache/catalog/providers/`, which was a copy of the same
+    /// data. Reading `registry/providers/` directly eliminates the copy
+    /// step and guarantees the catalog is never staler than what
+    /// `registry_sync` last pulled.
     pub fn load_cached_catalog_for(&mut self, home_dir: &std::path::Path) {
-        let providers_dir = home_dir.join("cache").join("catalog").join("providers");
+        let providers_dir = home_dir.join("registry").join("providers");
         if providers_dir.exists() {
             match self.load_cached_catalog(&providers_dir) {
                 Ok(n) => {
