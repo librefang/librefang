@@ -589,6 +589,8 @@ struct ToolExecutionContext<'a> {
     /// long-running tools (shell_exec, agent_send, …) can observe a /stop
     /// signal without polling a global flag.
     interrupt: Option<crate::interrupt::SessionInterrupt>,
+    dangerous_command_checker:
+        Option<&'a Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>>,
 }
 
 async fn execute_single_tool_call(
@@ -3125,6 +3127,7 @@ pub async fn run_agent_loop(
                         agent_id_str: agent_id_str.as_str(),
                         opts,
                         interrupt: opts.interrupt.clone(),
+                        dangerous_command_checker: None,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -4337,6 +4340,7 @@ pub async fn run_agent_loop_streaming(
                         agent_id_str: agent_id_str.as_str(),
                         opts,
                         interrupt: opts.interrupt.clone(),
+                        dangerous_command_checker: None,
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 

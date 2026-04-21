@@ -8,7 +8,6 @@
 pub const USER_AGENT: &str = concat!("librefang/", env!("CARGO_PKG_VERSION"));
 
 pub mod a2a;
-pub mod dangerous_command;
 pub mod agent_loop;
 pub mod apply_patch;
 pub mod audit;
@@ -17,6 +16,7 @@ pub mod browser;
 pub mod catalog_sync;
 pub mod channel_registry;
 pub mod checkpoint_manager;
+pub mod dangerous_command;
 pub use librefang_runtime_oauth::chatgpt_oauth;
 pub mod command_lane;
 pub mod compactor;
