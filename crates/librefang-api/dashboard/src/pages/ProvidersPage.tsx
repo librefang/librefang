@@ -1166,7 +1166,11 @@ export function ProvidersPage() {
   };
 
   const allSelected = filteredProviders.length > 0 && selectedIds.size === filteredProviders.length;
-  const saveDisabled = !config.provider || config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""));
+  const isUnchanged = !!config.provider
+    && !config.keyInput.trim()
+    && config.urlInput === (config.provider.base_url || "")
+    && config.proxyInput === (config.provider.proxy_url || "");
+  const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">

@@ -68,18 +68,20 @@ export function PluginsPage() {
   const onRefresh = useCallback(() => {
     pluginsQuery.refetch();
     registriesQuery.refetch();
-  }, [pluginsQuery, registriesQuery]);
+  }, [pluginsQuery.refetch, registriesQuery.refetch]);
 
   const resetInstallForm = () => {
     setInstallName(""); setInstallPath(""); setInstallUrl(""); setInstallBranch(""); setInstallRepo("");
   };
 
-  const onInstallSuccess = () => {
+  const onInstallSuccess = useCallback(() => {
     setShowInstall(false);
     resetInstallForm();
     addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
-  };
-  const onInstallError = (e: unknown) => addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
+  }, [addToast, t]);
+  const onInstallError = useCallback((e: unknown) => {
+    addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
+  }, [addToast, t]);
 
   const handleInstall = useCallback(() => {
     const payload = {
@@ -92,7 +94,7 @@ export function PluginsPage() {
       onError: onInstallError,
       onSettled: () => setInstallingName(null),
     });
-  }, [installSource, installName, installRepo, installPath, installUrl, installBranch, installMutation, onInstallSuccess, onInstallError]);
+  }, [installSource, installName, installRepo, installPath, installUrl, installBranch, installMutation.mutate, onInstallSuccess, onInstallError]);
 
   const handleRegistryInstall = useCallback((name: string, repo: string) => {
     setInstallingName(`${repo}:${name}`);
@@ -104,7 +106,7 @@ export function PluginsPage() {
         onSettled: () => setInstallingName(null),
       },
     );
-  }, [installMutation, addToast, t]);
+  }, [installMutation.mutate, addToast, t]);
 
   const handleDelete = useCallback((name: string) => {
     if (confirmDelete !== name) { setConfirmDelete(name); return; }
@@ -115,7 +117,7 @@ export function PluginsPage() {
       },
       onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
     });
-  }, [confirmDelete, uninstallMutation, addToast, t]);
+  }, [confirmDelete, uninstallMutation.mutate, addToast, t]);
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20";
 
@@ -145,7 +147,7 @@ export function PluginsPage() {
           className={`pb-2 text-sm font-bold transition-colors ${tab === "installed" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
           <Package className="w-4 h-4 inline mr-1.5" />
           {t("plugins.installed_tab")}
-          <Badge variant="default" className="ml-2">{plugins.length > 0 ? plugins.length : ""}</Badge>
+          {plugins.length > 0 && <Badge variant="default" className="ml-2">{plugins.length}</Badge>}
         </button>
         <button onClick={() => startTransition(() => setTab("registry"))}
           className={`pb-2 text-sm font-bold transition-colors ${tab === "registry" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
