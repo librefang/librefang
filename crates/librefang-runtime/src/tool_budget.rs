@@ -132,7 +132,7 @@ impl ToolBudgetEnforcer {
     /// Already-persisted results (those whose content starts with the
     /// [`PERSISTED_MARKER`]) are counted toward the total but are never
     /// re-persisted.
-    pub fn enforce_turn_budget(&self, results: &mut Vec<ToolResultEntry>) {
+    pub fn enforce_turn_budget(&self, results: &mut [ToolResultEntry]) {
         let total: usize = results.iter().map(|r| r.content.len()).sum();
         if total <= self.per_turn_budget {
             return;
@@ -286,8 +286,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn layer2_fallback_on_bad_path() {
-        // Use an unwriteable path to force the fallback.
+        // Use an unwriteable path to force the fallback. `/proc` on Linux is a
+        // read-only virtual filesystem; macOS has no `/proc` so `create_dir_all`
+        // fails at the filesystem root. Either way, the write must fail so the
+        // fallback path in `maybe_persist_result` runs.
+        //
+        // Skipped on Windows because `/proc/...` gets resolved to
+        // `C:\proc\...`, which is writeable under a standard user account.
         let enforcer = ToolBudgetEnforcer {
             per_result_threshold: 10,
             per_turn_budget: 1000,
