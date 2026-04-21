@@ -479,9 +479,14 @@ export function RuntimePage() {
                 <div className="space-y-1.5 max-h-64 overflow-y-auto">
                   {auditEntries.map((entry: AuditEntry, i: number) => (
                     <div key={entry.seq ?? i} className="flex items-start gap-2 text-xs py-1.5 px-2 rounded-lg bg-main/30">
-                      <Badge variant={entry.outcome === "ok" ? "success" : entry.outcome === "denied" ? "error" : "warning"}>
-                        {entry.outcome || "-"}
-                      </Badge>
+                      {/* Fixed-width badge column so "ok" / "completed" /
+                          "denied" outcomes of different lengths don't shift
+                          the action column — the log now reads as a table. */}
+                      <div className="w-20 shrink-0 flex justify-start pt-0.5">
+                        <Badge variant={entry.outcome === "ok" ? "success" : entry.outcome === "denied" ? "error" : "warning"}>
+                          {entry.outcome || "-"}
+                        </Badge>
+                      </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-[10px] truncate">{entry.action || "-"}</span>
@@ -501,14 +506,30 @@ export function RuntimePage() {
                 <p className="text-xs text-text-dim">{t("runtime.no_audit")}</p>
               )}
 
-              {auditVerifyQuery.data && (
-                <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between">
-                  <span className="text-xs text-text-dim">{t("runtime.audit_entries", { count: auditVerifyQuery.data.entries ?? 0 })}</span>
-                  <Button variant="ghost" size="sm" onClick={() => auditVerifyQuery.refetch()}>
-                    {t("runtime.audit_verify")}
-                  </Button>
-                </div>
-              )}
+              {/* Verify button is always rendered so the user can trigger a
+                  chain verification even before any automatic fetch has
+                  landed. `refetchInterval: false` means the query no longer
+                  polls in the background, so the previous "hidden until
+                  data arrives" gating left the button invisible on first
+                  paint. `isFetching` also provides a visible loading state
+                  so repeated clicks don't look like they did nothing. */}
+              <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between">
+                <span className="text-xs text-text-dim">
+                  {auditVerifyQuery.data
+                    ? t("runtime.audit_entries", { count: auditVerifyQuery.data.entries ?? 0 })
+                    : t("runtime.audit_not_verified", { defaultValue: "Chain not verified yet" })}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={auditVerifyQuery.isFetching}
+                  onClick={() => auditVerifyQuery.refetch()}
+                >
+                  {auditVerifyQuery.isFetching
+                    ? t("common.loading")
+                    : t("runtime.audit_verify")}
+                </Button>
+              </div>
             </Card>
           </div>
 
