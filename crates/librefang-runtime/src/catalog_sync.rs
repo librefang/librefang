@@ -50,21 +50,29 @@ pub async fn sync_catalog_to(
     std::fs::create_dir_all(&cache_meta_dir)
         .map_err(|e| format!("Failed to create cache meta dir: {e}"))?;
 
-    // Force a registry refresh. `registry_sync` is blocking (git
-    // subprocess + filesystem copies), so hop to a blocking task to
-    // keep the runtime responsive.
+    // Force a registry refresh. We call `refresh_registry_checkout`
+    // (not `sync_registry`) because the catalog consumer only needs the
+    // upstream checkout refreshed — not the full fan-out into
+    // `workspaces/agents/`, `workflows/templates/`, etc. The broader
+    // fan-out belongs to `kernel::boot_with_config`; clicking
+    // "Update catalog" shouldn't, for example, overwrite user-managed
+    // workflow templates. `refresh_registry_checkout` also acquires
+    // the module's internal lock so concurrent callers (boot, 24h
+    // background task, manual trigger) don't race on the same
+    // working tree. It's blocking (git subprocess), so hop to a
+    // blocking task to keep the runtime responsive.
     {
         let home = home_dir.to_path_buf();
         let mirror = registry_mirror.to_string();
         let ok = tokio::task::spawn_blocking(move || {
-            crate::registry_sync::sync_registry(&home, 0, &mirror)
+            crate::registry_sync::refresh_registry_checkout(&home, 0, &mirror)
         })
         .await
         .map_err(|e| format!("registry sync task failed: {e}"))?;
         if !ok {
             tracing::warn!(
-                "registry_sync returned false; proceeding with whatever is \
-                 already on disk (previous sync may still be valid)"
+                "refresh_registry_checkout returned false; proceeding with \
+                 whatever is already on disk (previous sync may still be valid)"
             );
         }
     }
@@ -115,55 +123,61 @@ pub fn cache_dir_for(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("cache").join("catalog")
 }
 
-/// One-shot cleanup for directories obsoleted by the registry-unify
-/// refactor. Called from `LibreFangKernel::boot_with_config` so existing
-/// installs reclaim disk without any manual step.
+/// Reclaim disk from the pre-unify cache layout.
 ///
-/// Removes:
-/// - `~/.librefang/cache/registry/` — duplicate checkout of the upstream
-///   registry repo (now read from `~/.librefang/registry/`).
-/// - `~/.librefang/cache/catalog/providers/` — copy of
-///   `~/.librefang/registry/providers/` (consumer now reads the source).
+/// Called from `LibreFangKernel::boot_with_config` — idempotent so it's
+/// safe on every boot (each branch no-ops when the path is absent).
 ///
-/// Safe to call every boot — each step no-ops when the path is absent.
-pub fn remove_legacy_registry_checkout(home_dir: &std::path::Path) {
-    let legacy_repo = home_dir.join("cache").join("registry");
-    if legacy_repo.exists() {
-        match std::fs::remove_dir_all(&legacy_repo) {
-            Ok(()) => tracing::info!(
-                path = %legacy_repo.display(),
-                "Removed legacy duplicate registry checkout"
-            ),
+/// Removes three paths the old two-checkout design maintained, all of
+/// which are now pure duplicates of `~/.librefang/registry/`:
+/// - `~/.librefang/cache/registry/` — second git clone of the upstream repo
+/// - `~/.librefang/cache/catalog/providers/` — copy of `registry/providers/`
+/// - `~/.librefang/cache/catalog/aliases.toml` — copy of `registry/aliases.toml`
+///
+/// `cache/catalog/.last_sync` is deliberately preserved so
+/// `GET /api/catalog/status` keeps returning the user's last-sync
+/// timestamp across the upgrade.
+pub fn remove_legacy_cache_dirs(home_dir: &std::path::Path) {
+    fn remove_dir(path: &std::path::Path, label: &str) {
+        if !path.exists() {
+            return;
+        }
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => tracing::info!(path = %path.display(), "Removed legacy {label}"),
             Err(e) => tracing::warn!(
-                path = %legacy_repo.display(),
+                path = %path.display(),
                 error = %e,
-                "Failed to remove legacy duplicate registry checkout"
+                "Failed to remove legacy {label}"
             ),
         }
     }
 
-    let legacy_providers = home_dir.join("cache").join("catalog").join("providers");
-    if legacy_providers.exists() {
-        match std::fs::remove_dir_all(&legacy_providers) {
-            Ok(()) => tracing::info!(
-                path = %legacy_providers.display(),
-                "Removed legacy cached catalog providers copy"
-            ),
+    fn remove_file(path: &std::path::Path, label: &str) {
+        if !path.is_file() {
+            return;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => tracing::info!(path = %path.display(), "Removed legacy {label}"),
             Err(e) => tracing::warn!(
-                path = %legacy_providers.display(),
+                path = %path.display(),
                 error = %e,
-                "Failed to remove legacy cached catalog providers copy"
+                "Failed to remove legacy {label}"
             ),
         }
     }
 
-    // `~/.librefang/cache/catalog/aliases.toml` was also a copy of
-    // registry/aliases.toml; the model catalog's alias loader already
-    // handles either location, so drop the stale copy too.
-    let legacy_aliases = home_dir.join("cache").join("catalog").join("aliases.toml");
-    if legacy_aliases.is_file() {
-        let _ = std::fs::remove_file(&legacy_aliases);
-    }
+    remove_dir(
+        &home_dir.join("cache").join("registry"),
+        "duplicate registry checkout",
+    );
+    remove_dir(
+        &home_dir.join("cache").join("catalog").join("providers"),
+        "cached catalog providers copy",
+    );
+    remove_file(
+        &home_dir.join("cache").join("catalog").join("aliases.toml"),
+        "cached aliases.toml copy",
+    );
 }
 
 #[cfg(test)]
@@ -207,7 +221,7 @@ supports_streaming = true
     #[test]
     fn test_remove_legacy_noop_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        remove_legacy_registry_checkout(tmp.path());
+        remove_legacy_cache_dirs(tmp.path());
         assert!(!tmp.path().join("cache").join("registry").exists());
     }
 
@@ -217,7 +231,7 @@ supports_streaming = true
         let legacy = tmp.path().join("cache").join("registry").join("sub");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("file.toml"), "x").unwrap();
-        remove_legacy_registry_checkout(tmp.path());
+        remove_legacy_cache_dirs(tmp.path());
         assert!(!tmp.path().join("cache").join("registry").exists());
     }
 
@@ -227,7 +241,7 @@ supports_streaming = true
         let providers = tmp.path().join("cache").join("catalog").join("providers");
         std::fs::create_dir_all(&providers).unwrap();
         std::fs::write(providers.join("ollama.toml"), "x").unwrap();
-        remove_legacy_registry_checkout(tmp.path());
+        remove_legacy_cache_dirs(tmp.path());
         assert!(!providers.exists());
     }
 
@@ -237,7 +251,21 @@ supports_streaming = true
         let cache_catalog = tmp.path().join("cache").join("catalog");
         std::fs::create_dir_all(&cache_catalog).unwrap();
         std::fs::write(cache_catalog.join(".last_sync"), "2026-04-21").unwrap();
-        remove_legacy_registry_checkout(tmp.path());
+        remove_legacy_cache_dirs(tmp.path());
         assert!(cache_catalog.join(".last_sync").exists());
+    }
+
+    #[test]
+    fn test_remove_legacy_deletes_aliases_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_catalog = tmp.path().join("cache").join("catalog");
+        std::fs::create_dir_all(&cache_catalog).unwrap();
+        let aliases = cache_catalog.join("aliases.toml");
+        std::fs::write(&aliases, "[aliases]\nfoo = \"bar\"").unwrap();
+        remove_legacy_cache_dirs(tmp.path());
+        assert!(!aliases.exists());
+        // Removing the file must not take the containing directory with it —
+        // `.last_sync` lives in the same dir and must survive.
+        assert!(cache_catalog.exists());
     }
 }

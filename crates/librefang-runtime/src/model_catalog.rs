@@ -1059,6 +1059,23 @@ mod tests {
         assert!(catalog.list_models().len() >= 30);
     }
 
+    /// Mirrors the pre-refactor `catalog_sync::test_alias_catalog_parse` —
+    /// keeps direct coverage of `AliasesCatalogFile` deserialization, which
+    /// is now only consumed here in `model_catalog`.
+    #[test]
+    fn test_aliases_catalog_parse() {
+        let toml_str = r#"
+[aliases]
+sonnet = "claude-sonnet-4-20250514"
+gpt4 = "gpt-4o"
+"#;
+        let file: librefang_types::model_catalog::AliasesCatalogFile =
+            toml::from_str(toml_str).unwrap();
+        assert_eq!(file.aliases.len(), 2);
+        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
+        assert_eq!(file.aliases["gpt4"], "gpt-4o");
+    }
+
     /// P2 regression: when registry classification is unavailable
     /// (registry dir unreadable or missing), every provider must fall back
     /// to is_custom=false so the dashboard does not re-enable the misleading

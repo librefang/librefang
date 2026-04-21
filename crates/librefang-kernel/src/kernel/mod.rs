@@ -1902,7 +1902,7 @@ impl LibreFangKernel {
         // Catalog sync now reads directly from `~/.librefang/registry/` (the
         // directory registry_sync already maintains), so the duplicate is
         // pure waste.
-        librefang_runtime::catalog_sync::remove_legacy_registry_checkout(&config.home_dir);
+        librefang_runtime::catalog_sync::remove_legacy_cache_dirs(&config.home_dir);
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
