@@ -63,11 +63,15 @@ export function WorkflowsPage() {
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]
-      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-      .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase())),
+      .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase()))
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")),
     [workflowsQuery.data, searchQuery]
   );
   const allWorkflows = workflowsQuery.data ?? [];
+  const scheduledWf = useMemo(
+    () => workflows.find(w => w.id === scheduleWorkflowId),
+    [workflows, scheduleWorkflowId]
+  );
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;
@@ -133,10 +137,17 @@ export function WorkflowsPage() {
     }
   };
 
-  const handleNewWorkflow = () => {
+  const navigateToCanvas = (wfId?: string, template?: object) => {
     sessionStorage.removeItem("canvasNodes");
     sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+    if (template) {
+      sessionStorage.setItem("workflowTemplate", JSON.stringify(template));
+    }
+    navigate({ to: "/canvas", search: { t: wfId ? undefined : Date.now(), wf: wfId } });
+  };
+
+  const handleNewWorkflow = () => {
+    navigateToCanvas();
   };
   useCreateShortcut(handleNewWorkflow);
 
@@ -166,11 +177,7 @@ export function WorkflowsPage() {
     if (hasRequiredParams) {
       // Template has required params — open canvas pre-populated with nodes so
       // the user can see the workflow structure and fill in parameter values.
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({
-        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-      }));
-      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
       return;
     }
     try {
@@ -180,25 +187,15 @@ export function WorkflowsPage() {
         openWorkflow(workflowId);
       } else {
         // Instantiation succeeded but no ID returned — fall back to pre-populated canvas
-        sessionStorage.removeItem("canvasNodes");
-        sessionStorage.setItem("workflowTemplate", JSON.stringify({
-          nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-        }));
-        navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+        navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
       }
     } catch {
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({
-        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-      }));
-      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
     }
   };
 
   const openWorkflow = (wfId: string) => {
-    sessionStorage.removeItem("canvasNodes");
-    sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: undefined, wf: wfId } });
+    navigateToCanvas(wfId);
   };
 
   const templatesQuery = useWorkflowTemplates();
@@ -424,19 +421,19 @@ export function WorkflowsPage() {
                               <span className="text-[9px] text-text-dim/50 shrink-0">{step.agent_name}</span>
                             )}
                             {step.skipped && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">skip</span>
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">{t("workflows.skip", { defaultValue: "skip" })}</span>
                             )}
                             <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i ? "rotate-180" : ""}`} />
                           </button>
                           {expandedStepIdx === i && (
                             <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
                               {!step.agent_found && (
-                                <p className="text-[10px] text-warning mt-2">Agent not found</p>
+                                <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
                               )}
                               {step.skip_reason && (
                                 <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
                               )}
-                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">Resolved prompt:</p>
+                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
                               <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
                                 {step.resolved_prompt || "(empty)"}
                               </pre>
@@ -458,7 +455,7 @@ export function WorkflowsPage() {
                     {/* Step-level I/O */}
                     {((runMutation.data as any).step_results as any[])?.length > 0 && (
                       <div className="space-y-1.5 border-t border-success/20 pt-2">
-                        <p className="text-[9px] font-bold text-text-dim/50">Step details</p>
+                        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.step_details", { defaultValue: "Step details" })}</p>
                         {((runMutation.data as any).step_results as any[]).map((s: any, i: number) => (
                           <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                             <button
@@ -517,7 +514,7 @@ export function WorkflowsPage() {
               {/* Run History */}
               {runsQuery.data && runsQuery.data.length > 0 && (
                 <Card padding="lg" className="space-y-3">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">Run History</h3>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_history", { defaultValue: "Run History" })}</h3>
                   <div className="space-y-1.5">
                     {runsQuery.data.slice(0, 10).map((run) => {
                       const runId = (run as any).id as string | undefined;
@@ -572,13 +569,13 @@ export function WorkflowsPage() {
                                   {expandedStepIdx === si + 2000 && (
                                     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
                                       <div>
-                                        <p className="text-[9px] font-bold text-text-dim/50 mt-2">Prompt sent:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
                                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                           {step.prompt || "(empty)"}
                                         </pre>
                                       </div>
                                       <div>
-                                        <p className="text-[9px] font-bold text-text-dim/50">Output:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
                                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                           {step.output || "(empty)"}
                                         </pre>
@@ -594,7 +591,7 @@ export function WorkflowsPage() {
                           )}
                           {isSelected && runDetailQuery.isLoading && (
                             <div className="ml-5 mt-1 p-2 text-[10px] text-text-dim/50 flex items-center gap-1.5">
-                              <Loader2 className="w-3 h-3 animate-spin" /> Loading details…
+                              <Loader2 className="w-3 h-3 animate-spin" /> {t("workflows.loading_details", { defaultValue: "Loading details…" })}
                             </div>
                           )}
                         </div>
@@ -636,11 +633,11 @@ export function WorkflowsPage() {
       {scheduleWorkflowId && (
         <ScheduleModal
           title={t("nav.scheduler")}
-          subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
-          initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
-          initialTz={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.tz}
+          subtitle={scheduledWf?.name}
+          initialCron={(scheduledWf as any)?.schedule?.cron || "0 9 * * *"}
+          initialTz={(scheduledWf as any)?.schedule?.tz}
           onSave={async (cron, tz) => {
-            const wf = workflows.find(w => w.id === scheduleWorkflowId);
+            const wf = scheduledWf;
             try {
               await createScheduleMutation.mutateAsync({
                 name: `${wf?.name || "workflow"} schedule`,
