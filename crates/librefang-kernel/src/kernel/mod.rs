@@ -671,6 +671,93 @@ impl LibreFangKernel {
         roots
     }
 
+    /// Create a fresh, per-execution MCP connection pool for a single agent run.
+    ///
+    /// Adds `agent_workspace` to the default roots so filesystem-aware MCP
+    /// servers (morphllm, filesystem, …) scope their access to the agent's
+    /// specific working directory rather than the broad workspace base.
+    ///
+    /// Returns `None` when no MCP servers are configured, when the workspace
+    /// path adds nothing new over the default roots, or when all connections
+    /// fail.  Callers fall back to the daemon-global pool in the `None` case.
+    async fn build_agent_mcp_pool(
+        &self,
+        agent_workspace: Option<&std::path::Path>,
+    ) -> Option<tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>> {
+        use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+        use librefang_types::config::McpTransportEntry;
+
+        let servers = self
+            .effective_mcp_servers
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+
+        if servers.is_empty() {
+            return None;
+        }
+
+        let mut roots = self.default_mcp_roots();
+
+        // Add the agent workspace only when it's genuinely new information
+        // (i.e. not already a sub-path of an existing root).
+        if let Some(ws) = agent_workspace {
+            let ws_str = ws.to_string_lossy().into_owned();
+            let already_covered = roots.iter().any(|r| ws.starts_with(r.as_str()));
+            if !already_covered && !roots.contains(&ws_str) {
+                roots.push(ws_str);
+            }
+        }
+
+        let mut connections = Vec::new();
+        for server_config in &servers {
+            let transport = match &server_config.transport {
+                McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
+                    command: command.clone(),
+                    args: args.clone(),
+                },
+                McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+                McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
+                McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => McpTransport::HttpCompat {
+                    base_url: base_url.clone(),
+                    headers: headers.clone(),
+                    tools: tools.clone(),
+                },
+            };
+
+            let mcp_config = McpServerConfig {
+                name: server_config.name.clone(),
+                transport,
+                timeout_secs: server_config.timeout_secs,
+                env: server_config.env.clone(),
+                headers: server_config.headers.clone(),
+                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_config: server_config.oauth.clone(),
+                taint_scanning: server_config.taint_scanning,
+                roots: roots.clone(),
+            };
+
+            match McpConnection::connect(mcp_config).await {
+                Ok(conn) => connections.push(conn),
+                Err(e) => warn!(
+                    server = %server_config.name,
+                    error = %e,
+                    "Per-agent MCP connection failed; agent will lack this server's tools"
+                ),
+            }
+        }
+
+        if connections.is_empty() {
+            None
+        } else {
+            Some(tokio::sync::Mutex::new(connections))
+        }
+    }
+
     /// Relocate any legacy `<home>/agents/<name>/` directories into the
     /// canonical `workspaces/agents/<name>/` layout. This is the same pass
     /// that runs at boot and is exposed so runtime flows (e.g. the migrate
@@ -4540,6 +4627,13 @@ system_prompt = "You are a helpful assistant."
             // Snapshot config for the duration of the agent loop call
             // (load_full returns Arc so the data stays alive across .await).
             let loop_cfg = kernel_clone.config.load_full();
+
+            // Per-agent MCP pool (workspace-scoped roots).
+            let agent_mcp = kernel_clone
+                .build_agent_mcp_pool(manifest.workspace.as_deref())
+                .await;
+            let effective_mcp = agent_mcp.as_ref().unwrap_or(&kernel_clone.mcp_connections);
+
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -4550,7 +4644,7 @@ system_prompt = "You are a helpful assistant."
                 kernel_handle,
                 tx,
                 Some(&skill_snapshot),
-                Some(&kernel_clone.mcp_connections),
+                Some(effective_mcp),
                 Some(&kernel_clone.web_ctx),
                 Some(&kernel_clone.browser_ctx),
                 kernel_clone.embedding_driver.as_deref(),
@@ -5838,6 +5932,14 @@ system_prompt = "You are a helpful assistant."
         // Set up mid-turn injection channel (#956)
         let injection_rx = self.setup_injection_channel(agent_id);
 
+        // Build a per-execution MCP pool that includes the agent workspace as
+        // a root. Falls back to the global pool if the workspace adds nothing
+        // new or if all connections fail.
+        let agent_mcp = self
+            .build_agent_mcp_pool(manifest.workspace.as_deref())
+            .await;
+        let effective_mcp = agent_mcp.as_ref().unwrap_or(&self.mcp_connections);
+
         let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
@@ -5848,7 +5950,7 @@ system_prompt = "You are a helpful assistant."
             &tools,
             kernel_handle,
             Some(&skill_snapshot),
-            Some(&self.mcp_connections),
+            Some(effective_mcp),
             Some(&self.web_ctx),
             Some(&self.browser_ctx),
             self.embedding_driver.as_deref(),
