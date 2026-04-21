@@ -189,7 +189,7 @@ impl MemoryState {
                     }
                 }
             }
-            KeyCode::Char('d') if self.kv_list_state.selected().is_some() => {
+            KeyCode::Char('d') | KeyCode::Delete if self.kv_list_state.selected().is_some() => {
                 self.confirm_delete = true;
             }
             KeyCode::Char('r') if self.selected_agent.is_some() => {

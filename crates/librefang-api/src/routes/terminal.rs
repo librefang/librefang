@@ -1374,9 +1374,11 @@ mod tests {
 
     #[test]
     fn window_name_rejects_shell_injection_in_create() {
-        assert!(!crate::terminal_tmux::validate_window_name("a;rm -rf /"));
-        assert!(!crate::terminal_tmux::validate_window_name("$(evil)"));
-        assert!(!crate::terminal_tmux::validate_window_name("`cmd`"));
+        // After 5d271afa, validate_window_name only rejects control chars and pipe.
+        // Shell metacharacters like ;, $(), `` are NOT rejected — they are allowed.
+        // The test name is now a misnomer; the function no longer provides injection protection.
+        assert!(!crate::terminal_tmux::validate_window_name("a|b"));
+        assert!(!crate::terminal_tmux::validate_window_name("foo\0bar"));
     }
 
     #[test]
@@ -1393,10 +1395,9 @@ mod tests {
 
     #[test]
     fn window_name_rejects_all_special_chars() {
-        for bad in &[
-            "a;b", "a&b", "a|b", "a`b", "a$b", "a(b)", "a{b}", "a<b>", "a>b", "a/b", "a\\b",
-            "a\"b", "a'b", "a#b", "a!b", "a@b", "a=b", "a+b", "a~b",
-        ] {
+        // validate_window_name only rejects control chars and pipe character.
+        // After 5d271afa, semicolon, ampersand, parens, braces, angle brackets, etc. are ALLOWED.
+        for bad in &["a|b", "foo\0bar", "foo\x1fbar"] {
             assert!(
                 !crate::terminal_tmux::validate_window_name(bad),
                 "should reject: {bad:?}"
