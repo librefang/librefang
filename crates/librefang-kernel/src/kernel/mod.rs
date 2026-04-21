@@ -485,6 +485,11 @@ pub struct LibreFangKernel {
     budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
     /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Checkpoint manager — takes automatic shadow-git snapshots before every
+    /// `file_write` / `apply_patch` tool call.  `None` when the base
+    /// directory could not be resolved at boot.
+    pub(crate) checkpoint_manager:
+        Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -2480,6 +2485,14 @@ impl LibreFangKernel {
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            checkpoint_manager: {
+                let cp_dir = config
+                    .home_dir
+                    .join(librefang_runtime::checkpoint_manager::CHECKPOINT_BASE);
+                Some(Arc::new(
+                    librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
+                ))
+            },
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -14047,6 +14060,7 @@ impl LibreFangKernel {
             process_manager: Some(&self.process_manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            checkpoint_manager: self.checkpoint_manager.as_ref(),
         }
     }
 

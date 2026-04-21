@@ -319,6 +319,10 @@ pub struct ToolExecContext<'a> {
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// Optional checkpoint manager.  When `Some`, a snapshot is taken
+    /// automatically before every `file_write` and `apply_patch` call.
+    /// Snapshot failures are non-fatal (logged as warnings only).
+    pub checkpoint_manager: Option<&'a Arc<crate::checkpoint_manager::CheckpointManager>>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -353,14 +357,21 @@ pub async fn execute_tool_raw(
         process_manager,
         sender_id,
         channel: _,
+        checkpoint_manager,
     } = ctx;
 
     let result = match tool_name {
         // Filesystem tools
         "file_read" => tool_file_read(input, *workspace_root).await,
-        "file_write" => tool_file_write(input, *workspace_root).await,
+        "file_write" => {
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write");
+            tool_file_write(input, *workspace_root).await
+        }
         "file_list" => tool_file_list(input, *workspace_root).await,
-        "apply_patch" => tool_apply_patch(input, *workspace_root).await,
+        "apply_patch" => {
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch");
+            tool_apply_patch(input, *workspace_root).await
+        }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
         "web_fetch" => match input["url"].as_str() {
@@ -1014,6 +1025,9 @@ pub async fn execute_tool(
         process_manager,
         sender_id,
         channel,
+        // The checkpoint_manager is injected from the kernel layer
+        // (librefang-kernel); at this level we default to None.
+        checkpoint_manager: None,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
@@ -1972,6 +1986,51 @@ fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<Pa
     )?;
     crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
 }
+
+// ---------------------------------------------------------------------------
+// Checkpoint helper
+// ---------------------------------------------------------------------------
+
+/// Take a snapshot of `workspace_root` before a file-mutating operation.
+///
+/// If an explicit `CheckpointManager` is provided (injected from the kernel),
+/// it is used.  Otherwise, a transient manager is derived from the standard
+/// home directory (`~/.librefang/checkpoints/`).
+///
+/// Failures are **non-fatal**: they are logged as warnings and the calling
+/// tool proceeds normally.
+fn maybe_snapshot(
+    mgr: &Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
+    workspace_root: Option<&Path>,
+    reason: &str,
+) {
+    let Some(root) = workspace_root else {
+        return;
+    };
+
+    let snapshot_result = if let Some(m) = mgr {
+        m.snapshot(root, reason)
+    } else {
+        // No injected manager — derive the checkpoint directory from the
+        // standard home layout so file_write always has snapshot coverage.
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let base = home
+            .join(".librefang")
+            .join(crate::checkpoint_manager::CHECKPOINT_BASE);
+        let transient_mgr = crate::checkpoint_manager::CheckpointManager::new(base);
+        transient_mgr.snapshot(root, reason)
+    };
+
+    if let Err(e) = snapshot_result {
+        warn!(reason, root = %root.display(), "checkpoint snapshot failed (non-fatal): {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem tools
+// ---------------------------------------------------------------------------
 
 async fn tool_file_read(
     input: &serde_json::Value,
