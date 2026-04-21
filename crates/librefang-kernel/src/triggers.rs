@@ -48,7 +48,7 @@ impl std::fmt::Display for TriggerId {
 }
 
 /// What kind of events a trigger matches on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerPattern {
     /// Match any lifecycle event (agent spawned, started, terminated, etc.).
@@ -250,6 +250,20 @@ impl TriggerEngine {
     }
 
     /// Register a new trigger.
+    /// Returns `true` if `agent_id` already has an enabled trigger with this exact pattern.
+    /// Used to skip duplicate registration of proactive triggers on restart.
+    pub fn agent_has_pattern(&self, agent_id: AgentId, pattern: &TriggerPattern) -> bool {
+        let Some(ids) = self.agent_triggers.get(&agent_id) else {
+            return false;
+        };
+        ids.iter().any(|id| {
+            self.triggers
+                .get(id)
+                .map(|t| &t.pattern == pattern)
+                .unwrap_or(false)
+        })
+    }
+
     pub fn register(
         &self,
         agent_id: AgentId,

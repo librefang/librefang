@@ -2969,15 +2969,26 @@ system_prompt = "You are a helpful assistant."
             "ok",
         );
 
-        // For proactive agents spawned at runtime, auto-register triggers
+        // For proactive agents spawned at runtime, auto-register triggers.
+        // Skip any pattern already present (e.g. reloaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = &entry.manifest.schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
+                }
+            }
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, "Failed to persist proactive triggers: {e}");
                 }
             }
         }
@@ -9319,18 +9330,29 @@ system_prompt = "You are a helpful assistant."
         name: &str,
         schedule: &ScheduleMode,
     ) {
-        // For proactive agents, auto-register triggers from conditions
+        // For proactive agents, auto-register triggers from conditions.
+        // Skip patterns already present (loaded from trigger_jobs.json on restart).
         if let ScheduleMode::Proactive { conditions } = schedule {
+            let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
+                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                        continue;
+                    }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
                     self.triggers.register(agent_id, pattern, prompt, 0);
+                    registered = true;
                 }
             }
-            info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            if registered {
+                if let Err(e) = self.triggers.persist() {
+                    warn!(agent = %name, id = %agent_id, "Failed to persist proactive triggers: {e}");
+                }
+                info!(agent = %name, id = %agent_id, "Registered proactive triggers");
+            }
         }
 
         // Start continuous/periodic loops
