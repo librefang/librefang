@@ -108,10 +108,10 @@ export function RuntimePage() {
   const versionQuery = useVersionInfo();
   const queueQuery = useQueueStatus();
   const healthDetailQuery = useHealthDetail();
-  const securityQuery = useSecurityStatus({ enabled: false }); // rarely changes
+  const securityQuery = useSecurityStatus({ refetchInterval: false }); // load once, no background polling
   const auditQuery = useAuditRecent(20);
-  const auditVerifyQuery = useAuditVerify({ enabled: false }); // rarely changes
-  const backupsQuery = useBackups({ enabled: false }); // rarely changes
+  const auditVerifyQuery = useAuditVerify({ refetchInterval: false }); // load once, no background polling
+  const backupsQuery = useBackups({ refetchInterval: false }); // load once, no background polling
   const taskStatusQuery = useTaskQueueStatus();
   const taskListQuery = useTaskQueue();
 
