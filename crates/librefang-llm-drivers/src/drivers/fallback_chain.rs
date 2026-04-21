@@ -21,6 +21,7 @@
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use librefang_llm_driver::FailoverReason;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -59,7 +60,7 @@ pub struct ChainEntry {
 /// let chain = FallbackChain::new(vec![
 ///     ChainEntry { driver: anthropic_driver, model_override: "claude-3-5-sonnet-20241022".into(), provider_name: "anthropic".into() },
 ///     ChainEntry { driver: openai_driver,    model_override: "gpt-4o".into(),                    provider_name: "openai".into() },
-/// ]);
+/// ]).unwrap();
 /// let response = chain.complete(request).await?;
 /// ```
 pub struct FallbackChain {
@@ -67,22 +68,45 @@ pub struct FallbackChain {
     /// Sleep duration (ms) to use when a rate-limit error carries no
     /// `Retry-After` hint.
     rate_limit_sleep_ms: u64,
+    /// Maximum number of rate-limit retries on a single provider before
+    /// skipping to the next one in the chain.
+    max_rate_limit_retries: usize,
 }
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Error returned when creating a [`FallbackChain`] with no entries.
+#[derive(Debug)]
+pub struct EmptyChainError;
+
+impl std::fmt::Display for EmptyChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FallbackChain requires at least one entry")
+    }
+}
+
+impl std::error::Error for EmptyChainError {}
+
+// ---------------------------------------------------------------------------
+// FallbackChain
+// ---------------------------------------------------------------------------
 
 impl FallbackChain {
     /// Build a chain from an ordered list of entries.
     ///
-    /// # Panics
-    /// Panics when `entries` is empty — at least one provider is required.
-    pub fn new(entries: Vec<ChainEntry>) -> Self {
-        assert!(
-            !entries.is_empty(),
-            "FallbackChain requires at least one entry"
-        );
-        Self {
+    /// # Errors
+    /// Returns an error if `entries` is empty — at least one provider is required.
+    pub fn new(entries: Vec<ChainEntry>) -> Result<Self, EmptyChainError> {
+        if entries.is_empty() {
+            return Err(EmptyChainError);
+        }
+        Ok(Self {
             entries,
             rate_limit_sleep_ms: DEFAULT_RATE_LIMIT_SLEEP_MS,
-        }
+            max_rate_limit_retries: MAX_RATE_LIMIT_RETRIES,
+        })
     }
 
     /// Override the default rate-limit sleep duration (milliseconds).
@@ -91,17 +115,10 @@ impl FallbackChain {
         self
     }
 
-    /// Build a `ChainEntry` slice from parallel `(driver, model, name)` tuples.
-    pub fn from_tuples(tuples: Vec<(Arc<dyn LlmDriver>, String, String)>) -> Self {
-        let entries = tuples
-            .into_iter()
-            .map(|(driver, model_override, provider_name)| ChainEntry {
-                driver,
-                model_override,
-                provider_name,
-            })
-            .collect();
-        Self::new(entries)
+    /// Override the maximum number of rate-limit retries on a single provider.
+    pub fn with_max_rate_limit_retries(mut self, n: usize) -> Self {
+        self.max_rate_limit_retries = n;
+        self
     }
 
     /// Attempt a `complete` call on a single entry, applying rate-limit retry
@@ -128,8 +145,10 @@ impl FallbackChain {
                 Err(e) => {
                     let reason = e.failover_reason();
 
-                    if reason == FailoverReason::RateLimit && attempts < MAX_RATE_LIMIT_RETRIES {
-                        // Extract suggested delay from RateLimited variant, fall back to default.
+                    if matches!(reason, FailoverReason::RateLimit(_))
+                        && attempts < self.max_rate_limit_retries
+                    {
+                        // Extract suggested delay from the LlmError, fall back to default.
                         let sleep_ms = match &e {
                             LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
                                 *retry_after_ms
@@ -183,7 +202,7 @@ impl LlmDriver for FallbackChain {
                         FailoverReason::CreditExhausted
                         | FailoverReason::ModelUnavailable
                         | FailoverReason::Timeout
-                        | FailoverReason::RateLimit => {
+                        | FailoverReason::RateLimit(_) => {
                             last_error = Some(e);
                             continue;
                         }
@@ -215,10 +234,33 @@ impl LlmDriver for FallbackChain {
                 req.model = entry.model_override.clone();
             }
 
+            // Wrap the sender so we can detect whether any TextDelta events
+            // have already been forwarded to the caller.  If so, we cannot
+            // safely fall through to the next provider — the caller would
+            // receive a corrupted concatenation of this provider's partial
+            // output and a fresh response from provider B.
+            let text_emitted = Arc::new(AtomicBool::new(false));
+            let (wrap_tx, mut wrap_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
+
+            // Relay loop: forward events to the real sender, track TextDelta.
+            let tx_for_relay = tx.clone();
+            let text_emit_flag = text_emitted.clone();
+            tokio::spawn(async move {
+                while let Some(event) = wrap_rx.recv().await {
+                    if let StreamEvent::TextDelta { .. } = &event {
+                        text_emit_flag.store(true, Ordering::SeqCst);
+                    }
+                    let _ = tx_for_relay.send(event).await;
+                }
+            });
+
             // Stream does not get rate-limit retry (streaming mid-response retry
             // is not supported); any error here triggers the skip/propagate logic.
-            match entry.driver.stream(req, tx.clone()).await {
-                Ok(resp) => return Ok(resp),
+            match entry.driver.stream(req, wrap_tx).await {
+                Ok(resp) => {
+                    // Provider succeeded — stream is complete.
+                    return Ok(resp);
+                }
                 Err(e) => {
                     let reason = e.failover_reason();
                     warn!(
@@ -230,10 +272,16 @@ impl LlmDriver for FallbackChain {
                     );
 
                     match reason {
+                        // If any text was emitted before the error, we cannot
+                        // safely fall through — bail out with the error rather
+                        // than let the caller receive concatenated garbage.
+                        _ if text_emitted.load(Ordering::SeqCst) => {
+                            return Err(e);
+                        }
                         FailoverReason::CreditExhausted
                         | FailoverReason::ModelUnavailable
                         | FailoverReason::Timeout
-                        | FailoverReason::RateLimit => {
+                        | FailoverReason::RateLimit(_) => {
                             last_error = Some(e);
                             continue;
                         }
@@ -369,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn primary_succeeds() {
-        let chain = FallbackChain::new(vec![entry(Arc::new(OkDriver("primary")), "p1")]);
+        let chain = FallbackChain::new(vec![entry(Arc::new(OkDriver("primary")), "p1")]).unwrap();
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "primary");
     }
@@ -379,7 +427,8 @@ mod tests {
         let chain = FallbackChain::new(vec![
             entry(Arc::new(CreditExhaustedDriver), "p1"),
             entry(Arc::new(OkDriver("fallback")), "p2"),
-        ]);
+        ])
+        .unwrap();
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "fallback");
     }
@@ -389,7 +438,8 @@ mod tests {
         let chain = FallbackChain::new(vec![
             entry(Arc::new(ModelUnavailableDriver), "p1"),
             entry(Arc::new(OkDriver("fallback")), "p2"),
-        ]);
+        ])
+        .unwrap();
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "fallback");
     }
@@ -399,7 +449,8 @@ mod tests {
         let chain = FallbackChain::new(vec![
             entry(Arc::new(ContextTooLongDriver), "p1"),
             entry(Arc::new(OkDriver("should-not-reach")), "p2"),
-        ]);
+        ])
+        .unwrap();
         let err = chain.complete(test_request()).await.unwrap_err();
         // ContextTooLong must propagate without reaching p2
         assert_eq!(err.failover_reason(), FailoverReason::ContextTooLong);
@@ -419,6 +470,7 @@ mod tests {
             },
             entry(Arc::new(OkDriver("fallback")), "p2"),
         ])
+        .unwrap()
         .with_rate_limit_sleep_ms(0); // no real sleeping in tests
 
         let r = chain.complete(test_request()).await.unwrap();
@@ -436,7 +488,8 @@ mod tests {
         let chain = FallbackChain::new(vec![
             entry(Arc::new(CreditExhaustedDriver), "p1"),
             entry(Arc::new(ModelUnavailableDriver), "p2"),
-        ]);
+        ])
+        .unwrap();
         assert!(chain.complete(test_request()).await.is_err());
     }
 
@@ -458,7 +511,8 @@ mod tests {
             driver: Arc::new(ModelCapture),
             model_override: "custom-model-v2".to_string(),
             provider_name: "p1".to_string(),
-        }]);
+        }])
+        .unwrap();
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "custom-model-v2");
     }
@@ -471,7 +525,7 @@ mod tests {
             retry_after_ms: 5000,
             message: None,
         };
-        assert_eq!(e.failover_reason(), FailoverReason::RateLimit);
+        assert_eq!(e.failover_reason(), FailoverReason::RateLimit(Some(5000)));
     }
 
     #[test]
@@ -480,7 +534,7 @@ mod tests {
             status: 429,
             message: "Too many requests".to_string(),
         };
-        assert_eq!(e.failover_reason(), FailoverReason::RateLimit);
+        assert_eq!(e.failover_reason(), FailoverReason::RateLimit(None));
     }
 
     #[test]
@@ -515,7 +569,7 @@ mod tests {
         let e = LlmError::Overloaded {
             retry_after_ms: 1000,
         };
-        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+        assert_eq!(e.failover_reason(), FailoverReason::RateLimit(Some(1000)));
     }
 
     #[test]

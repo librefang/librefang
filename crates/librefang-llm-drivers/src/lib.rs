@@ -10,4 +10,4 @@ pub use librefang_llm_driver::FailoverReason;
 pub mod drivers;
 pub mod think_filter;
 
-pub use drivers::fallback_chain::{ChainEntry, FallbackChain};
+pub use drivers::fallback_chain::{ChainEntry, EmptyChainError, FallbackChain};

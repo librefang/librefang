@@ -762,18 +762,19 @@ pub fn is_html_error_page(body: &str) -> bool {
 /// but simplified to the six variants that drive distinct recovery actions in
 /// `librefang_llm_drivers::FallbackChain`:
 ///
-/// | Variant           | HTTP hint            | Recovery                         |
-/// |-------------------|----------------------|----------------------------------|
-/// | `RateLimit`       | 429 / "rate limit"   | sleep then retry same provider   |
-/// | `CreditExhausted` | 402 / "credit"       | skip to next provider            |
-/// | `ContextTooLong`  | 413 / "context"      | propagate (caller must compress) |
-/// | `ModelUnavailable`| 503 / 404            | skip to next provider            |
-/// | `Timeout`         | network timeout      | skip to next provider            |
-/// | `Unknown`         | anything else        | propagate immediately            |
+/// | Variant           | HTTP hint            | Recovery                            |
+/// |-------------------|----------------------|-------------------------------------|
+/// | `RateLimit`       | 429 / "rate limit"   | sleep (optional hint ms), retry      |
+/// | `CreditExhausted` | 402 / "credit"       | skip to next provider               |
+/// | `ModelUnavailable`| 503 / 404            | skip to next provider               |
+/// | `ContextTooLong`  | 413 / "context"      | propagate (caller must compress)   |
+/// | `Timeout`         | network timeout      | skip to next provider               |
+/// | `Unknown`         | anything else        | propagate immediately               |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum FailoverReason {
     /// 429 or quota-based throttling — back off then retry same provider.
-    RateLimit,
+    /// Carries an optional retry delay hint (milliseconds).
+    RateLimit(Option<u64>),
     /// 402 or confirmed credit exhaustion — rotate to next provider immediately.
     CreditExhausted,
     /// 413 or context window overflow — caller must compress, not retried here.

@@ -72,13 +72,19 @@ impl LlmError {
         use crate::llm_errors::FailoverReason;
         match self {
             // Rate-limited: retry the same provider after a backoff.
-            LlmError::RateLimited { .. } => FailoverReason::RateLimit,
+            LlmError::RateLimited { retry_after_ms, .. } => {
+                FailoverReason::RateLimit(if *retry_after_ms > 0 {
+                    Some(*retry_after_ms)
+                } else {
+                    None
+                })
+            }
 
             // HTTP-level API error: inspect status + message.
             LlmError::Api { status, message } => {
                 let msg = message.to_lowercase();
                 match status {
-                    429 => FailoverReason::RateLimit,
+                    429 => FailoverReason::RateLimit(None),
                     // 402 Payment Required is always a billing/credit issue.
                     402 => FailoverReason::CreditExhausted,
                     // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
@@ -88,12 +94,15 @@ impl LlmError {
                             || msg.contains("rate_limit")
                             || msg.contains("too many requests")
                         {
-                            FailoverReason::RateLimit
+                            FailoverReason::RateLimit(None)
                         } else if msg.contains("credit")
                             || msg.contains("balance")
                             || msg.contains("billing")
                             || msg.contains("payment")
-                            || msg.contains("quota")
+                        {
+                            FailoverReason::CreditExhausted
+                        } else if msg.contains("quota")
+                            && (msg.contains("exceeded") || msg.contains("limit"))
                         {
                             FailoverReason::CreditExhausted
                         } else {
@@ -132,7 +141,7 @@ impl LlmError {
                             || msg.contains("rate_limit")
                             || msg.contains("too many requests")
                         {
-                            FailoverReason::RateLimit
+                            FailoverReason::RateLimit(None)
                         } else if msg.contains("credit")
                             || msg.contains("balance")
                             || msg.contains("billing")
@@ -159,8 +168,14 @@ impl LlmError {
             // Inactivity / subprocess timeout maps to Timeout.
             LlmError::TimedOut { .. } => FailoverReason::Timeout,
 
-            // Overloaded (503-equivalent) → treat as ModelUnavailable.
-            LlmError::Overloaded { .. } => FailoverReason::ModelUnavailable,
+            // Overloaded — transient capacity error, retry same provider with back-off.
+            LlmError::Overloaded { retry_after_ms } => {
+                FailoverReason::RateLimit(if *retry_after_ms > 0 {
+                    Some(*retry_after_ms)
+                } else {
+                    None
+                })
+            }
 
             // ModelNotFound → ModelUnavailable (skip to next provider).
             LlmError::ModelNotFound(_) => FailoverReason::ModelUnavailable,
