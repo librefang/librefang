@@ -9,6 +9,14 @@ import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { FileText, Search, Download, Loader2 } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { useAuditRecent } from "../lib/queries/runtime";
+import type { AuditEntry } from "../api";
+
+type LogEntry = AuditEntry & {
+  source?: string;
+  message?: string;
+  event_type?: string;
+  id?: string;
+};
 
 const REFRESH_MS = 5000;
 
@@ -21,26 +29,28 @@ const LOG_LEVELS = {
 
 export function LogsPage() {
   const { t } = useTranslation();
-  const [limit] = useState(100);
-  const auditQuery = useAuditRecent(limit, {
+  const LIMIT = 100;
+  const auditQuery = useAuditRecent(LIMIT, {
     refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
   });
 
   const logs = auditQuery.data?.entries ?? [];
   const modules = useMemo(
-    () => Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[],
+    () => Array.from(new Set(logs.map((l: LogEntry) => l.action || l.source).filter(Boolean))) as string[],
     [logs],
   );
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
 
+  const searchLower = useMemo(() => search.toLowerCase(), [search]);
+
   const filteredLogs = useMemo(
-    () => logs.filter((l: any) => {
-      const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
+    () => logs.filter((l: LogEntry) => {
+      const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(searchLower);
       const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
       return matchesSearch && matchesModule;
     }),
-    [logs, search, moduleFilter],
+    [logs, searchLower, moduleFilter],
   );
 
   const handleExport = () => {
@@ -50,7 +60,7 @@ export function LogsPage() {
     a.href = url;
     a.download = `audit-log-${new Date().toISOString().split("T")[0]}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 100);
   };
 
   return (
@@ -72,7 +82,6 @@ export function LogsPage() {
       />
 
       <Card padding="none" className="flex-1 overflow-hidden">
-        {/* Search and Filter */}
         <div className="bg-main border-b border-border-subtle px-3 sm:px-6 py-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-4">
           <div className="flex-1">
             <Input
@@ -102,7 +111,12 @@ export function LogsPage() {
           <span className="flex-1">{t("logs.message")}</span>
         </div>
         <div className="p-2 sm:p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto scrollbar-thin">
-          {auditQuery.isLoading ? (
+          {auditQuery.isError ? (
+            <InlineEmpty
+              icon={<FileText className="w-5 h-5" />}
+              message={t("common.error")}
+            />
+          ) : auditQuery.isLoading ? (
             <InlineEmpty
               icon={<Loader2 className="w-5 h-5 animate-spin" />}
               message={t("common.loading")}
@@ -113,7 +127,7 @@ export function LogsPage() {
               message={t("common.no_data")}
             />
           ) : (
-            filteredLogs.map((l: any, i: any) => {
+            filteredLogs.map((l: LogEntry, i: number) => {
               const outcome = l.outcome || "";
               const isError = outcome.startsWith("error");
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();
@@ -131,7 +145,7 @@ export function LogsPage() {
                     <span className="text-text-dim/40 font-mono shrink-0 sm:w-16 text-[9px] hidden sm:inline">{agentId || "-"}</span>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <span className="text-slate-700 dark:text-slate-300 text-[11px] break-all">{detail}</span>
+                    <span className="text-text-main text-[11px] break-all">{detail}</span>
                     {reason && (
                       <p className={`text-[10px] mt-0.5 break-all ${isError ? "text-error/70" : "text-text-dim/50"}`}>{reason}</p>
                     )}

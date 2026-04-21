@@ -73,14 +73,19 @@ function CatalogIcon({ icon, className }: { icon: string; className?: string }) 
 type TransportType = "stdio" | "sse" | "http";
 type StatusFilter = "all" | "connected" | "disconnected";
 
+interface LabeledItem {
+  id: string;
+  value: string;
+}
+
 interface ServerFormState {
   name: string;
   transportType: TransportType;
   command: string;
-  args: string[];
+  args: LabeledItem[];
   url: string;
   timeout: number;
-  env: string[];
+  env: LabeledItem[];
   headers: string;
 }
 
@@ -111,7 +116,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     transport = {
       type: "stdio",
       command: form.command,
-      args: form.args.map(s => s.trim()).filter(Boolean),
+      args: form.args.map(item => item.value.trim()).filter(Boolean),
     };
   } else {
     transport = { type: form.transportType, url: form.url };
@@ -122,7 +127,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     name: form.name,
     transport,
     timeout_secs: form.timeout || 30,
-    env: form.env.map(s => s.trim()).filter(Boolean),
+    env: form.env.map(item => item.value.trim()).filter(Boolean),
   };
   // Only include headers if user explicitly entered values, to avoid
   // overwriting server-side headers that the list API may not return.
@@ -138,10 +143,10 @@ function configuredToForm(server: McpServerConfigured): ServerFormState {
     name: server.name,
     transportType: transport.type ?? "stdio",
     command: transport.command ?? "",
-    args: transport.args ?? [],
+    args: (transport.args ?? []).map(v => ({ id: crypto.randomUUID(), value: v })),
     url: transport.url ?? "",
     timeout: server.timeout_secs ?? 30,
-    env: server.env ?? [],
+    env: (server.env ?? []).map(v => ({ id: crypto.randomUUID(), value: v })),
     headers: (server.headers ?? []).join("\n"),
   };
 }
@@ -160,12 +165,12 @@ function getTransportDetail(server: McpServerConfigured): string {
 
 // ── ArgsEditor ──────────────────────────────────────────────────────
 
-function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items: LabeledItem[]) => void }) {
   const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, ""];
+    const next = [...items, { id: crypto.randomUUID(), value: "" }];
     onChange(next);
     // Focus the newly added input after render
     setTimeout(() => {
@@ -179,18 +184,18 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
 
   function updateItem(idx: number, value: string) {
     const next = [...items];
-    next[idx] = value;
+    next[idx] = { ...next[idx], value };
     onChange(next);
   }
 
   return (
     <div className="space-y-1.5">
       {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5">
+        <div key={item.id} className="flex items-center gap-1.5">
           <input
             ref={el => { inputRefs.current[idx] = el; }}
             type="text"
-            value={item}
+            value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
             className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
           />
@@ -218,12 +223,12 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
 
 // ── EnvEditor ───────────────────────────────────────────────────────
 
-function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+function EnvEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items: LabeledItem[]) => void }) {
   const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, ""];
+    const next = [...items, { id: crypto.randomUUID(), value: "" }];
     onChange(next);
     setTimeout(() => {
       inputRefs.current[next.length - 1]?.focus();
@@ -236,18 +241,18 @@ function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: str
 
   function updateItem(idx: number, value: string) {
     const next = [...items];
-    next[idx] = value;
+    next[idx] = { ...next[idx], value };
     onChange(next);
   }
 
   return (
     <div className="space-y-1.5">
       {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5">
+        <div key={item.id} className="flex items-center gap-1.5">
           <input
             ref={el => { inputRefs.current[idx] = el; }}
             type="text"
-            value={item}
+            value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
             placeholder={t("mcp.env_placeholder")}
             className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
@@ -291,7 +296,7 @@ function AuthBadge({
   onAuthSuccess,
 }: {
   server: McpServerConfigured;
-  onAuthSuccess: () => void;
+  onAuthSuccess?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -304,7 +309,7 @@ function AuthBadge({
   const serverIdentity = serverIdentityOf(server);
 
   useEffect(() => {
-    if ((authState === "pending_auth" && polling) || polling) {
+    if (polling) {
       pollRef.current = setInterval(async () => {
         try {
           const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
@@ -312,7 +317,7 @@ function AuthBadge({
             setPolling(false);
             queryClient.invalidateQueries({ queryKey: mcpQueries.servers().queryKey });
             queryClient.invalidateQueries({ queryKey: mcpQueries.health().queryKey });
-            onAuthSuccess();
+            onAuthSuccess?.();
           } else if (status.auth.state === "error") {
             setPolling(false);
             addToast(status.auth.message || t("mcp.auth_failed"), "error");
@@ -338,21 +343,21 @@ function AuthBadge({
       }
       setPolling(true);
       addToast(t("mcp.auth_started"), "info");
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (authWindow && !authWindow.closed) {
         authWindow.close();
       }
-      addToast(e?.message || t("mcp.auth_start_failed"), "error");
+      addToast(e instanceof Error ? e.message : String(e) || t("mcp.auth_start_failed"), "error");
     }
   }, [serverIdentity, startAuthMutation, addToast, t]);
 
   const handleRevoke = useCallback(async () => {
     try {
       await revokeAuthMutation.mutateAsync(serverIdentity);
-      onAuthSuccess();
+      onAuthSuccess?.();
       addToast(t("mcp.auth_revoked"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("mcp.auth_revoke_failed"), "error");
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : String(e) || t("mcp.auth_revoke_failed"), "error");
     }
   }, [serverIdentity, revokeAuthMutation, onAuthSuccess, addToast, t]);
 
@@ -437,12 +442,16 @@ function ServerCard({
   onToggleTools: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onAuthSuccess: () => void;
+  onAuthSuccess?: () => void;
   t: (key: string, opts?: any) => string;
 }) {
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;
   const [showAllTools, setShowAllTools] = useState(false);
+
+  // Cache transport info — computed once per render, not 3-4x
+  const transportType = useMemo(() => getTransportType(server), [server]);
+  const transportDetail = useMemo(() => getTransportDetail(server), [server]);
 
   // Reset "show all" when tools section is collapsed
   useEffect(() => {
@@ -482,7 +491,7 @@ function ServerCard({
                 isConnected ? "group-hover:text-success" : "group-hover:text-brand"
               }`}>{server.name}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
-                {getTransportType(server)}
+                {transportType}
               </p>
             </div>
           </div>
@@ -515,17 +524,17 @@ function ServerCard({
         {/* Transport badge + detail */}
         <div className="flex items-center gap-2 mb-3">
           <Badge variant="default">
-            <TransportIcon type={getTransportType(server)} />
-            <span className="ml-1">{getTransportType(server).toUpperCase()}</span>
+            <TransportIcon type={transportType} />
+            <span className="ml-1">{transportType.toUpperCase()}</span>
           </Badge>
         </div>
         <div className="flex items-center gap-2 text-xs mb-2">
-          {getTransportType(server) === "stdio" ? (
+          {transportType === "stdio" ? (
             <Terminal className="w-3 h-3 text-text-dim/50 shrink-0" />
           ) : (
             <Globe className="w-3 h-3 text-text-dim/50 shrink-0" />
           )}
-          <span className="text-text-dim font-mono text-[10px] truncate">{getTransportDetail(server)}</span>
+          <span className="text-text-dim font-mono text-[10px] truncate">{transportDetail}</span>
         </div>
       </div>
 
@@ -646,7 +655,7 @@ export function McpServersPage() {
     return result;
   }, [configured, searchQuery, statusFilter, connectedMap]);
 
-  function toggleTools(server: McpServerConfigured) {
+  const toggleTools = useCallback((server: McpServerConfigured) => {
     const identity = serverIdentityOf(server);
     setExpandedTools(prev => {
       const next = new Set(prev);
@@ -654,17 +663,35 @@ export function McpServersPage() {
       else next.add(identity);
       return next;
     });
-  }
+  }, []);
 
   function openAdd() {
     setForm(defaultForm);
     setShowAddModal(true);
   }
 
-  function openEdit(server: McpServerConfigured) {
+  const openEdit = useCallback((server: McpServerConfigured) => {
     setForm(configuredToForm(server));
     setEditingServer(server);
-  }
+  }, []);
+
+  const deleteServer = useCallback((server: McpServerConfigured) => {
+    setDeletingServer(server);
+  }, []);
+
+  // Stable per-server callbacks for ServerCard
+  const serverCallbacks = useMemo(() => {
+    const map = new Map<string, { toggle: () => void; edit: () => void; del: () => void }>();
+    for (const server of filteredServers) {
+      const id = serverIdentityOf(server);
+      map.set(id, {
+        toggle: () => toggleTools(server),
+        edit: () => openEdit(server),
+        del: () => deleteServer(server),
+      });
+    }
+    return map;
+  }, [filteredServers, toggleTools, openEdit, deleteServer]);
 
   function handleSubmit() {
     const payload = formToPayload(form);
@@ -677,7 +704,7 @@ export function McpServersPage() {
             setForm(defaultForm);
             addToast(t("mcp.update_success"), "success");
           },
-          onError: (e: any) => addToast(e?.message || t("mcp.update_failed"), "error"),
+          onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.update_failed"), "error"),
         },
       );
     } else {
@@ -689,7 +716,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
       });
     }
   }
@@ -697,7 +724,7 @@ export function McpServersPage() {
   function handleReload() {
     reloadMutation.mutate(undefined, {
       onSuccess: () => addToast(t("mcp.reload_success"), "success"),
-      onError: (e: any) => addToast(e?.message || t("mcp.reload_failed"), "error"),
+      onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.reload_failed"), "error"),
     });
   }
 
@@ -725,7 +752,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
       });
     }
   }
@@ -751,7 +778,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
       },
     );
   }
@@ -942,19 +969,23 @@ export function McpServersPage() {
           {/* Server cards */}
           {filteredServers.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-              {filteredServers.map((server) => (
-                <ServerCard
-                  key={serverIdentityOf(server)}
-                  server={server}
-                  conn={connectedMap.get(serverIdentityOf(server))}
-                  isExpanded={expandedTools.has(serverIdentityOf(server))}
-                  onToggleTools={() => toggleTools(server)}
-                  onEdit={() => openEdit(server)}
-                  onDelete={() => setDeletingServer(server)}
-                  onAuthSuccess={() => undefined}
-                  t={t}
-                />
-              ))}
+              {filteredServers.map((server) => {
+                const id = serverIdentityOf(server);
+                const callbacks = serverCallbacks.get(id);
+                if (!callbacks) return null;
+                return (
+                  <ServerCard
+                    key={id}
+                    server={server}
+                    conn={connectedMap.get(id)}
+                    isExpanded={expandedTools.has(id)}
+                    onToggleTools={callbacks.toggle}
+                    onEdit={callbacks.edit}
+                    onDelete={callbacks.del}
+                    t={t}
+                  />
+                );
+              })}
             </div>
           )}
         </>
@@ -1285,7 +1316,7 @@ export function McpServersPage() {
               setDeletingServer(null);
               addToast(t("mcp.delete_success"), "success");
             },
-            onError: (e: any) => addToast(e?.message || t("mcp.delete_failed"), "error"),
+            onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.delete_failed"), "error"),
           });
         }}
         onClose={() => setDeletingServer(null)}

@@ -1,5 +1,4 @@
-import { formatCost } from "../lib/format";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { router } from "../router";
@@ -8,7 +7,6 @@ import {
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
-  type HandSessionMessage,
   type CronJobItem,
 } from "../lib/http/client";
 import { Badge } from "../components/ui/Badge";
@@ -27,16 +25,12 @@ import {
   Wrench,
   Activity,
   MessageCircle,
-  Send,
-  Bot,
-  User,
   AlertCircle,
   FileText,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { truncateId } from "../lib/string";
 import {
   useHands,
@@ -45,10 +39,11 @@ import {
   useHandSettings as useHandSettingsQuery,
   useHandStats,
   useHandStatsBatch,
-  useHandSession,
   useHandManifestToml,
 } from "../lib/queries/hands";
-import { TomlViewer } from "../components/TomlViewer";
+
+const TomlViewer = lazy(() => import("../components/TomlViewer").then(m => ({ default: m.TomlViewer })));
+
 import {
   useActivateHand,
   useDeactivateHand,
@@ -57,23 +52,10 @@ import {
   useUninstallHand,
   useSetHandSecret,
   useUpdateHandSettings,
-  useSendHandMessage,
 } from "../lib/mutations/hands";
 import { useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { useCronJobs } from "../lib/queries/runtime";
 
-/* ── Inject slideInRight keyframes once at module level ──── */
-if (typeof document !== "undefined" && !document.getElementById("hands-keyframes")) {
-  const style = document.createElement("style");
-  style.id = "hands-keyframes";
-  style.textContent = `
-    @keyframes slideInRight {
-      from { transform: translateX(100%); opacity: 0; }
-      to   { transform: translateX(0);    opacity: 1; }
-    }
-  `;
-  document.head.appendChild(style);
-}
 
 
 /* ── Inline metrics for active hand cards ─────────────────── */
@@ -93,325 +75,6 @@ function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unk
           <span className="text-brand/80">{String(m.value)}</span>
         </span>
       ))}
-    </div>
-  );
-}
-
-/* ── Chat panel for an active hand instance ──────────────── */
-
-interface ChatMsg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: Date;
-  isLoading?: boolean;
-  error?: string;
-  tokens?: { input?: number; output?: number };
-  cost_usd?: number;
-  blocks?: Array<
-    | { type: "text"; text: string }
-    | { type: "tool_use"; id: string; name: string; input: unknown }
-    | { type: "tool_result"; tool_use_id: string; name: string; content: string; is_error: boolean }
-  >;
-}
-
-function HandChatPanel({
-  instanceId,
-  handName,
-  onClose,
-}: {
-  instanceId: string;
-  handName: string;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const hydratedInstanceIdRef = useRef<string | null>(null);
-  const sendHandMessageMutation = useSendHandMessage();
-
-  const { data: sessionData } = useHandSession(instanceId);
-
-  useEffect(() => {
-    if (hydratedInstanceIdRef.current !== instanceId) {
-      hydratedInstanceIdRef.current = instanceId;
-      setMessages([]);
-    }
-  }, [instanceId]);
-
-  useEffect(() => {
-    if (sessionData?.messages) {
-      const hist: ChatMsg[] = sessionData.messages.map(
-        (m: HandSessionMessage, i: number) => ({
-          id: `hist-${i}`,
-          role: m.role === "user" ? ("user" as const) : ("assistant" as const),
-          content: m.content || "",
-          timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
-          blocks: m.blocks,
-        }),
-      );
-      setMessages((current) => {
-        if (current.some((msg) => msg.isLoading || msg.error)) {
-          return current;
-        }
-        if (hist.length > 0 || current.length === 0) {
-          return hist;
-        }
-        return current;
-      });
-    }
-  }, [sessionData?.messages]);
-
-  useEffect(() => {
-    if (messages.length === 0) return;
-    const id = setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
-    return () => clearTimeout(id);
-  }, [messages]);
-
-  useEffect(() => {
-    const id = setTimeout(() => inputRef.current?.focus(), 100);
-    return () => clearTimeout(id);
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-
-    const userMsg: ChatMsg = {
-      id: `u-${Date.now()}`,
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    };
-    const botMsg: ChatMsg = {
-      id: `b-${Date.now()}`,
-      role: "assistant",
-      content: "",
-      timestamp: new Date(),
-      isLoading: true,
-    };
-
-    setMessages((prev) => [...prev, userMsg, botMsg]);
-    setInput("");
-    setSending(true);
-
-    try {
-      const res = await sendHandMessageMutation.mutateAsync({
-        instanceId,
-        message: text,
-      });
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id
-            ? {
-                ...m,
-                content: res.response || "",
-                isLoading: false,
-                tokens: { input: res.input_tokens, output: res.output_tokens },
-                cost_usd: res.cost_usd,
-              }
-            : m
-        )
-      );
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Error";
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id ? { ...m, isLoading: false, error: errMsg } : m
-        )
-      );
-    } finally {
-      setSending(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [input, sending, instanceId, sendHandMessageMutation]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl backdrop-saturate-150"
-      onClick={onClose}
-    >
-      <div
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[92vw] h-[85vh] sm:h-[80vh] flex flex-col animate-fade-in-scale"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border-subtle flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-brand/15 text-brand flex items-center justify-center">
-              <MessageCircle className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold">{handName}</h3>
-              <p className="text-[9px] text-text-dim/60 font-mono">
-                {truncateId(instanceId, 12)}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-text-dim hover:text-text hover:bg-main transition-colors"
-            aria-label={t("common.close", { defaultValue: "Close" })}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-          {messages.length === 0 && !sending && (
-            <div className="h-full flex flex-col items-center justify-center text-center">
-              <div className="w-14 h-14 rounded-xl bg-brand/10 flex items-center justify-center mb-3">
-                <Bot className="w-7 h-7 text-brand/60" />
-              </div>
-              <p className="text-sm font-bold">{handName}</p>
-              <p className="text-xs text-text-dim mt-1">{t("chat.welcome_system")}</p>
-            </div>
-          )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div className={`max-w-[85%] ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                <div className={`flex items-center gap-1.5 mb-1 ${msg.role === "user" ? "justify-end" : ""}`}>
-                  <div className={`h-5 w-5 rounded-md flex items-center justify-center ${
-                    msg.role === "user"
-                      ? "bg-brand text-white"
-                      : "bg-surface border border-border-subtle"
-                  }`}>
-                    {msg.role === "user" ? (
-                      <User className="h-2.5 w-2.5" />
-                    ) : (
-                      <Bot className="h-2.5 w-2.5 text-brand" />
-                    )}
-                  </div>
-                  <span className="text-[9px] text-text-dim/50">
-                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </div>
-                <div
-                  className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-brand text-white rounded-tr-sm"
-                      : msg.error
-                        ? "bg-error/10 border border-error/20 text-error rounded-tl-sm"
-                        : "bg-surface border border-border-subtle rounded-tl-sm"
-                  }`}
-                >
-                  {msg.isLoading ? (
-                    <div className="flex items-center gap-1 py-1">
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                    </div>
-                  ) : msg.error ? (
-                    <div className="flex items-start gap-1.5">
-                      <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                      <span>{msg.error}</span>
-                    </div>
-                  ) : msg.role === "user" ? (
-                    <span>{msg.content}</span>
-                  ) : msg.blocks?.length ? (
-                    <div className="space-y-2">
-                      {msg.blocks.map((block, bi) => {
-                        if (block.type === "text") {
-                          return (
-                            <MarkdownContent key={bi}>
-                              {block.text}
-                            </MarkdownContent>
-                          );
-                        }
-                        if (block.type === "tool_use") {
-                          return (
-                            <details key={bi} className="rounded-lg border border-brand/20 bg-brand/5 overflow-hidden">
-                              <summary className="px-2.5 py-1.5 text-[10px] font-bold text-brand cursor-pointer flex items-center gap-1.5 select-none">
-                                <Wrench className="w-3 h-3 shrink-0" />
-                                {block.name}
-                              </summary>
-                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all">
-                                {typeof block.input === "string" ? block.input : JSON.stringify(block.input, null, 2)}
-                              </pre>
-                            </details>
-                          );
-                        }
-                        if (block.type === "tool_result") {
-                          return (
-                            <details key={bi} className={`rounded-lg border overflow-hidden ${block.is_error ? "border-error/20 bg-error/5" : "border-success/20 bg-success/5"}`}>
-                              <summary className={`px-2.5 py-1.5 text-[10px] font-bold cursor-pointer flex items-center gap-1.5 select-none ${block.is_error ? "text-error" : "text-success"}`}>
-                                {block.is_error ? <XCircle className="w-3 h-3 shrink-0" /> : <CheckCircle2 className="w-3 h-3 shrink-0" />}
-                                {block.name || "result"}
-                              </summary>
-                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
-                                {block.content}
-                              </pre>
-                            </details>
-                          );
-                        }
-                        return null;
-                      })}
-                    </div>
-                  ) : (
-                    <MarkdownContent>
-                      {msg.content}
-                    </MarkdownContent>
-                  )}
-                </div>
-                {msg.tokens?.output && !msg.isLoading && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <span className="text-[8px] text-text-dim/40 font-mono">
-                      {msg.tokens.output} tok
-                    </span>
-                    {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
-                      <span className="text-[8px] text-success/60 font-mono">
-                        {formatCost(msg.cost_usd)}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <div ref={endRef} />
-        </div>
-
-        {/* Input */}
-        <div className="px-4 py-3 border-t border-border-subtle shrink-0">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex gap-2 items-end"
-          >
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={t("chat.input_placeholder_with_agent", { name: handName })}
-              disabled={sending}
-              rows={1}
-              className="flex-1 min-h-[40px] max-h-[100px] rounded-xl border border-border-subtle bg-main px-3 py-2.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || sending}
-              className="px-3.5 py-2.5 rounded-xl bg-brand text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-            >
-              <Send className="h-4 w-4" />
-            </button>
-          </form>
-        </div>
-      </div>
     </div>
   );
 }
@@ -534,8 +197,6 @@ function HandDetailPanel({
               <p className="text-sm text-text-dim leading-relaxed">{hand.description}</p>
             )}
 
-            {/* View raw manifest — discreet link, useful for debugging /
-                code review without leaving the panel. */}
             <button
               type="button"
               onClick={() => setShowManifest(true)}
@@ -636,18 +297,20 @@ function HandDetailPanel({
           </div>
         </div>
       </div>
-      <TomlViewer
-        isOpen={showManifest}
-        onClose={() => setShowManifest(false)}
-        title={t("hands.manifest_title", { name: hand.name || hand.id })}
-        toml={manifestQuery.data}
-        downloadName={`${hand.id}.HAND.toml`}
-        error={
-          manifestQuery.error
-            ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
-            : null
-        }
-      />
+      <Suspense fallback={null}>
+        <TomlViewer
+          isOpen={showManifest}
+          onClose={() => setShowManifest(false)}
+          title={t("hands.manifest_title", { name: hand.name || hand.id })}
+          toml={manifestQuery.data}
+          downloadName={`${hand.id}.HAND.toml`}
+          error={
+            manifestQuery.error
+              ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
+              : null
+          }
+        />
+      </Suspense>
     </div>
   );
 }
@@ -727,13 +390,11 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   );
 }
 
-function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, statsQuery }: {
+function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats: _stats, statsQuery: _statsQuery }: {
   hand: HandDefinitionItem; instance: HandInstanceItem | undefined; isActive: boolean;
   settings: HandSettingsResponse; settingsQuery: any; stats: HandStatsResponse; statsQuery: any;
 }) {
   const { t } = useTranslation();
-  const hasMetrics = isActive && !statsQuery.isLoading && stats.metrics &&
-    Object.entries(stats.metrics).some(([, m]) => m.value != null && String(m.value) !== "-" && String(m.value) !== "");
 
   // Fetch hand detail with agents list
   const detailQuery = useHandDetail(hand.id);
@@ -753,8 +414,6 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
     { id: "tools", label: t("hands.tools"), count: hand.tools?.length, show: !!(hand.tools && hand.tools.length > 0) },
   ];
-  // Silence unused — hasMetrics is now surfaced via the hero metrics strip in HandDetailPanel
-  void hasMetrics;
   const visibleTabs = tabs.filter(t => t.show);
   const [activeTab, setActiveTab] = useState<Tab>(visibleTabs[0]?.id ?? "settings");
 
@@ -967,7 +626,7 @@ function HandSettingsEditor({
                   id={`setting-${key}`}
                   value={current}
                   disabled={!canEdit || saveMutation.isPending}
-                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  onChange={(e) => setDraft(prev => ({ ...prev, [key]: e.target.value }))}
                   className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-brand"
                 >
                   {!current && <option value="">—</option>}
@@ -984,7 +643,7 @@ function HandSettingsEditor({
                   value={current}
                   disabled={!canEdit || saveMutation.isPending}
                   placeholder={rawDefault || undefined}
-                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  onChange={(e) => setDraft(prev => ({ ...prev, [key]: e.target.value }))}
                   className="text-xs font-mono"
                 />
               )}
@@ -1045,7 +704,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
     try {
       await toggleSchedule.mutateAsync({ id: job.id, data: { enabled: !job.enabled } });
       onRefresh();
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) { addToast(err instanceof Error ? err.message : t("common.error"), "error"); }
   };
 
   const handleDelete = async (id: string) => {
@@ -1054,7 +713,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
     try {
       await deleteScheduleMut.mutateAsync(id);
       onRefresh();
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) { addToast(err instanceof Error ? err.message : t("common.error"), "error"); }
   };
 
   if (isLoading) return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
@@ -1100,7 +759,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
 
 /* ── Active hand card (horizontal strip) ─────────────────── */
 
-function ActiveHandChip({
+const ActiveHandChip = React.memo(function ActiveHandChip({
   hand,
   instance,
   onChat,
@@ -1180,7 +839,7 @@ function ActiveHandChip({
       </div>
     </div>
   );
-}
+});
 
 /* ── Grid skeleton matching HandCard layout ──────────────── */
 
@@ -1215,7 +874,7 @@ function HandCardGridSkeleton() {
 
 /* ── Hand card (grid item) ───────────────────────────────── */
 
-function HandCard({
+const HandCard = React.memo(function HandCard({
   hand,
   instance,
   isActive,
@@ -1264,6 +923,7 @@ function HandCard({
       className={`group relative flex flex-col rounded-2xl border transition-all cursor-pointer ${stateClasses}`}
       onClick={() => onDetail(hand)}
       role="button"
+      aria-label={hand.name || hand.id}
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onDetail(hand); } }}
     >
@@ -1387,7 +1047,7 @@ function HandCard({
       </div>
     </div>
   );
-}
+});
 
 /* ── Main page ────────────────────────────────────────────── */
 
@@ -1415,6 +1075,11 @@ export function HandsPage() {
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
 
+  const handleChat = useCallback((instanceId: string) => {
+    const inst = instances.find((i) => i.instance_id === instanceId);
+    navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+  }, [instances, navigate]);
+
   const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
   const allStatsQuery = useHandStatsBatch(activeInstanceIds);
   const statsByInstance = allStatsQuery.data ?? {};
@@ -1439,6 +1104,15 @@ export function HandsPage() {
       if (h.category) cats.add(h.category);
     }
     return Array.from(cats).sort();
+  }, [hands]);
+
+  // Memoized category counts
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const h of hands) {
+      if (h.category) counts[h.category] = (counts[h.category] ?? 0) + 1;
+    }
+    return counts;
   }, [hands]);
 
   // Active hands paired with their definitions — used by the running strip
@@ -1604,10 +1278,7 @@ export function HandsPage() {
                 hand={hand}
                 instance={instance}
                 metrics={statsByInstance[instance.instance_id]?.metrics}
-                onChat={(instanceId) => {
-                  const inst = instances.find((i) => i.instance_id === instanceId);
-                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-                }}
+                onChat={handleChat}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === instance.instance_id}
@@ -1639,7 +1310,7 @@ export function HandsPage() {
               <span className="ml-1 opacity-50">({hands.length})</span>
             </button>
             {categories.map((cat) => {
-              const count = hands.filter((h) => h.category === cat).length;
+              const count = categoryCounts[cat] ?? 0;
               return (
                 <button
                   key={cat}
@@ -1699,10 +1370,7 @@ export function HandsPage() {
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
-                onChat={(instanceId) => {
-                  const inst = instances.find((i) => i.instance_id === instanceId);
-                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-                }}
+                onChat={handleChat}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
@@ -1722,10 +1390,7 @@ export function HandsPage() {
           onDeactivate={handleDeactivate}
           onPause={handlePause}
           onResume={handleResume}
-          onChat={(instanceId) => {
-            const inst = instances.find(i => i.instance_id === instanceId);
-            navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-          }}
+          onChat={handleChat}
           onUninstall={handleUninstall}
           isPending={pendingId === detailHandLatest.id}
         />
@@ -1734,7 +1399,3 @@ export function HandsPage() {
     </div>
   );
 }
-
-// HandChatPanel is a self-contained side-panel chat; currently unused because
-// the page navigates to /chat instead. Kept for planned re-integration.
-void HandChatPanel;

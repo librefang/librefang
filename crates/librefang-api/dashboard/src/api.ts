@@ -513,6 +513,9 @@ export interface MemoryStatsResponse {
   user_count?: number;
   session_count?: number;
   agent_count?: number;
+  episodic_count?: number;
+  semantic_count?: number;
+  working_count?: number;
   categories?: Record<string, number>;
   enabled?: boolean;
   auto_memorize_enabled?: boolean;

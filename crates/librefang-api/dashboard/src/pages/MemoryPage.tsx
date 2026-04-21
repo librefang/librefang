@@ -1,5 +1,5 @@
 import { formatDateTime } from "../lib/datetime";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo, useDeferredValue } from "react";
 import { useTranslation } from "react-i18next";
 import { type MemoryStatsResponse } from "../api";
 import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList } from "../lib/queries/memory";
@@ -129,14 +129,16 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
 
   if (!stats) return null;
 
+  const kpis = useMemo(() => [
+    { icon: Database, label: t("memory.total_memories"), value: stats.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
+    { icon: Sparkles, label: t("memory.episodic"), value: stats.episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
+    { icon: Zap, label: t("memory.semantic"), value: stats.semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
+    { icon: Clock, label: t("memory.working"), value: stats.working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
+  ], [stats, t]);
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
-      {[
-        { icon: Database, label: t("memory.total_memories"), value: stats.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
-        { icon: Sparkles, label: t("memory.episodic"), value: (stats as any).episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
-        { icon: Zap, label: t("memory.semantic"), value: (stats as any).semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
-        { icon: Clock, label: t("memory.working"), value: (stats as any).working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
-      ].map((kpi, i) => (
+      {kpis.map((kpi, i) => (
         <Card key={i} hover padding="md">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
@@ -149,6 +151,18 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   );
 }
 
+interface MemoryConfigForm {
+  embedding_provider: string;
+  embedding_model: string;
+  embedding_api_key_env: string;
+  decay_rate: string;
+  pm_enabled: boolean;
+  pm_auto_memorize: boolean;
+  pm_auto_retrieve: boolean;
+  pm_extraction_model: string;
+  pm_max_retrieve: string;
+}
+
 function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -156,25 +170,19 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const configQuery = useMemoryConfig();
   const updateConfig = useUpdateMemoryConfig();
 
-  const [form, setForm] = useState<Record<string, any> | null>(null);
-
-  // Init form from API data
-  useEffect(() => {
-    const data = configQuery.data;
-    if (data && !form) {
-      setForm({
-        embedding_provider: data.embedding_provider || "",
-        embedding_model: data.embedding_model || "",
-        embedding_api_key_env: data.embedding_api_key_env || "",
-        decay_rate: data.decay_rate ?? 0.05,
-        pm_enabled: data.proactive_memory?.enabled ?? true,
-        pm_auto_memorize: data.proactive_memory?.auto_memorize ?? true,
-        pm_auto_retrieve: data.proactive_memory?.auto_retrieve ?? true,
-        pm_extraction_model: data.proactive_memory?.extraction_model || "",
-        pm_max_retrieve: data.proactive_memory?.max_retrieve ?? 10,
-      });
-    }
-  }, [configQuery.data, form]);
+  const [form, setForm] = useState<MemoryConfigForm | null>(() =>
+    configQuery.data ? {
+      embedding_provider: configQuery.data.embedding_provider || "",
+      embedding_model: configQuery.data.embedding_model || "",
+      embedding_api_key_env: configQuery.data.embedding_api_key_env || "",
+      decay_rate: String(configQuery.data.decay_rate ?? 0.05),
+      pm_enabled: configQuery.data.proactive_memory?.enabled ?? true,
+      pm_auto_memorize: configQuery.data.proactive_memory?.auto_memorize ?? true,
+      pm_auto_retrieve: configQuery.data.proactive_memory?.auto_retrieve ?? true,
+      pm_extraction_model: configQuery.data.proactive_memory?.extraction_model || "",
+      pm_max_retrieve: String(configQuery.data.proactive_memory?.max_retrieve ?? 10),
+    } : null
+  );
 
   const handleSave = async () => {
     if (!form) return;
@@ -203,93 +211,88 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
 
   return (
-    <div className="fixed inset-0 z-100 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-0 sm:p-4" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-t-2xl sm:rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale overflow-hidden" onClick={e => e.stopPropagation()}>
-        <div className="p-6 pb-4">
-          <h3 className="text-lg font-black">{t("memory.config_title", { defaultValue: "Memory Configuration" })}</h3>
-          <p className="text-xs text-text-dim mt-0.5">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
-        </div>
+    <Modal isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg">
+      <p className="text-xs text-text-dim -mt-2 mb-4">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
 
-        {configQuery.isLoading || !form ? (
-          <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
-        ) : (
-          <div className="px-6 pb-4 space-y-4 max-h-[60vh] overflow-y-auto">
-            {/* Embedding */}
-            <div>
-              <h4 className="text-xs font-bold mb-3">Embedding</h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <span className={labelCls}>Provider</span>
-                  <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
-                    <option value="">Auto-detect</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="ollama">Ollama</option>
-                    <option value="gemini">Gemini</option>
-                    <option value="minimax">MiniMax</option>
-                  </select>
-                </div>
-                <div>
-                  <span className={labelCls}>Model</span>
-                  <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
-                    placeholder="text-embedding-3-small" className={inputCls} />
-                </div>
+      {configQuery.isLoading || !form ? (
+        <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
+      ) : (
+        <div className="space-y-4 max-h-[60vh] overflow-y-auto">
+          {/* Embedding */}
+          <div>
+            <h4 className="text-xs font-bold mb-3">Embedding</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <span className={labelCls}>Provider</span>
+                <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
+                  <option value="">Auto-detect</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="minimax">MiniMax</option>
+                </select>
               </div>
-              <div className="mt-2">
-                <span className={labelCls}>API Key Env</span>
-                <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
-                  placeholder="OPENAI_API_KEY" className={inputCls} />
+              <div>
+                <span className={labelCls}>Model</span>
+                <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
+                  placeholder="text-embedding-3-small" className={inputCls} />
               </div>
             </div>
-
-            {/* Proactive Memory */}
-            <div>
-              <h4 className="text-xs font-bold mb-3">Proactive Memory</h4>
-              <div className="space-y-2">
-                {[
-                  { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
-                  { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
-                  { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
-                ].map(opt => (
-                  <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
-                    <span className="text-xs font-medium">{opt.label}</span>
-                    <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key] })}
-                      className={`w-10 h-5 rounded-full transition-colors ${form[opt.key] ? "bg-brand" : "bg-border-subtle"}`}>
-                      <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key] ? "translate-x-5" : "translate-x-0.5"}`} />
-                    </button>
-                  </label>
-                ))}
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                <div>
-                  <span className={labelCls}>Extraction Model</span>
-                  <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
-                    placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
-                </div>
-                <div>
-                  <span className={labelCls}>Max Retrieve</span>
-                  <input type="number" min={1} max={50} value={form.pm_max_retrieve ?? 10}
-                    onChange={e => setForm({ ...form, pm_max_retrieve: e.target.value })} className={inputCls} />
-                </div>
-              </div>
-            </div>
-
-            {/* Decay */}
-            <div>
-              <span className={labelCls}>Decay Rate</span>
-              <input type="number" step={0.01} min={0} max={1} value={form.decay_rate ?? 0.05}
-                onChange={e => setForm({ ...form, decay_rate: e.target.value })} className={inputCls} />
+            <div className="mt-2">
+              <span className={labelCls}>API Key Env</span>
+              <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
+                placeholder="OPENAI_API_KEY" className={inputCls} />
             </div>
           </div>
-        )}
 
-        <div className="flex gap-2 p-6 pt-3">
-          <Button variant="primary" className="flex-1" onClick={handleSave} disabled={updateConfig.isPending}>
-            {updateConfig.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
-          </Button>
-          <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
+          {/* Proactive Memory */}
+          <div>
+            <h4 className="text-xs font-bold mb-3">Proactive Memory</h4>
+            <div className="space-y-2">
+              {[
+                { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
+                { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
+                { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
+              ].map(opt => (
+                <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
+                  <span className="text-xs font-medium">{opt.label}</span>
+                  <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key as keyof MemoryConfigForm] })}
+                    className={`w-10 h-5 rounded-full transition-colors ${form[opt.key as keyof MemoryConfigForm] ? "bg-brand" : "bg-border-subtle"}`}>
+                    <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key as keyof MemoryConfigForm] ? "translate-x-5" : "translate-x-0.5"}`} />
+                  </button>
+                </label>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <div>
+                <span className={labelCls}>Extraction Model</span>
+                <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
+                  placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
+              </div>
+              <div>
+                <span className={labelCls}>Max Retrieve</span>
+                <input type="number" min={1} max={50} value={form.pm_max_retrieve ?? 10}
+                  onChange={e => setForm({ ...form, pm_max_retrieve: e.target.value })} className={inputCls} />
+              </div>
+            </div>
+          </div>
+
+          {/* Decay */}
+          <div>
+            <span className={labelCls}>Decay Rate</span>
+            <input type="number" step={0.01} min={0} max={1} value={form.decay_rate ?? 0.05}
+              onChange={e => setForm({ ...form, decay_rate: e.target.value })} className={inputCls} />
+          </div>
         </div>
+      )}
+
+      <div className="flex gap-2 mt-6">
+        <Button variant="primary" className="flex-1" onClick={handleSave} disabled={updateConfig.isPending}>
+          {updateConfig.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+        </Button>
+        <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -320,7 +323,8 @@ export function MemoryPage() {
       }
     : null;
 
-  const memoryQuery = useMemorySearchOrList(search);
+  const deferredSearch = useDeferredValue(search);
+  const memoryQuery = useMemorySearchOrList(deferredSearch);
 
   const statsQuery = useMemoryStats();
   const deleteMutation = useDeleteMemory();
@@ -330,13 +334,10 @@ export function MemoryPage() {
   const memories = memoryQuery.data?.memories ?? [];
   const totalCount = memoryQuery.data?.total ?? 0;
 
-  const filteredMemories = useMemo(
-    () => memories.filter(m => {
-      const matchesLevel = levelFilter === "all" || m.level === levelFilter;
-      return matchesLevel;
-    }),
-    [memories, levelFilter],
-  );
+  const filteredMemories = useMemo(() => {
+    if (levelFilter === "all") return memories;
+    return memories.filter(m => m.level === levelFilter);
+  }, [memories, levelFilter]);
 
   const levels = useMemo(
     () => Array.from(new Set(memories.map(m => m.level).filter(Boolean))),
@@ -374,10 +375,24 @@ export function MemoryPage() {
       />
 
       {/* Stats */}
-      <MemoryStats stats={statsQuery.data ?? null} />
+      {statsQuery.isError ? (
+        <EmptyState
+          title={t("common.error")}
+          description={t("common.error_loading_stats", { defaultValue: "Failed to load memory stats" })}
+          icon={<Database className="h-6 w-6" />}
+        />
+      ) : (
+        <MemoryStats stats={statsQuery.data ?? null} />
+      )}
 
       {/* Memory Config */}
-      {memoryConfig && (
+      {memoryConfigQuery.isError ? (
+        <EmptyState
+          title={t("common.error")}
+          description={t("common.error_loading_config", { defaultValue: "Failed to load memory config" })}
+          icon={<Settings className="h-6 w-6" />}
+        />
+      ) : memoryConfig && (
         <Card padding="md">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
             <div className="flex items-center gap-1.5">
@@ -444,6 +459,12 @@ export function MemoryPage() {
         <div className="grid gap-4">
           {[1, 2, 3, 4, 5].map(i => <CardSkeleton key={i} />)}
         </div>
+      ) : memoryQuery.isError ? (
+        <EmptyState
+          title={t("common.error")}
+          description={t("common.error_loading_data", { defaultValue: "Failed to load memories" })}
+          icon={<Database className="h-6 w-6" />}
+        />
       ) : filteredMemories.length === 0 ? (
         <EmptyState
           title={search || levelFilter !== "all" ? t("common.no_data") : t("memory.no_memories")}
@@ -456,7 +477,7 @@ export function MemoryPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
                 <div className="flex items-center gap-2 min-w-0 flex-wrap">
                   <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-45 sm:max-w-none">{m.id}</h2>
-                  <Badge variant={m.level === "user" ? "success" : m.level === "agent" ? "warning" : "info"}>
+                  <Badge variant={m.level === "episodic" ? "info" : m.level === "semantic" ? "warning" : m.level === "working" ? "brand" : "default"}>
                     {m.level || "session"}
                   </Badge>
                   {m.source && (
