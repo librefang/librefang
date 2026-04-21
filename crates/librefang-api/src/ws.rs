@@ -735,6 +735,10 @@ async fn handle_text_message(
                 was_mentioned: false,
                 thread_id: None,
                 account_id: None,
+                // Dashboard chat shares storage with canonical `entry.session_id`
+                // so GET /session, list_agent_sessions, switch_agent_session,
+                // and agent_send all see the same conversation history.
+                use_canonical_session: true,
                 ..Default::default()
             };
             match state

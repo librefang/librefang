@@ -1036,7 +1036,7 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
         "max_fires": t.max_fires,
         "created_at": t.created_at.to_rfc3339(),
         "cooldown_secs": t.cooldown_secs,
-        "session_mode": serde_json::to_value(&t.session_mode).unwrap_or(serde_json::Value::Null),
+        "session_mode": serde_json::to_value(t.session_mode).unwrap_or(serde_json::Value::Null),
     });
     if let Some(target) = &t.target_agent {
         v["target_agent_id"] = serde_json::json!(target.to_string());

@@ -652,6 +652,146 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Build the default list of root directories to advertise to MCP servers
+    /// via the MCP Roots capability.
+    ///
+    /// Includes the librefang home directory and the agent workspaces directory
+    /// so that filesystem-aware MCP servers (e.g. morphllm, filesystem) know
+    /// which paths they are allowed to operate on without needing hard-coded
+    /// allowed-directories in their own server args.
+    fn default_mcp_roots(&self) -> Vec<String> {
+        // Advertise only the workspaces directory, not the entire home dir.
+        // Scoping roots to workspaces_dir means per-agent pools are actually
+        // created for agent-specific workspaces (which are subdirectories of
+        // workspaces_dir), giving MCP servers an appropriately narrow view.
+        // Advertising home_dir would cause every agent workspace to be "already
+        // covered", silently disabling per-agent workspace scoping.
+        let mut roots = Vec::new();
+        let workspaces = self.config.load().effective_workspaces_dir();
+        // Use to_str() rather than to_string_lossy() so that non-UTF-8 paths
+        // are silently skipped instead of being silently corrupted (U+FFFD).
+        if let Some(ws) = workspaces.to_str() {
+            roots.push(ws.to_owned());
+        }
+        roots
+    }
+
+    /// Create a fresh, per-execution MCP connection pool for a single agent run.
+    ///
+    /// Adds `agent_workspace` to the default roots so filesystem-aware MCP
+    /// servers (morphllm, filesystem, …) scope their access to the agent's
+    /// specific working directory rather than the broad workspace base.
+    ///
+    /// Returns `None` — and callers fall back to the daemon-global pool — when:
+    /// - no MCP servers are configured,
+    /// - `agent_workspace` is `None` (no workspace to scope),
+    /// - the workspace is already a sub-path of an existing default root
+    ///   (per-agent pool would be identical to the global pool), or
+    /// - all per-agent connections fail.
+    async fn build_agent_mcp_pool(
+        &self,
+        agent_workspace: Option<&std::path::Path>,
+    ) -> Option<tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>> {
+        use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+        use librefang_types::config::McpTransportEntry;
+
+        let servers = self
+            .effective_mcp_servers
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+
+        if servers.is_empty() {
+            return None;
+        }
+
+        let mut roots = self.default_mcp_roots();
+
+        // Add the agent workspace only when it genuinely extends the default
+        // roots.  Use Path::starts_with (component-level comparison) rather
+        // than str::starts_with so that "/project2" is not mistakenly treated
+        // as a sub-path of "/project".
+        //
+        // When there is no workspace, or when the workspace is already covered,
+        // the roots would be identical to those in the daemon-global pool —
+        // creating a fresh per-agent pool would be pure overhead.
+        match agent_workspace {
+            None => return None,
+            Some(ws) => {
+                let already_covered = roots
+                    .iter()
+                    .any(|r| ws.starts_with(std::path::Path::new(r)));
+                if already_covered {
+                    return None;
+                }
+                // Use to_str() for consistency with default_mcp_roots(); non-UTF-8
+                // workspace paths fall back to the global pool.
+                let ws_str = match ws.to_str() {
+                    Some(s) => s.to_owned(),
+                    None => return None,
+                };
+                if !roots.contains(&ws_str) {
+                    roots.push(ws_str);
+                }
+            }
+        }
+
+        let mut connections = Vec::new();
+        for server_config in &servers {
+            let transport_entry = match &server_config.transport {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(name = %server_config.name, "MCP server has no transport configured, skipping");
+                    continue;
+                }
+            };
+            let transport = match transport_entry {
+                McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
+                    command: command.clone(),
+                    args: args.clone(),
+                },
+                McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+                McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
+                McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => McpTransport::HttpCompat {
+                    base_url: base_url.clone(),
+                    headers: headers.clone(),
+                    tools: tools.clone(),
+                },
+            };
+
+            let mcp_config = McpServerConfig {
+                name: server_config.name.clone(),
+                transport,
+                timeout_secs: server_config.timeout_secs,
+                env: server_config.env.clone(),
+                headers: server_config.headers.clone(),
+                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_config: server_config.oauth.clone(),
+                taint_scanning: server_config.taint_scanning,
+                roots: roots.clone(),
+            };
+
+            match McpConnection::connect(mcp_config).await {
+                Ok(conn) => connections.push(conn),
+                Err(e) => warn!(
+                    server = %server_config.name,
+                    error = %e,
+                    "Per-agent MCP connection failed; agent will lack this server's tools"
+                ),
+            }
+        }
+
+        if connections.is_empty() {
+            None
+        } else {
+            Some(tokio::sync::Mutex::new(connections))
+        }
+    }
+
     /// Relocate any legacy `<home>/agents/<name>/` directories into the
     /// canonical `workspaces/agents/<name>/` layout. This is the same pass
     /// that runs at boot and is exposed so runtime flows (e.g. the migrate
@@ -2651,6 +2791,84 @@ impl LibreFangKernel {
             }
         }
 
+        // One-time webui → canonical session migration.
+        //
+        // Before the unify fix, the dashboard WS wrote to
+        // `SessionId::for_channel(agent, "webui")` while GET /session and the
+        // sessions management endpoints read `entry.session_id`. Any agent
+        // with recent dashboard chat therefore has two sessions: the stale
+        // canonical and the active webui one. Adopt the webui session as the
+        // canonical pointer when it has strictly more messages, so existing
+        // conversations show up after the fix.
+        //
+        // Idempotent: once `entry.session_id` matches the webui session id
+        // (or canonical overtakes it), this is a no-op on subsequent boots.
+        {
+            let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .registry
+                .list()
+                .iter()
+                .map(|e| (e.id, e.session_id))
+                .collect();
+            for (agent_id, canonical_session_id) in registry_snapshot {
+                let webui_session_id = SessionId::for_channel(agent_id, "webui");
+                if webui_session_id == canonical_session_id {
+                    continue;
+                }
+                let webui_msgs = match kernel.memory.get_session(webui_session_id) {
+                    Ok(Some(s)) => s.messages.len(),
+                    _ => continue,
+                };
+                if webui_msgs == 0 {
+                    continue;
+                }
+                // Inspect canonical: if the user has deliberately labeled it
+                // (via create_agent_session / switch_agent_session from the
+                // sessions UI), treat that as an explicit choice and don't
+                // override it — they can still find the orphaned webui session
+                // in `list_agent_sessions` and switch manually if desired.
+                let canonical_session = kernel
+                    .memory
+                    .get_session(canonical_session_id)
+                    .ok()
+                    .flatten();
+                if canonical_session
+                    .as_ref()
+                    .and_then(|s| s.label.as_ref())
+                    .is_some()
+                {
+                    info!(
+                        agent_id = %agent_id,
+                        webui_messages = webui_msgs,
+                        "Skipping webui adoption — canonical session is labeled (user-managed)"
+                    );
+                    continue;
+                }
+                let canonical_msgs = canonical_session.map(|s| s.messages.len()).unwrap_or(0);
+                if webui_msgs <= canonical_msgs {
+                    continue;
+                }
+                if let Err(e) = kernel
+                    .registry
+                    .update_session_id(agent_id, webui_session_id)
+                {
+                    warn!(agent_id = %agent_id, "Failed to adopt webui session: {e}");
+                    continue;
+                }
+                if let Some(entry) = kernel.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                        warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
+                    }
+                }
+                info!(
+                    agent_id = %agent_id,
+                    webui_messages = webui_msgs,
+                    canonical_messages = canonical_msgs,
+                    "Adopted webui channel session as canonical (one-time migration)"
+                );
+            }
+        }
+
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
@@ -4165,8 +4383,13 @@ system_prompt = "You are a helpful assistant."
         // (channel, chat_id). Including chat_id prevents context bleed between
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations, respect the agent's session_mode.
+        //
+        // `use_canonical_session` short-circuits the channel branch: the sender
+        // wants routing-cache scoping (per-channel assistant auto-router) but
+        // storage to land in `entry.session_id`. Used by the dashboard WS so
+        // webui chat shares history with agent_send / session management.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -4534,6 +4757,13 @@ system_prompt = "You are a helpful assistant."
             // Snapshot config for the duration of the agent loop call
             // (load_full returns Arc so the data stays alive across .await).
             let loop_cfg = kernel_clone.config.load_full();
+
+            // Per-agent MCP pool (workspace-scoped roots).
+            let agent_mcp = kernel_clone
+                .build_agent_mcp_pool(manifest.workspace.as_deref())
+                .await;
+            let effective_mcp = agent_mcp.as_ref().unwrap_or(&kernel_clone.mcp_connections);
+
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -4544,7 +4774,7 @@ system_prompt = "You are a helpful assistant."
                 kernel_handle,
                 tx,
                 Some(&skill_snapshot),
-                Some(&kernel_clone.mcp_connections),
+                Some(effective_mcp),
                 Some(&kernel_clone.web_ctx),
                 Some(&kernel_clone.browser_ctx),
                 kernel_clone.embedding_driver.as_deref(),
@@ -5415,8 +5645,12 @@ system_prompt = "You are a helpful assistant."
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations (background ticks, triggers, agent_send), resolve the
         // effective session mode: per-trigger override > agent manifest default.
+        //
+        // `use_canonical_session` short-circuits the channel branch so the
+        // dashboard WS (channel="webui") persists to `entry.session_id` while
+        // still scoping routing caches per-surface.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -5832,6 +6066,14 @@ system_prompt = "You are a helpful assistant."
         // Set up mid-turn injection channel (#956)
         let injection_rx = self.setup_injection_channel(agent_id);
 
+        // Build a per-execution MCP pool that includes the agent workspace as
+        // a root. Falls back to the global pool if the workspace adds nothing
+        // new or if all connections fail.
+        let agent_mcp = self
+            .build_agent_mcp_pool(manifest.workspace.as_deref())
+            .await;
+        let effective_mcp = agent_mcp.as_ref().unwrap_or(&self.mcp_connections);
+
         let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
@@ -5842,7 +6084,7 @@ system_prompt = "You are a helpful assistant."
             &tools,
             kernel_handle,
             Some(&skill_snapshot),
-            Some(&self.mcp_connections),
+            Some(effective_mcp),
             Some(&self.web_ctx),
             Some(&self.browser_ctx),
             self.embedding_driver.as_deref(),
@@ -8177,6 +8419,7 @@ system_prompt = "You are a helpful assistant."
     ///
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner. Both owner and target must exist.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_trigger_with_target(
         &self,
         agent_id: AgentId,
@@ -9756,6 +9999,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9903,6 +10147,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -10025,6 +10270,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             self.mcp_health.register(&server_config.name);
@@ -10169,6 +10415,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {
