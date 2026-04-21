@@ -205,7 +205,7 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
     chunks
 }
 
-/// Return the longest prefix of `s` whose UTF-16 length is < `limit`.
+/// Return the longest prefix of `s` whose UTF-16 length is ≤ `limit`.
 ///
 /// Uses binary search over the char-index table, so the result is always
 /// aligned to a char boundary — we never slice a surrogate pair in half.
@@ -236,7 +236,7 @@ pub fn truncate_to_utf16_limit(s: &str, limit: usize) -> &str {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
 
     // Binary-search for the largest prefix of `chars` whose cumulative
-    // UTF-16 length is strictly less than `limit`.
+    // UTF-16 length is ≤ `limit`.
     let mut lo: usize = 0;
     let mut hi: usize = chars.len();
 
