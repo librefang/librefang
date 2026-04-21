@@ -729,7 +729,7 @@ impl MemorySubstrate {
             });
 
             match result {
-                Ok((id, title, description, assigned, created_by, created_at)) => {
+                Ok((id, title, description, _assigned, created_by, created_at)) => {
                     // Update status to in_progress
                     db.execute(
                         "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2 WHERE id = ?1",
