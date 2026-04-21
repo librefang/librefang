@@ -661,12 +661,16 @@ impl LibreFangKernel {
     /// allowed-directories in their own server args.
     fn default_mcp_roots(&self) -> Vec<String> {
         let mut roots = Vec::new();
-        let home = self.home_dir_boot.to_string_lossy().into_owned();
-        roots.push(home);
+        // Use to_str() rather than to_string_lossy() so that non-UTF-8 paths
+        // are silently skipped instead of being silently corrupted (U+FFFD).
+        if let Some(h) = self.home_dir_boot.to_str() {
+            roots.push(h.to_owned());
+        }
         let workspaces = self.config.load().effective_workspaces_dir();
-        let ws = workspaces.to_string_lossy().into_owned();
-        if !roots.contains(&ws) {
-            roots.push(ws);
+        if let Some(ws) = workspaces.to_str() {
+            if !roots.iter().any(|r| r == ws) {
+                roots.push(ws.to_owned());
+            }
         }
         roots
     }
@@ -677,9 +681,12 @@ impl LibreFangKernel {
     /// servers (morphllm, filesystem, …) scope their access to the agent's
     /// specific working directory rather than the broad workspace base.
     ///
-    /// Returns `None` when no MCP servers are configured, when the workspace
-    /// path adds nothing new over the default roots, or when all connections
-    /// fail.  Callers fall back to the daemon-global pool in the `None` case.
+    /// Returns `None` — and callers fall back to the daemon-global pool — when:
+    /// - no MCP servers are configured,
+    /// - `agent_workspace` is `None` (no workspace to scope),
+    /// - the workspace is already a sub-path of an existing default root
+    ///   (per-agent pool would be identical to the global pool), or
+    /// - all per-agent connections fail.
     async fn build_agent_mcp_pool(
         &self,
         agent_workspace: Option<&std::path::Path>,
@@ -699,13 +706,27 @@ impl LibreFangKernel {
 
         let mut roots = self.default_mcp_roots();
 
-        // Add the agent workspace only when it's genuinely new information
-        // (i.e. not already a sub-path of an existing root).
-        if let Some(ws) = agent_workspace {
-            let ws_str = ws.to_string_lossy().into_owned();
-            let already_covered = roots.iter().any(|r| ws.starts_with(r.as_str()));
-            if !already_covered && !roots.contains(&ws_str) {
-                roots.push(ws_str);
+        // Add the agent workspace only when it genuinely extends the default
+        // roots.  Use Path::starts_with (component-level comparison) rather
+        // than str::starts_with so that "/project2" is not mistakenly treated
+        // as a sub-path of "/project".
+        //
+        // When there is no workspace, or when the workspace is already covered,
+        // the roots would be identical to those in the daemon-global pool —
+        // creating a fresh per-agent pool would be pure overhead.
+        match agent_workspace {
+            None => return None,
+            Some(ws) => {
+                let already_covered = roots
+                    .iter()
+                    .any(|r| ws.starts_with(std::path::Path::new(r)));
+                if already_covered {
+                    return None;
+                }
+                let ws_str = ws.to_string_lossy().into_owned();
+                if !roots.contains(&ws_str) {
+                    roots.push(ws_str);
+                }
             }
         }
 

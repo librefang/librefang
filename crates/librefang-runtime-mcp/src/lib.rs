@@ -290,7 +290,14 @@ impl RootsClientHandler {
                 let uri = if path.starts_with("file://") {
                     path.clone()
                 } else {
-                    format!("file://{path}")
+                    // RFC 8089 requires forward slashes and three slashes before
+                    // a drive letter on Windows (file:///C:/Users/…).
+                    let forward = path.replace('\\', "/");
+                    if forward.starts_with('/') {
+                        format!("file://{forward}")
+                    } else {
+                        format!("file:///{forward}")
+                    }
                 };
                 let name = std::path::Path::new(path)
                     .file_name()
@@ -495,6 +502,8 @@ impl McpConnection {
                 headers,
                 tools,
             } => {
+                // HttpCompat is a static tool-declaration protocol; it does not
+                // perform an MCP initialize handshake, so roots don't apply.
                 Self::validate_http_compat_config(base_url, headers, tools)?;
                 Self::connect_http_compat(base_url).await?
             }
@@ -1049,12 +1058,36 @@ impl McpConnection {
 
     /// Returns `true` when `url` resolves to the local machine.
     /// Used to decide whether filesystem roots are meaningful for an HTTP MCP server.
+    ///
+    /// Uses proper host parsing rather than substring matching to avoid false
+    /// positives on attacker-controlled domains like `127.0.0.1.evil.com`.
     fn is_local_url(url: &str) -> bool {
-        let lower = url.to_lowercase();
-        lower.contains("://127.")
-            || lower.contains("://localhost")
-            || lower.contains("://[::1]")
-            || lower.contains("://0.0.0.0")
+        // Extract the host portion (strip scheme, path, query, fragment).
+        let after_scheme = match url.find("://") {
+            Some(i) => &url[i + 3..],
+            None => return false,
+        };
+        let host_port = after_scheme.split('/').next().unwrap_or("");
+        // Handle bracketed IPv6 addresses: [::1]:3000 → ::1
+        let host = if host_port.starts_with('[') {
+            host_port
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or("")
+        } else {
+            host_port.split(':').next().unwrap_or(host_port)
+        };
+        let host_lower = host.to_lowercase();
+        if host_lower == "localhost" || host_lower == "::1" {
+            return true;
+        }
+        // Use the standard library IP parser — it rejects hostnames like
+        // "127.0.0.1.evil.com", which would fool a naive starts_with check.
+        if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
+            return addr.octets()[0] == 127;
+        }
+        false
     }
 
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
@@ -2297,13 +2330,24 @@ mod tests {
 
     #[test]
     fn test_is_local_url() {
+        // Standard loopback addresses
         assert!(McpConnection::is_local_url("http://127.0.0.1:8080/mcp"));
         assert!(McpConnection::is_local_url("http://localhost/mcp"));
         assert!(McpConnection::is_local_url("http://LOCALHOST/mcp"));
         assert!(McpConnection::is_local_url("http://[::1]:3000/mcp"));
-        assert!(McpConnection::is_local_url("http://0.0.0.0:4545/mcp"));
+        assert!(McpConnection::is_local_url("http://::1/mcp"));
+        // Full 127.0.0.0/8 range
+        assert!(McpConnection::is_local_url("http://127.2.3.4/mcp"));
+        assert!(McpConnection::is_local_url("http://127.255.255.255/mcp"));
+        // Remote hosts
         assert!(!McpConnection::is_local_url("https://api.github.com/mcp"));
         assert!(!McpConnection::is_local_url("https://mcp.example.com/mcp"));
+        // Security: domain that starts with "127." must not match
+        assert!(!McpConnection::is_local_url(
+            "https://127.0.0.1.evil.com/mcp"
+        ));
+        // 0.0.0.0 is a listen address, not a loopback target
+        assert!(!McpConnection::is_local_url("http://0.0.0.0:4545/mcp"));
     }
 
     /// `extract_auth_header_from_error` returns `None` for any
