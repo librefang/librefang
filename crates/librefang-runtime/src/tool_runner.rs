@@ -882,6 +882,7 @@ pub async fn execute_tool(
     process_manager: Option<&crate::process_manager::ProcessManager>,
     sender_id: Option<&str>,
     channel: Option<&str>,
+    checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1025,9 +1026,7 @@ pub async fn execute_tool(
         process_manager,
         sender_id,
         channel,
-        // The checkpoint_manager is injected from the kernel layer
-        // (librefang-kernel); at this level we default to None.
-        checkpoint_manager: None,
+        checkpoint_manager,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
@@ -5827,6 +5826,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -5861,6 +5861,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -5892,6 +5893,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -5923,6 +5925,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -5953,6 +5956,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -5983,6 +5987,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6013,6 +6018,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6044,6 +6050,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6076,6 +6083,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -6134,6 +6142,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -6170,6 +6179,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6213,6 +6223,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
 
@@ -6257,6 +6268,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
 
@@ -6312,6 +6324,7 @@ mod tests {
             None,
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
 
@@ -6503,6 +6516,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6556,6 +6570,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -6768,6 +6783,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -6806,6 +6822,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -6844,6 +6861,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -6891,6 +6909,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -6942,6 +6961,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -7036,6 +7056,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -7073,6 +7094,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -7119,6 +7141,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         // Should NOT be a permission-denied error
@@ -7155,6 +7178,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(result.is_error);
@@ -7191,6 +7215,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -7226,6 +7251,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         assert!(
@@ -7261,6 +7287,7 @@ mod tests {
             None, // process_manager
             None, // sender_id
             None, // channel
+            None, // checkpoint_manager
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"

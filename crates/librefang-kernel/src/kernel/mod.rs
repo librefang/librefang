@@ -3660,6 +3660,7 @@ system_prompt = "You are a helpful assistant."
             None, // no hooks
             ctx_window,
             None, // no process manager
+            None, // no checkpoint manager (ephemeral /btw — side questions only)
             None, // no content blocks
             None, // no proactive memory
             None, // no context engine
@@ -4808,6 +4809,7 @@ system_prompt = "You are a helpful assistant."
                 Some(&kernel_clone.hooks),
                 ctx_window,
                 Some(&kernel_clone.process_manager),
+                kernel_clone.checkpoint_manager.clone(),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
@@ -6118,6 +6120,7 @@ system_prompt = "You are a helpful assistant."
             Some(&self.hooks),
             ctx_window,
             Some(&self.process_manager),
+            self.checkpoint_manager.clone(),
             content_blocks,
             proactive_memory,
             self.context_engine_for_agent(&manifest),
