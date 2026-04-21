@@ -653,7 +653,7 @@ impl LlmDriver for OpenAIDriver {
                         .map(std::time::Duration::from_secs);
                     let delay = standard_retry_delay(attempt + 1);
                     let delay = match retry_after {
-                        Some(ra) if ra > delay => ra,
+                        Some(ra) if ra > delay => ra.min(std::time::Duration::from_secs(300)),
                         _ => delay,
                     };
                     warn!(
@@ -1012,7 +1012,7 @@ impl LlmDriver for OpenAIDriver {
                         .map(std::time::Duration::from_secs);
                     let delay = standard_retry_delay(attempt + 1);
                     let delay = match retry_after {
-                        Some(ra) if ra > delay => ra,
+                        Some(ra) if ra > delay => ra.min(std::time::Duration::from_secs(300)),
                         _ => delay,
                     };
                     warn!(
