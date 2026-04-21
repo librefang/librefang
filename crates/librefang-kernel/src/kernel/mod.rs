@@ -652,6 +652,25 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Build the default list of root directories to advertise to MCP servers
+    /// via the MCP Roots capability.
+    ///
+    /// Includes the librefang home directory and the agent workspaces directory
+    /// so that filesystem-aware MCP servers (e.g. morphllm, filesystem) know
+    /// which paths they are allowed to operate on without needing hard-coded
+    /// allowed-directories in their own server args.
+    fn default_mcp_roots(&self) -> Vec<String> {
+        let mut roots = Vec::new();
+        let home = self.home_dir_boot.to_string_lossy().into_owned();
+        roots.push(home);
+        let workspaces = self.config.load().effective_workspaces_dir();
+        let ws = workspaces.to_string_lossy().into_owned();
+        if !roots.contains(&ws) {
+            roots.push(ws);
+        }
+        roots
+    }
+
     /// Relocate any legacy `<home>/agents/<name>/` directories into the
     /// canonical `workspaces/agents/<name>/` layout. This is the same pass
     /// that runs at boot and is exposed so runtime flows (e.g. the migrate
@@ -9743,6 +9762,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9890,6 +9910,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -10012,6 +10033,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                roots: self.default_mcp_roots(),
             };
 
             self.mcp_health.register(&server_config.name);
@@ -10156,6 +10178,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            roots: self.default_mcp_roots(),
         };
 
         match McpConnection::connect(mcp_config).await {

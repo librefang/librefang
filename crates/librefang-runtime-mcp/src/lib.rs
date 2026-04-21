@@ -182,6 +182,18 @@ pub struct McpServerConfig {
     /// when this is `false` — only the content-based heuristic is disabled.
     #[serde(default = "default_taint_scanning")]
     pub taint_scanning: bool,
+    /// Root directories advertised to this MCP server via the MCP Roots capability.
+    ///
+    /// Each entry is an absolute path (e.g. `/home/user/project`).  librefang
+    /// converts these to `file://` URIs and declares `roots` in the client
+    /// capabilities during the MCP `initialize` handshake. Servers that support
+    /// Roots use this list to scope their file-system operations rather than
+    /// falling back to their own hard-coded allowed-directories list.
+    ///
+    /// This field is populated at runtime by the kernel (home dir + agent
+    /// workspaces dir) and is never serialised to / deserialised from config.
+    #[serde(skip)]
+    pub roots: Vec<String>,
 }
 
 impl std::fmt::Debug for McpServerConfig {
@@ -198,6 +210,7 @@ impl std::fmt::Debug for McpServerConfig {
             )
             .field("oauth_config", &self.oauth_config)
             .field("taint_scanning", &self.taint_scanning)
+            .field("roots", &self.roots)
             .finish()
     }
 }
@@ -213,6 +226,7 @@ impl Clone for McpServerConfig {
             oauth_provider: self.oauth_provider.clone(),
             oauth_config: self.oauth_config.clone(),
             taint_scanning: self.taint_scanning,
+            roots: self.roots.clone(),
         }
     }
 }
@@ -260,6 +274,67 @@ type DynRmcpClient = rmcp::service::RunningService<
     rmcp::service::RoleClient,
     Box<dyn rmcp::service::DynService<rmcp::service::RoleClient>>,
 >;
+
+/// MCP client handler that declares the `roots` capability and responds to
+/// `roots/list` requests with a pre-configured list of root directories.
+struct RootsClientHandler {
+    client_info: rmcp::model::ClientInfo,
+    roots: Arc<Vec<rmcp::model::Root>>,
+}
+
+impl RootsClientHandler {
+    fn new(roots: Vec<String>) -> Self {
+        let mcp_roots: Vec<rmcp::model::Root> = roots
+            .iter()
+            .map(|path| {
+                let uri = if path.starts_with("file://") {
+                    path.clone()
+                } else {
+                    format!("file://{path}")
+                };
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+                let mut root = rmcp::model::Root::new(uri);
+                if let Some(n) = name {
+                    root = root.with_name(n);
+                }
+                root
+            })
+            .collect();
+
+        let mut capabilities = rmcp::model::ClientCapabilities::default();
+        capabilities.roots = Some(rmcp::model::RootsCapabilities { list_changed: None });
+
+        let client_info = rmcp::model::ClientInfo::new(
+            capabilities,
+            rmcp::model::Implementation::new("librefang", env!("CARGO_PKG_VERSION")),
+        );
+
+        Self {
+            client_info,
+            roots: Arc::new(mcp_roots),
+        }
+    }
+}
+
+impl rmcp::ClientHandler for RootsClientHandler {
+    fn get_info(&self) -> rmcp::model::ClientInfo {
+        self.client_info.clone()
+    }
+
+    fn list_roots(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleClient>,
+    ) -> impl std::future::Future<
+        Output = Result<rmcp::model::ListRootsResult, rmcp::model::ErrorData>,
+    > + Send
+           + '_ {
+        let roots = Arc::clone(&self.roots);
+        async move { Ok(rmcp::model::ListRootsResult::new((*roots).clone())) }
+    }
+}
 
 /// An active connection to an MCP server.
 pub struct McpConnection {
@@ -389,9 +464,10 @@ impl McpConnection {
     pub async fn connect(config: McpServerConfig) -> Result<Self, String> {
         let mut initial_auth_state: Option<crate::mcp_oauth::McpAuthState> = None;
 
+        let roots = config.roots.clone();
         let (inner, discovered_tools) = match &config.transport {
             McpTransport::Stdio { command, args } => {
-                Self::connect_stdio(command, args, &config.env).await?
+                Self::connect_stdio(command, args, &config.env, roots).await?
             }
             McpTransport::Sse { url } => Self::connect_sse(url).await?,
             McpTransport::Http { url } => {
@@ -400,6 +476,7 @@ impl McpConnection {
                     &config.headers,
                     config.oauth_provider.as_ref(),
                     config.oauth_config.as_ref(),
+                    roots,
                 )
                 .await?;
                 initial_auth_state = Some(auth_state);
@@ -439,7 +516,7 @@ impl McpConnection {
                     let declared_tools = tools.clone();
                     conn.register_http_compat_tools(&declared_tools);
                 } else if let McpInner::Sse { .. } = &conn.inner {
-                    conn.sse_initialize().await?;
+                    conn.sse_initialize(&conn.config.roots.clone()).await?;
                     conn.sse_discover_tools().await?;
                 }
             }
@@ -460,6 +537,7 @@ impl McpConnection {
         command: &str,
         args: &[String],
         extra_env: &[String],
+        roots: Vec<String>,
     ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use rmcp::ServiceExt;
@@ -554,11 +632,18 @@ impl McpConnection {
         )
         .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
 
-        let client = ()
-            .into_dyn()
-            .serve(transport)
-            .await
-            .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?;
+        let client = if roots.is_empty() {
+            ().into_dyn()
+                .serve(transport)
+                .await
+                .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?
+        } else {
+            RootsClientHandler::new(roots)
+                .into_dyn()
+                .serve(transport)
+                .await
+                .map_err(|e| format!("MCP handshake failed for '{resolved_command}': {e}"))?
+        };
 
         // Discover tools via rmcp (with timeout)
         let timeout = std::time::Duration::from_secs(60);
@@ -602,6 +687,7 @@ impl McpConnection {
         headers: &[String],
         oauth_provider: Option<&std::sync::Arc<dyn crate::mcp_oauth::McpOAuthProvider>>,
         oauth_config: Option<&librefang_types::config::McpOAuthConfig>,
+        roots: Vec<String>,
     ) -> Result<
         (
             McpInner,
@@ -652,7 +738,15 @@ impl McpConnection {
 
         let transport = StreamableHttpClientTransport::from_config(config);
 
-        match ().into_dyn().serve(transport).await {
+        let serve_result = if roots.is_empty() {
+            ().into_dyn().serve(transport).await
+        } else {
+            RootsClientHandler::new(roots)
+                .into_dyn()
+                .serve(transport)
+                .await
+        };
+        match serve_result {
             Ok(client) => {
                 // Discover tools via rmcp (with timeout)
                 let timeout = std::time::Duration::from_secs(60);
@@ -770,10 +864,15 @@ impl McpConnection {
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
-    async fn sse_initialize(&mut self) -> Result<(), String> {
+    async fn sse_initialize(&mut self, roots: &[String]) -> Result<(), String> {
+        let capabilities = if roots.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "roots": { "listChanged": false } })
+        };
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": {},
+            "capabilities": capabilities,
             "clientInfo": {
                 "name": "librefang",
                 "version": env!("CARGO_PKG_VERSION")
@@ -1828,6 +1927,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            roots: vec![],
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -1858,6 +1958,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            roots: vec![],
         };
         let json = serde_json::to_string(&sse_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1892,6 +1993,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            roots: vec![],
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1921,6 +2023,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            roots: vec![],
         };
         let json = serde_json::to_string(&http_config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1966,6 +2069,7 @@ mod tests {
                 oauth_provider: None,
                 oauth_config: None,
                 taint_scanning: true,
+                roots: vec![],
             },
             tools: Vec::new(),
             original_names: HashMap::new(),
@@ -2132,6 +2236,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            roots: vec![],
         })
         .await
         .unwrap();
