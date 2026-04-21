@@ -43,7 +43,7 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
     let registry_cache = home_dir.join("registry");
 
-    if !should_refresh(&registry_cache, cache_ttl_secs) {
+    if should_refresh(&registry_cache, cache_ttl_secs) {
         tracing::debug!("Registry cache is fresh, skipping download");
     } else {
         // Try git first (faster incremental updates, private fork support)
