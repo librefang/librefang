@@ -1,2 +1,37 @@
 [alias]
 xtask = "run --package xtask --"
+
+# ── Faster dev builds ────────────────────────────────────────────────────────
+# mold replaces the system linker; the link step drops from ~3s to <0.5s on
+# incremental rebuilds.  Install once, then every `cargo build` is faster.
+#
+#   Ubuntu/Debian:  sudo apt install mold
+#   Arch:           sudo pacman -S mold
+#   macOS (lld):    brew install llvm
+#
+# Optional — even faster incremental codegen via Cranelift (skips LLVM
+# optimisations; dev/test builds only, release is unaffected):
+#
+#   rustup component add rustc-codegen-cranelift-preview
+#
+# Then uncomment in your *local* .cargo/config.toml (don't commit):
+#   [profile.dev]
+#   codegen-backend = "cranelift"
+#   [profile.test]
+#   codegen-backend = "cranelift"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
