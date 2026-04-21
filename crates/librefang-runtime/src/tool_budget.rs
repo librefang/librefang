@@ -132,7 +132,7 @@ impl ToolBudgetEnforcer {
     /// Already-persisted results (those whose content starts with the
     /// [`PERSISTED_MARKER`]) are counted toward the total but are never
     /// re-persisted.
-    pub fn enforce_turn_budget(&self, results: &mut [ToolResultEntry]) {
+    pub fn enforce_turn_budget(&self, results: &mut Vec<ToolResultEntry>) {
         let total: usize = results.iter().map(|r| r.content.len()).sum();
         if total <= self.per_turn_budget {
             return;
@@ -152,7 +152,7 @@ impl ToolBudgetEnforcer {
             .filter(|(_, r)| !r.content.starts_with(PERSISTED_MARKER))
             .map(|(i, r)| (i, r.content.len()))
             .collect();
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut running_total = total;
 
