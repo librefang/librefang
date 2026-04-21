@@ -2628,6 +2628,11 @@ pub async fn run_agent_loop(
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
 
+        // Fire agent:step external hook (fire-and-forget).
+        if let Some(ref k) = kernel {
+            k.fire_agent_step(&agent_id_str, iteration);
+        }
+
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
             let result = engine

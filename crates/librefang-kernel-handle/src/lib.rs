@@ -547,4 +547,8 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<String, String> {
         Err("run_forked_agent_oneshot not available in this KernelHandle".to_string())
     }
+
+    /// Fire an `agent:step` external hook event.
+    /// Called by the runtime at the start of each agent loop iteration.
+    fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}
 }

@@ -396,6 +396,8 @@ pub struct LibreFangKernel {
     pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Plugin lifecycle hook registry.
     pub(crate) hooks: librefang_runtime::hooks::HookRegistry,
+    /// External file-system lifecycle hook system (HOOK.yaml based, fire-and-forget).
+    pub(crate) external_hooks: crate::hooks::ExternalHookSystem,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub(crate) process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
     /// OFP peer registry — tracks connected peers (set once during OFP startup).
@@ -2462,6 +2464,9 @@ impl LibreFangKernel {
             broadcast: initial_broadcast,
             auto_reply_engine,
             hooks: librefang_runtime::hooks::HookRegistry::new(),
+            external_hooks: crate::hooks::ExternalHookSystem::load(
+                crate::config::librefang_home().join("hooks"),
+            ),
             process_manager: Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
             peer_registry: OnceLock::new(),
             peer_node: OnceLock::new(),
@@ -6096,6 +6101,20 @@ system_prompt = "You are a helpful assistant."
             .await;
         let effective_mcp = agent_mcp.as_ref().unwrap_or(&self.mcp_connections);
 
+        // Fire external agent:start hook (fire-and-forget, never blocks execution).
+        {
+            let preview: String = message.chars().take(200).collect();
+            self.external_hooks.fire(
+                crate::hooks::ExternalHookEvent::AgentStart,
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "agent_name": entry.name,
+                    "session_id": effective_session_id.0.to_string(),
+                    "message_preview": preview,
+                }),
+            );
+        }
+
         let start_time = std::time::Instant::now();
         let result = run_agent_loop(
             &manifest,
@@ -6139,9 +6158,36 @@ system_prompt = "You are a helpful assistant."
         // Tear down injection channel after loop finishes
         self.teardown_injection_channel(agent_id);
 
-        let result = result.map_err(KernelError::LibreFang)?;
-
+        // Capture latency before potentially mapping error — we fire agent:end
+        // on both success and failure so callers can observe failures via hook.
         let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        // Fire external agent:end hook (fire-and-forget) before checking result.
+        // This ensures the hook fires even when the agent loop returns an error,
+        // matching the principle that "agent:end" fires on loop completion.
+        let hook_payload = if let Ok(ref r) = result {
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": entry.name,
+                "session_id": effective_session_id.0.to_string(),
+                "latency_ms": latency_ms,
+                "success": true,
+                "input_tokens": r.total_usage.input_tokens,
+                "output_tokens": r.total_usage.output_tokens,
+            })
+        } else {
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "agent_name": entry.name,
+                "session_id": effective_session_id.0.to_string(),
+                "latency_ms": latency_ms,
+                "success": false,
+            })
+        };
+        self.external_hooks
+            .fire(crate::hooks::ExternalHookEvent::AgentEnd, hook_payload);
+
+        let result = result.map_err(KernelError::LibreFang)?;
 
         // Append new messages to canonical session for cross-channel memory.
         // Use run_agent_loop's own start index (post-trim) instead of one
@@ -6336,6 +6382,15 @@ system_prompt = "You are a helpful assistant."
         // Reset quota tracking so /new clears "token quota exceeded"
         self.scheduler.reset_usage(agent_id);
 
+        // Fire external session:reset hook (fire-and-forget).
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::SessionReset,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "session_id": new_session.id.0.to_string(),
+            }),
+        );
+
         info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
         Ok(())
     }
@@ -6366,6 +6421,15 @@ system_prompt = "You are a helpful assistant."
         // Reset quota tracking
         self.scheduler.reset_usage(agent_id);
 
+        // Fire external session:reset hook (fire-and-forget).
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::SessionReset,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "session_id": new_session.id.0.to_string(),
+            }),
+        );
+
         info!(agent_id = %agent_id, "Session rebooted (no summary saved)");
         Ok(())
     }
@@ -6395,6 +6459,18 @@ system_prompt = "You are a helpful assistant."
         self.registry
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
+
+        // Reset quota tracking
+        self.scheduler.reset_usage(agent_id);
+
+        // Fire external session:reset hook (fire-and-forget).
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::SessionReset,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "session_id": new_session.id.0.to_string(),
+            }),
+        );
 
         info!(agent_id = %agent_id, "All agent history cleared");
         Ok(())
@@ -6684,6 +6760,15 @@ system_prompt = "You are a helpful assistant."
         if !session.messages.is_empty() {
             let _ = self.memory.save_session(session);
         }
+
+        // Fire external session:start hook (fire-and-forget).
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::SessionStart,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "session_id": session.id.0.to_string(),
+            }),
+        );
 
         // Run on_session_start_script if configured (fire-and-forget).
         if let Some(ref script) = cfg.session.on_session_start_script {
@@ -8647,6 +8732,14 @@ system_prompt = "You are a helpful assistant."
     /// Hands activated on first boot when no `hand_state.json` exists yet.
     /// By default, NO hands are activated to prevent unexpected token consumption.
     pub async fn start_background_agents(self: &Arc<Self>) {
+        // Fire external gateway:startup hook (fire-and-forget) before starting agents.
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::GatewayStartup,
+            serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+            }),
+        );
+
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
@@ -13811,6 +13904,16 @@ impl KernelHandle for LibreFangKernel {
     fn max_agent_call_depth(&self) -> u32 {
         let cfg = self.config.load();
         cfg.max_agent_call_depth
+    }
+
+    fn fire_agent_step(&self, agent_id: &str, step: u32) {
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::AgentStep,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "step": step,
+            }),
+        );
     }
 
     async fn run_workflow(
