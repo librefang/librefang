@@ -86,6 +86,12 @@ pub struct ChatState {
     pub model_picker_filter: String,
     /// Selected index in the filtered model list.
     pub model_picker_idx: usize,
+    /// Sent message history for Up/Down recall (capped at 100).
+    pub input_history: Vec<String>,
+    /// Current position while browsing history (None = not browsing).
+    pub history_idx: Option<usize>,
+    /// Draft saved before the user started browsing history.
+    pub history_draft: String,
 }
 
 pub enum ChatAction {
@@ -123,6 +129,9 @@ impl ChatState {
             model_picker_models: Vec::new(),
             model_picker_filter: String::new(),
             model_picker_idx: 0,
+            input_history: Vec::new(),
+            history_idx: None,
+            history_draft: String::new(),
         }
     }
 
@@ -144,6 +153,10 @@ impl ChatState {
         self.show_model_picker = false;
         self.model_picker_filter.clear();
         self.model_picker_idx = 0;
+        // Note: input_history is intentionally preserved across resets so history
+        // survives agent context switches within a session.
+        self.history_idx = None;
+        self.history_draft.clear();
     }
 
     /// Push a completed message into history.
@@ -250,6 +263,61 @@ impl ChatState {
             .collect()
     }
 
+    /// Push a sent message into the input history, capping the list at 100.
+    fn push_input_history(&mut self, msg: String) {
+        // Avoid consecutive duplicates.
+        if self.input_history.last().map(|s| s.as_str()) != Some(msg.as_str()) {
+            if self.input_history.len() >= 100 {
+                self.input_history.remove(0);
+            }
+            self.input_history.push(msg);
+        }
+    }
+
+    /// Navigate backwards (older) in history.
+    fn history_up(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        match self.history_idx {
+            None => {
+                // Save current draft before entering history navigation.
+                self.history_draft = self.input.clone();
+                let new_idx = self.input_history.len() - 1;
+                self.history_idx = Some(new_idx);
+                self.input = self.input_history[new_idx].clone();
+            }
+            Some(0) => {
+                // Already at oldest — stay there.
+                self.input = self.input_history[0].clone();
+            }
+            Some(idx) => {
+                let new_idx = idx - 1;
+                self.history_idx = Some(new_idx);
+                self.input = self.input_history[new_idx].clone();
+            }
+        }
+    }
+
+    /// Navigate forwards (newer) in history; returns to draft at the end.
+    fn history_down(&mut self) {
+        match self.history_idx {
+            None => {} // Not in history mode — nothing to do.
+            Some(idx) => {
+                let last = self.input_history.len() - 1;
+                if idx >= last {
+                    // Reached the newest entry — restore draft.
+                    self.history_idx = None;
+                    self.input = std::mem::take(&mut self.history_draft);
+                } else {
+                    let new_idx = idx + 1;
+                    self.history_idx = Some(new_idx);
+                    self.input = self.input_history[new_idx].clone();
+                }
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.show_model_picker {
@@ -316,7 +384,9 @@ impl ChatState {
                 KeyCode::Enter => {
                     let msg = self.input.trim().to_string();
                     self.input.clear();
+                    self.history_idx = None;
                     if !msg.is_empty() && !msg.starts_with('/') {
+                        self.push_input_history(msg.clone());
                         self.staged_messages.push(msg.clone());
                         self.push_message(Role::User, msg);
                     }
@@ -349,29 +419,45 @@ impl ChatState {
             KeyCode::Enter => {
                 let msg = self.input.trim().to_string();
                 self.input.clear();
+                self.history_idx = None;
                 if msg.is_empty() {
                     return ChatAction::Continue;
                 }
                 if msg.starts_with('/') {
                     return ChatAction::SlashCommand(msg);
                 }
+                self.push_input_history(msg.clone());
                 self.push_message(Role::User, msg.clone());
                 ChatAction::SendMessage(msg)
             }
             KeyCode::Char(c) => {
+                // Any typing while browsing history exits history mode and
+                // keeps the currently shown (potentially recalled) text.
+                self.history_idx = None;
                 self.input.push(c);
                 ChatAction::Continue
             }
             KeyCode::Backspace => {
+                self.history_idx = None;
                 self.input.pop();
                 ChatAction::Continue
             }
             KeyCode::Up => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                // History navigation when input is non-empty or already in history mode;
+                // otherwise fall through to message-list scrolling.
+                if self.history_idx.is_some() || !self.input.is_empty() {
+                    self.history_up();
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_add(1);
+                }
                 ChatAction::Continue
             }
             KeyCode::Down => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                if self.history_idx.is_some() {
+                    self.history_down();
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                }
                 ChatAction::Continue
             }
             KeyCode::PageUp => {
@@ -442,7 +528,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
         }
         Line::from(spans)
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(" > ", theme::input_style()),
             Span::raw(&state.input),
             Span::styled(
@@ -451,7 +537,18 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::SLOW_BLINK),
             ),
-        ])
+        ];
+        if let Some(idx) = state.history_idx {
+            spans.push(Span::styled(
+                format!(
+                    "  \u{2191}{}/{}",
+                    state.input_history.len() - idx,
+                    state.input_history.len()
+                ),
+                theme::dim_style(),
+            ));
+        }
+        Line::from(spans)
     };
     f.render_widget(Paragraph::new(input_line), chunks[2]);
 
@@ -460,8 +557,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut ChatState) {
         "    [\u{2191}\u{2193}] Navigate  [Enter] Select  [Esc] Close  [type] Filter"
     } else if state.is_streaming {
         "    [Enter] Stage  [\u{2191}\u{2193}] Scroll  [Esc] Stop"
+    } else if state.history_idx.is_some() {
+        "    [Enter] Send  [\u{2191}\u{2193}] History  [PgUp/PgDn] Scroll  [Esc] Back"
     } else {
-        "    [Enter] Send  [Ctrl+M] Models  [\u{2191}\u{2193}] Scroll  [Esc] Back"
+        "    [Enter] Send  [Ctrl+M] Models  [\u{2191}\u{2193}] History  [PgUp/PgDn] Scroll  [Esc] Back"
     };
     f.render_widget(widgets::hint_bar(hints), chunks[3]);
 

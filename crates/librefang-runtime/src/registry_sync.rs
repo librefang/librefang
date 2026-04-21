@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 
 /// GitHub tarball URL for the registry (no auth required).
 const REGISTRY_TARBALL_URL: &str =
@@ -24,6 +25,57 @@ const TARBALL_PREFIX: &str = "librefang-registry-main/";
 /// Default cache TTL: how long (in seconds) before we re-download the registry.
 /// Callers without access to `KernelConfig` can use this value directly.
 pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
+
+/// Serialises all writes to `~/.librefang/registry/`.
+///
+/// Without this, a manual `POST /api/catalog/update` firing at the same
+/// time as the 24h background catalog task could have two `git pull`
+/// subprocesses racing on the same working tree, which corrupts the
+/// checkout. Boot-time `sync_registry` and the catalog-only
+/// `refresh_registry_checkout` both acquire it. The lock is held across
+/// the blocking git/tar work; callers already run these via
+/// `spawn_blocking`, so a `std::sync::Mutex` is appropriate.
+static SYNC_LOCK: Mutex<()> = Mutex::new(());
+
+/// Refresh only the `~/.librefang/registry/` checkout from upstream —
+/// no fan-out into `workspaces/`, `providers/`, `workflows/templates/`
+/// etc. Callers like `catalog_sync` want the repo refreshed without
+/// accidentally re-installing agent templates or overwriting workflow
+/// templates every time the user clicks "Update catalog".
+///
+/// Returns `true` when the checkout is in a usable state (fresh pull,
+/// fresh clone, fresh tarball extract, or the on-disk copy from a
+/// previous successful run).
+pub fn refresh_registry_checkout(
+    home_dir: &Path,
+    cache_ttl_secs: u64,
+    registry_mirror: &str,
+) -> bool {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry_cache = home_dir.join("registry");
+
+    if should_refresh(&registry_cache, cache_ttl_secs) {
+        // Try git first (faster incremental updates, private fork support)
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
+                false
+            }
+        };
+
+        // Fall back to HTTP tarball if git failed
+        if !git_ok {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+                tracing::warn!("HTTP registry download also failed: {e}");
+                return registry_cache.exists();
+            }
+        }
+    } else {
+        tracing::debug!("Registry cache is fresh, skipping download");
+    }
+    true
+}
 
 /// Sync all content from the registry to the local librefang home directory.
 ///
@@ -41,11 +93,10 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
 /// `https://ghproxy.cn/https://github.com/...`).
 pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
+    let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
-    if !should_refresh(&registry_cache, cache_ttl_secs) {
-        tracing::debug!("Registry cache is fresh, skipping download");
-    } else {
+    if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
             Ok(()) => true,
@@ -64,6 +115,8 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
                 }
             }
         }
+    } else {
+        tracing::debug!("Registry cache is fresh, skipping download");
     }
 
     // Pre-install core content users need out of the box.
