@@ -245,7 +245,7 @@ impl LlmDriver for FallbackChain {
             // Relay loop: forward events to the real sender, signal on TextDelta.
             let tx_for_relay = tx.clone();
             let text_emit_flag = text_emit_tx.clone();
-            tokio::spawn(async move {
+            let relay_handle = tokio::spawn(async move {
                 while let Some(event) = wrap_rx.recv().await {
                     if let StreamEvent::TextDelta { .. } = &event {
                         let _ = text_emit_flag.send(true);
@@ -262,6 +262,14 @@ impl LlmDriver for FallbackChain {
                     return Ok(resp);
                 }
                 Err(e) => {
+                    // Drop wrap_tx is implicit here (moved into stream above and
+                    // returned by stream).  Wait for the relay task to drain all
+                    // buffered events before reading the text_emit flag, otherwise
+                    // we race against TextDelta events still sitting in the mpsc
+                    // buffer (TOCTOU: flag could read false while events are
+                    // in-flight).
+                    let _ = relay_handle.await;
+
                     let reason = e.failover_reason();
                     warn!(
                         provider = %entry.provider_name,
@@ -590,8 +598,20 @@ mod tests {
     }
 
     #[test]
-    fn failover_reason_auth_unknown() {
+    fn failover_reason_auth_model_unavailable() {
         let e = LlmError::AuthenticationFailed("bad key".to_string());
+        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+    }
+
+    #[test]
+    fn failover_reason_missing_api_key_model_unavailable() {
+        let e = LlmError::MissingApiKey("ANTHROPIC_API_KEY".to_string());
+        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+    }
+
+    #[test]
+    fn failover_reason_parse_unknown() {
+        let e = LlmError::Parse("unexpected token".to_string());
         assert_eq!(e.failover_reason(), FailoverReason::Unknown);
     }
 }

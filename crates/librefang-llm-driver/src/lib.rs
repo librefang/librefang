@@ -184,11 +184,15 @@ impl LlmError {
             // ModelNotFound → ModelUnavailable (skip to next provider).
             LlmError::ModelNotFound(_) => FailoverReason::ModelUnavailable,
 
-            // Auth failures, missing keys, parse errors, HTTP transport errors
-            // are not recoverable by switching providers.
-            LlmError::AuthenticationFailed(_) | LlmError::MissingApiKey(_) | LlmError::Parse(_) => {
-                FailoverReason::Unknown
+            // Auth failures and missing keys indicate a misconfigured provider
+            // slot, not a transient error.  Skip to the next provider so a chain
+            // like [expired_anthropic, valid_openai] can still succeed.
+            LlmError::AuthenticationFailed(_) | LlmError::MissingApiKey(_) => {
+                FailoverReason::ModelUnavailable
             }
+
+            // Parse errors are opaque and not recoverable by switching providers.
+            LlmError::Parse(_) => FailoverReason::Unknown,
 
             // HTTP transport errors (connection refused, TLS failure, etc.) are
             // indistinguishable from transient timeouts — treat as Timeout so
