@@ -12851,17 +12851,22 @@ impl KernelHandle for LibreFangKernel {
         let adapter = self
             .channel_adapters
             .get(&lookup_key)
-            .or_else(|| self.channel_adapters.get(channel))
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12920,17 +12925,22 @@ impl KernelHandle for LibreFangKernel {
         let adapter = self
             .channel_adapters
             .get(&lookup_key)
-            .or_else(|| self.channel_adapters.get(channel))
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -12993,17 +13003,22 @@ impl KernelHandle for LibreFangKernel {
         let adapter = self
             .channel_adapters
             .get(&lookup_key)
-            .or_else(|| self.channel_adapters.get(channel))
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13055,8 +13070,12 @@ impl KernelHandle for LibreFangKernel {
         let adapter = self
             .channel_adapters
             .get(&lookup_key)
-            .or_else(|| self.channel_adapters.get(channel))
-            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
+                Some(aid) => {
+                    format!("Channel adapter '{channel}' with account_id '{aid}' not found")
+                }
+                None => format!("Channel adapter '{channel}' not found"),
+            })?
             .clone();
 
         let user = librefang_channels::types::ChannelUser {
