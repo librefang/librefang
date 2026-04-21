@@ -3,6 +3,7 @@
 //! Provides filesystem, web, shell, and inter-agent tools. Agent tools
 //! (agent_send, agent_spawn, etc.) require a KernelHandle to be passed in.
 
+use crate::dangerous_command::DangerousCommandChecker;
 use crate::kernel_handle::KernelHandle;
 use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
@@ -372,6 +373,7 @@ pub async fn execute_tool_raw(
         channel: _,
         checkpoint_manager,
         interrupt,
+        dangerous_command_checker: _,
     } = ctx;
 
     let result = match tool_name {
@@ -535,12 +537,10 @@ pub async fn execute_tool_raw(
             // reuse it so that session allowlist entries from prior `allow_for_session`
             // calls are honored. Otherwise create a one-shot checker with no allowlist.
             let check_result = {
-                use crate::dangerous_command::{
-                    ApprovalMode, CheckResult, DangerousCommandChecker,
-                };
+                use crate::dangerous_command::ApprovalMode;
                 match ctx.dangerous_command_checker {
                     Some(checker_arc) => {
-                        let checker = checker_arc.read().unwrap();
+                        let checker = checker_arc.read().await;
                         checker.check(command)
                     }
                     None => {

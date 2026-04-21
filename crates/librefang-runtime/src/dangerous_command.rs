@@ -54,7 +54,9 @@ macro_rules! dp {
 pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // ── Filesystem destruction ───────────────────────────────────────────
     dp!("delete in root path", r"\brm\b\s+(-[^\s]*\s+)*/"),
-    dp!("recursive delete", r"\brm\b\s+-[^\s]*r"),
+    // Match -r in any short-flag token, including split flags like `rm -f -r`.
+    // The leading (\s+-[^\s]*)* allows any number of preceding flag tokens.
+    dp!("recursive delete", r"\brm\b(\s+-[^\s]*)*\s+-[^\s]*r"),
     dp!("recursive delete (long flag)", r"\brm\b\s+--recursive\b"),
     // Command substitution: $(echo rm), `echo rm`
     dp!("command substitution (rm)", r"\$\([^)]*rm\b"),
@@ -73,9 +75,15 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         "recursive world/other-writable (long flag)",
         r"\bchmod\b\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
     ),
-    // setuid bit detection (4-digit octal modes: 4xxx=setuid, 2xxx=setgid)
-    dp!("setuid bit set", r"\bchmod\b\s+[0-9]{4}\s+"),
-    dp!("recursive chown to root", r"\bchown\b\s+(-[^\s]*)?r\s+root"),
+    // setuid/setgid/sticky bit detection: leading octal digit must be non-zero
+    // (1=sticky, 2=setgid, 3=setgid+sticky, 4=setuid, …, 7=setuid+setgid+sticky).
+    // This avoids false-positives on harmless modes like chmod 0644 or chmod 0755.
+    dp!("setuid bit set", r"\bchmod\b\s+[1-7][0-7]{3}\s+"),
+    // Recursive chown to root: detect -R (capital R) or -r in any combined flag token.
+    dp!(
+        "recursive chown to root",
+        r"\bchown\b\s+-[^\s]*[Rr][^\s]*\s+root\b"
+    ),
     dp!(
         "recursive chown to root (long flag)",
         r"\bchown\b\s+--recursive\b.*root"
@@ -479,5 +487,40 @@ mod tests {
                 description: "delete in root path"
             }
         ));
+    }
+
+    /// chmod with special-bit modes (setuid/setgid/sticky) must be flagged, but
+    /// harmless 4-digit modes like 0644 or 0755 must NOT be false-positives.
+    #[test]
+    fn chmod_setuid_narrow_match() {
+        // Dangerous: leading octal digit is non-zero → special bits are set.
+        assert!(dangerous("chmod 4755 /usr/bin/sudo"));
+        assert!(dangerous("chmod 2755 /usr/bin/something"));
+        assert!(dangerous("chmod 1755 /tmp"));
+        assert!(dangerous("chmod 7777 /bin/evil"));
+        // Safe: leading digit is 0 → no special bits.
+        assert!(safe("chmod 0644 file.txt"));
+        assert!(safe("chmod 0755 script.sh"));
+        assert!(safe("chmod 0600 secret"));
+    }
+
+    /// `rm -f -r` (split short flags) must be detected as recursive.
+    #[test]
+    fn rm_split_flags_recursive() {
+        assert!(dangerous("rm -f -r build/"));
+        assert!(dangerous("rm -v -r /tmp/dir"));
+        assert!(dangerous("rm -f -r -v /path"));
+        // Baseline: single combined flag still works.
+        assert!(dangerous("rm -rf /tmp/dir"));
+    }
+
+    /// chown with capital -R (standard recursive flag for chown) must be caught.
+    #[test]
+    fn chown_capital_r_recursive() {
+        assert!(dangerous("chown -R root /etc"));
+        assert!(dangerous("chown -R root:root /var"));
+        assert!(dangerous("chown -Rh root /srv"));
+        // Combined flags where R is not first.
+        assert!(dangerous("chown -hR root /srv"));
     }
 }
