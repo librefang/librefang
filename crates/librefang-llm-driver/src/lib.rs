@@ -79,9 +79,17 @@ impl LlmError {
                 let msg = message.to_lowercase();
                 match status {
                     429 => FailoverReason::RateLimit,
-                    402 | 403 => {
-                        // 402 = payment required; 403 with billing keywords = credit exhausted.
-                        if msg.contains("credit")
+                    // 402 Payment Required is always a billing/credit issue.
+                    402 => FailoverReason::CreditExhausted,
+                    // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
+                    // others use it for billing blocks.  Check rate-limit keywords first.
+                    403 => {
+                        if msg.contains("rate limit")
+                            || msg.contains("rate_limit")
+                            || msg.contains("too many requests")
+                        {
+                            FailoverReason::RateLimit
+                        } else if msg.contains("credit")
                             || msg.contains("balance")
                             || msg.contains("billing")
                             || msg.contains("payment")
@@ -93,7 +101,19 @@ impl LlmError {
                         }
                     }
                     413 => FailoverReason::ContextTooLong,
-                    503 | 404 => FailoverReason::ModelUnavailable,
+                    503 => FailoverReason::ModelUnavailable,
+                    // 404 is only a model error when the message references the model;
+                    // a generic 404 (e.g. wrong base URL) should not trigger failover.
+                    404 => {
+                        if msg.contains("model")
+                            || msg.contains("not found")
+                            || msg.contains("does not exist")
+                        {
+                            FailoverReason::ModelUnavailable
+                        } else {
+                            FailoverReason::Unknown
+                        }
+                    }
                     400 => {
                         // Some providers return context errors as 400.
                         if msg.contains("context")
@@ -147,10 +167,14 @@ impl LlmError {
 
             // Auth failures, missing keys, parse errors, HTTP transport errors
             // are not recoverable by switching providers.
-            LlmError::AuthenticationFailed(_)
-            | LlmError::MissingApiKey(_)
-            | LlmError::Parse(_)
-            | LlmError::Http(_) => FailoverReason::Unknown,
+            LlmError::AuthenticationFailed(_) | LlmError::MissingApiKey(_) | LlmError::Parse(_) => {
+                FailoverReason::Unknown
+            }
+
+            // HTTP transport errors (connection refused, TLS failure, etc.) are
+            // indistinguishable from transient timeouts — treat as Timeout so
+            // FallbackChain will skip to the next provider.
+            LlmError::Http(_) => FailoverReason::Timeout,
         }
     }
 }
