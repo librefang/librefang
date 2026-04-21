@@ -89,6 +89,28 @@ function getCategoryIcon(category: string) {
   return icons[category] || <Sparkles className="w-4 h-4" />;
 }
 
+function isRateLimitError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const obj = err as Record<string, unknown>;
+  const msg = String(obj.message ?? "").toLowerCase();
+  return msg.includes("429") || msg.includes("rate limit") || msg.includes("rate") || obj.status === 429;
+}
+
+function filterByKeywords<T extends { name: string; description?: string; tags?: string[] }>(
+  items: T[], selectedCategory: string | null
+): T[] {
+  if (!selectedCategory) return items;
+  // Uses the shared category keyword map defined above for page-level filtering.
+  const kws = (categories.find(c => c.id === selectedCategory)?.keyword || "").toLowerCase().split(" ");
+  return items.filter(s =>
+    kws.some(kw =>
+      s.name.toLowerCase().includes(kw) ||
+      s.description?.toLowerCase().includes(kw) ||
+      s.tags?.some(tag => tag.toLowerCase().includes(kw))
+    )
+  );
+}
+
 // Skill Card - FangHub registry skill
 function FangHubSkillCard({ skill, pendingId, onInstall, t }: {
   skill: FangHubSkill;
@@ -221,8 +243,8 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
   }, [isOpen]);
 
   /// Map common API error messages to user-friendly localized strings
-  const formatApiError = useCallback((e: any): string => {
-    const msg = (e?.message || "").toLowerCase();
+  const formatApiError = useCallback((e: unknown): string => {
+    const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
     if (msg.includes("already installed") || msg.includes("already exists")) {
       return t("skills.err_name_conflict", { defaultValue: "A skill with this name already exists. Please choose a different name." });
     }
@@ -238,7 +260,7 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
     if (msg.includes("invalid") && msg.includes("name")) {
       return t("skills.err_invalid_name", { defaultValue: "Invalid skill name. Use lowercase letters, numbers, hyphens, and underscores only." });
     }
-    return e?.message || t("skills.err_create_failed", { defaultValue: "Failed to create skill. Please try again." });
+    return (e instanceof Error ? e.message : String(e)) || t("skills.err_create_failed", { defaultValue: "Failed to create skill. Please try again." });
   }, [t]);
 
   const handleCreate = async () => {
@@ -267,9 +289,9 @@ function CreateSkillModal({ isOpen, onClose, onCreated, t }: {
         onClose();
         setName(""); setDescription(""); setPromptContext(""); setTags("");
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       // Ignore abort errors
-      if (e?.name === "AbortError") return;
+      if (e instanceof DOMException && e.name === "AbortError") return;
       if (mountedRef.current && !controller.signal.aborted) {
         setError(formatApiError(e));
       }
@@ -526,7 +548,7 @@ function SupportingFileViewer({ skillName, path, onClose, t }: {
         <button className="text-text-dim hover:text-text-main" onClick={onClose}><X className="w-4 h-4" /></button>
       </div>
       {isLoading && <div className="flex items-center justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-text-dim" /></div>}
-      {error && <p className="text-xs text-error">{(error as any)?.message || "Failed to load file"}</p>}
+      {error && <p className="text-xs text-error">{error instanceof Error ? error.message : "Failed to load file"}</p>}
       {data && (
         <>
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all text-[11px] bg-surface-2 p-2 rounded font-mono">{data.content}</pre>
@@ -579,8 +601,8 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
       await refetch();
       addToast(successMsg, "success");
       setPane("none");
-    } catch (e: any) {
-      addToast(e?.message || "Action failed", "error");
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : "Action failed", "error");
     } finally {
       setBusy(false);
     }
@@ -617,8 +639,8 @@ function SkillDetailModal({ skillName, isOpen, onClose, t }: {
         await deleteSkillMutation.mutateAsync({ name: skillName });
         addToast(t("skills.evo_deleted", { defaultValue: "Skill deleted" }), "success");
         onClose();
-      } catch (e: any) {
-        addToast(e?.message || "Delete failed", "error");
+      } catch (e: unknown) {
+        addToast(e instanceof Error ? e.message : "Delete failed", "error");
       } finally {
         setBusy(false);
       }
@@ -901,6 +923,14 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, sour
   );
 }
 
+function SkillGridSkeleton({ count = 6 }: { count?: number }) {
+  return (
+    <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+      {Array.from({ length: count }, (_, i) => <CardSkeleton key={i} />)}
+    </div>
+  );
+}
+
 // Details Modal
 function DetailsModal({ skill, onClose, onInstall, pendingId, source = "clawhub", t }: {
   skill: ClawHubSkillWithStatus;
@@ -1026,7 +1056,7 @@ export function SkillsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("fanghub");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [skillhubSearch_, setSkillhubSearch] = useState("");
+  const [skillhubSearch, setSkillhubSearch] = useState("");
 
   // Actions
   const [uninstalling, setUninstalling] = useState<string | null>(null);
@@ -1060,7 +1090,7 @@ export function SkillsPage() {
 
   // Skillhub queries — category selection also drives search.
   // Browse only fires when no keyword; search only fires when keyword present.
-  const skillhubKeyword = skillhubSearch_ || (selectedCategory ? categories.find(c => c.id === selectedCategory)?.keyword || "" : "");
+  const skillhubKeyword = skillhubSearch || (selectedCategory ? categories.find(c => c.id === selectedCategory)?.keyword || "" : "");
 
   const skillhubBrowseQuery = useQuery({
     ...skillQueries.skillhubBrowse(),
@@ -1104,8 +1134,8 @@ export function SkillsPage() {
 
   const marketplaceSkills = searchQuery.data?.items ?? [];
   const isMarketplaceLoading = searchQuery.isLoading;
-  const marketplaceError = searchQuery.error as any;
-  const isRateLimited = marketplaceError?.message?.includes("429") || marketplaceError?.message?.includes("rate") || marketplaceError?.message?.includes("Rate limit") || marketplaceError?.status === 429;
+  const marketplaceError = searchQuery.error;
+  const isRateLimited = isRateLimitError(marketplaceError);
 
   const filteredMarketplace = useMemo(
     () => marketplaceSkills
@@ -1115,33 +1145,16 @@ export function SkillsPage() {
   );
   const skillhubSkills = activeSkillhubQuery.data?.items ?? [];
   const isSkillhubLoading = activeSkillhubQuery.isLoading;
-  const skillhubError = activeSkillhubQuery.error as any;
-  const isSkillhubRateLimited = skillhubError?.message?.includes("429") || skillhubError?.message?.includes("rate") || skillhubError?.message?.includes("Rate limit") || skillhubError?.status === 429;
+  const skillhubError = activeSkillhubQuery.error;
+  const isSkillhubRateLimited = isRateLimitError(skillhubError);
 
   const filteredSkillhub = useMemo(() => {
     const all = skillhubSkills.map(s => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "skillhub") }));
-    if (!selectedCategory) return all;
-    const kws = (categories.find(c => c.id === selectedCategory)?.keyword || "").toLowerCase().split(" ");
-    return all.filter(s =>
-      kws.some(kw =>
-        s.name.toLowerCase().includes(kw) ||
-        s.description?.toLowerCase().includes(kw) ||
-        s.tags?.some((tag: string) => tag.toLowerCase().includes(kw))
-      )
-    );
+    return filterByKeywords(all, selectedCategory);
   }, [skillhubSkills, installedSkills, selectedCategory]);
   const fanghubSkills = fanghubQuery.data?.skills ?? [];
   const filteredFanghub = useMemo(() => {
-    if (!selectedCategory) return fanghubSkills;
-    const keyword = categories.find(c => c.id === selectedCategory)?.keyword || "";
-    const kws = keyword.toLowerCase().split(" ");
-    return fanghubSkills.filter(s =>
-      kws.some(kw =>
-        s.name.toLowerCase().includes(kw) ||
-        s.description?.toLowerCase().includes(kw) ||
-        s.tags?.some(tag => tag.toLowerCase().includes(kw))
-      )
-    );
+    return filterByKeywords(fanghubSkills, selectedCategory);
   }, [fanghubSkills, selectedCategory]);
 
   // Mutations
@@ -1160,7 +1173,7 @@ export function SkillsPage() {
     }
   };
 
-  const handleInstall = (slug: string, source: MarketplaceSource = "clawhub") => {
+  const handleInstall = (slug: string, source: MarketplaceSource | "fanghub" = "clawhub") => {
     setInstallingId(slug);
     const hand = targetHand || undefined;
     const opts = {
@@ -1169,14 +1182,16 @@ export function SkillsPage() {
         setInstallingId(null);
         setDetailsSkill(null);
       },
-      onError: (error: any) => {
-        const msg = error.message || t("common.error");
+      onError: (error: unknown) => {
+        const msg = error instanceof Error ? error.message : String(error);
         addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
         setInstallingId(null);
       },
     };
     if (source === "skillhub") {
       skillhubInstallMutation.mutate({ slug, hand }, opts);
+    } else if (source === "fanghub") {
+      fanghubInstallMutation.mutate({ name: slug, hand }, opts);
     } else {
       installMutation.mutate({ slug, hand }, opts);
     }
@@ -1243,11 +1258,11 @@ export function SkillsPage() {
               try {
                 const res = await reloadSkillsMutation.mutateAsync();
                 addToast(
-                  t("skills.reloaded", { defaultValue: "Rescanned skills directory ({{count}} loaded)", count: (res as any).count ?? 0 }),
+                  t("skills.reloaded", { defaultValue: "Rescanned skills directory ({{count}} loaded)", count: (res as { count?: number }).count ?? 0 }),
                   "success",
                 );
-              } catch (e: any) {
-                addToast(e?.message || "Reload failed", "error");
+              } catch (e: unknown) {
+                addToast(e instanceof Error ? e.message : "Reload failed", "error");
               }
               void skillsQuery.refetch();
               void searchQuery.refetch();
@@ -1372,11 +1387,11 @@ export function SkillsPage() {
       {/* Search — Skillhub */}
       {viewMode === "skillhub" && (
         <Input
-          value={skillhubSearch_}
+          value={skillhubSearch}
           onChange={(e) => { setSkillhubSearch(e.target.value); }}
           placeholder={t("skills.skillhub_search_placeholder")}
           leftIcon={<Search className="w-4 h-4" />}
-          rightIcon={skillhubSearch_ ? (
+          rightIcon={skillhubSearch ? (
             <button onClick={() => setSkillhubSearch("")} className="hover:text-text-main">
               <X className="w-3 h-3" />
             </button>
@@ -1387,9 +1402,7 @@ export function SkillsPage() {
       {/* Content */}
       {viewMode === "installed" ? (
         skillsQuery.isLoading ? (
-          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-            {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
-          </div>
+          <SkillGridSkeleton />
         ) : installedSkills.length === 0 ? (
           <EmptyState title={t("skills.no_skills")} icon={<Package className="h-6 w-6" />} />
         ) : (
@@ -1401,9 +1414,7 @@ export function SkillsPage() {
         )
       ) : viewMode === "marketplace" ? (
         isMarketplaceLoading ? (
-          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-            {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
-          </div>
+          <SkillGridSkeleton />
         ) : isRateLimited ? (
           <EmptyState title={t("skills.rate_limited")} description={t("skills.rate_limited_desc")} icon={<Loader2 className="h-6 w-6 animate-spin" />} />
         ) : marketplaceError ? (
@@ -1424,9 +1435,7 @@ export function SkillsPage() {
         )
       ) : viewMode === "skillhub" ? (
         isSkillhubLoading ? (
-          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-            {[1, 2, 3, 4, 5, 6].map(i => <CardSkeleton key={i} />)}
-          </div>
+          <SkillGridSkeleton />
         ) : isSkillhubRateLimited ? (
           <EmptyState title={t("skills.rate_limited")} description={t("skills.skillhub_rate_limited_desc")} icon={<Loader2 className="h-6 w-6 animate-spin" />} />
         ) : skillhubError ? (
@@ -1448,7 +1457,7 @@ export function SkillsPage() {
       ) : (
         /* viewMode === "fanghub" — official LibreFang registry skills */
         fanghubQuery.isLoading ? (
-          <div className="grid gap-2 sm:gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">{[1, 2, 3].map(i => <CardSkeleton key={i} />)}</div>
+          <SkillGridSkeleton count={3} />
         ) : filteredFanghub.length === 0 ? (
           <EmptyState title={t("skills.no_results")} icon={<Zap className="h-6 w-6" />} />
         ) : (
@@ -1459,23 +1468,7 @@ export function SkillsPage() {
                 key={skill.name}
                 skill={skill}
                 pendingId={installingId}
-                onInstall={(name) => {
-                  setInstallingId(name);
-                  fanghubInstallMutation.mutate(
-                    { name, hand: targetHand || undefined },
-                    {
-                      onSuccess: () => {
-                        addToast(t("common.success"), "success");
-                        setInstallingId(null);
-                      },
-                      onError: (error: any) => {
-                        const msg = error.message || t("common.error");
-                        addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
-                        setInstallingId(null);
-                      },
-                    },
-                  );
-                }}
+                onInstall={(name) => handleInstall(name, "fanghub")}
                 t={t}
               />
             ))}

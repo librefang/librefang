@@ -1,7 +1,44 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, CheckCircle, Calendar, Shield, Users, User, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge, LogOut, UserCircle, X, Sparkles, Terminal, Plug } from "lucide-react";
+import {
+  Globe,
+  Sun,
+  Moon,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  Menu,
+  Home,
+  Layers,
+  MessageCircle,
+  CheckCircle,
+  Calendar,
+  Shield,
+  Users,
+  User,
+  Server,
+  Network,
+  Bell,
+  Hand,
+  BarChart3,
+  Database,
+  Activity,
+  FileText,
+  Settings,
+  Puzzle,
+  Cpu,
+  Lock,
+  Share2,
+  Gauge,
+  LogOut,
+  UserCircle,
+  X,
+  Sparkles,
+  Terminal,
+  Plug,
+} from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
@@ -208,6 +245,8 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   );
 }
 
+const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40";
+
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const [currentUsername, setCurrentUsername] = useState("");
@@ -219,10 +258,13 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     getDashboardUsername().then((u) => {
+      if (cancelled) return;
       setCurrentUsername(u);
       setNewUsername(u);
     });
+    return () => { cancelled = true; };
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -267,13 +309,10 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40";
-
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="w-full max-w-md mx-4 animate-fade-in-scale">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
-          {/* Header */}
           <div className="flex items-center justify-between px-6 pt-6 pb-4">
             <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
             <button
@@ -286,7 +325,6 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
           <form onSubmit={handleSubmit}>
             <div className="px-6 space-y-5">
-              {/* Username */}
               <div>
                 <label className="block text-xs font-semibold text-text-dim mb-1.5">{t("settings.new_username")}</label>
                 <input
@@ -295,11 +333,10 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
                   onChange={(e) => { setNewUsername(e.target.value); setMessage(null); }}
                   autoComplete="username"
                   autoFocus
-                  className={inputClass}
+                  className={INPUT_CLASS}
                 />
               </div>
 
-              {/* New password */}
               <div>
                 <div className="flex items-baseline justify-between mb-1.5">
                   <label className="text-xs font-semibold text-text-dim">{t("settings.pw_new")}</label>
@@ -311,11 +348,10 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
                   onChange={(e) => { setNewPassword(e.target.value); setMessage(null); }}
                   placeholder="••••••••"
                   autoComplete="new-password"
-                  className={inputClass}
+                  className={INPUT_CLASS}
                 />
               </div>
 
-              {/* Confirm password — always visible, grayed out when no new password */}
               <div className={newPassword ? "" : "opacity-40 pointer-events-none"}>
                 <label className="block text-xs font-semibold text-text-dim mb-1.5">{t("settings.pw_confirm")}</label>
                 <input
@@ -325,12 +361,11 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
                   placeholder="••••••••"
                   autoComplete="new-password"
                   tabIndex={newPassword ? 0 : -1}
-                  className={`${inputClass} ${newPassword && confirmPassword && newPassword !== confirmPassword ? "border-error focus:border-error focus:ring-error/10" : ""}`}
+                  className={`${INPUT_CLASS} ${newPassword && confirmPassword && newPassword !== confirmPassword ? "border-error focus:border-error focus:ring-error/10" : ""}`}
                 />
               </div>
             </div>
 
-            {/* Verify identity section */}
             <div className="mx-6 mt-5 rounded-xl bg-surface-hover/60 border border-border-subtle px-4 py-3.5">
               <label className="block text-[10px] font-bold uppercase tracking-widest text-text-dim mb-2">{t("settings.pw_verify_identity")}</label>
               <input
@@ -339,18 +374,16 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
                 onChange={(e) => { setCurrentPassword(e.target.value); setMessage(null); }}
                 placeholder={t("settings.pw_current_placeholder")}
                 autoComplete="current-password"
-                className={inputClass}
+                className={INPUT_CLASS}
               />
             </div>
 
-            {/* Error / success */}
             {message && (
               <p className={`mx-6 mt-3 text-xs font-semibold ${message.type === "success" ? "text-success" : "text-error"}`}>
                 {message.text}
               </p>
             )}
 
-            {/* Actions */}
             <div className="flex gap-3 px-6 py-5">
               <button
                 type="button"
@@ -442,7 +475,7 @@ export function App() {
     getVersionInfo().then((v) => {
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
-    }).catch(() => {});
+    }).catch(() => { /* Version info is non-essential; silently ignore failure. */ });
 
     getStatus().then((s) => {
       setTerminalEnabled(s.terminal_enabled !== false);
@@ -547,7 +580,6 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
-      {/* Skip to content — visible only when focused (keyboard users) */}
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[200] focus:rounded-lg focus:bg-brand focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-white focus:shadow-lg focus:outline-none"
@@ -555,7 +587,6 @@ export function App() {
         {t("nav.skip_to_content", { defaultValue: "Skip to content" })}
       </a>
 
-      {/* Sidebar Overlay (Mobile) */}
       {isMobileMenuOpen && (
         <div 
           className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
@@ -563,14 +594,12 @@ export function App() {
         />
       )}
 
-      {/* Sidebar */}
       <aside className={`
         fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-24" : "lg:w-[280px]"}
       `}>
-        {/* Sidebar Header */}
         <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
           isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-4"
         }`}>
@@ -594,9 +623,7 @@ export function App() {
           </button>
         </div>
 
-        {/* Navigation */}
-        <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin" style={{ maxHeight: "calc(100vh - 160px)" }}>
-          {/* Search Button */}
+        <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin max-h-[calc(100vh-160px)]">
           <button
             onClick={() => setPaletteOpen(true)}
             className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
@@ -665,7 +692,6 @@ export function App() {
           </div>
         </nav>
 
-        {/* Sidebar Footer */}
         <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
           <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
@@ -686,9 +712,7 @@ export function App() {
         </div>
       </aside>
 
-      {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top Header */}
         <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-6">
           <div className="flex items-center gap-2">
             <button
@@ -770,7 +794,6 @@ export function App() {
           </div>
         </header>
 
-        {/* Main Content */}
         <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden bg-main" tabIndex={-1}>
           <div className="w-full p-3 sm:p-4 lg:p-8">
             <Outlet />

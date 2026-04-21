@@ -346,6 +346,7 @@ export interface WorkflowItem {
   description?: string;
   steps?: number | WorkflowStep[];
   created_at?: string;
+  layout?: unknown;
 }
 
 export interface WorkflowRunItem {
@@ -938,12 +939,7 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 }
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
-  const response = await fetch(`/api/templates/${encodeURIComponent(name)}/toml`);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Failed to fetch template: ${response.status}`);
-  }
-  return response.text();
+  return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1424,19 +1420,19 @@ export async function createWorkflow(payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/workflows", payload);
 }
 
-export async function getWorkflow(workflowId: string): Promise<any> {
-  return get<any>(`/api/workflows/${encodeURIComponent(workflowId)}`);
+export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {
+  return get<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
 
 export async function runWorkflow(workflowId: string, input: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
-  }, 300000); // 5 min timeout — workflows run multiple LLM steps
+  }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
@@ -1453,7 +1449,7 @@ export async function updateWorkflow(workflowId: string, payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
@@ -1566,8 +1562,8 @@ export async function runSchedule(scheduleId: string): Promise<ApiActionResponse
 }
 
 export async function listTriggers(): Promise<TriggerItem[]> {
-  const data = await get<any>("/api/triggers");
-  return data.triggers ?? data ?? [];
+  const data = await get<{ triggers?: TriggerItem[] }>("/api/triggers");
+  return data.triggers ?? [];
 }
 
 export async function getTrigger(triggerId: string): Promise<TriggerItem> {
@@ -2463,8 +2459,8 @@ export async function dashboardLogin(username: string, password: string, totpCod
       setApiKey(data.token);
     }
     return data;
-  } catch (e: any) {
-    return { ok: false, error: e.message || "Network error" };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
   }
 }
 
