@@ -5715,6 +5715,12 @@ system_prompt = "You are a helpful assistant."
                 let _ = self
                     .registry
                     .update_session_reset_state(agent_id, types_reason);
+                // Persist the updated entry so the reset state survives a crash.
+                // Other registry updates (update_skills, update_mcp_servers, etc.)
+                // follow the same pattern: update + save_agent.
+                if let Some(updated) = self.registry.get(agent_id) {
+                    let _ = self.memory.save_agent(&updated);
+                }
             }
         }
         // ───────────────────────────────────────────────────────────────────

@@ -341,4 +341,165 @@ mod tests {
         assert_eq!(policy.idle_minutes, 1440);
         assert_eq!(policy.daily_at_hour, 4);
     }
+
+    // ── Daily-mode tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn daily_mode_triggers_when_before_boundary() {
+        // Use a large offset to make last_active clearly before today's boundary.
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 4,
+            ..Default::default()
+        };
+        // last_active = yesterday 03:00 local → yesterday's 04:00 boundary passed
+        // → should trigger reset (crossed_daily_boundary returns true)
+        let last = SystemTime::now() - Duration::from_secs(25 * 3600);
+        let result = policy.should_reset(last, false);
+        assert!(
+            matches!(result, Some(ResetReason::Daily)),
+            "should trigger daily reset"
+        );
+    }
+
+    #[test]
+    fn daily_mode_does_not_trigger_when_after_boundary_but_same_day() {
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 4,
+            ..Default::default()
+        };
+        // last_active = today 05:00 local, now = today 12:00 local
+        // → still in same day after today's 04:00 boundary → no trigger
+        let last = SystemTime::now() - Duration::from_secs(7 * 3600);
+        let result = policy.should_reset(last, false);
+        assert_eq!(result, None, "same-day after boundary should not trigger");
+    }
+
+    #[test]
+    fn daily_mode_does_not_fire_multiple_times_same_day() {
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 4,
+            ..Default::default()
+        };
+        // First call with last_active before boundary → triggers
+        let last_before = SystemTime::now() - Duration::from_secs(25 * 3600);
+        assert!(matches!(
+            policy.should_reset(last_before, false),
+            Some(ResetReason::Daily)
+        ));
+
+        // Second call, same `now`, but last_active is NOW (after reset, last_active = now)
+        // → last_local is today 12:00, boundary was today 04:00 → no trigger
+        let last_after = SystemTime::now();
+        assert_eq!(policy.should_reset(last_after, false), None);
+    }
+
+    #[test]
+    fn daily_at_hour_24_is_skipped_not_misfired() {
+        // 24 is out of range for a local hour (valid range 0-23).
+        // Out-of-range values must be treated as misconfiguration and skip the
+        // daily check entirely — otherwise target_secs_into_day = 86 400 which
+        // equals secs_per_day, causing the boundary calculation to always pick
+        // yesterday and fire on every invocation.
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 24, // invalid — out of 0-23 range
+            ..Default::default()
+        };
+        let very_old = SystemTime::now() - Duration::from_secs(100 * 86400);
+        // With the guard in place, this must NOT return Daily (it should skip the check).
+        assert_eq!(
+            policy.should_reset(very_old, false),
+            None,
+            "daily_at_hour=24 must be treated as no-op, not misfire"
+        );
+    }
+
+    #[test]
+    fn daily_at_hour_255_also_skipped() {
+        // Also verify that u8 values like 255 (which serde accepts for u8)
+        // are similarly handled.
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 255,
+            ..Default::default()
+        };
+        let very_old = SystemTime::now() - Duration::from_secs(100 * 86400);
+        assert_eq!(
+            policy.should_reset(very_old, false),
+            None,
+            "daily_at_hour=255 must be treated as no-op"
+        );
+    }
+
+    #[test]
+    fn both_mode_daily_wins_when_idle_not_triggered() {
+        // Idle threshold = 10 min, last_active = 5 min ago → idle doesn't fire.
+        // Daily boundary is crossed → daily should fire.
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Both,
+            idle_minutes: 10,
+            daily_at_hour: 4,
+            ..Default::default()
+        };
+        // Active 5 min ago → idle-safe, but if daily boundary crossed → daily fires.
+        let last = SystemTime::now() - Duration::from_secs(25 * 3600);
+        let result = policy.should_reset(last, false);
+        assert!(
+            matches!(result, Some(ResetReason::Daily)),
+            "both mode with idle-safe but crossed-daily-boundary should fire Daily"
+        );
+    }
+
+    #[test]
+    fn both_mode_idle_wins_when_both_conditions_met() {
+        // Active 15 min ago → idle threshold breached (10 min).
+        // Also crossed daily boundary → but idle is checked first and wins.
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Both,
+            idle_minutes: 10,
+            daily_at_hour: 4,
+        };
+        let last = SystemTime::now() - Duration::from_secs(15 * 60);
+        let result = policy.should_reset(last, false);
+        assert!(
+            matches!(result, Some(ResetReason::Idle)),
+            "both mode with both conditions met should fire Idle (checked first)"
+        );
+    }
+
+    #[test]
+    fn suspended_overrides_daily() {
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Daily,
+            daily_at_hour: 4,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                policy.should_reset(SystemTime::now(), true),
+                Some(ResetReason::Suspended)
+            ),
+            "suspended must win over daily even when daily would fire"
+        );
+    }
+
+    #[test]
+    fn suspended_overrides_both() {
+        let policy = SessionResetPolicy {
+            mode: ResetMode::Both,
+            idle_minutes: 1,
+            daily_at_hour: 4,
+        };
+        // Very recent last_active (idle-safe), but suspended flag is set
+        assert!(
+            matches!(
+                policy.should_reset(SystemTime::now(), true),
+                Some(ResetReason::Suspended)
+            ),
+            "suspended must win over both idle and daily"
+        );
+    }
 }
