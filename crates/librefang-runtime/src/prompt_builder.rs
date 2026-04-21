@@ -453,8 +453,7 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
 }
 
 /// When skill count exceeds this threshold, the system prompt uses a compact
-/// summary listing only skill names and instructs the agent to call
-/// `skill_list` for full descriptions. Below or at this threshold, full
+/// summary listing only skill names. Below or at this threshold, full
 /// skill descriptions are inlined. Matches Hermes-Agent's design.
 pub const SKILL_INLINE_THRESHOLD: usize = 10;
 
@@ -464,8 +463,9 @@ pub const SKILL_INLINE_THRESHOLD: usize = 10;
 /// - `skill_count <= SKILL_INLINE_THRESHOLD`: full descriptions are inlined
 ///   inside `<available_skills>` (existing behaviour).
 /// - `skill_count > SKILL_INLINE_THRESHOLD`: only skill names are listed and
-///   the agent is told to call `skill_list` for details. This prevents the
-///   system prompt from bloating when many skills are installed.
+///   the agent is told to call `skill_read_file` to load each skill before
+///   applying it. This prevents the system prompt from bloating when many
+///   skills are installed.
 ///
 /// `skill_summary` is the pre-built summary string from the kernel (either
 /// full descriptions or the plain name list — the caller always passes the
@@ -506,10 +506,11 @@ pub fn build_skill_section(
             .filter(|n| !n.is_empty())
             .collect();
 
-        out.push_str("Available skills (use `skill_list` tool for full details): ");
+        out.push_str("Available skills: ");
         out.push_str(&names.join(", "));
         out.push('\n');
-        out.push_str("Use `skill_read_file` to load a skill before applying it.\n");
+        out.push_str("Use `skill_read_file` to load a skill by name before applying it. ");
+        out.push_str("Load any skill that seems relevant before proceeding.\n");
     } else {
         // Inline mode — full descriptions
         out.push_str(concat!(
@@ -1243,8 +1244,9 @@ mod tests {
         assert!(result.contains("skill-11"));
         // Descriptions NOT inlined
         assert!(!result.contains("Description for skill 1"));
-        // Hint to use skill_list tool
-        assert!(result.contains("skill_list"));
+        // Compact format: no skill_list (non-existent tool), uses skill_read_file
+        assert!(!result.contains("skill_list"));
+        assert!(result.contains("skill_read_file"));
         // No <available_skills> wrapper in summary mode
         assert!(!result.contains("<available_skills>"));
     }
@@ -1279,7 +1281,7 @@ mod tests {
         }
         let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
         assert!(!result.contains("<available_skills>"));
-        assert!(result.contains("skill_list"));
+        assert!(result.contains("skill_read_file"));
     }
 
     #[test]
