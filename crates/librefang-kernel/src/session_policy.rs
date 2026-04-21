@@ -134,7 +134,12 @@ impl SessionResetPolicy {
         }
 
         if matches!(self.mode, ResetMode::Daily | ResetMode::Both) {
-            if self.crossed_daily_boundary(last_active, now) {
+            // Guard: daily_at_hour must be 0-23.  Values ≥ 24 would produce a
+            // target_secs_into_day that exceeds 86 400, causing the boundary
+            // calculation to pick yesterday's slot every time and fire on
+            // every invocation.  Treat out-of-range values as misconfiguration
+            // and skip the check entirely rather than silently misfiring.
+            if self.daily_at_hour <= 23 && self.crossed_daily_boundary(last_active, now) {
                 return Some(ResetReason::Daily);
             }
         }

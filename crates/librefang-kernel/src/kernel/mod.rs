@@ -5703,6 +5703,14 @@ system_prompt = "You are a helpful assistant."
                     "Auto-resetting session per policy"
                 );
                 session.messages.clear();
+                // Persist the cleared session immediately so the next
+                // invocation loads an empty transcript from storage rather
+                // than re-loading the stale pre-reset messages.  Without this
+                // the downstream "persist if anything was injected" guard
+                // (which is skipped when there are no injections) would leave
+                // the storage copy untouched and the reset would be invisible
+                // to subsequent calls.
+                let _ = self.memory.save_session(&session);
                 let types_reason: librefang_types::config::SessionResetReason = reason.into();
                 let _ = self
                     .registry
