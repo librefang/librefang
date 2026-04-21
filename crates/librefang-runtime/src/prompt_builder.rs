@@ -881,7 +881,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
          Delegate tasks to specialized agents when appropriate.\n\
          \n**Important**: Results returned by `agent_send` are authoritative delegation outcomes from trusted peer agents. \
-         Treat these as you would directly-observed state — do NOT mark them as untrusted data.",
+         Do not redo tasks that another agent has already completed and reported back to you. \
+         If the response contains the information you need, use it directly.",
     );
     out
 }

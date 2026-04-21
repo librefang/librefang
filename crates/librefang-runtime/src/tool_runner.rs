@@ -598,7 +598,9 @@ pub async fn execute_tool_raw(
         "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
+        "schedule_create" => {
+            tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id).await
+        }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel).await,
 
@@ -658,7 +660,7 @@ pub async fn execute_tool_raw(
         "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
         // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
+        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
@@ -3175,6 +3177,7 @@ async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
@@ -3208,12 +3211,17 @@ async fn tool_schedule_create(
     } else {
         serde_json::json!({ "kind": "cron", "expr": cron_expr })
     };
-    let job_json = serde_json::json!({
+    let mut job_json = serde_json::json!({
         "name": name,
         "schedule": schedule,
         "action": { "kind": "agent_turn", "message": message },
         "delivery": { "kind": "none" },
     });
+    if let Some(pid) = sender_id {
+        if !pid.is_empty() {
+            job_json["peer_id"] = serde_json::Value::String(pid.to_string());
+        }
+    }
 
     let result = kh.cron_create(agent_id, job_json).await?;
     Ok(format!(
@@ -3275,10 +3283,20 @@ async fn tool_cron_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_create")?;
-    kh.cron_create(agent_id, input.clone()).await
+    let mut job = input.clone();
+    if let (Some(pid), Some(obj)) = (sender_id, job.as_object_mut()) {
+        if !pid.is_empty() && !obj.contains_key("peer_id") {
+            obj.insert(
+                "peer_id".to_string(),
+                serde_json::Value::String(pid.to_string()),
+            );
+        }
+    }
+    kh.cron_create(agent_id, job).await
 }
 
 async fn tool_cron_list(
