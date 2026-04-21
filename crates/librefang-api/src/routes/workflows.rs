@@ -1178,6 +1178,16 @@ pub async fn update_trigger(
         }
     };
 
+    // Validate target agent exists when being set (mirrors POST validation)
+    if let Some(Some(target_id)) = target_agent {
+        if state.kernel.agent_registry().get(target_id).is_none() {
+            return ApiErrorResponse::bad_request(format!(
+                "target_agent_id '{target_id}' does not exist"
+            ))
+            .into_json_tuple();
+        }
+    }
+
     let patch = TriggerPatch {
         pattern,
         prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),

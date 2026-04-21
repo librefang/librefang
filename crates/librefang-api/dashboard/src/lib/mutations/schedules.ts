@@ -56,15 +56,23 @@ export function useRunSchedule() {
   });
 }
 
+// Trigger writes must invalidate triggerKeys.all (not just the per-agent
+// sub-key) so that SchedulerPage — which queries triggerKeys.lists() without
+// an agentId — also refreshes.  triggerKeys.list(agentId) is a strictly
+// longer key; react-query prefix matching never reaches the shorter lists()
+// key from it.
+function invalidateTriggerCaches(qc: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: triggerKeys.all }),
+    qc.invalidateQueries({ queryKey: cronKeys.all }),
+  ]);
+}
+
 export function useCreateTrigger() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateTriggerPayload) => createTrigger(payload),
-    onSuccess: (_data, payload) => {
-      // Invalidate the specific agent's list; falls back to all lists.
-      qc.invalidateQueries({ queryKey: triggerKeys.list(payload.agent_id) });
-      qc.invalidateQueries({ queryKey: cronKeys.all });
-    },
+    onSuccess: () => invalidateTriggerCaches(qc),
   });
 }
 
@@ -73,12 +81,7 @@ export function useUpdateTrigger() {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: TriggerPatch; agentId?: string }) =>
       updateTrigger(id, data),
-    onSuccess: (_data, { id, agentId }) => {
-      // Invalidate the specific detail entry and the owning agent's list.
-      qc.invalidateQueries({ queryKey: triggerKeys.detail(id) });
-      qc.invalidateQueries({ queryKey: triggerKeys.list(agentId) });
-      qc.invalidateQueries({ queryKey: cronKeys.all });
-    },
+    onSuccess: () => invalidateTriggerCaches(qc),
   });
 }
 
@@ -86,11 +89,9 @@ export function useDeleteTrigger() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id }: { id: string; agentId?: string }) => deleteTrigger(id),
-    onSuccess: (_data, { id, agentId }) => {
-      // Remove the stale detail entry and invalidate the owning agent's list.
+    onSuccess: (_data, { id }) => {
       qc.removeQueries({ queryKey: triggerKeys.detail(id) });
-      qc.invalidateQueries({ queryKey: triggerKeys.list(agentId) });
-      qc.invalidateQueries({ queryKey: cronKeys.all });
+      return invalidateTriggerCaches(qc);
     },
   });
 }
