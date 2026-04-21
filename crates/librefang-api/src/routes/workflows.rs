@@ -1044,6 +1044,7 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     v
 }
 
+#[utoipa::path(get, path = "/api/triggers", tag = "workflows", params(("agent_id" = Option<String>, Query, description = "Filter by agent ID")), responses((status = 200, description = "List triggers", body = serde_json::Value)))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
