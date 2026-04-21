@@ -550,7 +550,7 @@ fn run_git(
     let allowed_owned: Vec<i32> = allowed_non_zero.to_vec();
 
     // Spawn the child process with captured stdout/stderr.
-    let mut child = match Command::new("git")
+    let child = match Command::new("git")
         .args(args)
         .current_dir(work_dir)
         .env_clear()
