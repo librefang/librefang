@@ -2308,9 +2308,12 @@ async fn tool_shell_exec(
         });
 
         // Drive both the wait and the kill signal concurrently.
+        // Both arms must produce the same type (ExitStatus). We use `?` in
+        // both arms so that any io::Error propagates out of the spawned task
+        // (which returns Ok::<_, io::Error>(())), keeping the arm types uniform.
         let status = tokio::select! {
             // Wait for the child to exit naturally.
-            s = child.wait() => s,
+            s = child.wait() => s?,
             // Or respond to a timeout kill signal.
             _ = kill_rx => {
                 let _ = child.start_kill();
@@ -2337,8 +2340,10 @@ async fn tool_shell_exec(
     })
     .await;
 
+    // rx.recv() returns Option<T> (None when all senders are dropped).
+    // timeout wraps that, giving Result<Option<Result<Output, io::Error>>, Elapsed>.
     match result {
-        Ok(Ok(output)) => {
+        Ok(Some(Ok(output))) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
@@ -2377,7 +2382,21 @@ async fn tool_shell_exec(
                 "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}"
             ))
         }
-        Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
+        Ok(Some(Err(e))) => {
+            // The spawned task failed (e.g. wait() returned an io::Error).
+            // Mark the registry entry finished so it never stays in Running state.
+            if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
+                reg.mark_finished(pid, -1);
+            }
+            Err(format!("Failed to execute command: {e}"))
+        }
+        Ok(None) => {
+            // Channel closed without sending — the spawned task exited early.
+            if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
+                reg.mark_finished(pid, -1);
+            }
+            Err("Command task exited unexpectedly".to_string())
+        }
         Err(_) => {
             // Timed out — signal the child task to kill the process via the
             // oneshot channel (non-blocking, never hangs), then wait for the
@@ -2385,8 +2404,9 @@ async fn tool_shell_exec(
             let _ = kill_tx.send(());
             // Wait for the task to finish (it sends the result back via rx even
             // though we already know the overall timeout expired).
+            // Note: `tx` was moved into the spawned task, so we only drop `rx`
+            // here to release our end of the channel.
             let _ = rx.recv().await;
-            drop(tx);
             drop(rx);
 
             // Mark the registry entry finished with a sentinel exit code so
