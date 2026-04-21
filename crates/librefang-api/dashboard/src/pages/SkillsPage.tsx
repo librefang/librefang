@@ -100,6 +100,7 @@ function filterByKeywords<T extends { name: string; description?: string; tags?:
   items: T[], selectedCategory: string | null
 ): T[] {
   if (!selectedCategory) return items;
+  // Uses the shared category keyword map defined above for page-level filtering.
   const kws = (categories.find(c => c.id === selectedCategory)?.keyword || "").toLowerCase().split(" ");
   return items.filter(s =>
     kws.some(kw =>

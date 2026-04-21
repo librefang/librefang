@@ -26,8 +26,16 @@ import {
   Check, ChevronLeft
 } from "lucide-react";
 
-function getErrorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+function getErrorMessage(e: unknown): string | null {
+  if (e instanceof Error) {
+    return e.message.trim() || null;
+  }
+
+  if (typeof e === "string") {
+    return e.trim() || null;
+  }
+
+  return null;
 }
 
 function getActionResultError(result: ApiActionResponse & { error_message?: string }, fallback: string): string {

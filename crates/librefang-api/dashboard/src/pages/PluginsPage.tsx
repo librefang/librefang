@@ -26,8 +26,16 @@ import {
 const EMPTY_PLUGINS: PluginItem[] = [];
 const EMPTY_REGISTRIES: RegistryEntry[] = [];
 
-function getErrorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+function getErrorMessage(e: unknown): string | null {
+  if (e instanceof Error) {
+    return e.message.trim() || null;
+  }
+
+  if (typeof e === "string") {
+    return e.trim() || null;
+  }
+
+  return null;
 }
 
 export function PluginsPage() {
@@ -70,15 +78,15 @@ export function PluginsPage() {
     registriesQuery.refetch();
   }, [pluginsQuery.refetch, registriesQuery.refetch]);
 
-  const resetInstallForm = () => {
+  const resetInstallForm = useCallback(() => {
     setInstallName(""); setInstallPath(""); setInstallUrl(""); setInstallBranch(""); setInstallRepo("");
-  };
+  }, []);
 
   const onInstallSuccess = useCallback(() => {
     setShowInstall(false);
     resetInstallForm();
     addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
-  }, [addToast, t]);
+  }, [addToast, resetInstallForm, t]);
   const onInstallError = useCallback((e: unknown) => {
     addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
   }, [addToast, t]);
