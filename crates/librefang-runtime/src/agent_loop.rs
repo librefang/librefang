@@ -2637,7 +2637,7 @@ pub async fn run_agent_loop(
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::default();
+    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
@@ -3675,7 +3675,7 @@ pub async fn run_agent_loop_streaming(
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — LLM-based soft compression before hard trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::default();
+    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;

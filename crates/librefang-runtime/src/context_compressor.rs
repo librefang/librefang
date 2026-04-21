@@ -107,7 +107,7 @@ impl ContextCompressor {
     }
 
     /// Create a compressor with default settings.
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(CompressionConfig::default())
     }
 
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_should_compress_below_threshold() {
-        let compressor = ContextCompressor::default();
+        let compressor = ContextCompressor::with_defaults();
         let messages = make_messages(5);
         // Large context window — should not trigger
         assert!(!compressor.should_compress(&messages, "system", &[], 200_000));
@@ -421,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compress_if_needed_no_compression() {
-        let compressor = ContextCompressor::default();
+        let compressor = ContextCompressor::with_defaults();
         let messages = make_messages(5);
         let original_len = messages.len();
         let (result, events) = compressor
