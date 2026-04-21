@@ -752,6 +752,40 @@ pub fn is_html_error_page(body: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// FailoverReason — provider-switching taxonomy
+// ---------------------------------------------------------------------------
+
+/// Why an LLM API call failed, used to decide the provider-switching strategy.
+///
+/// Mirrors the `FailoverReason` taxonomy from Hermes-Agent's `error_classifier.py`
+/// but simplified to the six variants that drive distinct recovery actions in
+/// [`crate::super::fallback_chain::FallbackChain`]:
+///
+/// | Variant           | HTTP hint            | Recovery                         |
+/// |-------------------|----------------------|----------------------------------|
+/// | `RateLimit`       | 429 / "rate limit"   | sleep then retry same provider   |
+/// | `CreditExhausted` | 402 / "credit"       | skip to next provider            |
+/// | `ContextTooLong`  | 413 / "context"      | propagate (caller must compress) |
+/// | `ModelUnavailable`| 503 / 404            | skip to next provider            |
+/// | `Timeout`         | network timeout      | skip to next provider            |
+/// | `Unknown`         | anything else        | propagate immediately            |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum FailoverReason {
+    /// 429 or quota-based throttling — back off then retry same provider.
+    RateLimit,
+    /// 402 or confirmed credit exhaustion — rotate to next provider immediately.
+    CreditExhausted,
+    /// 413 or context window overflow — caller must compress, not retried here.
+    ContextTooLong,
+    /// 503 / 404 — provider or model temporarily unavailable, try next provider.
+    ModelUnavailable,
+    /// Connection or read timeout — try next provider.
+    Timeout,
+    /// Unclassifiable error — propagate to caller.
+    Unknown,
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

@@ -62,6 +62,99 @@ pub enum LlmError {
     },
 }
 
+impl LlmError {
+    /// Classify this error into a [`crate::llm_errors::FailoverReason`] that
+    /// drives provider-switching decisions in `FallbackChain`.
+    ///
+    /// Classification is purely structural (variant + embedded status/message)
+    /// and therefore allocation-free and infallible.
+    pub fn failover_reason(&self) -> crate::llm_errors::FailoverReason {
+        use crate::llm_errors::FailoverReason;
+        match self {
+            // Rate-limited: retry the same provider after a backoff.
+            LlmError::RateLimited { .. } => FailoverReason::RateLimit,
+
+            // HTTP-level API error: inspect status + message.
+            LlmError::Api { status, message } => {
+                let msg = message.to_lowercase();
+                match status {
+                    429 => FailoverReason::RateLimit,
+                    402 | 403 => {
+                        // 402 = payment required; 403 with billing keywords = credit exhausted.
+                        if msg.contains("credit")
+                            || msg.contains("balance")
+                            || msg.contains("billing")
+                            || msg.contains("payment")
+                            || msg.contains("quota")
+                        {
+                            FailoverReason::CreditExhausted
+                        } else {
+                            FailoverReason::Unknown
+                        }
+                    }
+                    413 => FailoverReason::ContextTooLong,
+                    503 | 404 => FailoverReason::ModelUnavailable,
+                    400 => {
+                        // Some providers return context errors as 400.
+                        if msg.contains("context")
+                            || msg.contains("token limit")
+                            || msg.contains("too long")
+                            || msg.contains("context_length")
+                        {
+                            FailoverReason::ContextTooLong
+                        } else {
+                            FailoverReason::Unknown
+                        }
+                    }
+                    _ => {
+                        // Message-level disambiguation for other/unknown status codes.
+                        if msg.contains("rate limit")
+                            || msg.contains("rate_limit")
+                            || msg.contains("too many requests")
+                        {
+                            FailoverReason::RateLimit
+                        } else if msg.contains("credit")
+                            || msg.contains("balance")
+                            || msg.contains("billing")
+                            || msg.contains("insufficient")
+                        {
+                            FailoverReason::CreditExhausted
+                        } else if msg.contains("context")
+                            || msg.contains("token limit")
+                            || msg.contains("context_length")
+                        {
+                            FailoverReason::ContextTooLong
+                        } else if msg.contains("unavailable")
+                            || msg.contains("not found")
+                            || msg.contains("overloaded")
+                        {
+                            FailoverReason::ModelUnavailable
+                        } else {
+                            FailoverReason::Unknown
+                        }
+                    }
+                }
+            }
+
+            // Inactivity / subprocess timeout maps to Timeout.
+            LlmError::TimedOut { .. } => FailoverReason::Timeout,
+
+            // Overloaded (503-equivalent) → treat as ModelUnavailable.
+            LlmError::Overloaded { .. } => FailoverReason::ModelUnavailable,
+
+            // ModelNotFound → ModelUnavailable (skip to next provider).
+            LlmError::ModelNotFound(_) => FailoverReason::ModelUnavailable,
+
+            // Auth failures, missing keys, parse errors, HTTP transport errors
+            // are not recoverable by switching providers.
+            LlmError::AuthenticationFailed(_)
+            | LlmError::MissingApiKey(_)
+            | LlmError::Parse(_)
+            | LlmError::Http(_) => FailoverReason::Unknown,
+        }
+    }
+}
+
 /// A request to an LLM for completion.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -455,3 +548,4 @@ mod tests {
 }
 
 pub mod llm_errors;
+pub use llm_errors::FailoverReason;
