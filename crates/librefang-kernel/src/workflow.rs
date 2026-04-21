@@ -422,6 +422,12 @@ impl WorkflowEngine {
             }
         };
         drop(runs);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!("Failed to create workflow runs dir: {e}");
+                return;
+            }
+        }
         let tmp_path = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp_path, data.as_bytes()) {
             warn!("Failed to write workflow runs temp file: {e}");

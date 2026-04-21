@@ -124,6 +124,11 @@ impl CronScheduler {
         let metas: Vec<JobMeta> = self.jobs.iter().map(|r| r.value().clone()).collect();
         let data = serde_json::to_string_pretty(&metas)
             .map_err(|e| LibreFangError::Internal(format!("Failed to serialize cron jobs: {e}")))?;
+        if let Some(parent) = self.persist_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
+            })?;
+        }
         let tmp_path = self.persist_path.with_extension("json.tmp");
         std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
             LibreFangError::Internal(format!("Failed to write cron jobs temp file: {e}"))
