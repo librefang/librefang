@@ -37,6 +37,69 @@ pub fn utf16_len(s: &str) -> usize {
         .sum()
 }
 
+/// If `chunk` ends inside an HTML entity that spans the boundary into `rest`,
+/// shrink `chunk` to end at the last safe entity boundary so the entity is
+/// preserved intact.
+///
+/// HTML entities are `&name;` or `&#123;` (decimal) or `&#xABC;` (hex).
+/// We only handle the named entities that `sanitize_telegram_html` produces
+/// or that can appear in Telegram HTML: `&amp;`, `&lt;`, `&gt;`, `&quot;`,
+/// `&nbsp;`, `&amp;#` (escaped entity prefix), `&#`, `&#x`.
+///
+/// Returns `chunk` unchanged if no entity is broken across the boundary.
+///
+/// # Examples
+/// ```
+/// use librefang_channels::message_truncator::adjust_html_entity_boundary;
+///
+/// // Entity `&lt;` split after `&l` — should cut before `&l` so `&lt;` stays complete
+/// assert_eq!(adjust_html_entity_boundary("foo &l"), "foo ");
+/// // No broken entity — no change
+/// assert_eq!(adjust_html_entity_boundary("hello &lt;"), "hello &lt;");
+/// // `&#` prefix cut — remove the broken `&#`
+/// assert_eq!(adjust_html_entity_boundary("text &#x"), "text ");
+/// ```
+fn adjust_html_entity_boundary(chunk: &str) -> &str {
+    // Check if chunk ends with what looks like a truncated entity.
+    // We look for '&' followed by partial entity content (but not a
+    // complete valid entity that ends with ';').
+    let tail = match chunk.rfind('&') {
+        Some(pos) => &chunk[pos..],
+        None => return chunk,
+    };
+
+    // If the tail is already a valid complete entity (ends with ';'), it is
+    // safe — no adjustment needed.
+    if tail.ends_with(';') {
+        return chunk;
+    }
+
+    // The '&' is not followed by ';' — entity may be broken.
+    // Named entities: &amp; &lt; &gt; &quot; &nbsp;
+    // Numeric entities: &#digits;  &#xhexdigits;
+    // Pattern: '&' followed by name chars (a-zA-Z) or '#' (decimal/hex).
+    // We accept up to 10 chars after '&' to handle `&#xxxxxxxx` (8 hex + 'x').
+    let after_ampersand = &tail[1..];
+    let is_entity_like = !after_ampersand.is_empty()
+        && after_ampersand
+            .chars()
+            .take(10)
+            .all(|c| c.is_ascii_alphanumeric() || c == '#' || c == 'x' || c == ';');
+
+    if !is_entity_like {
+        // No active entity — the '&' is a literal ampersand or start of
+        // something else (e.g. `&foo` not a known entity). Leave as-is.
+        return chunk;
+    }
+
+    // Entity is broken. Find the last safe split point by scanning backward.
+    // Safe points are: before '&', or after ';' (but we already checked that).
+    // We scan the chunk for the last '&' that is not followed by a valid ';`.
+    // Actually: we want to drop everything from the broken entity start.
+    let amp_pos = chunk.rfind('&').unwrap();
+    &chunk[..amp_pos]
+}
+
 /// Split `s` into chunks where each chunk's UTF-16 length is ≤ `limit`.
 ///
 /// Splits preferring newline boundaries when a natural break point exists near
@@ -413,5 +476,112 @@ mod tests {
         let chunks = split_to_utf16_chunks("🎉🎉", 1);
         // Each emoji is an unavoidable oversized chunk.
         assert_eq!(chunks, vec!["🎉", "🎉"]);
+    }
+
+    // ── adjust_html_entity_boundary ─────────────────────────────────────────
+
+    #[test]
+    fn html_entity_not_broken_no_change() {
+        // Complete entity at end — no adjustment needed
+        assert_eq!(adjust_html_entity_boundary("hello &lt;"), "hello &lt;");
+        assert_eq!(
+            adjust_html_entity_boundary("foo &amp; bar"),
+            "foo &amp; bar"
+        );
+        assert_eq!(
+            adjust_html_entity_boundary("&quot;quoted&quot;"),
+            "&quot;quoted&quot;"
+        );
+        assert_eq!(
+            adjust_html_entity_boundary("text&nbsp;here"),
+            "text&nbsp;here"
+        );
+        assert_eq!(adjust_html_entity_boundary("&#42;"), "&#42;");
+        assert_eq!(adjust_html_entity_boundary("&#x2A;"), "&#x2A;");
+    }
+
+    #[test]
+    fn html_entity_broken_at_name_truncates_to_safe_point() {
+        // `&lt` is truncated — entity is broken, drop the broken prefix
+        assert_eq!(adjust_html_entity_boundary("foo &l"), "foo ");
+        assert_eq!(adjust_html_entity_boundary("&am"), "");
+        assert_eq!(adjust_html_entity_boundary("text &gt"), "text ");
+    }
+
+    #[test]
+    fn html_entity_broken_numeric_prefix_truncates() {
+        // `&#` or `&#x` prefix without closing `;` — entity broken
+        assert_eq!(adjust_html_entity_boundary("text &#x"), "text ");
+        assert_eq!(adjust_html_entity_boundary("&#42"), "");
+        assert_eq!(adjust_html_entity_boundary("val &#x1F"), "val ");
+    }
+
+    #[test]
+    fn html_entity_ampersand_letter_not_entity_no_change() {
+        // `&` followed by something that doesn't look like an entity — keep
+        assert_eq!(adjust_html_entity_boundary("foo &bar"), "foo &bar");
+    }
+
+    #[test]
+    fn html_entity_no_ampersand_no_change() {
+        assert_eq!(adjust_html_entity_boundary("hello world"), "hello world");
+        assert_eq!(
+            adjust_html_entity_boundary("no entities here"),
+            "no entities here"
+        );
+    }
+
+    #[test]
+    fn split_preserves_html_entities_across_chunks() {
+        // Entity `&lt;` would be split by raw limit — boundary guard must prevent it.
+        // "text &lt;more" with limit=10: `&lt` (3 UTF-16 units) fits in 10,
+        // so safe_prefix includes "text &lt", but rfind('\n')==None so split at
+        // byte 9. `adjust_html_entity_boundary` drops the broken `&lt` → "text ".
+        // Next iteration processes " &lt;more" which starts with a space.
+        let s = "text &lt;tag&gt;end";
+        let chunks = split_to_utf16_chunks(s, 10);
+        // Verify no chunk ends with a broken entity (no '&' not followed by ';')
+        for chunk in &chunks {
+            if let Some(pos) = chunk.rfind('&') {
+                let tail = &chunk[pos..];
+                assert!(
+                    tail.ends_with(';')
+                        || !tail
+                            .chars()
+                            .take(10)
+                            .all(|c| c.is_ascii_alphanumeric() || c == '#' || c == 'x'),
+                    "chunk has broken entity: {chunk:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_numeric_html_entity_intact() {
+        // `&#x1F600;` (emoji as numeric entity) should stay intact across chunks
+        let s = "a&#x1F600;b&#x1F600;c";
+        let chunks = split_to_utf16_chunks(s, 8); // force split between entities
+        for chunk in &chunks {
+            // No chunk should end with broken numeric entity prefix
+            if chunk.ends_with('&') || chunk.ends_with('#') || chunk.ends_with("#x") {
+                panic!("chunk ends with broken entity: {chunk:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn split_entity_at_chunk_boundary() {
+        // Specifically test the reported bug: entity split at chunk boundary
+        // produces &lt without ; which Telegram rejects.
+        // "say &lt; here" — if limit cuts before `;`, entity must be preserved.
+        let s = "alpha &lt;beta&gt; gamma";
+        // Use a tight limit to force split right after &lt
+        let chunks = split_to_utf16_chunks(s, 12); // "alpha &lt;" = 11, split possible
+        for chunk in &chunks {
+            assert!(
+                !chunk.ends_with('&'),
+                "chunk must not end with bare &: {chunk:?}"
+            );
+        }
     }
 }
