@@ -760,7 +760,7 @@ pub fn is_html_error_page(body: &str) -> bool {
 ///
 /// Mirrors the `FailoverReason` taxonomy from Hermes-Agent's `error_classifier.py`
 /// but simplified to the six variants that drive distinct recovery actions in
-/// [`crate::super::fallback_chain::FallbackChain`]:
+/// `librefang_llm_drivers::FallbackChain`:
 ///
 /// | Variant           | HTTP hint            | Recovery                         |
 /// |-------------------|----------------------|----------------------------------|

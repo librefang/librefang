@@ -116,7 +116,6 @@ impl FallbackChain {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
         let mut attempts = 0usize;
-        let mut last_err: Option<LlmError> = None;
 
         loop {
             let mut req = request.clone();
@@ -149,7 +148,6 @@ impl FallbackChain {
 
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                         attempts += 1;
-                        last_err = Some(e);
                         continue;
                     }
 
