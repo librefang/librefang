@@ -20,6 +20,7 @@ pub use librefang_runtime_oauth::chatgpt_oauth;
 pub mod command_lane;
 pub mod compactor;
 pub mod context_budget;
+pub mod context_compressor;
 pub mod context_engine;
 pub mod context_overflow;
 pub use librefang_runtime_oauth::copilot_oauth;

@@ -2635,6 +2635,9 @@ pub async fn run_agent_loop(
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
+    // Context compressor — triggers LLM-based summarisation when token usage
+    // exceeds 80% of the context window, before falling back to brute-force trim.
+    let context_compressor = crate::context_compressor::ContextCompressor::default();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
@@ -2664,7 +2667,22 @@ pub async fn run_agent_loop(
                 warn!("Context overflow unrecoverable — suggest /reset or /compact");
             }
         } else {
-            // Inline fallback: overflow recovery + context guard
+            // Inline fallback: LLM-based context compression (soft), then
+            // overflow recovery (hard trim), then context guard.
+            let (compressed, compression_events) = context_compressor
+                .compress_if_needed(
+                    messages.clone(),
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                    &manifest.model.model,
+                    driver.clone(),
+                )
+                .await;
+            if !compression_events.is_empty() {
+                messages = compressed;
+                messages = crate::session_repair::validate_and_repair(&messages);
+            }
             let recovery =
                 recover_from_overflow(&mut messages, &system_prompt, available_tools, ctx_window);
             if recovery == RecoveryStage::FinalError {
@@ -3656,6 +3674,8 @@ pub async fn run_agent_loop_streaming(
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
+    // Context compressor — LLM-based soft compression before hard trim.
+    let context_compressor = crate::context_compressor::ContextCompressor::default();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
@@ -3678,6 +3698,21 @@ pub async fn run_agent_loop_streaming(
                 .await?;
             result.recovery
         } else {
+            // LLM-based soft compression first, then hard overflow recovery.
+            let (compressed, compression_events) = context_compressor
+                .compress_if_needed(
+                    messages.clone(),
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                    &manifest.model.model,
+                    driver.clone(),
+                )
+                .await;
+            if !compression_events.is_empty() {
+                messages = compressed;
+                messages = crate::session_repair::validate_and_repair(&messages);
+            }
             let recovery =
                 recover_from_overflow(&mut messages, &system_prompt, available_tools, ctx_window);
             if recovery != RecoveryStage::None {
