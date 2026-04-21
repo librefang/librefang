@@ -515,6 +515,40 @@ pub async fn execute_tool_raw(
                     };
                 }
             }
+
+            // Dangerous command detection gate.
+            //
+            // Runs in Manual mode for all exec policies (including Full) because
+            // even explicitly-trusted agents should not silently execute commands
+            // like `rm -rf /` or fork bombs.
+            //
+            // In Manual mode a Dangerous result causes an immediate block with a
+            // descriptive error. The agent can route approval via the existing
+            // `submit_tool_approval` path by catching the error message and
+            // re-submitting after the user has explicitly allowed the pattern.
+            {
+                use crate::dangerous_command::{ApprovalMode, DangerousCommandChecker, CheckResult};
+                let checker = DangerousCommandChecker::new(ApprovalMode::Manual);
+                if let CheckResult::Dangerous { description } = checker.check(command) {
+                    warn!(
+                        command = crate::str_utils::safe_truncate_str(command, 120),
+                        description,
+                        "Dangerous command detected — blocking execution"
+                    );
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: dangerous command detected ({description}). \
+                             The command matches a known-dangerous pattern and has been blocked \
+                             for safety. If you need to run this command, request explicit user \
+                             approval first."
+                        ),
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
+
             let effective_allowed_env_vars = allowed_env_vars.or_else(|| {
                 exec_policy.and_then(|policy| {
                     if policy.allowed_env_vars.is_empty() {
