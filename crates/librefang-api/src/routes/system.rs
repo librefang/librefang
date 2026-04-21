@@ -63,15 +63,15 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
         .route("/approvals/batch", axum::routing::post(batch_resolve))
         .route(
-            "/approvals/session/:session_id",
+            "/approvals/session/{session_id}",
             axum::routing::get(list_approvals_for_session),
         )
         .route(
-            "/approvals/session/:session_id/approve_all",
+            "/approvals/session/{session_id}/approve_all",
             axum::routing::post(approve_all_for_session),
         )
         .route(
-            "/approvals/session/:session_id/reject_all",
+            "/approvals/session/{session_id}/reject_all",
             axum::routing::post(reject_all_for_session),
         )
         .route("/approvals/audit", axum::routing::get(audit_log))
