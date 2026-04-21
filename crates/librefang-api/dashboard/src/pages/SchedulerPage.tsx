@@ -17,6 +17,7 @@ import { formatTriggerPattern } from "../lib/triggerPattern";
 import { useSchedules, useTriggers } from "../lib/queries/schedules";
 import {
   useCreateSchedule,
+  useCreateTrigger,
   useDeleteSchedule,
   useRunSchedule,
   useUpdateSchedule,
@@ -24,10 +25,19 @@ import {
   useDeleteTrigger,
 } from "../lib/mutations/schedules";
 
+const TRIGGER_PATTERN_PRESETS = [
+  { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
+  { label: "agent_spawned", value: '"agent_spawned"' },
+  { label: "agent_terminated", value: '"agent_terminated"' },
+  { label: "all events", value: '"all"' },
+  { label: "custom JSON…", value: "custom" },
+] as const;
+
 export function SchedulerPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [showCreate, setShowCreate] = useState(false);
+  const [createMode, setCreateMode] = useState<"schedule" | "trigger">("schedule");
   useCreateShortcut(() => setShowCreate(true));
   const [showCronPicker, setShowCronPicker] = useState(false);
   const [name, setName] = useState("");
@@ -39,12 +49,21 @@ export function SchedulerPage() {
   const [message, setMessage] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
 
+  // Trigger-creation state
+  const [triggerAgentId, setTriggerAgentId] = useState("");
+  const [triggerPatternPreset, setTriggerPatternPreset] = useState<string>('"lifecycle"');
+  const [triggerPatternCustom, setTriggerPatternCustom] = useState("");
+  const [triggerPrompt, setTriggerPrompt] = useState("");
+  const [triggerMaxFires, setTriggerMaxFires] = useState<number>(0);
+  const [triggerTargetAgent, setTriggerTargetAgent] = useState("");
+
   const agentsQuery = useAgents();
   const schedulesQuery = useSchedules();
   const triggersQuery = useTriggers();
   const workflowsQuery = useWorkflows();
 
   const createMut = useCreateSchedule();
+  const createTriggerMut = useCreateTrigger();
   const runMut = useRunSchedule();
   const deleteScheduleMut = useDeleteSchedule();
   const toggleScheduleMut = useUpdateSchedule();
@@ -70,6 +89,30 @@ export function SchedulerPage() {
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
       });
       setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
+    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+  };
+
+  const handleCreateTrigger = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!triggerAgentId) return;
+    const patternStr = triggerPatternPreset === "custom" ? triggerPatternCustom : triggerPatternPreset;
+    let pattern: unknown;
+    try {
+      pattern = JSON.parse(patternStr);
+    } catch {
+      addToast("Invalid pattern JSON", "error");
+      return;
+    }
+    try {
+      await createTriggerMut.mutateAsync({
+        agent_id: triggerAgentId,
+        pattern,
+        prompt_template: triggerPrompt,
+        ...(triggerMaxFires > 0 ? { max_fires: triggerMaxFires } : {}),
+        ...(triggerTargetAgent ? { target_agent_id: triggerTargetAgent } : {}),
+      });
+      setShowCreate(false);
+      setTriggerAgentId(""); setTriggerPatternPreset('"lifecycle"'); setTriggerPatternCustom(""); setTriggerPrompt(""); setTriggerMaxFires(0); setTriggerTargetAgent("");
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -256,74 +299,157 @@ export function SchedulerPage() {
 
       {/* Create Modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
-        <form onSubmit={handleCreate} className="p-5 space-y-4">
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name")}</label>
-                <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={inputClass} />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp")}</label>
-                <button
-                  type="button"
-                  onClick={() => setShowCronPicker(true)}
-                  className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
-                >
-                  <div>
-                    <p className="text-sm">{cronHint(cron)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
-                    <p className="text-[10px] font-mono text-text-dim/50">{cron}{cronTz ? ` · ${cronTz}` : ""}</p>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-text-dim/40 shrink-0" />
+        {/* Mode tabs */}
+        <div className="flex gap-1 px-5 pt-4">
+          <button
+            type="button"
+            onClick={() => setCreateMode("schedule")}
+            className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex items-center justify-center gap-1 ${createMode === "schedule" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
+            <Clock className="w-3.5 h-3.5" /> {t("scheduler.schedules")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setCreateMode("trigger")}
+            className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex items-center justify-center gap-1 ${createMode === "trigger" ? "bg-warning text-white" : "bg-main text-text-dim"}`}
+          >
+            <Zap className="w-3.5 h-3.5" /> {t("scheduler.event_triggers")}
+          </button>
+        </div>
+
+        {createMode === "schedule" ? (
+          <form onSubmit={handleCreate} className="p-5 space-y-4">
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name")}</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp")}</label>
+              <button
+                type="button"
+                onClick={() => setShowCronPicker(true)}
+                className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+              >
+                <div>
+                  <p className="text-sm">{cronHint(cron)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
+                  <p className="text-[10px] font-mono text-text-dim/50">{cron}{cronTz ? ` · ${cronTz}` : ""}</p>
+                </div>
+                <ChevronRight className="w-4 h-4 text-text-dim/40 shrink-0" />
+              </button>
+            </div>
+            {showCronPicker && (
+              <ScheduleModal
+                title={t("scheduler.cron_exp")}
+                initialCron={cron}
+                initialTz={cronTz}
+                onSave={(c, tz) => { setCron(c); setCronTz(tz); setShowCronPicker(false); }}
+                onClose={() => setShowCronPicker(false)}
+              />
+            )}
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target", { defaultValue: "Target" })}</label>
+              <div className="flex gap-1 mb-2">
+                <button type="button" onClick={() => setTargetType("agent")}
+                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "agent" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  {t("scheduler.target_agent")}
+                </button>
+                <button type="button" onClick={() => setTargetType("workflow")}
+                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "workflow" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  {t("scheduler.target_workflow", { defaultValue: "Workflow" })}
                 </button>
               </div>
-              {showCronPicker && (
-                <ScheduleModal
-                  title={t("scheduler.cron_exp")}
-                  initialCron={cron}
-                  initialTz={cronTz}
-                  onSave={(c, tz) => { setCron(c); setCronTz(tz); setShowCronPicker(false); }}
-                  onClose={() => setShowCronPicker(false)}
+              {targetType === "agent" ? (
+                <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
+                  <option value="">{t("scheduler.select_agent")}</option>
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+              ) : (
+                <select value={workflowId} onChange={e => setWorkflowId(e.target.value)} className={inputClass}>
+                  <option value="">{t("scheduler.select_workflow", { defaultValue: "Select workflow..." })}</option>
+                  {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              )}
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message")}</label>
+              <textarea value={message} onChange={e => setMessage(e.target.value)} rows={3}
+                placeholder={t("scheduler.message_placeholder")} className={`${inputClass} resize-none`} />
+            </div>
+            {createMut.error && (
+              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createMut.error as any)?.message}</div>
+            )}
+            <div className="flex gap-2 pt-2">
+              <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !canSubmit}>
+                {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+                {t("scheduler.create_job")}
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleCreateTrigger} className="p-5 space-y-4">
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent")}</label>
+              <select value={triggerAgentId} onChange={e => setTriggerAgentId(e.target.value)} className={inputClass} required>
+                <option value="">{t("scheduler.select_agent")}</option>
+                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">Event pattern</label>
+              <select value={triggerPatternPreset} onChange={e => setTriggerPatternPreset(e.target.value)} className={inputClass}>
+                {TRIGGER_PATTERN_PRESETS.map(p => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+              {triggerPatternPreset === "custom" && (
+                <input
+                  value={triggerPatternCustom}
+                  onChange={e => setTriggerPatternCustom(e.target.value)}
+                  placeholder='e.g. "agent_spawned" or {"agent_spawned":{"name_pattern":"*"}}'
+                  className={`${inputClass} mt-1 font-mono text-xs`}
                 />
               )}
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message")}</label>
+              <textarea
+                value={triggerPrompt}
+                onChange={e => setTriggerPrompt(e.target.value)}
+                rows={3}
+                placeholder="Prompt template sent to the agent when the event fires…"
+                className={`${inputClass} resize-none`}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target", { defaultValue: "Target" })}</label>
-                <div className="flex gap-1 mb-2">
-                  <button type="button" onClick={() => setTargetType("agent")}
-                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "agent" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                    {t("scheduler.target_agent")}
-                  </button>
-                  <button type="button" onClick={() => setTargetType("workflow")}
-                    className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "workflow" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
-                    {t("scheduler.target_workflow", { defaultValue: "Workflow" })}
-                  </button>
-                </div>
-                {targetType === "agent" ? (
-                  <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
-                    <option value="">{t("scheduler.select_agent")}</option>
-                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-                ) : (
-                  <select value={workflowId} onChange={e => setWorkflowId(e.target.value)} className={inputClass}>
-                    <option value="">{t("scheduler.select_workflow", { defaultValue: "Select workflow..." })}</option>
-                    {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-                  </select>
-                )}
+                <label className="text-[10px] font-bold text-text-dim uppercase">Max fires (0 = unlimited)</label>
+                <input
+                  type="number" min={0} value={triggerMaxFires}
+                  onChange={e => setTriggerMaxFires(Number(e.target.value))}
+                  className={inputClass}
+                />
               </div>
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message")}</label>
-                <textarea value={message} onChange={e => setMessage(e.target.value)} rows={3}
-                  placeholder={t("scheduler.message_placeholder")} className={`${inputClass} resize-none`} />
+                <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (optional)</label>
+                <select value={triggerTargetAgent} onChange={e => setTriggerTargetAgent(e.target.value)} className={inputClass}>
+                  <option value="">Same agent</option>
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
               </div>
-              {createMut.error && (
-                <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createMut.error as any)?.message}</div>
-              )}
-              <div className="flex gap-2 pt-2">
-                <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !canSubmit}>
-                  {createMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-                  {t("scheduler.create_job")}
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
-              </div>
-        </form>
+            </div>
+            {createTriggerMut.error && (
+              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createTriggerMut.error as any)?.message}</div>
+            )}
+            <div className="flex gap-2 pt-2">
+              <Button type="submit" variant="primary" className="flex-1" disabled={createTriggerMut.isPending || !triggerAgentId}>
+                {createTriggerMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
+                Create trigger
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
+            </div>
+          </form>
+        )}
       </Modal>
     </div>
   );

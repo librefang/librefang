@@ -4,9 +4,11 @@ import {
   updateSchedule,
   deleteSchedule,
   runSchedule,
+  createTrigger,
   updateTrigger,
   deleteTrigger,
 } from "../http/client";
+import type { TriggerPatch, CreateTriggerPayload } from "../../api";
 import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
 
 // Schedules surface in two views: SchedulerPage (via useSchedules →
@@ -54,10 +56,21 @@ export function useRunSchedule() {
   });
 }
 
+export function useCreateTrigger() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CreateTriggerPayload) => createTrigger(payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: triggerKeys.all });
+      qc.invalidateQueries({ queryKey: cronKeys.all });
+    },
+  });
+}
+
 export function useUpdateTrigger() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { enabled: boolean } }) =>
+    mutationFn: ({ id, data }: { id: string; data: TriggerPatch }) =>
       updateTrigger(id, data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: triggerKeys.all });

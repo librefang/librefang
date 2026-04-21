@@ -8199,6 +8199,26 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
+    /// Get a single trigger by ID.
+    pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<crate::triggers::Trigger> {
+        self.triggers.get_trigger(trigger_id)
+    }
+
+    /// Update mutable fields of an existing trigger.
+    pub fn update_trigger(
+        &self,
+        trigger_id: TriggerId,
+        patch: crate::triggers::TriggerPatch,
+    ) -> Option<crate::triggers::Trigger> {
+        let result = self.triggers.update(trigger_id, patch);
+        if result.is_some() {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after update: {e}");
+            }
+        }
+        result
+    }
+
     /// Register a workflow definition.
     pub async fn register_workflow(&self, workflow: Workflow) -> WorkflowId {
         self.workflows.register(workflow).await

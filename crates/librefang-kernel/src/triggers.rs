@@ -123,6 +123,23 @@ pub struct TriggerMatch {
     pub session_mode_override: Option<librefang_types::agent::SessionMode>,
 }
 
+/// Patch payload for updating an existing trigger.
+///
+/// All fields are optional — `None` means "leave unchanged".
+/// `cooldown_secs` and `session_mode` use `Option<Option<T>>` so callers can
+/// explicitly clear a value by passing `Some(None)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TriggerPatch {
+    pub pattern: Option<TriggerPattern>,
+    pub prompt_template: Option<String>,
+    pub enabled: Option<bool>,
+    pub max_fires: Option<u64>,
+    /// `Some(None)` clears the override (reverts to engine default).
+    pub cooldown_secs: Option<Option<u64>>,
+    /// `Some(None)` clears the override (inherits from agent manifest).
+    pub session_mode: Option<Option<librefang_types::agent::SessionMode>>,
+}
+
 /// The trigger engine manages event-to-agent routing.
 pub struct TriggerEngine {
     /// All registered triggers.
@@ -423,6 +440,39 @@ impl TriggerEngine {
         } else {
             false
         }
+    }
+
+    /// Patch mutable fields of an existing trigger.
+    ///
+    /// Only `Some` fields are updated; `None` leaves the current value intact.
+    /// Returns the updated trigger, or `None` if the ID was not found.
+    pub fn update(&self, trigger_id: TriggerId, patch: TriggerPatch) -> Option<Trigger> {
+        let mut entry = self.triggers.get_mut(&trigger_id)?;
+        let t = entry.value_mut();
+        if let Some(pattern) = patch.pattern {
+            t.pattern = pattern;
+        }
+        if let Some(prompt_template) = patch.prompt_template {
+            t.prompt_template = prompt_template;
+        }
+        if let Some(enabled) = patch.enabled {
+            t.enabled = enabled;
+        }
+        if let Some(max_fires) = patch.max_fires {
+            t.max_fires = max_fires;
+        }
+        if let Some(cooldown_secs) = patch.cooldown_secs {
+            t.cooldown_secs = cooldown_secs;
+        }
+        if let Some(session_mode) = patch.session_mode {
+            t.session_mode = session_mode;
+        }
+        Some(t.clone())
+    }
+
+    /// Get a single trigger by ID.
+    pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<Trigger> {
+        self.triggers.get(&trigger_id).map(|t| t.clone())
     }
 
     /// List all triggers for an agent.
