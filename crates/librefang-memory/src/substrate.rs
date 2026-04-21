@@ -741,7 +741,7 @@ impl MemorySubstrate {
                         "title": title,
                         "description": description,
                         "status": "in_progress",
-                        "assigned_to": if assigned.is_empty() { &agent_id } else { &assigned },
+                        "assigned_to": agent_id,
                         "created_by": created_by,
                         "created_at": created_at,
                     })))
