@@ -346,7 +346,7 @@ export interface WorkflowItem {
   description?: string;
   steps?: number | WorkflowStep[];
   created_at?: string;
-  layout?: any;
+  layout?: unknown;
 }
 
 export interface WorkflowRunItem {
@@ -1394,7 +1394,7 @@ export async function createWorkflow(payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/workflows", payload);
 }
@@ -1423,7 +1423,7 @@ export async function updateWorkflow(workflowId: string, payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
