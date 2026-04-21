@@ -14,7 +14,7 @@
 //! use librefang_memory::provider::{MemoryManager, MemoryProvider, NullMemoryProvider};
 //!
 //! let builtin = Arc::new(NullMemoryProvider::new("builtin", true));
-//! let mut manager = MemoryManager::new(builtin);
+//! let manager = MemoryManager::new(builtin);
 //!
 //! // Register an external provider (only one allowed)
 //! let external = Arc::new(NullMemoryProvider::new("vector-db", false));
@@ -26,7 +26,7 @@
 //! ```
 
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracing::warn;
 
@@ -124,11 +124,15 @@ pub trait MemoryProvider: Send + Sync {
 /// * All multi-provider operations apply *error isolation*: a failure in one
 ///   provider is logged at `warn` level and does not affect the result from
 ///   other providers.
+/// * The external slot is guarded by a `RwLock`, so `register_external` and
+///   `remove_external` can be called through a shared `Arc<MemoryManager>`
+///   without requiring `&mut self`.
 ///
 /// [`register_external`]: MemoryManager::register_external
 pub struct MemoryManager {
     builtin: Arc<dyn MemoryProvider>,
-    external: Option<Arc<dyn MemoryProvider>>,
+    /// RwLock allows hot-swap of the external provider through `Arc<MemoryManager>`.
+    external: RwLock<Option<Arc<dyn MemoryProvider>>>,
 }
 
 impl MemoryManager {
@@ -136,55 +140,72 @@ impl MemoryManager {
     pub fn new(builtin: Arc<dyn MemoryProvider>) -> Self {
         Self {
             builtin,
-            external: None,
+            external: RwLock::new(None),
         }
     }
 
     /// Register an external (non-builtin) provider.
     ///
     /// Returns `Err` if an external provider is already registered.
-    pub fn register_external(
-        &mut self,
-        provider: Arc<dyn MemoryProvider>,
-    ) -> Result<(), MemoryError> {
-        if let Some(existing) = &self.external {
+    ///
+    /// This method takes `&self` so it can be called through `Arc<MemoryManager>`.
+    pub fn register_external(&self, provider: Arc<dyn MemoryProvider>) -> Result<(), MemoryError> {
+        let mut slot = self
+            .external
+            .write()
+            .expect("MemoryManager external lock poisoned");
+        if let Some(existing) = slot.as_ref() {
             return Err(MemoryError::ExternalProviderAlreadyRegistered {
                 existing: existing.name().to_owned(),
                 rejected: provider.name().to_owned(),
             });
         }
-        self.external = Some(provider);
+        *slot = Some(provider);
         Ok(())
     }
 
     /// Remove the current external provider, if any.
     ///
     /// Returns the removed provider so the caller can perform any teardown.
-    pub fn remove_external(&mut self) -> Option<Arc<dyn MemoryProvider>> {
-        self.external.take()
+    ///
+    /// This method takes `&self` so it can be called through `Arc<MemoryManager>`.
+    pub fn remove_external(&self) -> Option<Arc<dyn MemoryProvider>> {
+        self.external
+            .write()
+            .expect("MemoryManager external lock poisoned")
+            .take()
     }
 
-    /// Returns a reference to the external provider, if one is registered.
-    pub fn external(&self) -> Option<&Arc<dyn MemoryProvider>> {
-        self.external.as_ref()
+    /// Returns a clone of the external provider `Arc`, if one is registered.
+    pub fn external(&self) -> Option<Arc<dyn MemoryProvider>> {
+        self.external
+            .read()
+            .expect("MemoryManager external lock poisoned")
+            .clone()
     }
 
     // -- Multi-provider helpers ---------------------------------------------
 
-    /// Iterate over all providers: builtin first, then external (if present).
-    fn all_providers(&self) -> impl Iterator<Item = &Arc<dyn MemoryProvider>> {
-        std::iter::once(&self.builtin).chain(self.external.iter())
+    /// Snapshot all providers: builtin first, then external (if present).
+    ///
+    /// Returns owned `Arc`s so callers can `.await` without holding the lock.
+    fn snapshot_providers(&self) -> Vec<Arc<dyn MemoryProvider>> {
+        let mut providers: Vec<Arc<dyn MemoryProvider>> = vec![Arc::clone(&self.builtin)];
+        if let Some(ext) = self.external() {
+            providers.push(ext);
+        }
+        providers
     }
 
     // -- Public async API ---------------------------------------------------
 
     /// Collect system-prompt blocks from every provider.
     ///
-    /// Providers that return `None` or whose call panics are silently skipped.
-    /// Failures are logged at `warn` level.
+    /// Providers that return `None` are skipped.
+    /// Providers that return an empty string after trimming are skipped.
     pub async fn collect_system_blocks(&self, session_id: &str) -> Vec<String> {
         let mut blocks = Vec::new();
-        for provider in self.all_providers() {
+        for provider in self.snapshot_providers() {
             match provider.system_prompt_block(session_id).await {
                 Some(block) if !block.trim().is_empty() => {
                     blocks.push(block);
@@ -205,7 +226,7 @@ impl MemoryManager {
     /// `"\n\n"`), or an empty string if no provider returns content.
     pub async fn prefetch_all(&self, query: &str, session_id: &str) -> String {
         let mut parts: Vec<String> = Vec::new();
-        for provider in self.all_providers() {
+        for provider in self.snapshot_providers() {
             match provider.prefetch(query, session_id).await {
                 Ok(result) if !result.trim().is_empty() => {
                     parts.push(result);
@@ -227,7 +248,7 @@ impl MemoryManager {
     ///
     /// Failures are logged at `warn` level but do not propagate.
     pub async fn notify_turn_complete(&self, session_id: &str, turn_summary: &str) {
-        for provider in self.all_providers() {
+        for provider in self.snapshot_providers() {
             if let Err(err) = provider.on_turn_complete(session_id, turn_summary).await {
                 warn!(
                     provider = provider.name(),
@@ -309,13 +330,13 @@ mod tests {
 
     #[test]
     fn register_external_once_succeeds() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
     }
 
     #[test]
     fn register_external_twice_fails() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
         let err = mgr.register_external(null_external("ext2")).unwrap_err();
         match err {
@@ -329,7 +350,7 @@ mod tests {
 
     #[test]
     fn remove_external_clears_slot() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
         let removed = mgr.remove_external();
         assert!(removed.is_some());
@@ -337,9 +358,19 @@ mod tests {
         mgr.register_external(null_external("ext2")).unwrap();
     }
 
+    #[test]
+    fn register_and_remove_through_arc() {
+        // Verify that hot-swap works through Arc<MemoryManager>
+        let mgr = Arc::new(MemoryManager::new(null_builtin()));
+        mgr.register_external(null_external("ext1")).unwrap();
+        let removed = mgr.remove_external();
+        assert!(removed.is_some());
+        mgr.register_external(null_external("ext2")).unwrap();
+    }
+
     #[tokio::test]
     async fn prefetch_all_returns_empty_for_null_providers() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
         let result = mgr.prefetch_all("test query", "session-1").await;
         assert!(result.is_empty());
@@ -380,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefetch_error_is_isolated() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(Arc::new(FailingProvider)).unwrap();
         // Should not panic; failing provider's error is swallowed
         let result = mgr.prefetch_all("query", "sid").await;
@@ -389,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn notify_turn_complete_error_is_isolated() {
-        let mut mgr = MemoryManager::new(null_builtin());
+        let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(Arc::new(FailingProvider)).unwrap();
         // Should not panic
         mgr.notify_turn_complete("sid", "summary").await;
