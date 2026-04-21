@@ -22,6 +22,7 @@ pub mod knowledge;
 pub mod migration;
 pub mod proactive;
 pub mod prompt;
+pub mod provider;
 pub mod semantic;
 pub mod session;
 pub mod structured;
@@ -44,3 +45,6 @@ pub use prompt::PromptStore;
 // Re-export vector store implementations
 pub use http_vector_store::HttpVectorStore;
 pub use semantic::SqliteVectorStore;
+
+// Re-export memory provider plugin system
+pub use provider::{MemoryError, MemoryManager, MemoryProvider, NullMemoryProvider};
