@@ -589,3 +589,156 @@ LLM Providers (49):
 - 通过 REST API 设置的提供商 API 密钥（`POST /api/providers/{name}/key`）遵循相同的零化策略。
 - 健康检查端点（`/api/health`）不会暴露提供商认证状态或 API 密钥。详细信息位于 `/api/health/detail`，需要认证才能访问。
 - 所有 `DriverConfig` 和 `KernelConfig` 结构体的 `Debug` 实现均包含密钥脱敏 -- API 密钥在日志中显示为 `"***"`。
+
+---
+
+## Provider 故障转移链
+
+**源码：** `librefang-llm-drivers/src/drivers/fallback_chain.rs`
+
+`FallbackChain` 允许你配置一个按顺序尝试的 LLM Provider 列表。当某个 provider 失败时，运行时会对失败类型分类，决定是切换到下一个 provider 还是立即返回错误。
+
+### 故障转移原因
+
+LibreFang 在决定是否向前切换之前，会对每次失败进行分类：
+
+| `FailoverReason` | 说明 | 是否转移？ |
+|---|---|---|
+| `RateLimit` | HTTP 429 或 `x-ratelimit-remaining: 0` | 是 — 尝试下一个 provider |
+| `Timeout` | 请求超过配置的超时时限 | 是 |
+| `ServerError` | HTTP 5xx 响应 | 是 |
+| `ModelNotFound` | 请求的模型 ID 返回 HTTP 404 | 是 |
+| `AuthError` | HTTP 401 / 403 | 否 — 密钥配置错误，立即停止 |
+| `Unknown` | 其他任何错误 | 是 |
+
+`AuthError` 故意不向前转移——密钥缺失或被吊销需要运维人员处理，静默重试会掩盖问题。
+
+### 配置
+
+在 `~/.librefang/config.toml` 中通过 `[[providers.fallback_chain]]` 定义链：
+
+```toml
+[[providers.fallback_chain]]
+name = "anthropic"
+model = "claude-sonnet-4-5"
+
+[[providers.fallback_chain]]
+name = "openai"
+model = "gpt-4o"
+
+[[providers.fallback_chain]]
+name = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+model = "llama3.1:8b"
+```
+
+LibreFang 按顺序尝试列表中的每个 provider。若所有 provider 均因可转移原因失败，则返回最后一个 provider 的错误。
+
+### 与 Credential Pool 的交互
+
+故障转移链中的每个条目都可以拥有由 [Credential Pool](#credential-pool) 管理的多个密钥。当一个密钥的速率限制耗尽时，pool 会在链切换到下一个 provider 之前先轮转到该 provider 的下一个密钥。
+
+---
+
+## Credential Pool
+
+**源码：** `librefang-llm-drivers/src/credential_pool.rs`
+
+`CredentialPool` 管理单个 provider 的多个 API Key，并自动在它们之间轮转。这可以在无需手动干预的情况下扩展有效速率限制，并在个别密钥临时耗尽时保持服务连续性。
+
+### 轮转策略
+
+| 策略 | 行为 |
+|---|---|
+| `FillFirst` | 始终使用第一个未耗尽的密钥，按顺序跳过已耗尽的密钥。 |
+| `RoundRobin` | 按固定循环依次轮换密钥，跳过已耗尽的密钥。 |
+| `Random` | 每次请求随机选择一个未耗尽的密钥。 |
+| `LeastUsed` | 选择总请求次数最少的未耗尽密钥。 |
+
+默认策略为 `RoundRobin`。
+
+### 配置
+
+```toml
+[providers.anthropic]
+rotation_strategy = "round_robin"  # fill_first | round_robin | random | least_used
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-1"
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-2"
+```
+
+### 耗尽与冷却
+
+当响应头报告剩余配额为零时（`x-ratelimit-remaining-requests: 0` 或 `x-ratelimit-remaining-tokens: 0`），密钥被标记为**已耗尽**，所有轮转策略均会跳过它。
+
+**1 小时**后，已耗尽的密钥自动重新加入活跃池。此冷却时长在当前版本不可配置；与大多数 OpenAI 兼容 provider 使用的标准窗口对应。
+
+若池中所有密钥同时耗尽，`CredentialPool` 返回 `RateLimit` 错误，触发向故障转移链中下一个 provider 切换（如已配置）。
+
+### 用量追踪
+
+池中每个密钥追踪：
+- 总请求次数
+- 总 token 数（提示词 + 补全）
+- 耗尽时间戳（如当前已耗尽）
+
+这些计数器仅保存在内存中，守护进程重启后重置。持久用量追踪通过预算账本（`/api/providers/{name}/usage`）提供。
+
+---
+
+## 速率限制追踪器
+
+**源码：** `librefang-llm-drivers/src/rate_limit_tracker.rs`
+
+每次 LLM API 响应后，LibreFang 将 provider 的速率限制响应头解析为 `RateLimitSnapshot`。该快照供 Credential Pool 检测耗尽状态，并在控制台和 CLI 中展示给运维人员。
+
+### 解析的响应头
+
+LibreFang 识别主流 provider 的 **21 种响应头变体**：
+
+| 响应头 | 含义 |
+|---|---|
+| `x-ratelimit-limit-requests` | 窗口请求上限 |
+| `x-ratelimit-remaining-requests` | 当前窗口剩余请求数 |
+| `x-ratelimit-reset-requests` | 请求配额重置时间 |
+| `x-ratelimit-limit-tokens` | 窗口 token 上限 |
+| `x-ratelimit-remaining-tokens` | 当前窗口剩余 token 数 |
+| `x-ratelimit-reset-tokens` | token 配额重置时间 |
+| `ratelimit-limit` | 通用综合限制（部分 provider） |
+| `ratelimit-remaining` | 通用综合剩余 |
+| `ratelimit-reset` | 通用重置时间 |
+| `retry-after` | 安全重试等待秒数（429 响应） |
+| `x-rate-limit-limit-requests` | 备用拼写变体 |
+| `x-rate-limit-remaining-requests` | 备用拼写变体 |
+| … 以及 9 个 provider 专属变体 | |
+
+### ASCII 进度条
+
+CLI 和控制台为每个活跃 provider 显示紧凑进度条：
+
+```
+anthropic  [████████░░░░░░░░░░░░]  req: 847/1000  tok: 42.3K/90K
+openai     [██████████████░░░░░░]  req: 712/1000  tok: 61.1K/90K
+```
+
+进度条宽度为 20 字符，每个填充块（`█`）代表 5% 的已用配额。空进度条表示该 provider 未返回配额数据。
+
+### 访问快照
+
+```bash
+curl http://127.0.0.1:4545/api/providers/rate-limits
+```
+
+```json
+{
+  "anthropic": {
+    "requests": { "limit": 1000, "remaining": 153, "reset_in_seconds": 34 },
+    "tokens":   { "limit": 90000, "remaining": 47700, "reset_in_seconds": 34 }
+  }
+}
+```
+
+provider 未返回对应响应头时，字段值为 `null`。

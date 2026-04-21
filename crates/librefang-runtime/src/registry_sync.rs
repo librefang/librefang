@@ -54,26 +54,25 @@ pub fn refresh_registry_checkout(
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
-    if !should_refresh(&registry_cache, cache_ttl_secs) {
+    if should_refresh(&registry_cache, cache_ttl_secs) {
+        // Try git first (faster incremental updates, private fork support)
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
+                false
+            }
+        };
+
+        // Fall back to HTTP tarball if git failed
+        if !git_ok {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+                tracing::warn!("HTTP registry download also failed: {e}");
+                return registry_cache.exists();
+            }
+        }
+    } else {
         tracing::debug!("Registry cache is fresh, skipping download");
-        return registry_cache.exists();
-    }
-
-    // Try git first (faster incremental updates, private fork support)
-    let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
-            false
-        }
-    };
-
-    // Fall back to HTTP tarball if git failed
-    if !git_ok {
-        if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
-            tracing::warn!("HTTP registry download also failed: {e}");
-            return registry_cache.exists();
-        }
     }
     true
 }
