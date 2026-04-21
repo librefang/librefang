@@ -268,12 +268,16 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
   const messagesRef = useRef<ChatMessage[]>(messages);
   messagesRef.current = messages;
   useEffect(() => {
-    const prev = prevAgentRef.current;
+    if (!agentId) {
+      prevAgentRef.current = null;
+      return;
+    }
+
     prevAgentRef.current = agentId;
+    const ownedAgentId = agentId;
+
     return () => {
-      if (prev) {
-        sessionCache.set(prev, messagesRef.current);
-      }
+      sessionCache.set(ownedAgentId, messagesRef.current);
     };
   }, [agentId]);
 
