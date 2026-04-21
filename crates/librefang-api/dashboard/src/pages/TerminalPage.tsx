@@ -11,13 +11,12 @@ import {
   Terminal as TerminalIcon,
   Maximize2,
   Minimize2,
+  AlertCircle,
+  X,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { buildAuthenticatedWebSocketUrl } from "../api";
-import { PageHeader } from "../components/ui/PageHeader";
-import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { EmptyState } from "../components/ui/EmptyState";
 import { TerminalTabs } from "../components/TerminalTabs";
 import { useTerminalHealth } from "../lib/queries/terminal";
 
@@ -37,6 +36,19 @@ interface ServerMessage {
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
+const TERM_MIN_COLS = 1;
+const TERM_MAX_COLS = 1000;
+const TERM_MIN_ROWS = 1;
+const TERM_MAX_ROWS = 500;
+
+function clampTermSize(cols: number, rows: number): { cols: number; rows: number } | null {
+  const c = Math.max(TERM_MIN_COLS, Math.min(TERM_MAX_COLS, Math.floor(cols)));
+  const r = Math.max(TERM_MIN_ROWS, Math.min(TERM_MAX_ROWS, Math.floor(rows)));
+  if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+  return { cols: c, rows: r };
+}
+
 function getTmuxInstallCommand(os: string): string {
   switch (os) {
     case "macos":
@@ -45,6 +57,31 @@ function getTmuxInstallCommand(os: string): string {
       return "sudo apt-get update && sudo apt-get install -y tmux || sudo dnf install -y tmux || sudo yum install -y tmux || sudo pacman -S --noconfirm tmux || sudo apk add tmux";
   }
 }
+
+// GitHub Dark-inspired terminal theme.
+const TERMINAL_THEME = {
+  background: "#0d1117",
+  foreground: "#e6edf3",
+  cursor: "#58a6ff",
+  cursorAccent: "#0d1117",
+  selectionBackground: "rgba(88,166,255,0.25)",
+  black: "#21262d",
+  red: "#ff7b72",
+  green: "#3fb950",
+  yellow: "#d29922",
+  blue: "#58a6ff",
+  magenta: "#bc8cff",
+  cyan: "#39c5cf",
+  white: "#b1bac4",
+  brightBlack: "#6e7681",
+  brightRed: "#ffa198",
+  brightGreen: "#56d364",
+  brightYellow: "#e3b341",
+  brightBlue: "#79c0ff",
+  brightMagenta: "#d2a8ff",
+  brightCyan: "#56d4dd",
+  brightWhite: "#f0f6fc",
+} as const;
 
 export function TerminalPage() {
   const { t } = useTranslation();
@@ -67,6 +104,8 @@ export function TerminalPage() {
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [pendingWindowId, setPendingWindowId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
   const {
     data: terminalHealth,
@@ -95,9 +134,7 @@ export function TerminalPage() {
   }, []);
 
   const connect = useCallback(() => {
-    if (terminalEnabled !== true) {
-      return;
-    }
+    if (terminalEnabled !== true) return;
 
     if (wsRef.current) {
       wsRef.current.close();
@@ -108,8 +145,11 @@ export function TerminalPage() {
     setIsRoot(false);
     const url = new URL(buildAuthenticatedWebSocketUrl("/api/terminal/ws"));
     if (terminalRef.current) {
-      url.searchParams.set("cols", String(terminalRef.current.cols));
-      url.searchParams.set("rows", String(terminalRef.current.rows));
+      const size = clampTermSize(terminalRef.current.cols, terminalRef.current.rows);
+      if (size) {
+        url.searchParams.set("cols", String(size.cols));
+        url.searchParams.set("rows", String(size.rows));
+      }
     }
     const ws = new WebSocket(url.toString());
     wsRef.current = ws;
@@ -118,10 +158,11 @@ export function TerminalPage() {
       setIsConnecting(false);
       setIsConnected(true);
       attemptRef.current = 0;
+      setReconnectAttempt(0);
       setError(null);
       if (terminalRef.current && fitAddonRef.current) {
-        const { cols, rows } = terminalRef.current;
-        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+        const size = clampTermSize(terminalRef.current.cols, terminalRef.current.rows);
+        if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
       }
       if (desiredWindowIdRef.current) {
         ws.send(JSON.stringify({ type: "switch_window", window: desiredWindowIdRef.current }));
@@ -193,7 +234,6 @@ export function TerminalPage() {
         return;
       }
 
-      // Non-transient close codes: stop reconnecting
       const isAppError = event.code >= 4000 && event.code <= 4999;
       const isNonTransient = event.code === 1008 || event.code === 1011 || isAppError;
       if (isNonTransient) {
@@ -207,11 +247,10 @@ export function TerminalPage() {
       }
       const delay = Math.min(RECONNECT_DELAY_MS * 2 ** attemptRef.current, 30_000) + Math.random() * 1000;
       attemptRef.current += 1;
+      setReconnectAttempt(attemptRef.current);
+      setIsConnecting(true);
       reconnectTimeoutRef.current = setTimeout(() => {
-        if (
-          wsRef.current === null ||
-          wsRef.current.readyState === WebSocket.CLOSED
-        ) {
+        if (wsRef.current === null || wsRef.current.readyState === WebSocket.CLOSED) {
           connect();
         }
       }, delay);
@@ -225,7 +264,6 @@ export function TerminalPage() {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-
     if (wsRef.current) {
       intentionalDisconnectRef.current = true;
       sendCloseMessage(wsRef.current);
@@ -238,6 +276,7 @@ export function TerminalPage() {
     setPendingWindowId(null);
     setIsConnected(false);
     setIsConnecting(false);
+    setReconnectAttempt(0);
   }, [sendCloseMessage, activeWindowId]);
 
   useEffect(() => {
@@ -249,7 +288,7 @@ export function TerminalPage() {
   const handleInstallTmux = useCallback(() => {
     const cmd = getTmuxInstallCommand(serverOs);
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "input", data: cmd }));
+      wsRef.current.send(JSON.stringify({ type: "input", data: cmd + "\n" }));
     }
   }, [serverOs]);
 
@@ -262,21 +301,19 @@ export function TerminalPage() {
     setIsFullscreen((v) => !v);
   }, []);
 
-  // Refit the terminal after fullscreen toggles, and notify the remote pty of
-  // the new size. We rAF twice so layout has actually settled before we measure.
+  // Refit the terminal after fullscreen toggles.
   useEffect(() => {
     if (!terminalRef.current || !fitAddonRef.current) return;
     const raf1 = requestAnimationFrame(() => {
       const raf2 = requestAnimationFrame(() => {
         try {
           fitAddonRef.current?.fit();
-        } catch {
-          /* xterm not attached yet */
-        }
+        } catch { /* xterm not attached yet */ }
         const term = terminalRef.current;
         const ws = wsRef.current;
         if (term && ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+          const size = clampTermSize(term.cols, term.rows);
+          if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
         }
       });
       return () => cancelAnimationFrame(raf2);
@@ -284,8 +321,7 @@ export function TerminalPage() {
     return () => cancelAnimationFrame(raf1);
   }, [isFullscreen]);
 
-  // ESC exits fullscreen — but not when focus is inside the terminal, since
-  // vim/less/tmux all use Escape as a meaningful key.
+  // ESC exits fullscreen, but not when focus is inside the terminal.
   useEffect(() => {
     if (!isFullscreen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -299,25 +335,22 @@ export function TerminalPage() {
   }, [isFullscreen]);
 
   useEffect(() => {
-    if (terminalEnabled !== true) {
-      return;
-    }
-
+    if (terminalEnabled !== true) return;
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      theme: {
-        background: "#1a1a2e",
-        foreground: "#eee",
-        cursor: "#f00",
-      },
-      fontSize: 14,
-      fontFamily: "monospace",
+      theme: TERMINAL_THEME,
+      fontSize: 13,
+      fontFamily:
+        "'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, 'Liberation Mono', monospace",
+      lineHeight: 1.2,
+      cursorBlink: true,
+      cursorStyle: "block",
+      scrollback: 5000,
     });
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
-
     term.open(containerRef.current);
     fitAddon.fit();
 
@@ -332,7 +365,8 @@ export function TerminalPage() {
 
     term.onResize(({ cols, rows }) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "resize", cols, rows }));
+        const size = clampTermSize(cols, rows);
+        if (size) wsRef.current.send(JSON.stringify({ type: "resize", ...size }));
       }
     });
 
@@ -341,14 +375,8 @@ export function TerminalPage() {
     const handleResize = () => fitAddon.fit();
     window.addEventListener("resize", handleResize);
 
-    // Also refit when the container itself changes size (sidebar toggle,
-    // parent layout changes, etc) so we don't get a mismatched pty size.
     const ro = new ResizeObserver(() => {
-      try {
-        fitAddon.fit();
-      } catch {
-        /* ignore */
-      }
+      try { fitAddon.fit(); } catch { /* ignore */ }
     });
     ro.observe(containerRef.current);
 
@@ -370,78 +398,88 @@ export function TerminalPage() {
     };
   }, [sendCloseMessage, terminalEnabled]);
 
-  if (terminalEnabled === null) {
-    return (
-      <div className="flex flex-col h-full">
-        <PageHeader
-          badge={t("terminal.badge")}
-          title={t("nav.terminal")}
-          subtitle={t("common.loading")}
-          icon={<TerminalIcon className="h-4 w-4" />}
-        />
-        <div className="flex-1 p-4">
-          <Card className="h-full flex items-center justify-center">
-            <EmptyState title={t("common.loading")} icon={<TerminalIcon className="h-6 w-6" />} />
-          </Card>
-        </div>
-      </div>
-    );
-  }
+  // ── Derived UI state ─────────────────────────────────────────────────────────
 
-  const statusLabel = error
-    ? t("terminal.subtitle_error", { error })
+  const statusDotClass = error
+    ? "bg-red-400"
+    : isConnecting
+      ? "bg-amber-400 animate-pulse"
+      : isConnected
+        ? "bg-emerald-400"
+        : "bg-gray-500";
+
+  const statusLabel = isConnecting
+    ? reconnectAttempt > 0
+      ? t("terminal.subtitle_reconnecting", {
+          attempt: reconnectAttempt,
+          max: MAX_RECONNECT_ATTEMPTS,
+        })
+      : t("terminal.subtitle_connecting")
     : isConnected
       ? t("terminal.subtitle_connected")
       : t("terminal.subtitle_disconnected");
 
+  // ── Actions ──────────────────────────────────────────────────────────────────
+
   const actions = (
-    <>
+    <div className="flex items-center gap-2">
       {!tmuxAvailable && isConnected && (
-        <Button onClick={handleInstallTmux} variant="secondary">
+        <Button onClick={handleInstallTmux} variant="secondary" size="sm">
           {t("terminal.install_tmux")}
         </Button>
       )}
-      <Button onClick={connect} disabled={isConnected || isConnecting}>
-        {isConnected
-          ? t("terminal.subtitle_connected")
-          : t("terminal.connect")}
-      </Button>
-      {isConnected && (
-        <Button onClick={disconnect} variant="secondary">
+      {isConnected ? (
+        <Button onClick={disconnect} variant="secondary" size="sm">
           {t("terminal.disconnect")}
         </Button>
+      ) : (
+        <Button
+          onClick={connect}
+          isLoading={isConnecting}
+          disabled={isConnecting}
+          size="sm"
+        >
+          {t("terminal.connect")}
+        </Button>
       )}
-      <Button
+      <button
         onClick={toggleFullscreen}
-        variant="secondary"
+        className="flex items-center justify-center w-8 h-8 rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors shadow-sm"
         aria-label={
-          isFullscreen
-            ? t("terminal.exit_fullscreen")
-            : t("terminal.enter_fullscreen")
+          isFullscreen ? t("terminal.exit_fullscreen") : t("terminal.enter_fullscreen")
         }
-        title={
-          isFullscreen
-            ? t("terminal.exit_fullscreen")
-            : t("terminal.enter_fullscreen")
-        }
+        title={isFullscreen ? t("terminal.exit_fullscreen") : t("terminal.enter_fullscreen")}
       >
         {isFullscreen ? (
-          <Minimize2 className="h-4 w-4" />
+          <Minimize2 className="h-3.5 w-3.5" />
         ) : (
-          <Maximize2 className="h-4 w-4" />
+          <Maximize2 className="h-3.5 w-3.5" />
         )}
-      </Button>
-    </>
+      </button>
+    </div>
   );
 
-  // The terminal body. Rendered identically in normal and fullscreen modes so
-  // xterm never unmounts — otherwise the pty session would be torn down every
-  // time we toggle fullscreen.
+  // ── Terminal body ─────────────────────────────────────────────────────────────
+
   const terminalBody = (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {isRoot && (
-        <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-4 py-2 text-sm shrink-0">
-          {t("terminal.root_warning")}
+        <div className="shrink-0 flex items-center gap-2 bg-red-950/60 border-b border-red-800/50 px-4 py-2 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span>{t("terminal.root_warning")}</span>
+        </div>
+      )}
+      {error && (
+        <div className="shrink-0 flex items-center gap-2 bg-red-950/40 border-b border-red-800/40 px-4 py-2 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1 truncate min-w-0">{error}</span>
+          <button
+            onClick={() => setError(null)}
+            className="shrink-0 ml-1 hover:text-red-300 transition-colors"
+            aria-label={t("terminal.dismiss_error")}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
       <TerminalTabs
@@ -453,12 +491,65 @@ export function TerminalPage() {
         terminalRef={terminalRef}
         fitAddonRef={fitAddonRef}
       />
-      <div
-        ref={containerRef}
-        className="flex-1 bg-[#1a1a2e] p-2 overflow-hidden min-h-0"
-      />
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden" />
     </div>
   );
+
+  // ── Loading state ─────────────────────────────────────────────────────────────
+
+  if (terminalEnabled === null) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <header className="shrink-0 flex items-center gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
+          <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+            <TerminalIcon className="h-4 w-4" />
+          </div>
+          <h1 className="text-sm font-extrabold tracking-tight">{t("nav.terminal")}</h1>
+        </header>
+        <div className="flex-1 min-h-0 flex items-center justify-center bg-[#0d1117] text-gray-500 text-sm">
+          {t("common.loading")}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Headers ───────────────────────────────────────────────────────────────────
+
+  const normalHeader = (
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+          <TerminalIcon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <h1 className="text-sm font-extrabold tracking-tight leading-tight">
+            {t("nav.terminal")}
+          </h1>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+            <p className="text-[11px] text-text-dim truncate">{statusLabel}</p>
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">{actions}</div>
+    </header>
+  );
+
+  const fullscreenHeader = (
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-2 bg-[#161b22] border-b border-gray-700/50">
+      <div className="flex items-center gap-2 min-w-0">
+        <TerminalIcon className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+        <span className="text-sm font-semibold text-gray-200 truncate">
+          {t("nav.terminal")}
+        </span>
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+        <span className="text-xs text-gray-400 truncate">{statusLabel}</span>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">{actions}</div>
+    </header>
+  );
+
+  // ── Main render ───────────────────────────────────────────────────────────────
 
   // Single tree in both modes so React doesn't unmount the xterm container
   // when toggling fullscreen. Only the header chrome and outer className swap.
@@ -466,34 +557,17 @@ export function TerminalPage() {
     <div
       className={
         isFullscreen
-          ? "fixed inset-0 z-50 flex flex-col bg-[#1a1a2e]"
-          : "flex flex-col h-full"
+          ? "fixed inset-0 z-50 flex flex-col bg-[#0d1117]"
+          : "flex flex-col flex-1 min-h-0"
       }
     >
-      {isFullscreen ? (
-        <div className="flex items-center justify-between gap-3 px-4 py-2 bg-surface border-b border-border-subtle shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <TerminalIcon className="h-4 w-4 text-text-dim shrink-0" />
-            <span className="font-semibold truncate">{t("nav.terminal")}</span>
-            <span className="text-xs text-text-dim truncate">· {statusLabel}</span>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">{actions}</div>
-        </div>
-      ) : (
-        <PageHeader
-          badge={t("terminal.badge")}
-          title={t("nav.terminal")}
-          subtitle={statusLabel}
-          icon={<TerminalIcon className="h-4 w-4" />}
-          actions={actions}
-        />
-      )}
-      <div className={isFullscreen ? "flex-1 min-h-0" : "flex-1 p-4 min-h-0"}>
+      {isFullscreen ? fullscreenHeader : normalHeader}
+      <div className={isFullscreen ? "flex-1 min-h-0" : "flex-1 px-4 pb-4 pt-3 min-h-0"}>
         <div
           className={
             isFullscreen
-              ? "h-full flex flex-col overflow-hidden"
-              : "h-full flex flex-col overflow-hidden rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm"
+              ? "flex flex-col flex-1 min-h-0 overflow-hidden"
+              : "flex flex-col flex-1 min-h-0 overflow-hidden rounded-xl sm:rounded-2xl border border-gray-800 bg-[#0d1117] shadow-lg"
           }
         >
           {terminalBody}

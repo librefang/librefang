@@ -2196,6 +2196,8 @@
     "title": "Terminal",
     "subtitle_connected": "Connected",
     "subtitle_disconnected": "Disconnected",
+    "subtitle_connecting": "Connecting…",
+    "subtitle_reconnecting": "Reconnecting… ({{attempt}}/{{max}})",
     "subtitle_error": "Error: {{error}}",
     "connect": "Connect",
     "disconnect": "Disconnect",
@@ -2208,6 +2210,7 @@
     "root_warning": "Warning: The daemon is running as root. Terminal commands execute with full privileges.",
     "enter_fullscreen": "Enter fullscreen",
     "exit_fullscreen": "Exit fullscreen (Esc)",
+    "dismiss_error": "Dismiss",
     "tabs": {
       "new": "New tab",
       "unnamed": "Unnamed",

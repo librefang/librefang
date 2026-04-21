@@ -18,6 +18,19 @@ import { ApiError, type TerminalWindow } from "../lib/http/client";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 
+// Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
+const TERM_MIN_COLS = 1;
+const TERM_MAX_COLS = 1000;
+const TERM_MIN_ROWS = 1;
+const TERM_MAX_ROWS = 500;
+
+function clampTermSize(cols: number, rows: number): { cols: number; rows: number } | null {
+  const c = Math.max(TERM_MIN_COLS, Math.min(TERM_MAX_COLS, Math.floor(cols)));
+  const r = Math.max(TERM_MIN_ROWS, Math.min(TERM_MAX_ROWS, Math.floor(rows)));
+  if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+  return { cols: c, rows: r };
+}
+
 interface TerminalTabsProps {
   ws: WebSocket | null;
   tmuxAvailable: boolean;
@@ -71,7 +84,8 @@ export function TerminalTabs({
         const fit = fitAddonRef.current;
         if (!term || !fit || !ws || ws.readyState !== WebSocket.OPEN) return;
         fit.fit();
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        const size = clampTermSize(term.cols, term.rows);
+        if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
       }, 100);
       settleTimeoutsRef.current = [tid];
     },
@@ -127,7 +141,6 @@ export function TerminalTabs({
     if (!editingId) return;
     const name = editValue.trim();
     const current = windowsRef.current.find((w) => w.id === editingId);
-    // Nothing changed or empty → just close the editor.
     if (!current || name === "" || name === current.name) {
       cancelRename();
       return;
@@ -142,7 +155,7 @@ export function TerminalTabs({
       { windowId: idToRename, name },
       {
         onError: () => addToast(t("terminal.tabs.rename_failed"), "error"),
-      },
+      }
     );
   }, [editingId, editValue, renameMutation, cancelRename, addToast, t]);
 
@@ -176,9 +189,10 @@ export function TerminalTabs({
   if (!tmuxAvailable) return null;
 
   const atLimit = windows.length >= maxWindows;
+  const nearLimit = windows.length >= Math.max(2, maxWindows - 2);
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto shrink-0">
+    <div className="flex items-end gap-0.5 px-2 pt-1.5 bg-[#161b22] border-b border-gray-700/60 overflow-x-auto shrink-0 scrollbar-thin">
       {windows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
@@ -191,17 +205,16 @@ export function TerminalTabs({
               startRename(w);
             }}
             onAuxClick={(e) => {
-              // Middle-click closes, matching VS Code / browser tab behavior.
               if (e.button === 1 && windows.length > 1) {
                 e.preventDefault();
                 void handleCloseTab(w.id, e);
               }
             }}
             title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
-            className={`group flex items-center gap-1 px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors cursor-pointer select-none ${
+            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors cursor-pointer select-none rounded-t-md border-t border-x ${
               isActive
-                ? "bg-[#1a1a2e] text-white border-t border-x border-gray-600"
-                : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/50"
+                ? "bg-[#0d1117] text-gray-200 border-gray-700/70 -mb-px pb-[7px]"
+                : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/40 mb-0"
             }`}
           >
             {isEditing ? (
@@ -224,21 +237,23 @@ export function TerminalTabs({
                 onDoubleClick={(e) => e.stopPropagation()}
                 maxLength={64}
                 aria-label={t("terminal.tabs.name_label")}
-                className="bg-gray-800 text-white text-sm px-1 py-0 rounded border border-blue-500 outline-none w-32"
+                className="bg-gray-900 text-gray-200 text-xs px-1.5 py-0.5 rounded border border-blue-500/70 outline-none w-28"
               />
             ) : (
-              <span>{w.name || t("terminal.tabs.unnamed")}</span>
+              <span className="max-w-[120px] truncate">
+                {w.name || t("terminal.tabs.unnamed")}
+              </span>
             )}
             {!isEditing && windows.length > 1 && (
               <span
                 role="button"
                 tabIndex={0}
                 aria-label={t("terminal.tabs.close")}
-                onClick={(e) => handleCloseTab(w.id, e)}
+                onClick={(e) => void handleCloseTab(w.id, e)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e);
+                  if (e.key === "Enter" || e.key === " ") void handleCloseTab(w.id, e);
                 }}
-                className={`text-gray-500 hover:text-red-400 cursor-pointer transition-opacity ${
+                className={`text-gray-600 hover:text-red-400 cursor-pointer transition-colors rounded ${
                   isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                 }`}
               >
@@ -248,25 +263,22 @@ export function TerminalTabs({
           </div>
         );
       })}
+
       <button
         onClick={() => void handleCreate()}
         disabled={atLimit || createMutation.isPending}
         aria-label={t("terminal.tabs.new")}
-        className="p-1 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500"
-        title={
-          atLimit
-            ? t("terminal.tabs.limit_reached")
-            : t("terminal.tabs.new")
-        }
+        title={atLimit ? t("terminal.tabs.limit_reached") : t("terminal.tabs.new")}
+        className="mb-0.5 flex items-center justify-center w-6 h-6 rounded text-gray-600 hover:text-gray-300 hover:bg-gray-800/50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-600 disabled:hover:bg-transparent"
       >
-        <Plus className="h-4 w-4" />
+        <Plus className="h-3.5 w-3.5" />
       </button>
-      <span className="ml-auto pr-1 text-xs text-gray-500 shrink-0 tabular-nums">
-        {t("terminal.tabs.counter", {
-          used: windows.length,
-          total: maxWindows,
-        })}
-      </span>
+
+      {nearLimit && (
+        <span className="ml-auto pr-1 pb-1 text-[10px] text-gray-600 shrink-0 tabular-nums self-center">
+          {windows.length}/{maxWindows}
+        </span>
+      )}
     </div>
   );
 }

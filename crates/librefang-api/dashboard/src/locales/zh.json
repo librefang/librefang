@@ -2203,6 +2203,8 @@
     "title": "终端",
     "subtitle_connected": "已连接",
     "subtitle_disconnected": "未连接",
+    "subtitle_connecting": "连接中…",
+    "subtitle_reconnecting": "重连中… ({{attempt}}/{{max}})",
     "subtitle_error": "错误: {{error}}",
     "connect": "连接",
     "disconnect": "断开",
@@ -2215,6 +2217,7 @@
     "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。",
     "enter_fullscreen": "全屏",
     "exit_fullscreen": "退出全屏（Esc）",
+    "dismiss_error": "关闭",
     "tabs": {
       "new": "新标签页",
       "unnamed": "未命名",
