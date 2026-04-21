@@ -53,18 +53,9 @@ macro_rules! dp {
 /// Patterns are matched case-insensitively against a lowercased command string.
 pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // ── Filesystem destruction ───────────────────────────────────────────
-    dp!(
-        "delete in root path",
-        r"\brm\s+(-[^\s]*\s+)*/"
-    ),
-    dp!(
-        "recursive delete",
-        r"\brm\s+-[^\s]*r"
-    ),
-    dp!(
-        "recursive delete (long flag)",
-        r"\brm\s+--recursive\b"
-    ),
+    dp!("delete in root path", r"\brm\s+(-[^\s]*\s+)*/"),
+    dp!("recursive delete", r"\brm\s+-[^\s]*r"),
+    dp!("recursive delete (long flag)", r"\brm\s+--recursive\b"),
     // ── Dangerous permissions ────────────────────────────────────────────
     dp!(
         "world/other-writable permissions",
@@ -74,51 +65,30 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         "recursive world/other-writable (long flag)",
         r"\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
     ),
-    dp!(
-        "recursive chown to root",
-        r"\bchown\s+(-[^\s]*)?r\s+root"
-    ),
+    dp!("recursive chown to root", r"\bchown\s+-[^\s]*r\s+root"),
     dp!(
         "recursive chown to root (long flag)",
         r"\bchown\s+--recursive\b.*root"
     ),
     // ── Low-level disk operations ────────────────────────────────────────
-    dp!(
-        "format filesystem",
-        r"\bmkfs\b"
-    ),
-    dp!(
-        "disk copy",
-        r"\bdd\s+.*if="
-    ),
+    dp!("format filesystem", r"\bmkfs\b"),
+    dp!("disk copy", r"\bdd\s+.*if="),
     dp!(
         "write to block device",
-        r">\s*/dev/sd"
+        r">\s*/dev/(sd|hd|nvme|vd|xvd|mmcblk|disk)"
     ),
     // ── SQL destructive statements ───────────────────────────────────────
-    dp!(
-        "SQL DROP",
-        r"\bdrop\s+(table|database)\b"
-    ),
+    dp!("SQL DROP", r"\bdrop\s+(table|database)\b"),
     dp!(
         "SQL DELETE without WHERE",
         // Negative lookahead not supported in regex-lite; use a two-pass
         // approach: flag DELETE FROM and let the allowlist handle exceptions.
         r"\bdelete\s+from\b"
     ),
-    dp!(
-        "SQL TRUNCATE",
-        r"\btruncate\s+(table\s+)?\w"
-    ),
+    dp!("SQL TRUNCATE", r"\btruncate\s+(table\s+)?\w"),
     // ── System file overwrites ───────────────────────────────────────────
-    dp!(
-        "overwrite system config",
-        r">\s*/etc/"
-    ),
-    dp!(
-        "copy/move file into /etc/",
-        r"\b(cp|mv|install)\b.*\s/etc/"
-    ),
+    dp!("overwrite system config", r">\s*/etc/"),
+    dp!("copy/move file into /etc/", r"\b(cp|mv|install)\b.*\s/etc/"),
     dp!(
         "in-place edit of system config",
         r"\bsed\s+-[^\s]*i.*\s/etc/"
@@ -127,24 +97,15 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         "in-place edit of system config (long flag)",
         r"\bsed\s+--in-place\b.*\s/etc/"
     ),
-    dp!(
-        "overwrite system file via tee",
-        r"\btee\b.*/etc/"
-    ),
+    dp!("overwrite system file via tee", r"\btee\b.*/etc/"),
     // ── Service management ───────────────────────────────────────────────
     dp!(
         "stop/restart system service",
         r"\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
     ),
     // ── Process termination ──────────────────────────────────────────────
-    dp!(
-        "kill all processes",
-        r"\bkill\s+-9\s+-1\b"
-    ),
-    dp!(
-        "force kill processes",
-        r"\bpkill\s+-9\b"
-    ),
+    dp!("kill all processes", r"\bkill\s+-9\s+-1\b"),
+    dp!("force kill processes", r"\bpkill\s+-9\b"),
     dp!(
         "kill process via pgrep expansion (self-termination)",
         r"\bkill\b.*\$\(\s*pgrep\b"
@@ -154,10 +115,7 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         r"\bkill\b.*`\s*pgrep\b"
     ),
     // ── Fork bomb ────────────────────────────────────────────────────────
-    dp!(
-        "fork bomb",
-        r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"
-    ),
+    dp!("fork bomb", r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
     // ── Arbitrary code execution ─────────────────────────────────────────
     dp!(
         "shell command via -c/-lc flag",
@@ -184,18 +142,9 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         r"\bchmod\s+\+x\b.*[;&|]+\s*\./"
     ),
     // ── find destructive usage ───────────────────────────────────────────
-    dp!(
-        "xargs with rm",
-        r"\bxargs\s+.*\brm\b"
-    ),
-    dp!(
-        "find -exec rm",
-        r"\bfind\b.*-exec\s+(/\S*/)?rm\b"
-    ),
-    dp!(
-        "find -delete",
-        r"\bfind\b.*-delete\b"
-    ),
+    dp!("xargs with rm", r"\bxargs\s+.*\brm\b"),
+    dp!("find -exec rm", r"\bfind\b.*-exec\s+(/\S*/)?rm\b"),
+    dp!("find -delete", r"\bfind\b.*-delete\b"),
     // ── Git destructive operations ───────────────────────────────────────
     dp!(
         "git reset --hard (destroys uncommitted changes)",
@@ -215,7 +164,7 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     ),
     dp!(
         "git branch force delete",
-        r"\bgit\s+branch\s+-d\b"
+        r"\bgit\s+branch\s+(-[^\s]*d\b|--delete\b)"
     ),
 ];
 
@@ -294,9 +243,11 @@ impl DangerousCommandChecker {
 
         for pat in DANGEROUS_PATTERNS {
             if pat.regex.is_match(&normalised) {
-                // Already allowlisted for this session?
+                // Already allowlisted for this session? Skip this pattern and
+                // continue checking the rest — the command may also match a
+                // non-allowlisted pattern and must still be blocked.
                 if self.session_allowlist.contains(pat.description) {
-                    return CheckResult::Safe;
+                    continue;
                 }
                 return CheckResult::Dangerous {
                     description: pat.description,
@@ -351,10 +302,7 @@ mod tests {
     }
 
     fn dangerous(cmd: &str) -> bool {
-        matches!(
-            detect_dangerous_command(cmd),
-            CheckResult::Dangerous { .. }
-        )
+        matches!(detect_dangerous_command(cmd), CheckResult::Dangerous { .. })
     }
 
     #[test]
@@ -483,11 +431,63 @@ mod tests {
 
     #[test]
     fn script_heredoc() {
-        assert!(dangerous("python3 << 'EOF'\nimport os; os.system('id')\nEOF"));
+        assert!(dangerous(
+            "python3 << 'EOF'\nimport os; os.system('id')\nEOF"
+        ));
     }
 
     #[test]
     fn chmod_plus_x_exec() {
         assert!(dangerous("chmod +x script.sh; ./script.sh"));
+    }
+
+    // ── Regression tests for bugs fixed after initial PR ────────────────────
+
+    /// chown -R root was never matched by the original r"\bchown\s+(-[^\s]*)?r\s+root"
+    /// pattern because (-[^\s]*)? greedily consumed "-r", then the regex required a
+    /// standalone "r" character, which didn't exist.  Fixed to r"\bchown\s+-[^\s]*r\s+root".
+    #[test]
+    fn chown_recursive_short_flag() {
+        assert!(dangerous("chown -R root /etc"));
+        assert!(dangerous("chown -R root:root /var/lib/data"));
+        assert!(dangerous("chown -Rh root /srv"));
+    }
+
+    /// > /dev/nvme, > /dev/vda and other non-SATA block devices were not covered.
+    #[test]
+    fn write_to_block_device_variants() {
+        assert!(dangerous("dd if=/dev/zero > /dev/nvme0n1"));
+        assert!(dangerous("cat disk.img > /dev/vda"));
+        assert!(dangerous("cat img > /dev/xvda"));
+        assert!(dangerous("cat img > /dev/hda"));
+        assert!(dangerous("cat img > /dev/mmcblk0"));
+        // Original SATA path still caught.
+        assert!(dangerous("cat img > /dev/sda"));
+    }
+
+    /// git branch --delete was not covered; only -d short flag was.
+    #[test]
+    fn git_branch_delete_long_flag() {
+        assert!(dangerous("git branch --delete feature-branch"));
+        assert!(dangerous("git branch -d old-feature"));
+        assert!(dangerous("git branch -D force-delete"));
+    }
+
+    /// Allowlisting one matched pattern must NOT suppress a second matched
+    /// pattern on the same command.  The old code returned Safe immediately
+    /// when the first matching pattern was allowlisted.
+    #[test]
+    fn allowlist_does_not_bypass_second_matching_pattern() {
+        let mut checker = DangerousCommandChecker::new(ApprovalMode::Manual);
+        // "rm -rf /" matches both "delete in root path" and "recursive delete".
+        // Allowlist only one of them.
+        checker.allow_for_session("recursive delete");
+        // The command still matches "delete in root path" which is not allowlisted.
+        assert!(matches!(
+            checker.check("rm -rf /"),
+            CheckResult::Dangerous {
+                description: "delete in root path"
+            }
+        ));
     }
 }
