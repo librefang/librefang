@@ -3,7 +3,7 @@ import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { createRegistryContent } from "../api";
-import type { ProviderItem } from "../api";
+import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
@@ -26,6 +26,14 @@ import {
   Check, ChevronLeft
 } from "lucide-react";
 
+function getErrorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function getActionResultError(result: ApiActionResponse & { error_message?: string }, fallback: string): string {
+  return String(result.error_message || result.error || fallback);
+}
+
 const providerIcons: Record<string, React.ReactNode> = {
   openai: <Sparkles className="w-5 h-5" />,
   anthropic: <Cpu className="w-5 h-5" />,
@@ -45,6 +53,10 @@ const providerIcons: Record<string, React.ReactNode> = {
 function getProviderIcon(id: string): React.ReactNode {
   const key = id.toLowerCase().split("-")[0];
   return providerIcons[key] || <Cpu className="w-5 h-5" />;
+}
+
+function isCliProvider(provider: Pick<ProviderItem, "auth_status" | "base_url" | "key_required">): boolean {
+  return provider.auth_status === "configured_cli" || provider.auth_status === "cli_not_installed" || (!provider.base_url && !provider.key_required);
 }
 
 function getLatencyColor(ms?: number) {
@@ -158,10 +170,10 @@ interface ProviderConfigState {
 }
 
 function useProviderConfig(
-  testMutation: ReturnType<typeof useMutation<any, any, string>>,
-  setKeyMutation: ReturnType<typeof useMutation<any, any, { id: string; key: string }>>,
-  deleteKeyMutation: ReturnType<typeof useMutation<any, any, string>>,
-  setUrlMutation: ReturnType<typeof useMutation<any, any, { id: string; baseUrl: string; proxyUrl?: string }>>,
+  testMutation: ReturnType<typeof useMutation<ApiActionResponse, unknown, string>>,
+  setKeyMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; key: string }>>,
+  deleteKeyMutation: ReturnType<typeof useMutation<unknown, unknown, string>>,
+  setUrlMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
   t: (key: string, opts?: any) => string,
   activeTab: string,
@@ -208,8 +220,8 @@ function useProviderConfig(
       setState(s => ({ ...s, provider: null }));
       if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
-    } catch (e: any) {
-      setState(s => ({ ...s, error: e?.message || String(e) }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
@@ -222,8 +234,8 @@ function useProviderConfig(
       await deleteKeyMutation.mutateAsync(state.provider.id);
       setState(s => ({ ...s, provider: null, hasStoredKey: false }));
       addToast(t("providers.key_removed"), "success");
-    } catch (e: any) {
-      setState(s => ({ ...s, error: e?.message || String(e) }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
@@ -251,12 +263,12 @@ function useProviderConfig(
       }
       const result = await testMutation.mutateAsync(state.provider.id);
       if (result.status === "error") {
-        setState(s => ({ ...s, testResult: { ok: false, message: String(result.error_message || result.error || t("providers.unreachable")) } }));
+        setState(s => ({ ...s, testResult: { ok: false, message: getActionResultError(result, t("providers.unreachable")) } }));
       } else {
         setState(s => ({ ...s, testResult: { ok: true, message: t("providers.reachable") } }));
       }
-    } catch (e: any) {
-      setState(s => ({ ...s, testResult: { ok: false, message: e?.message || t("common.error") } }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, testResult: { ok: false, message: getErrorMessage(e) || t("common.error") } }));
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
@@ -284,7 +296,7 @@ interface ProviderCardProps {
 
 function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
-  const isCli = p.auth_status === "configured_cli" || p.auth_status === "cli_not_installed" || (!p.base_url && !p.key_required);
+  const isCli = isCliProvider(p);
 
   if (viewMode === "list") {
     return (
@@ -834,8 +846,8 @@ function CreateProviderWizard({
     setSubmitError(null);
     try {
       await onSubmit(buildValues());
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : String(err));
+    } catch (err: unknown) {
+      setSubmitError(getErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -1075,8 +1087,8 @@ export function ProvidersPage() {
         return tabMatch && searchMatch && statusMatch;
       })
       .sort((a, b) => {
-        const aCli = a.auth_status === "configured_cli" || a.auth_status === "cli_not_installed" || (!a.base_url && !a.key_required) ? 1 : 0;
-        const bCli = b.auth_status === "configured_cli" || b.auth_status === "cli_not_installed" || (!b.base_url && !b.key_required) ? 1 : 0;
+        const aCli = isCliProvider(a) ? 1 : 0;
+        const bCli = isCliProvider(b) ? 1 : 0;
         if (aCli !== bCli) return aCli - bCli;
         let cmp = 0;
         if (sortField === "name") cmp = a.id.localeCompare(b.id);
@@ -1124,10 +1136,10 @@ export function ProvidersPage() {
     setPendingId(id);
     try {
       const result = await testMutation.mutateAsync(id);
-      if (result.status === "error") addToast(String(result.error_message || result.error || t("common.error")), "error");
+      if (result.status === "error") addToast(getActionResultError(result, t("common.error")), "error");
       else addToast(t("common.success"), "success");
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     } finally {
       setPendingId(null);
     }
@@ -1137,8 +1149,8 @@ export function ProvidersPage() {
     try {
       await defaultProviderMutation.mutateAsync({ id, model });
       addToast(t("providers.default_set"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     }
   };
 
@@ -1148,12 +1160,13 @@ export function ProvidersPage() {
       await deleteKeyMutation.mutateAsync(deleteConfirmProvider.id);
       setDeleteConfirmProvider(null);
       addToast(t("providers.key_removed"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     }
   };
 
   const allSelected = filteredProviders.length > 0 && selectedIds.size === filteredProviders.length;
+  const saveDisabled = !config.provider || config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""));
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1302,7 +1315,7 @@ export function ProvidersPage() {
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
               <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
-                {providerIcons[config.provider.id] || <Server className="w-5 h-5 text-brand" />}
+                {getProviderIcon(config.provider.id)}
               </div>
               <div>
                 <p className="text-sm font-bold">{config.provider.display_name || config.provider.id}</p>
@@ -1352,7 +1365,7 @@ export function ProvidersPage() {
 
             <div className="flex gap-2 pt-2">
               <Button variant="primary" className="flex-1" onClick={config.saveKey}
-                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""))}>
+                disabled={saveDisabled}>
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>
@@ -1387,7 +1400,7 @@ export function ProvidersPage() {
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
               <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center">
-                {providerIcons[deleteConfirmProvider.id] || <Server className="w-5 h-5 text-error" />}
+                {getProviderIcon(deleteConfirmProvider.id)}
               </div>
               <div>
                 <p className="text-sm font-bold">{deleteConfirmProvider.display_name || deleteConfirmProvider.id}</p>
