@@ -44,8 +44,6 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
     let registry_cache = home_dir.join("registry");
 
     if should_refresh(&registry_cache, cache_ttl_secs) {
-        tracing::debug!("Registry cache is fresh, skipping download");
-    } else {
         // Try git first (faster incremental updates, private fork support)
         let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
             Ok(()) => true,
@@ -64,6 +62,8 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
                 }
             }
         }
+    } else {
+        tracing::debug!("Registry cache is fresh, skipping download");
     }
 
     // Pre-install core content users need out of the box.
