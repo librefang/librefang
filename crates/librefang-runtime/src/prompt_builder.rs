@@ -120,7 +120,7 @@ pub struct PromptContext {
     /// Total number of enabled skills represented in `skill_summary`.
     /// Used for progressive disclosure: when this exceeds
     /// `SKILL_INLINE_THRESHOLD`, only skill names are shown inline with
-    /// a hint to use `skill_list` for details.
+    /// a hint to use `skill_read_file` for details.
     pub skill_count: usize,
     /// Prompt context from prompt-only skills.
     pub skill_prompt_context: String,
@@ -495,10 +495,10 @@ pub fn build_skill_section(
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
-                if trimmed.starts_with("- ") {
-                    let after_dash = trimmed[2..].trim();
+                if let Some(after_dash) = trimmed.strip_prefix("- ") {
+                    let name_part = after_dash.trim();
                     // Take everything before the first `: ` as the name
-                    Some(after_dash.split(':').next().unwrap_or(after_dash).trim())
+                    Some(name_part.split(':').next().unwrap_or(name_part).trim())
                 } else {
                     None
                 }
