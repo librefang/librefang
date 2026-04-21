@@ -180,26 +180,26 @@ function SkillCard({
   onViewDetail,
   t,
 }: SkillCardProps) {
-  const isCnSource = source === "skillhub" || source === "clawhub-cn";
+  const isAccentSource = source === "skillhub" || source === "clawhub-cn";
 
   const accentClass =
     variant === "installed"
       ? "from-success via-success/60 to-success/30"
-      : isCnSource
+      : isAccentSource
         ? "from-accent via-accent/60 to-accent/30"
         : "from-brand via-brand/60 to-brand/30";
 
   const iconClass =
     variant === "installed"
       ? "bg-success/10 border-success/20 text-success"
-      : isCnSource
+      : isAccentSource
         ? "bg-accent/10 border-accent/20 text-accent"
         : "bg-brand/10 border-brand/20 text-brand";
 
   const hoverTextClass =
     variant === "installed"
       ? "group-hover:text-success"
-      : isCnSource
+      : isAccentSource
         ? "group-hover:text-accent"
         : "group-hover:text-brand";
 
@@ -1673,7 +1673,8 @@ export function SkillsPage() {
                 setSelectedCategory(null);
                 setViewMode("browse");
               }}
-              className="h-8 rounded-xl border border-border-subtle bg-surface px-2 text-xs font-bold text-text-main cursor-pointer"
+              disabled={viewMode === "installed"}
+              className="h-8 rounded-xl border border-border-subtle bg-surface px-2 text-xs font-bold text-text-main cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <option value="fanghub">{t("skills.source_fanghub", { defaultValue: "FangHub" })}</option>
               <option value="clawhub">{t("skills.source_clawhub", { defaultValue: "ClawHub" })}</option>
