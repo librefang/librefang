@@ -82,7 +82,7 @@ export const useUIStore = create<UIState>()(
       toggleNavGroup: (key) => set((state) => ({ collapsedNavGroups: { ...state.collapsedNavGroups, [key]: !state.collapsedNavGroups[key] } })),
       addToast: (message, type = "info") =>
         set((state) => ({
-          toasts: [...state.toasts, { id: Date.now().toString(), message, type }],
+          toasts: [...state.toasts, { id: crypto.randomUUID(), message, type }],
         })),
       removeToast: (id) =>
         set((state) => ({
@@ -91,7 +91,7 @@ export const useUIStore = create<UIState>()(
       addSkillOutput: (output) =>
         set((state) => ({
           skillOutputs: [
-            { ...output, id: Date.now().toString(), timestamp: Date.now() },
+            { ...output, id: crypto.randomUUID(), timestamp: Date.now() },
             ...state.skillOutputs,
           ].slice(0, 50),
         })),
@@ -121,6 +121,7 @@ export const useUIStore = create<UIState>()(
       partialize: (state) => ({
         theme: state.theme,
         language: state.language,
+        isSidebarCollapsed: state.isSidebarCollapsed,
         navLayout: state.navLayout,
         hiddenModelKeys: state.hiddenModelKeys,
         modelsAvailableOnly: state.modelsAvailableOnly,

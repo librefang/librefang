@@ -78,8 +78,12 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
   const stop = useCallback(() => {
     if (audioRef.current) {
+      const src = audioRef.current.src;
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
+      if (src && src.startsWith("blob:") && !cacheRef.current.has(currentMessageIdRef.current ?? "")) {
+        URL.revokeObjectURL(src);
+      }
       audioRef.current = null;
     }
     currentMessageIdRef.current = null;
@@ -89,6 +93,11 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
   const clearCache = useCallback(() => {
     stop();
+    for (const url of cacheRef.current.values()) {
+      if (url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
+    }
     cacheRef.current.clear();
   }, [stop]);
 
@@ -148,14 +157,14 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
         setStatus("idle");
         setSpeakingMessageId(null);
         currentMessageIdRef.current = null;
-      });
+      }, { once: true });
 
       audio.addEventListener("error", () => {
         setStatus("idle");
         setSpeakingMessageId(null);
         setError("tts_error");
         currentMessageIdRef.current = null;
-      });
+      }, { once: true });
 
       try {
         await audio.play();
@@ -172,6 +181,12 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
   useEffect(() => {
     return () => {
+      for (const url of cacheRef.current.values()) {
+        if (url.startsWith("blob:")) {
+          URL.revokeObjectURL(url);
+        }
+      }
+      cacheRef.current.clear();
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;

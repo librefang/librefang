@@ -27,6 +27,7 @@ export function useFocusTrap(
   containerRef: React.RefObject<HTMLElement | null>,
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const focusableRef = useRef<HTMLElement[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -40,19 +41,23 @@ export function useFocusTrap(
     // programmatically without joining the tab order).
     const container = containerRef.current;
     if (container) {
-      const focusable = container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-      if (focusable.length > 0) {
-        focusable[0].focus();
+      focusableRef.current = Array.from(
+        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      );
+      if (focusableRef.current.length > 0) {
+        focusableRef.current[0].focus();
       } else if (container.tabIndex >= -1) {
         container.focus();
       }
+      container.setAttribute("aria-modal", "true");
+      container.setAttribute("role", "dialog");
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab" || !container) return;
-      const focusable = Array.from(
-        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-      ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
+      const focusable = focusableRef.current.filter(
+        (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
+      );
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -70,6 +75,10 @@ export function useFocusTrap(
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      if (container) {
+        container.removeAttribute("aria-modal");
+        container.removeAttribute("role");
+      }
       // Restore focus to the element that opened the modal. Null-guard
       // because the element may have been removed from the DOM (e.g.
       // the page unmounted while the modal was open).
