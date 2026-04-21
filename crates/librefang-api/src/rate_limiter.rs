@@ -182,7 +182,9 @@ mod tests {
         assert!(is_rate_limit_exempt("/dashboard/index.html"));
         assert!(is_rate_limit_exempt("/dashboard/manifest.json"));
         assert!(is_rate_limit_exempt("/dashboard/sw.js"));
-        assert!(is_rate_limit_exempt("/dashboard/assets/ChatPage-ChE_yUYu.js"));
+        assert!(is_rate_limit_exempt(
+            "/dashboard/assets/ChatPage-ChE_yUYu.js"
+        ));
         assert!(is_rate_limit_exempt("/dashboard/icon-192.png"));
         // Locale files loaded by the dashboard on boot.
         assert!(is_rate_limit_exempt("/locales/en.json"));
@@ -219,10 +221,7 @@ mod tests {
         Router::new()
             .route("/dashboard/{*path}", get(|| async { "asset" }))
             .route("/api/health", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                state,
-                gcra_rate_limit,
-            ))
+            .layer(axum::middleware::from_fn_with_state(state, gcra_rate_limit))
     }
 
     /// Regression for the production 429 storm on `dash.librefang.ai`:
