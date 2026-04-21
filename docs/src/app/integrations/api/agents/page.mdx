@@ -516,10 +516,21 @@ List all triggers. Optionally filter by agent.
     "enabled": true,
     "fire_count": 5,
     "max_fires": 0,
-    "created_at": "2025-01-15T10:30:00Z"
+    "created_at": "2025-01-15T10:30:00Z",
+    "cooldown_secs": 60,
+    "session_mode": "persistent",
+    "target_agent_id": null
   }
 ]
 ```
+
+### GET /api/triggers/&lbrace;id&rbrace;
+
+Retrieve a single trigger by ID.
+
+**Response** `200 OK`: same shape as a single item from the list above.
+
+**Response** `404 Not Found` if the trigger does not exist.
 
 ### POST /api/triggers
 
@@ -536,9 +547,24 @@ Create a new event trigger.
     }
   },
   "prompt_template": "A new agent was spawned: {&lbrace;event&rbrace;}. Review its capabilities.",
-  "max_fires": 0
+  "max_fires": 0,
+  "cooldown_secs": 60,
+  "session_mode": "persistent",
+  "target_agent_id": "b2c3d4e5-..."
 }
 ```
+
+All fields except `agent_id`, `pattern`, and `prompt_template` are optional.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent_id` | UUID | — | Owner agent. The trigger is registered under this agent. |
+| `pattern` | object | — | Event pattern that activates the trigger (see pattern types below). |
+| `prompt_template` | string | — | Message sent to the agent when the event fires. Supports `{&lbrace;event&rbrace;}` placeholder. |
+| `max_fires` | integer | `0` | Maximum times this trigger may fire. `0` = unlimited. |
+| `cooldown_secs` | integer | engine default | Minimum seconds between fires. Omit to use the engine default. |
+| `session_mode` | `"persistent"` \| `"new"` | agent default | Session continuity for each fire. Omit to inherit from the agent manifest. |
+| `target_agent_id` | UUID | `null` | Route the fired message to a different agent instead of the owner. |
 
 **Supported pattern types:**
 
@@ -558,28 +584,28 @@ Create a new event trigger.
 }
 ```
 
-### PUT /api/triggers/&lbrace;id&rbrace;
+### PATCH /api/triggers/&lbrace;id&rbrace;
 
-Update an existing trigger's configuration.
+Partially update a trigger. All fields are optional — only provided fields are changed.
+
+Pass `null` for `cooldown_secs`, `session_mode`, or `target_agent_id` to clear the override and revert to the default. Omitting a field leaves it unchanged.
 
 **Request Body**:
 
 ```json
 {
-  "prompt_template": "Updated template: {&lbrace;event&rbrace;}",
-  "enabled": false,
-  "max_fires": 10
+  "prompt_template": "Updated: {&lbrace;event&rbrace;}",
+  "enabled": true,
+  "max_fires": 10,
+  "cooldown_secs": 120,
+  "session_mode": "new",
+  "target_agent_id": "b2c3d4e5-..."
 }
 ```
 
-**Response** `200 OK`:
+**Response** `200 OK`: the full updated trigger object (same shape as GET /api/triggers/{id}).
 
-```json
-{
-  "status": "updated",
-  "trigger_id": "t1b2c3d4-..."
-}
-```
+**Response** `404 Not Found` if the trigger does not exist.
 
 ### DELETE /api/triggers/&lbrace;id&rbrace;
 
