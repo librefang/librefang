@@ -99,10 +99,8 @@ impl LlmError {
                             || msg.contains("balance")
                             || msg.contains("billing")
                             || msg.contains("payment")
-                        {
-                            FailoverReason::CreditExhausted
-                        } else if msg.contains("quota")
-                            && (msg.contains("exceeded") || msg.contains("limit"))
+                            || (msg.contains("quota")
+                                && (msg.contains("exceeded") || msg.contains("limit")))
                         {
                             FailoverReason::CreditExhausted
                         } else if msg.contains("model")

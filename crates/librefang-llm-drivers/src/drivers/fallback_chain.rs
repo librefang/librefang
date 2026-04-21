@@ -239,7 +239,7 @@ impl LlmDriver for FallbackChain {
             // safely fall through to the next provider — the caller would
             // receive a corrupted concatenation of this provider's partial
             // output and a fresh response from provider B.
-            let (text_emit_tx, mut text_emit_rx) = watch::channel(false);
+            let (text_emit_tx, text_emit_rx) = watch::channel(false);
             let (wrap_tx, mut wrap_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
 
             // Relay loop: forward events to the real sender, signal on TextDelta.
