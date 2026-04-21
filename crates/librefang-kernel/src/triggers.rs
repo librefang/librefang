@@ -543,9 +543,14 @@ impl TriggerEngine {
     ///    on a trigger to disable its cooldown.
     /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
     ///    from a single event evaluation. Excess matches are dropped with a warning.
-    pub fn evaluate(&self, event: &Event) -> Vec<TriggerMatch> {
+    /// Returns `(matches, state_mutated)`. `state_mutated` is `true` when any
+    /// trigger's persistent state changed (fire_count increment or auto-disable
+    /// from max_fires), even if no match was produced. Callers should persist
+    /// whenever either the match list is non-empty or `state_mutated` is set.
+    pub fn evaluate(&self, event: &Event) -> (Vec<TriggerMatch>, bool) {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
+        let mut state_mutated = false;
         let now = Instant::now();
 
         for mut entry in self.triggers.iter_mut() {
@@ -558,6 +563,8 @@ impl TriggerEngine {
             // Check max fires
             if trigger.max_fires > 0 && trigger.fire_count >= trigger.max_fires {
                 trigger.enabled = false;
+                // enabled=false must be persisted even if this event produces no match.
+                state_mutated = true;
                 continue;
             }
 
@@ -614,6 +621,7 @@ impl TriggerEngine {
                     session_mode_override: trigger.session_mode,
                 });
                 trigger.fire_count += 1;
+                state_mutated = true;
                 self.last_fired.insert(trigger.id, now);
 
                 debug!(
@@ -626,7 +634,7 @@ impl TriggerEngine {
             }
         }
 
-        matches
+        (matches, state_mutated)
     }
 
     /// Get a trigger by ID.

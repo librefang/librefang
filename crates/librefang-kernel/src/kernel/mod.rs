@@ -3001,8 +3001,8 @@ system_prompt = "You are a helpful assistant."
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
-        let triggered = self.triggers.evaluate(&event);
-        if !triggered.is_empty() {
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
             }
@@ -8101,8 +8101,8 @@ system_prompt = "You are a helpful assistant."
         let _guard = DepthGuard;
 
         // Evaluate triggers before publishing (so describe_event works on the event)
-        let triggered = self.triggers.evaluate(&event);
-        if !triggered.is_empty() {
+        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after fire: {e}");
             }
