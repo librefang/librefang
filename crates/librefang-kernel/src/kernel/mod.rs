@@ -12124,14 +12124,18 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-        // Resolve `agent_id` as either a UUID (used directly) or an agent
-        // name (looked up via the registry → its UUID). Tasks are stored
-        // under the canonical UUID, so name-based callers used to silently
-        // get zero matches. Issue #2330.
-        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
-            Ok(_) => agent_id.to_string(),
+        // Resolve `agent_id` to a canonical UUID and also capture the name.
+        // Both are forwarded to `memory.task_claim` so that tasks whose
+        // `assigned_to` field was stored as either a UUID *or* a name string
+        // are correctly matched (issue #2841).
+        let (resolved, resolved_name) = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(parsed_id) => {
+                // Caller passed a UUID — look up the name from the registry.
+                let name = self.registry.get(parsed_id).map(|e| e.name.clone());
+                (agent_id.to_string(), name)
+            }
             Err(_) => match self.registry.find_by_name(agent_id) {
-                Some(entry) => entry.id.to_string(),
+                Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
                     return Err(format!(
                         "Task claim failed: agent {agent_id:?} not found by UUID or name"
@@ -12141,7 +12145,7 @@ impl KernelHandle for LibreFangKernel {
         };
         let result = self
             .memory
-            .task_claim(&resolved)
+            .task_claim(&resolved, resolved_name.as_deref())
             .await
             .map_err(|e| format!("Task claim failed: {e}"))?;
 

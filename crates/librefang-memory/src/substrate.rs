@@ -689,22 +689,35 @@ impl MemorySubstrate {
     }
 
     /// Claim the next pending task (optionally for a specific assignee). Returns task JSON or None.
-    pub async fn task_claim(&self, agent_id: &str) -> LibreFangResult<Option<serde_json::Value>> {
+    ///
+    /// `agent_id` must be the canonical UUID. `agent_name` is the human-readable
+    /// name for the same agent; tasks posted with a name (rather than UUID) in
+    /// `assigned_to` are also matched so that name-based assignments are never
+    /// silently dropped (fixes issue #2841).
+    pub async fn task_claim(
+        &self,
+        agent_id: &str,
+        agent_name: Option<&str>,
+    ) -> LibreFangResult<Option<serde_json::Value>> {
         let conn = Arc::clone(&self.conn);
         let agent_id = agent_id.to_string();
+        let agent_name = agent_name.unwrap_or("").to_string();
 
         tokio::task::spawn_blocking(move || {
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
-            // Find first pending task assigned to this agent, or any unassigned pending task
+            // Match tasks assigned to this agent by UUID *or* by name (tasks posted
+            // via the API or bridge tools may store the name rather than the UUID),
+            // plus any unassigned (empty assigned_to) pending tasks.
             let mut stmt = db.prepare(
                 "SELECT id, title, description, assigned_to, created_by, created_at
                  FROM task_queue
-                 WHERE status = 'pending' AND (assigned_to = ?1 OR assigned_to = '')
+                 WHERE status = 'pending'
+                   AND (assigned_to = ?1 OR assigned_to = ?2 OR assigned_to = '')
                  ORDER BY priority DESC, created_at ASC
                  LIMIT 1"
             ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-            let result = stmt.query_row(rusqlite::params![agent_id], |row| {
+            let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1033,8 +1046,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Claim the task
-        let claimed = substrate.task_claim("auditor").await.unwrap();
+        // Claim the task (name stored in assigned_to; pass matching name param)
+        let claimed = substrate
+            .task_claim("auditor", Some("auditor"))
+            .await
+            .unwrap();
         assert!(claimed.is_some());
         let claimed = claimed.unwrap();
         assert_eq!(claimed["id"], task_id);
@@ -1055,8 +1071,49 @@ mod tests {
     #[tokio::test]
     async fn test_task_claim_empty() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let claimed = substrate.task_claim("nobody").await.unwrap();
+        let claimed = substrate.task_claim("nobody", None).await.unwrap();
         assert!(claimed.is_none());
+    }
+
+    /// Tasks posted with an agent *name* in assigned_to must be claimable when
+    /// the claimer passes the corresponding UUID + name (issue #2841).
+    #[tokio::test]
+    async fn test_task_claim_by_name_when_posted_with_name() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        // External actor posts task using agent name (not UUID)
+        let task_id = substrate
+            .task_post(
+                "Analyse logs",
+                "Check for anomalies",
+                Some("researcher"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let fake_uuid = "4c549884-2aa1-4860-a5bb-f0aa35a1bf7e";
+
+        // Claim with UUID only — should NOT match name-stored task
+        let not_claimed = substrate.task_claim(fake_uuid, None).await.unwrap();
+        assert!(
+            not_claimed.is_none(),
+            "UUID-only claim should not match name-assigned task"
+        );
+
+        // Claim with UUID + matching name — should match
+        let claimed = substrate
+            .task_claim(fake_uuid, Some("researcher"))
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_some(),
+            "UUID+name claim must match name-assigned task"
+        );
+        let claimed = claimed.unwrap();
+        assert_eq!(claimed["id"], task_id);
+        assert_eq!(claimed["status"], "in_progress");
+        // assigned_to should be normalised to the claimer's UUID after claim
+        assert_eq!(claimed["assigned_to"], fake_uuid);
     }
 
     #[tokio::test]
