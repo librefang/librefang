@@ -7,7 +7,10 @@ export function useAddMemory() {
   return useMutation({
     mutationFn: ({ content, level, agentId }: { content: string; level?: string; agentId?: string }) =>
       addMemoryFromText(content, { level, agentId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: memoryKeys.lists() });
+      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+    },
   });
 }
 
@@ -16,7 +19,10 @@ export function useUpdateMemory() {
   return useMutation({
     mutationFn: ({ id, content }: { id: string; content: string }) =>
       updateMemory(id, content),
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: memoryKeys.lists() });
+      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+    },
   });
 }
 
@@ -24,7 +30,10 @@ export function useDeleteMemory() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteMemory,
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: memoryKeys.lists() });
+      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+    },
   });
 }
 
@@ -32,7 +41,10 @@ export function useCleanupMemories() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: cleanupMemories,
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: memoryKeys.lists() });
+      qc.invalidateQueries({ queryKey: memoryKeys.stats() });
+    },
   });
 }
 
@@ -40,6 +52,6 @@ export function useUpdateMemoryConfig() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: updateMemoryConfig,
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.config() }),
   });
 }
