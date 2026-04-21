@@ -12943,6 +12943,7 @@ impl KernelHandle for LibreFangKernel {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
+            session_id: None,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -13084,6 +13085,7 @@ impl KernelHandle for LibreFangKernel {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
+            session_id: None,
         };
 
         self.approval_manager

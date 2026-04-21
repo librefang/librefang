@@ -62,6 +62,18 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(list_approvals).post(create_approval),
         )
         .route("/approvals/batch", axum::routing::post(batch_resolve))
+        .route(
+            "/approvals/session/:session_id",
+            axum::routing::get(list_approvals_for_session),
+        )
+        .route(
+            "/approvals/session/:session_id/approve_all",
+            axum::routing::post(approve_all_for_session),
+        )
+        .route(
+            "/approvals/session/:session_id/reject_all",
+            axum::routing::post(reject_all_for_session),
+        )
         .route("/approvals/audit", axum::routing::get(audit_log))
         .route("/approvals/count", axum::routing::get(approval_count))
         .route("/approvals/totp/setup", axum::routing::post(totp_setup))
@@ -1350,6 +1362,7 @@ fn approval_to_json(
         "requested_at": a.requested_at,
         "created_at": a.requested_at,
         "timeout_secs": a.timeout_secs,
+        "session_id": a.session_id,
         "status": "pending"
     })
 }
@@ -1461,6 +1474,10 @@ pub struct CreateApprovalRequest {
     pub description: String,
     #[serde(default)]
     pub action_summary: String,
+    /// Optional session ID — when set, this request participates in
+    /// per-session batch resolve via `/api/approvals/session/{session_id}/approve_all`.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
@@ -1493,6 +1510,7 @@ pub async fn create_approval(
         channel: None,
         route_to: Vec::new(),
         escalation_count: 0,
+        session_id: req.session_id,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)
@@ -1839,6 +1857,130 @@ pub async fn batch_resolve(
     (
         StatusCode::OK,
         Json(serde_json::json!({"results": result_json})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Per-session approval helpers
+// ---------------------------------------------------------------------------
+
+/// GET /api/approvals/session/{session_id} — List pending approvals for a session.
+///
+/// Mirrors `has_blocking_approval(session_key)` from Hermes-Agent: returns all
+/// pending `ApprovalRequest`s whose `session_id` field matches the path param.
+#[utoipa::path(
+    get,
+    path = "/api/approvals/session/{session_id}",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "Pending approvals for session", body = serde_json::Value)
+    )
+)]
+pub async fn list_approvals_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let registry_agents = state.kernel.agent_registry().list();
+    let pending = state
+        .kernel
+        .approvals()
+        .list_pending_for_session(&session_id);
+    let items: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|a| approval_to_json(a, &registry_agents))
+        .collect();
+    Json(serde_json::json!({
+        "session_id": session_id,
+        "pending": items,
+        "count": items.len(),
+        "has_pending": !items.is_empty(),
+    }))
+}
+
+/// POST /api/approvals/session/{session_id}/approve_all — Approve all pending
+/// approvals for the given session atomically.
+///
+/// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "once",
+/// resolve_all=True)`.  TOTP is not enforced on this endpoint — it is intended
+/// for operator-level batch actions where individual TOTP verification would be
+/// impractical.
+#[utoipa::path(
+    post,
+    path = "/api/approvals/session/{session_id}/approve_all",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "All pending session approvals approved", body = serde_json::Value)
+    )
+)]
+pub async fn approve_all_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    // Reject if any pending request for this session requires TOTP, to avoid
+    // bypassing the second-factor gate through the batch path.
+    let policy = state.kernel.approvals().policy();
+    let any_needs_totp = state
+        .kernel
+        .approvals()
+        .list_pending_for_session(&session_id)
+        .iter()
+        .any(|req| policy.tool_requires_totp(&req.tool_name));
+    if any_needs_totp {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Session contains approvals that require TOTP. Approve those individually."
+            })),
+        );
+    }
+
+    let resolved = state.kernel.approvals().resolve_all_for_session(
+        &session_id,
+        librefang_types::approval::ApprovalDecision::Approved,
+        Some("api".to_string()),
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "resolved": resolved,
+            "decision": "approved",
+        })),
+    )
+}
+
+/// POST /api/approvals/session/{session_id}/reject_all — Reject all pending
+/// approvals for the given session atomically.
+///
+/// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "deny",
+/// resolve_all=True)`.
+#[utoipa::path(
+    post,
+    path = "/api/approvals/session/{session_id}/reject_all",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "All pending session approvals rejected", body = serde_json::Value)
+    )
+)]
+pub async fn reject_all_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let resolved = state.kernel.approvals().resolve_all_for_session(
+        &session_id,
+        librefang_types::approval::ApprovalDecision::Denied,
+        Some("api".to_string()),
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "resolved": resolved,
+            "decision": "rejected",
+        })),
     )
 }
 
