@@ -2651,6 +2651,68 @@ impl LibreFangKernel {
             }
         }
 
+        // One-time webui → canonical session migration.
+        //
+        // Before the unify fix, the dashboard WS wrote to
+        // `SessionId::for_channel(agent, "webui")` while GET /session and the
+        // sessions management endpoints read `entry.session_id`. Any agent
+        // with recent dashboard chat therefore has two sessions: the stale
+        // canonical and the active webui one. Adopt the webui session as the
+        // canonical pointer when it has strictly more messages, so existing
+        // conversations show up after the fix.
+        //
+        // Idempotent: once `entry.session_id` matches the webui session id
+        // (or canonical overtakes it), this is a no-op on subsequent boots.
+        {
+            let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .registry
+                .list()
+                .iter()
+                .map(|e| (e.id, e.session_id))
+                .collect();
+            for (agent_id, canonical_session_id) in registry_snapshot {
+                let webui_session_id = SessionId::for_channel(agent_id, "webui");
+                if webui_session_id == canonical_session_id {
+                    continue;
+                }
+                let webui_msgs = match kernel.memory.get_session(webui_session_id) {
+                    Ok(Some(s)) => s.messages.len(),
+                    _ => continue,
+                };
+                if webui_msgs == 0 {
+                    continue;
+                }
+                let canonical_msgs = kernel
+                    .memory
+                    .get_session(canonical_session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.messages.len())
+                    .unwrap_or(0);
+                if webui_msgs <= canonical_msgs {
+                    continue;
+                }
+                if let Err(e) = kernel
+                    .registry
+                    .update_session_id(agent_id, webui_session_id)
+                {
+                    warn!(agent_id = %agent_id, "Failed to adopt webui session: {e}");
+                    continue;
+                }
+                if let Some(entry) = kernel.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                        warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
+                    }
+                }
+                info!(
+                    agent_id = %agent_id,
+                    webui_messages = webui_msgs,
+                    canonical_messages = canonical_msgs,
+                    "Adopted webui channel session as canonical (one-time migration)"
+                );
+            }
+        }
+
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
@@ -4165,8 +4227,13 @@ system_prompt = "You are a helpful assistant."
         // (channel, chat_id). Including chat_id prevents context bleed between
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations, respect the agent's session_mode.
+        //
+        // `use_canonical_session` short-circuits the channel branch: the sender
+        // wants routing-cache scoping (per-channel assistant auto-router) but
+        // storage to land in `entry.session_id`. Used by the dashboard WS so
+        // webui chat shares history with agent_send / session management.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -5415,8 +5482,12 @@ system_prompt = "You are a helpful assistant."
         // a group and a DM that share the same (agent, channel). For non-channel
         // invocations (background ticks, triggers, agent_send), resolve the
         // effective session mode: per-trigger override > agent manifest default.
+        //
+        // `use_canonical_session` short-circuits the channel branch so the
+        // dashboard WS (channel="webui") persists to `entry.session_id` while
+        // still scoping routing caches per-surface.
         let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() => {
+            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
                 let scope = match &ctx.chat_id {
                     Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                     _ => ctx.channel.clone(),
@@ -8177,6 +8248,7 @@ system_prompt = "You are a helpful assistant."
     ///
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner. Both owner and target must exist.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_trigger_with_target(
         &self,
         agent_id: AgentId,

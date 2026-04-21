@@ -6016,6 +6016,7 @@ fn cmd_trigger_get(trigger_id: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_trigger_update(
     trigger_id: &str,
     pattern: Option<&str>,

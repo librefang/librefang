@@ -295,6 +295,7 @@ impl TriggerEngine {
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner (`agent_id`). The owner still "owns" the
     /// trigger for management purposes (list, remove, etc.).
+    #[allow(clippy::too_many_arguments)]
     pub fn register_with_target(
         &self,
         agent_id: AgentId,
