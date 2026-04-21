@@ -2685,11 +2685,11 @@ pub async fn run_agent_loop(
                             "Context engine compaction complete"
                         );
                         messages = result.kept_messages;
-                        // Reset the stale token count so should_compress does
-                        // not re-fire on the next iteration before the LLM
-                        // has run. The real count will be refreshed by
-                        // accumulate_token_usage after the upcoming LLM call.
-                        total_usage.input_tokens = 0;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
                     }
                     Err(e) => {
                         warn!("Context engine compaction failed (continuing): {e}");
@@ -3748,11 +3748,11 @@ pub async fn run_agent_loop_streaming(
                             "Context engine compaction complete (streaming)"
                         );
                         messages = result.kept_messages;
-                        // Reset the stale token count so should_compress does
-                        // not re-fire on the next iteration before the LLM
-                        // has run. The real count will be refreshed by
-                        // accumulate_token_usage after the upcoming LLM call.
-                        total_usage.input_tokens = 0;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
                     }
                     Err(e) => {
                         warn!("Context engine compaction failed (continuing, streaming): {e}");
