@@ -341,10 +341,13 @@ impl ContextCompressor {
         };
 
         let summary_content = format!("{}\n\n{}", SUMMARY_PREFIX, result.summary);
+        // Propagate pinning: if any compressed message was pinned, the replacement
+        // summary must also be pinned so it survives future compression rounds.
+        let any_middle_pinned = middle.iter().any(|m| m.pinned);
         let summary_msg = Message {
             role: summary_role,
             content: MessageContent::Text(summary_content),
-            pinned: false,
+            pinned: any_middle_pinned,
         };
 
         let mut compressed = Vec::with_capacity(head.len() + 1 + tail.len());
