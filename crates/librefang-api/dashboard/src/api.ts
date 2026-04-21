@@ -382,6 +382,29 @@ export interface TriggerItem {
   fire_count?: number;
   max_fires?: number;
   created_at?: string;
+  target_agent_id?: string | null;
+  cooldown_secs?: number | null;
+  session_mode?: string | null;
+}
+
+export interface TriggerPatch {
+  pattern?: unknown;
+  prompt_template?: string;
+  enabled?: boolean;
+  max_fires?: number;
+  cooldown_secs?: number | null;
+  session_mode?: string | null;
+  target_agent_id?: string | null;
+}
+
+export interface CreateTriggerPayload {
+  agent_id: string;
+  pattern: unknown;
+  prompt_template: string;
+  max_fires?: number;
+  target_agent_id?: string;
+  cooldown_secs?: number;
+  session_mode?: string;
 }
 
 export interface CronJobItem {
@@ -1540,11 +1563,21 @@ export async function listTriggers(): Promise<TriggerItem[]> {
   return data.triggers ?? [];
 }
 
+export async function getTrigger(triggerId: string): Promise<TriggerItem> {
+  return get<TriggerItem>(`/api/triggers/${encodeURIComponent(triggerId)}`);
+}
+
+export async function createTrigger(
+  payload: CreateTriggerPayload
+): Promise<ApiActionResponse & { trigger_id?: string }> {
+  return post<ApiActionResponse & { trigger_id?: string }>("/api/triggers", payload);
+}
+
 export async function updateTrigger(
   triggerId: string,
-  payload: { enabled: boolean }
+  updates: TriggerPatch
 ): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`, payload);
+  return patch<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`, updates);
 }
 
 export async function deleteTrigger(triggerId: string): Promise<ApiActionResponse> {

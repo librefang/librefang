@@ -182,6 +182,7 @@ use crate::types;
         routes::save_workflow_as_template,
         routes::list_triggers,
         routes::create_trigger,
+        routes::get_trigger,
         routes::delete_trigger,
         routes::update_trigger,
         routes::list_schedules,

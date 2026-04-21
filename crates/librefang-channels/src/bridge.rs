@@ -1717,6 +1717,9 @@ fn build_sender_context(
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
         group_participants: extract_group_participants(message),
+        // Channel bridges land in per-channel sessions (the default); only
+        // the dashboard WS opts into canonical storage.
+        use_canonical_session: false,
     }
 }
 

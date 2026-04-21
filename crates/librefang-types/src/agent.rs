@@ -713,6 +713,13 @@ pub struct AgentManifest {
     /// are consumed by downstream parsers that would choke on the markers.
     #[serde(default = "default_true")]
     pub show_progress: bool,
+    /// Whether background skill evolution review runs after each turn.
+    /// Defaults to `true`. Set to `false` for A2A worker agents or any
+    /// agent where responsiveness to triggers matters more than automatic
+    /// skill distillation — skipping evolution means the agent never holds
+    /// the background LLM budget or concurrency semaphore after a turn.
+    #[serde(default = "default_true")]
+    pub auto_evolve: bool,
 }
 
 fn default_true() -> bool {
@@ -762,6 +769,7 @@ impl Default for AgentManifest {
             auto_dream_min_hours: None,
             auto_dream_min_sessions: None,
             show_progress: true,
+            auto_evolve: true,
         }
     }
 }

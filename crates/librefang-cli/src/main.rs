@@ -1147,9 +1147,17 @@ enum TriggerCommands {
         #[arg(long)]
         agent_id: Option<String>,
     },
+    /// Show details of a single trigger.
+    #[command(
+        long_about = "Show full details of a trigger by its UUID.\n\nExamples:\n  librefang trigger get <TRIGGER_ID>"
+    )]
+    Get {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+    },
     /// Create a trigger for an agent.
     #[command(
-        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
+        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10\n  librefang trigger create <OWNER_ID> '\"task_posted\"' --target-agent <WORKER_ID>"
     )]
     Create {
         /// Agent ID (UUID) that owns the trigger.
@@ -1162,6 +1170,69 @@ enum TriggerCommands {
         /// Maximum number of times to fire (0 = unlimited).
         #[arg(long, default_value = "0")]
         max_fires: u64,
+        /// Route triggered messages to this agent instead of the owner (cross-session wake).
+        #[arg(long)]
+        target_agent: Option<String>,
+        /// Cooldown in seconds before this trigger can fire again (0 = no cooldown).
+        #[arg(long)]
+        cooldown: Option<u64>,
+        /// Session mode override: "persistent" or "new".
+        #[arg(long)]
+        session_mode: Option<String>,
+    },
+    /// Update fields of an existing trigger.
+    #[command(
+        long_about = "Update one or more fields of a trigger. Only supplied flags are changed.\n\nExamples:\n  librefang trigger update <ID> --prompt \"New prompt: {{event}}\"\n  librefang trigger update <ID> --max-fires 5 --cooldown 30\n  librefang trigger update <ID> --enabled false"
+    )]
+    Update {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+        /// New pattern JSON.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// New prompt template.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Enable or disable the trigger.
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// New maximum fires limit (0 = unlimited).
+        #[arg(long)]
+        max_fires: Option<u64>,
+        /// New cooldown in seconds between fires.
+        #[arg(long)]
+        cooldown: Option<u64>,
+        /// Remove the cooldown limit entirely.
+        #[arg(long)]
+        clear_cooldown: bool,
+        /// Override session mode for this trigger (persistent|new).
+        #[arg(long)]
+        session_mode: Option<String>,
+        /// Remove the session mode override (revert to agent default).
+        #[arg(long)]
+        clear_session_mode: bool,
+        /// Set the cross-session wake target agent ID (UUID).
+        #[arg(long)]
+        target_agent: Option<String>,
+        /// Clear the target agent (revert to owner routing).
+        #[arg(long)]
+        clear_target_agent: bool,
+    },
+    /// Enable a trigger.
+    #[command(
+        long_about = "Enable a previously disabled trigger.\n\nExamples:\n  librefang trigger enable <TRIGGER_ID>"
+    )]
+    Enable {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+    },
+    /// Disable a trigger without deleting it.
+    #[command(
+        long_about = "Disable a trigger without removing it.\n\nExamples:\n  librefang trigger disable <TRIGGER_ID>"
+    )]
+    Disable {
+        /// Trigger ID (UUID).
+        trigger_id: String,
     },
     /// Delete a trigger by ID.
     #[command(
@@ -1580,22 +1651,12 @@ fn init_tracing_stderr(log_level: &str) {
 
     // Compact stderr format: in a one-shot CLI context the user cares about
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
-    // `daemon.log` keeps the full default format via the file layer below.
+    // One-shot CLI runs are transient — stderr is the only sink; the daemon
+    // has its own file appender under `logs/daemon.log`.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
         .compact();
-
-    // Also write logs to ~/.librefang/daemon.log
-    let log_dir = cli_librefang_home();
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_layer = std::fs::File::create(log_dir.join("daemon.log"))
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-        });
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
@@ -1607,11 +1668,7 @@ fn init_tracing_stderr(log_level: &str) {
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(file_layer)
-        .init();
+    registry.with(env_filter).with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -1650,9 +1707,11 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
 fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) {
+    // `custom_log_dir` is already a log directory (typically `daemon.log_dir`
+    // from config); use it as-is. Otherwise default to `<home>/logs/`.
     let log_dir = custom_log_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(cli_librefang_home);
+        .unwrap_or_else(|| cli_librefang_home().join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
 
@@ -1831,12 +1890,51 @@ fn main() {
         },
         Some(Commands::Trigger(sub)) => match sub {
             TriggerCommands::List { agent_id } => cmd_trigger_list(agent_id.as_deref()),
+            TriggerCommands::Get { trigger_id } => cmd_trigger_get(&trigger_id),
             TriggerCommands::Create {
                 agent_id,
                 pattern_json,
                 prompt,
                 max_fires,
-            } => cmd_trigger_create(&agent_id, &pattern_json, &prompt, max_fires),
+                target_agent,
+                cooldown,
+                session_mode,
+            } => cmd_trigger_create(
+                &agent_id,
+                &pattern_json,
+                &prompt,
+                max_fires,
+                target_agent.as_deref(),
+                cooldown,
+                session_mode.as_deref(),
+            ),
+            TriggerCommands::Update {
+                trigger_id,
+                pattern,
+                prompt,
+                enabled,
+                max_fires,
+                cooldown,
+                clear_cooldown,
+                session_mode,
+                clear_session_mode,
+                target_agent,
+                clear_target_agent,
+            } => cmd_trigger_update(
+                &trigger_id,
+                pattern.as_deref(),
+                prompt.as_deref(),
+                enabled,
+                max_fires,
+                cooldown,
+                clear_cooldown,
+                session_mode.as_deref(),
+                clear_session_mode,
+                target_agent.as_deref(),
+                clear_target_agent,
+            ),
+            TriggerCommands::Enable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, true),
+            TriggerCommands::Disable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, false),
             TriggerCommands::Delete { trigger_id } => cmd_trigger_delete(&trigger_id),
         },
         Some(Commands::Migrate(args)) => cmd_migrate(args),
@@ -5784,7 +5882,15 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     }
 }
 
-fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fires: u64) {
+fn cmd_trigger_create(
+    agent_id: &str,
+    pattern_json: &str,
+    prompt: &str,
+    max_fires: u64,
+    target_agent: Option<&str>,
+    cooldown: Option<u64>,
+    session_mode: Option<&str>,
+) {
     let base = require_daemon("trigger create");
     let agent_id = resolve_agent_id(&base, agent_id);
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
@@ -5797,16 +5903,27 @@ fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fire
         std::process::exit(1);
     });
 
+    let mut payload = serde_json::json!({
+        "agent_id": agent_id,
+        "pattern": pattern,
+        "prompt_template": prompt,
+        "max_fires": max_fires,
+    });
+    if let Some(t) = target_agent {
+        payload["target_agent_id"] = serde_json::json!(t);
+    }
+    if let Some(c) = cooldown {
+        payload["cooldown_secs"] = serde_json::json!(c);
+    }
+    if let Some(m) = session_mode {
+        payload["session_mode"] = serde_json::json!(m);
+    }
+
     let client = daemon_client();
     let body = daemon_json(
         client
             .post(format!("{base}/api/triggers"))
-            .json(&serde_json::json!({
-                "agent_id": agent_id,
-                "pattern": pattern,
-                "prompt_template": prompt,
-                "max_fires": max_fires,
-            }))
+            .json(&payload)
             .send(),
     );
 
@@ -5814,6 +5931,9 @@ fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fire
         println!("Trigger created successfully!");
         println!("  Trigger ID: {id}");
         println!("  Agent ID:   {agent_id}");
+        if let Some(t) = target_agent {
+            println!("  Target:     {t}");
+        }
     } else {
         eprintln!(
             "Failed to create trigger: {}",
@@ -5841,6 +5961,155 @@ fn cmd_trigger_delete(trigger_id: &str) {
         );
         std::process::exit(1);
     }
+}
+
+fn cmd_trigger_get(trigger_id: &str) {
+    let base = require_daemon("trigger get");
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/triggers/{trigger_id}"))
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to get trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+
+    println!("Trigger ID:    {}", body["id"].as_str().unwrap_or("-"));
+    println!(
+        "Agent ID:      {}",
+        body["agent_id"].as_str().unwrap_or("-")
+    );
+    println!("Pattern:       {}", body["pattern"]);
+    println!(
+        "Prompt:        {}",
+        body["prompt_template"].as_str().unwrap_or("-")
+    );
+    println!(
+        "Enabled:       {}",
+        body["enabled"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "Fire count:    {}",
+        body["fire_count"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "Max fires:     {}",
+        body["max_fires"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unlimited".to_string())
+    );
+    if let Some(t) = body["target_agent_id"].as_str() {
+        println!("Target agent:  {t}");
+    }
+    if let Some(c) = body["cooldown_secs"].as_u64() {
+        println!("Cooldown:      {c}s");
+    }
+    if let Some(m) = body["session_mode"].as_str() {
+        println!("Session mode:  {m}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_trigger_update(
+    trigger_id: &str,
+    pattern: Option<&str>,
+    prompt: Option<&str>,
+    enabled: Option<bool>,
+    max_fires: Option<u64>,
+    cooldown: Option<u64>,
+    clear_cooldown: bool,
+    session_mode: Option<&str>,
+    clear_session_mode: bool,
+    target_agent: Option<&str>,
+    clear_target_agent: bool,
+) {
+    let base = require_daemon("trigger update");
+    let client = daemon_client();
+
+    let mut payload = serde_json::json!({});
+    if let Some(p) = pattern {
+        let parsed: serde_json::Value = serde_json::from_str(p).unwrap_or_else(|e| {
+            eprintln!("Invalid pattern JSON: {e}");
+            std::process::exit(1);
+        });
+        payload["pattern"] = parsed;
+    }
+    if let Some(t) = prompt {
+        payload["prompt_template"] = serde_json::json!(t);
+    }
+    if let Some(e) = enabled {
+        payload["enabled"] = serde_json::json!(e);
+    }
+    if let Some(m) = max_fires {
+        payload["max_fires"] = serde_json::json!(m);
+    }
+    if clear_cooldown {
+        payload["cooldown_secs"] = serde_json::Value::Null;
+    } else if let Some(c) = cooldown {
+        payload["cooldown_secs"] = serde_json::json!(c);
+    }
+    if clear_session_mode {
+        payload["session_mode"] = serde_json::Value::Null;
+    } else if let Some(m) = session_mode {
+        payload["session_mode"] = serde_json::json!(m);
+    }
+    if clear_target_agent {
+        payload["target_agent_id"] = serde_json::Value::Null;
+    } else if let Some(a) = target_agent {
+        payload["target_agent_id"] = serde_json::json!(a);
+    }
+
+    let body = daemon_json(
+        client
+            .patch(format!("{base}/api/triggers/{trigger_id}"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to update trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+    println!("Trigger {trigger_id} updated.");
+}
+
+fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
+    let base = require_daemon(if enabled {
+        "trigger enable"
+    } else {
+        "trigger disable"
+    });
+    let client = daemon_client();
+    let payload = serde_json::json!({ "enabled": enabled });
+    let body = daemon_json(
+        client
+            .patch(format!("{base}/api/triggers/{trigger_id}"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to {} trigger: {}",
+            if enabled { "enable" } else { "disable" },
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "Trigger {trigger_id} {}.",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 /// Require a running daemon — exit with helpful message if not found.
@@ -9554,8 +9823,10 @@ fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         return;
     }
 
-    let tui_log_dir = daemon.log_dir.as_deref().unwrap_or(&daemon.home_dir);
-    let tui_log = tui_log_dir.join("tui.log");
+    let tui_log = match daemon.log_dir.as_deref() {
+        Some(dir) => dir.join("tui.log"),
+        None => daemon.home_dir.join("logs").join("tui.log"),
+    };
     if tui_log.exists() {
         ui::hint(&format!(
             "Daemon log not found; showing TUI log at {}",
