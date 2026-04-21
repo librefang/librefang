@@ -2166,8 +2166,8 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
     // Runtime stats shared with `/api/status` — the dashboard RuntimePage
-    // reads `uptime_seconds` / `memory_used_mb` out of this snapshot, so
-    // leaving them out renders the KPI tiles as "-".
+    // reads these out of the snapshot for its info panel and KPI tiles.
+    // Anything missing here renders as "-" on the page.
     let uptime_seconds = state.started_at.elapsed().as_secs();
     let memory_used_mb = current_process_rss_mb();
     let status = serde_json::json!({
@@ -2180,6 +2180,9 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "api_listen": cfg.api_listen,
+        "home_dir": state.kernel.home_dir().display().to_string(),
+        "log_level": cfg.log_level,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
     });
