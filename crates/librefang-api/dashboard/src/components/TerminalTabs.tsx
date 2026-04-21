@@ -242,7 +242,8 @@ export function TerminalTabs({
   const nearLimit = windows.length >= Math.max(2, maxWindows - 2);
 
   return (
-    <div className="flex items-end gap-0.5 px-2 pt-1.5 bg-[#161b22] border-b border-gray-700/60 overflow-x-auto shrink-0 scrollbar-thin">
+    <div className="flex items-end bg-[#161b22] border-b border-gray-700/60 shrink-0">
+      <div className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
@@ -342,8 +343,9 @@ export function TerminalTabs({
       >
         <Plus className="h-3.5 w-3.5" />
       </button>
+      </div>
 
-      <div className="ml-auto flex items-center gap-1 shrink-0 self-center pr-1 pb-0.5">
+      <div className="flex items-center gap-1 shrink-0 self-center pr-2 pb-0.5">
         {nearLimit && (
           <span className="text-[10px] text-gray-600 tabular-nums">
             {windows.length}/{maxWindows}
@@ -360,7 +362,7 @@ export function TerminalTabs({
           </button>
 
           {showHelp && (
-            <div className="absolute right-0 bottom-full mb-2 z-50 w-56 rounded-lg border border-gray-700/80 bg-[#1c2128] shadow-xl text-xs text-gray-300 p-3 space-y-2">
+            <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-gray-700/80 bg-[#1c2128] shadow-xl text-xs text-gray-300 p-3 space-y-2">
               <p className="font-semibold text-gray-200 mb-1">{t("terminal.tabs.help_title")}</p>
               {([
                 ["terminal.tabs.help_switch",  "terminal.tabs.help_switch_key"],
