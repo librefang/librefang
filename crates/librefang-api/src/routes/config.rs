@@ -37,6 +37,44 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+/// Best-effort host identifier for the machine running the daemon.
+///
+/// Exposed only via authenticated endpoints (`/api/status`,
+/// `/api/dashboard/snapshot`) — deliberately **not** surfaced on the
+/// public `/api/version` endpoint, because hostname is a per-machine
+/// identifier that a remote scanner could correlate to a specific
+/// deployment target. `$HOSTNAME` is honoured first for parity with
+/// containers that synthesise it; `hostname(1)` is the POSIX fallback.
+/// Returns `None` only when both fail (rare).
+fn system_hostname() -> Option<String> {
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
 /// Best-effort RSS memory probe for the running process, in MB.
 ///
 /// Shared between `/api/status` and `/api/dashboard/snapshot` so both
@@ -152,6 +190,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
+        "hostname": system_hostname(),
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
@@ -2183,6 +2222,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
+        "hostname": system_hostname(),
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
     });

@@ -21,6 +21,10 @@ export interface StatusResponse {
   api_listen?: string;
   home_dir?: string;
   log_level?: string;
+  /** Machine hostname. Only populated on authenticated endpoints
+   *  (`/api/status`, `/api/dashboard/snapshot`) — `/api/version` is public
+   *  and deliberately omits it. */
+  hostname?: string;
   network_enabled?: boolean;
   terminal_enabled?: boolean;
   session_count?: number;
