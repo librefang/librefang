@@ -2224,15 +2224,21 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading LibreFang installation");
 
-    // 2. Backup existing config with timestamp
-    let backup_name = format!("config.toml.bak.{}", format_local_timestamp());
-    let backup_path = librefang_dir.join(&backup_name);
+    // 2. Backup existing config under backups/ (keep last 3)
+    let backups_dir = librefang_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backups_dir) {
+        ui::error(&format!("Failed to create backups dir: {e}"));
+        std::process::exit(1);
+    }
+    let backup_name = format!("config-{}.toml", format_local_timestamp());
+    let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
         ui::error(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
-    ui::success(&format!("Backed up config to {backup_name}"));
+    prune_old_config_backups(&backups_dir, 3);
+    ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     ui::hint("Syncing registry...");
@@ -2250,12 +2256,12 @@ fn cmd_init_upgrade() {
     init_vault_if_missing(&librefang_dir);
     init_git_if_missing(&librefang_dir);
 
-    // Ensure .gitignore excludes backup files (may be missing in older installations)
+    // Ensure .gitignore excludes the backups/ directory (may be missing in older installations)
     let gitignore = librefang_dir.join(".gitignore");
     if gitignore.exists() {
         if let Ok(content) = std::fs::read_to_string(&gitignore) {
-            if !content.contains("*.bak.*") {
-                let _ = std::fs::write(&gitignore, format!("{content}*.bak.*\n"));
+            if !content.lines().any(|l| l.trim() == "backups/") {
+                let _ = std::fs::write(&gitignore, format!("{content}backups/\n"));
             }
         }
     }
@@ -2273,7 +2279,9 @@ fn cmd_init_upgrade() {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse config.toml: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
     };
@@ -2345,7 +2353,9 @@ fn cmd_init_upgrade() {
 
         if let Err(e) = std::fs::write(&config_path, &content) {
             ui::error(&format!("Failed to write config: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
@@ -2394,11 +2404,38 @@ fn cmd_init_upgrade() {
     // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
-    ui::kv("Backup", &backup_name);
+    ui::kv("Backup", &format!("backups/{backup_name}"));
     if !added.is_empty() {
         ui::kv("New fields", &added.len().to_string());
     }
     ui::blank();
+}
+
+/// Keep only the `keep` most recent `config-*.toml` backups under `backups_dir`.
+/// The embedded `YYYYMMDD-HHMMSS` timestamp sorts lexicographically, so a
+/// filename sort gives the same order as a chronological sort.
+fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config-") && name.ends_with(".toml") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort();
+    if files.len() > keep {
+        for old in &files[..files.len() - keep] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
 }
 
 /// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
@@ -2540,7 +2577,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n*.bak.*\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\nbackups/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
 
