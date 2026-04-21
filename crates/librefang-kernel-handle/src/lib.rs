@@ -273,6 +273,7 @@ pub trait KernelHandle: Send + Sync {
 
     /// Send a message to a user on a named channel adapter (e.g., "email", "telegram").
     /// When `thread_id` is provided, the message is sent as a thread reply.
+    /// When `account_id` is provided, routes through the specific configured bot with that ID.
     /// Returns a confirmation string on success.
     async fn send_channel_message(
         &self,
@@ -280,14 +281,16 @@ pub trait KernelHandle: Send + Sync {
         recipient: &str,
         message: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
-        let _ = (channel, recipient, message, thread_id);
+        let _ = (channel, recipient, message, thread_id, account_id);
         Err("Channel send not available".to_string())
     }
 
     /// Send media content (image/file) to a user on a named channel adapter.
     /// `media_type` is "image" or "file", `media_url` is the URL, `caption` is optional text.
     /// When `thread_id` is provided, the media is sent as a thread reply.
+    /// When `account_id` is provided, routes through the specific configured bot with that ID.
     #[allow(clippy::too_many_arguments)]
     async fn send_channel_media(
         &self,
@@ -298,9 +301,10 @@ pub trait KernelHandle: Send + Sync {
         caption: Option<&str>,
         filename: Option<&str>,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
         let _ = (
-            channel, recipient, media_type, media_url, caption, filename, thread_id,
+            channel, recipient, media_type, media_url, caption, filename, thread_id, account_id,
         );
         Err("Channel media send not available".to_string())
     }
@@ -308,6 +312,8 @@ pub trait KernelHandle: Send + Sync {
     /// Send a local file (raw bytes) to a user on a named channel adapter.
     /// Used by the `channel_send` tool when `file_path` is provided.
     /// When `thread_id` is provided, the file is sent as a thread reply.
+    /// When `account_id` is provided, routes through the specific configured bot with that ID.
+    #[allow(clippy::too_many_arguments)]
     async fn send_channel_file_data(
         &self,
         channel: &str,
@@ -316,8 +322,11 @@ pub trait KernelHandle: Send + Sync {
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
-        let _ = (channel, recipient, data, filename, mime_type, thread_id);
+        let _ = (
+            channel, recipient, data, filename, mime_type, thread_id, account_id,
+        );
         Err("Channel file data send not available".to_string())
     }
 
@@ -331,6 +340,7 @@ pub trait KernelHandle: Send + Sync {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String> {
         let _ = (
             channel,
@@ -340,6 +350,7 @@ pub trait KernelHandle: Send + Sync {
             is_quiz,
             correct_option_id,
             explanation,
+            account_id,
         );
         Err("Channel poll send not available".to_string())
     }

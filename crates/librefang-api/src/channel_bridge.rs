@@ -1974,7 +1974,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         use librefang_runtime::kernel_handle::KernelHandle;
         self.kernel
-            .send_channel_message(channel_type, recipient, message, thread_id)
+            .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
     }
 }
@@ -3320,12 +3320,25 @@ pub async fn start_channel_bridge_with_config(
     }
 
     let mut started_names = Vec::new();
-    for (adapter, _, _account_id) in adapters {
+    for (adapter, _, account_id) in adapters {
         let name = adapter.name().to_string();
-        // Register adapter in kernel so agents can use `channel_send` tool
-        kernel
-            .channel_adapters_ref()
-            .insert(name.clone(), adapter.clone());
+        // Register adapter in kernel so agents can use `channel_send` tool.
+        // First adapter for this channel type becomes the plain-key fallback for
+        // backward compatibility. Subsequent adapters are only reachable via the
+        // qualified "channel:account_id" key.
+        if !kernel.channel_adapters_ref().contains_key(&name) {
+            kernel
+                .channel_adapters_ref()
+                .insert(name.clone(), adapter.clone());
+        }
+        // Always register under qualified key when account_id is present so
+        // agents can explicitly route through a specific bot.
+        if let Some(ref aid) = account_id {
+            let qualified = format!("{name}:{aid}");
+            kernel
+                .channel_adapters_ref()
+                .insert(qualified, adapter.clone());
+        }
         match manager.start_adapter(adapter).await {
             Ok(()) => {
                 info!("{name} channel bridge started");
@@ -3334,6 +3347,11 @@ pub async fn start_channel_bridge_with_config(
             Err(e) => {
                 // Remove from kernel map if start failed
                 kernel.channel_adapters_ref().remove(&name);
+                if let Some(ref aid) = account_id {
+                    kernel
+                        .channel_adapters_ref()
+                        .remove(&format!("{name}:{aid}"));
+                }
                 error!("Failed to start {name} bridge: {e}");
             }
         }
