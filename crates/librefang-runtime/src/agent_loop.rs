@@ -2684,7 +2684,25 @@ pub async fn run_agent_loop(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete"
                         );
-                        messages = result.kept_messages;
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
                         // Reset last_prompt_tokens so should_compress does not
                         // re-fire on the next iteration before the LLM has run.
                         // Do NOT touch total_usage — it is the cross-turn budget
@@ -3747,7 +3765,25 @@ pub async fn run_agent_loop_streaming(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete (streaming)"
                         );
-                        messages = result.kept_messages;
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
                         // Reset last_prompt_tokens so should_compress does not
                         // re-fire on the next iteration before the LLM has run.
                         // Do NOT touch total_usage — it is the cross-turn budget
