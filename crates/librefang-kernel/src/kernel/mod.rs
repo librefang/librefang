@@ -1362,6 +1362,7 @@ impl LibreFangKernel {
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
+        migrate_root_backups(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
