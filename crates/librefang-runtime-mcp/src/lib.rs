@@ -471,12 +471,20 @@ impl McpConnection {
             }
             McpTransport::Sse { url } => Self::connect_sse(url).await?,
             McpTransport::Http { url } => {
+                // Only advertise local filesystem roots to local servers.
+                // Remote MCP servers (GitHub, Slack, …) don't operate on
+                // the local filesystem and shouldn't receive host paths.
+                let http_roots = if Self::is_local_url(url) {
+                    roots
+                } else {
+                    vec![]
+                };
                 let (inner, tools, auth_state) = Self::connect_streamable_http(
                     url,
                     &config.headers,
                     config.oauth_provider.as_ref(),
                     config.oauth_config.as_ref(),
-                    roots,
+                    http_roots,
                 )
                 .await?;
                 initial_auth_state = Some(auth_state);
@@ -516,7 +524,10 @@ impl McpConnection {
                     let declared_tools = tools.clone();
                     conn.register_http_compat_tools(&declared_tools);
                 } else if let McpInner::Sse { .. } = &conn.inner {
-                    conn.sse_initialize(&conn.config.roots.clone()).await?;
+                    // SSE is a unidirectional transport (client-initiated
+                    // requests only). Do NOT declare roots capability — the
+                    // server cannot send a roots/list request back over SSE.
+                    conn.sse_initialize().await?;
                     conn.sse_discover_tools().await?;
                 }
             }
@@ -864,15 +875,14 @@ impl McpConnection {
     }
 
     /// Send the MCP `initialize` handshake over SSE transport.
-    async fn sse_initialize(&mut self, roots: &[String]) -> Result<(), String> {
-        let capabilities = if roots.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::json!({ "roots": { "listChanged": false } })
-        };
+    ///
+    /// SSE is unidirectional (client → server), so we never declare the
+    /// `roots` capability here — the server has no channel to send
+    /// `roots/list` back to us.
+    async fn sse_initialize(&mut self) -> Result<(), String> {
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": capabilities,
+            "capabilities": {},
             "clientInfo": {
                 "name": "librefang",
                 "version": env!("CARGO_PKG_VERSION")
@@ -1036,6 +1046,16 @@ impl McpConnection {
     }
 
     // --- Shared ---
+
+    /// Returns `true` when `url` resolves to the local machine.
+    /// Used to decide whether filesystem roots are meaningful for an HTTP MCP server.
+    fn is_local_url(url: &str) -> bool {
+        let lower = url.to_lowercase();
+        lower.contains("://127.")
+            || lower.contains("://localhost")
+            || lower.contains("://[::1]")
+            || lower.contains("://0.0.0.0")
+    }
 
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
         let lower = url.to_lowercase();
@@ -2273,6 +2293,17 @@ mod tests {
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
+    }
+
+    #[test]
+    fn test_is_local_url() {
+        assert!(McpConnection::is_local_url("http://127.0.0.1:8080/mcp"));
+        assert!(McpConnection::is_local_url("http://localhost/mcp"));
+        assert!(McpConnection::is_local_url("http://LOCALHOST/mcp"));
+        assert!(McpConnection::is_local_url("http://[::1]:3000/mcp"));
+        assert!(McpConnection::is_local_url("http://0.0.0.0:4545/mcp"));
+        assert!(!McpConnection::is_local_url("https://api.github.com/mcp"));
+        assert!(!McpConnection::is_local_url("https://mcp.example.com/mcp"));
     }
 
     /// `extract_auth_header_from_error` returns `None` for any
