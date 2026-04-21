@@ -220,9 +220,7 @@ export function TerminalPage() {
     };
   }, [t, terminalEnabled, queryClient]);
 
-  useEffect(() => {
-    connectRef.current = connect;
-  }, [connect]);
+  connectRef.current = connect;
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {

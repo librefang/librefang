@@ -118,9 +118,9 @@ export function PluginsPage() {
 
   const handleDelete = useCallback((name: string) => {
     if (confirmDelete !== name) { setConfirmDelete(name); return; }
-    setConfirmDelete(null);
     uninstallMutation.mutate(name, {
       onSuccess: () => {
+        setConfirmDelete(null);
         addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
       },
       onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
@@ -383,7 +383,7 @@ export function PluginsPage() {
               {installMutation.error && (
                 <div className="flex items-center gap-2 text-error text-xs">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  {getErrorMessage(installMutation.error)}
+                  {getErrorMessage(installMutation.error) ?? t("plugins.install_failed", { defaultValue: "Install failed" })}
                 </div>
               )}
 
