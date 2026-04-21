@@ -2385,6 +2385,7 @@ impl LibreFangKernel {
 
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
+        let checkpoint_base_dir = config.home_dir.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -2486,8 +2487,7 @@ impl LibreFangKernel {
             approval_sweep_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
-                let cp_dir = config
-                    .home_dir
+                let cp_dir = checkpoint_base_dir
                     .join(librefang_runtime::checkpoint_manager::CHECKPOINT_BASE);
                 Some(Arc::new(
                     librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),

@@ -523,12 +523,12 @@ fn run_git(
     match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             warn!("git executable not found (shadow={})", shadow_str);
-            return (false, String::new(), "git not found".to_string());
+            (false, String::new(), "git not found".to_string())
         }
         Ok(Err(e)) => {
             let msg = e.to_string();
             warn!(error = %msg, "git command spawn failed");
-            return (false, String::new(), msg);
+            (false, String::new(), msg)
         }
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
