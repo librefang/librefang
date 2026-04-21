@@ -335,7 +335,7 @@ impl TriggerEngine {
         pattern: TriggerPattern,
         prompt_template: String,
     ) -> TriggerId {
-        self.register_with_target(owner, pattern, prompt_template, 0, Some(target))
+        self.register_with_target(owner, pattern, prompt_template, 0, Some(target), None, None)
     }
 
     /// Remove a trigger.

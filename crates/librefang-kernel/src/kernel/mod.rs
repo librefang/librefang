@@ -2145,7 +2145,7 @@ impl LibreFangKernel {
         }
 
         // Initialize trigger engine and reload persisted triggers
-        let trigger_engine = TriggerEngine::with_config(&trigger_config, &trigger_home_dir);
+        let trigger_engine = TriggerEngine::with_config(&config.triggers, &config.home_dir);
         match trigger_engine.load() {
             Ok(count) => {
                 if count > 0 {
@@ -8143,7 +8143,15 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+        self.register_trigger_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Register a trigger with an optional cross-session target agent.
