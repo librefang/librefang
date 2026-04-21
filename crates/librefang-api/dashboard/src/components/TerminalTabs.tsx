@@ -41,7 +41,8 @@ interface TerminalTabsProps {
   fitAddonRef: RefObject<FitAddon | null>;
 }
 
-const WINDOW_NAME_RE = /^[A-Za-z0-9 ._-]{1,64}$/;
+// Match backend validate_window_name: any Unicode except control chars and '|', 1–64 chars.
+const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
 
 export function TerminalTabs({
   ws,

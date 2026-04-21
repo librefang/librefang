@@ -2223,7 +2223,7 @@
       "rename_hint": "Double-click to rename",
       "tmux_unavailable": "tmux is not available on this host",
       "name_label": "Window name",
-      "name_invalid": "Only letters, digits, space, . _ - are allowed (1–64 chars).",
+      "name_invalid": "Name must be 1–64 characters and cannot contain | or control characters.",
       "counter": "{{used}} / {{total}}",
       "help": "Keyboard shortcuts",
       "help_title": "Tab shortcuts",

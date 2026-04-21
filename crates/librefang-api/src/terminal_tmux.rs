@@ -345,16 +345,25 @@ pub fn validate_window_id(id: &str) -> bool {
 }
 
 /// Return `true` if `name` is a safe tmux window name.
+/// Validate a tmux window name.
 ///
-/// Allowed: ASCII alphanumerics, space, `.`, `_`, `-`; length 1–64.
-/// Rejected: empty, > 64 chars, non-ASCII (including emoji), control chars,
-/// shell-special chars (`;`, `&`, `|`, `` ` ``, `$`, etc.).
+/// Allowed: any Unicode character except control characters and `|`.
+/// Length is measured in Unicode scalar values (chars), 1–64.
+///
+/// The `|` character is forbidden because it is used as the field separator
+/// in our `list-windows -F` format string; allowing it would corrupt parsing.
+/// Control characters (including newlines and null bytes) are rejected because
+/// they cannot appear in tmux window names meaningfully.
+///
+/// Since window names are passed via `Command::arg` (not a shell), there is no
+/// shell-injection risk — we only need to guard against chars that break our
+/// own tmux output parsing.
 pub fn validate_window_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
+    let len = name.chars().count();
+    if len == 0 || len > 64 {
         return false;
     }
-    name.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'.' || b == b'_' || b == b'-')
+    !name.chars().any(|c| c.is_control() || c == '|')
 }
 
 // ── internal parser ───────────────────────────────────────────────────────────
@@ -550,9 +559,18 @@ mod tests {
         assert!(validate_window_name("my-app_01"));
         assert!(validate_window_name("build 1"));
         assert!(validate_window_name("a")); // minimum length
-                                            // 64-character string — maximum
+                                            // 64-char string — maximum (measured in Unicode scalar values)
         let max_name = "a".repeat(64);
         assert!(validate_window_name(&max_name));
+        // Unicode / CJK / emoji are allowed
+        assert!(validate_window_name("终端"));
+        assert!(validate_window_name("开发环境"));
+        assert!(validate_window_name("hello🦊"));
+        assert!(validate_window_name("café"));
+        assert!(validate_window_name("日本語"));
+        // 64 Chinese chars — right at the limit
+        let max_cjk = "终".repeat(64);
+        assert!(validate_window_name(&max_cjk));
     }
 
     #[test]
@@ -561,35 +579,28 @@ mod tests {
     }
 
     #[test]
-    fn invalid_window_name_shell_injection() {
-        assert!(!validate_window_name("a;rm -rf /"));
-        assert!(!validate_window_name("$(evil)"));
-        assert!(!validate_window_name("a&b"));
+    fn invalid_window_name_pipe_separator() {
+        // '|' is our list-windows format separator — must be rejected.
         assert!(!validate_window_name("a|b"));
-        assert!(!validate_window_name("`cmd`"));
+        assert!(!validate_window_name("|"));
     }
 
     #[test]
     fn invalid_window_name_too_long() {
+        // 65 chars in Unicode scalar values
         let long = "a".repeat(65);
         assert!(!validate_window_name(&long));
+        // 65 CJK chars (each is one scalar value but 3 UTF-8 bytes)
+        let long_cjk = "终".repeat(65);
+        assert!(!validate_window_name(&long_cjk));
     }
 
     #[test]
-    fn invalid_window_name_unicode_emoji() {
-        assert!(!validate_window_name("hello🦊"));
-        assert!(!validate_window_name("café"));
-    }
-
-    #[test]
-    fn invalid_window_name_newline() {
+    fn invalid_window_name_control_chars() {
         assert!(!validate_window_name("foo\nbar"));
         assert!(!validate_window_name("foo\r\nbar"));
-    }
-
-    #[test]
-    fn invalid_window_name_tab() {
         assert!(!validate_window_name("foo\tbar"));
+        assert!(!validate_window_name("foo\x00bar"));
     }
 
     #[test]

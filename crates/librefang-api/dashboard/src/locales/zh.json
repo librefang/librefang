@@ -2230,7 +2230,7 @@
       "rename_hint": "双击可重命名",
       "tmux_unavailable": "此主机不支持 tmux",
       "name_label": "窗口名称",
-      "name_invalid": "只允许字母、数字、空格和 . _ -（1–64 个字符）。",
+      "name_invalid": "名称须为 1–64 个字符，不能包含 | 或控制字符。",
       "counter": "{{used}} / {{total}}",
       "help": "快捷操作说明",
       "help_title": "标签页快捷操作",
