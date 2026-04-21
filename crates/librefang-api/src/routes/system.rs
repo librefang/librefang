@@ -2094,7 +2094,7 @@ pub async fn reject_all_for_session(
             .await
         {
             Ok((resp, _)) => {
-                if resp.decision.is_denied() {
+                if resp.decision.is_approved() {
                     resolved += 1;
                 }
             }
