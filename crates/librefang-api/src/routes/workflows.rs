@@ -1040,6 +1040,7 @@ pub async fn list_triggers(
     Json(serde_json::json!({"triggers": list, "total": total}))
 }
 
+#[utoipa::path(get, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger detail", body = serde_json::Value), (status = 404, description = "Not found")))]
 /// GET /api/triggers/:id — Fetch a single trigger by ID.
 pub async fn get_trigger(
     State(state): State<Arc<AppState>>,
@@ -1082,6 +1083,7 @@ pub async fn delete_trigger(
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
+#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = serde_json::Value), (status = 404, description = "Not found")))]
 /// PATCH /api/triggers/:id — Partially update a trigger.
 ///
 /// All body fields are optional. Only provided fields are changed.
