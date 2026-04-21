@@ -1651,22 +1651,12 @@ fn init_tracing_stderr(log_level: &str) {
 
     // Compact stderr format: in a one-shot CLI context the user cares about
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
-    // `daemon.log` keeps the full default format via the file layer below.
+    // One-shot CLI runs are transient — stderr is the only sink; the daemon
+    // has its own file appender under `logs/daemon.log`.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
         .compact();
-
-    // Also write logs to ~/.librefang/daemon.log
-    let log_dir = cli_librefang_home();
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_layer = std::fs::File::create(log_dir.join("daemon.log"))
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-        });
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
@@ -1678,11 +1668,7 @@ fn init_tracing_stderr(log_level: &str) {
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(file_layer)
-        .init();
+    registry.with(env_filter).with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -1721,9 +1707,11 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
 fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) {
+    // `custom_log_dir` is already a log directory (typically `daemon.log_dir`
+    // from config); use it as-is. Otherwise default to `<home>/logs/`.
     let log_dir = custom_log_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(cli_librefang_home);
+        .unwrap_or_else(|| cli_librefang_home().join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
 
@@ -2334,15 +2322,21 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading LibreFang installation");
 
-    // 2. Backup existing config with timestamp
-    let backup_name = format!("config.toml.bak.{}", format_local_timestamp());
-    let backup_path = librefang_dir.join(&backup_name);
+    // 2. Backup existing config under backups/ (keep last 3)
+    let backups_dir = librefang_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backups_dir) {
+        ui::error(&format!("Failed to create backups dir: {e}"));
+        std::process::exit(1);
+    }
+    let backup_name = format!("config-{}.toml", format_local_timestamp());
+    let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
         ui::error(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
-    ui::success(&format!("Backed up config to {backup_name}"));
+    prune_old_config_backups(&backups_dir, 3);
+    ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     ui::hint("Syncing registry...");
@@ -2360,12 +2354,12 @@ fn cmd_init_upgrade() {
     init_vault_if_missing(&librefang_dir);
     init_git_if_missing(&librefang_dir);
 
-    // Ensure .gitignore excludes backup files (may be missing in older installations)
+    // Ensure .gitignore excludes the backups/ directory (may be missing in older installations)
     let gitignore = librefang_dir.join(".gitignore");
     if gitignore.exists() {
         if let Ok(content) = std::fs::read_to_string(&gitignore) {
-            if !content.contains("*.bak.*") {
-                let _ = std::fs::write(&gitignore, format!("{content}*.bak.*\n"));
+            if !content.lines().any(|l| l.trim() == "backups/") {
+                let _ = std::fs::write(&gitignore, format!("{content}backups/\n"));
             }
         }
     }
@@ -2383,7 +2377,9 @@ fn cmd_init_upgrade() {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse config.toml: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
     };
@@ -2455,7 +2451,9 @@ fn cmd_init_upgrade() {
 
         if let Err(e) = std::fs::write(&config_path, &content) {
             ui::error(&format!("Failed to write config: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
@@ -2504,11 +2502,38 @@ fn cmd_init_upgrade() {
     // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
-    ui::kv("Backup", &backup_name);
+    ui::kv("Backup", &format!("backups/{backup_name}"));
     if !added.is_empty() {
         ui::kv("New fields", &added.len().to_string());
     }
     ui::blank();
+}
+
+/// Keep only the `keep` most recent `config-*.toml` backups under `backups_dir`.
+/// The embedded `YYYYMMDD-HHMMSS` timestamp sorts lexicographically, so a
+/// filename sort gives the same order as a chronological sort.
+fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config-") && name.ends_with(".toml") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort();
+    if files.len() > keep {
+        for old in &files[..files.len() - keep] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
 }
 
 /// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
@@ -2633,7 +2658,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     }
 
     let Ok(status) = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(librefang_dir)
         .status()
     else {
@@ -2650,7 +2675,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n*.bak.*\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\nbackups/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
 
@@ -9797,8 +9822,10 @@ fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         return;
     }
 
-    let tui_log_dir = daemon.log_dir.as_deref().unwrap_or(&daemon.home_dir);
-    let tui_log = tui_log_dir.join("tui.log");
+    let tui_log = match daemon.log_dir.as_deref() {
+        Some(dir) => dir.join("tui.log"),
+        None => daemon.home_dir.join("logs").join("tui.log"),
+    };
     if tui_log.exists() {
         ui::hint(&format!(
             "Daemon log not found; showing TUI log at {}",

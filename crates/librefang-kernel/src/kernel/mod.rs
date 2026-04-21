@@ -1362,6 +1362,9 @@ impl LibreFangKernel {
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
+        migrate_root_backups(&config.home_dir);
+        migrate_root_state_files(&config.home_dir);
+        cleanup_legacy_root_logs(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
@@ -1757,8 +1760,13 @@ impl LibreFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
-        model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
-        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
+        model_catalog.load_suppressed(
+            &config
+                .home_dir
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1793,8 +1801,8 @@ impl LibreFangKernel {
                 config.provider_proxy_urls.len()
             );
         }
-        // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
-        let custom_models_path = config.home_dir.join("custom_models.json");
+        // Load user's custom models from ~/.librefang/data/custom_models.json (highest priority)
+        let custom_models_path = config.home_dir.join("data").join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
         let available_count = model_catalog.available_models().len();
         let total_count = model_catalog.list_models().len();
@@ -4936,7 +4944,7 @@ system_prompt = "You are a helpful assistant."
             for (channel, platform_id) in &bindings {
                 if kernel.channel_adapters.contains_key(channel.as_str()) {
                     if let Err(e) = kernel
-                        .send_channel_message(channel, platform_id, &message, None)
+                        .send_channel_message(channel, platform_id, &message, None, None)
                         .await
                     {
                         warn!(channel = %channel, error = %e, "Failed to send owner notification");
@@ -7654,7 +7662,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
@@ -8362,7 +8370,7 @@ system_prompt = "You are a helpful assistant."
     pub async fn start_background_agents(self: &Arc<Self>) {
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
@@ -11685,7 +11693,7 @@ async fn cron_deliver_response(
                 .memory
                 .structured_set(agent_id, "delivery.last_channel", kv_val);
             if let Err(e) = kernel
-                .send_channel_message(channel, to, response, None)
+                .send_channel_message(channel, to, response, None, None)
                 .await
             {
                 tracing::warn!(channel = %channel, to = %to, error = %e, "Cron channel delivery failed");
@@ -11706,7 +11714,7 @@ async fn cron_deliver_response(
                             "Cron: delivering to last channel"
                         );
                         if let Err(e) = kernel
-                            .send_channel_message(channel, recipient, response, None)
+                            .send_channel_message(channel, recipient, response, None, None)
                             .await
                         {
                             tracing::warn!(channel = %channel, recipient = %recipient, error = %e, "Cron last_channel delivery failed");
@@ -11839,6 +11847,7 @@ impl LibreFangKernel {
                 &target.recipient,
                 message,
                 target.thread_id.as_deref(),
+                None,
             )
             .await
         {
@@ -12227,14 +12236,18 @@ impl KernelHandle for LibreFangKernel {
     }
 
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-        // Resolve `agent_id` as either a UUID (used directly) or an agent
-        // name (looked up via the registry → its UUID). Tasks are stored
-        // under the canonical UUID, so name-based callers used to silently
-        // get zero matches. Issue #2330.
-        let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
-            Ok(_) => agent_id.to_string(),
+        // Resolve `agent_id` to a canonical UUID and also capture the name.
+        // Both are forwarded to `memory.task_claim` so that tasks whose
+        // `assigned_to` field was stored as either a UUID *or* a name string
+        // are correctly matched (issue #2841).
+        let (resolved, resolved_name) = match librefang_types::agent::AgentId::from_str(agent_id) {
+            Ok(parsed_id) => {
+                // Caller passed a UUID — look up the name from the registry.
+                let name = self.registry.get(parsed_id).map(|e| e.name.clone());
+                (agent_id.to_string(), name)
+            }
             Err(_) => match self.registry.find_by_name(agent_id) {
-                Some(entry) => entry.id.to_string(),
+                Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
                     return Err(format!(
                         "Task claim failed: agent {agent_id:?} not found by UUID or name"
@@ -12244,7 +12257,7 @@ impl KernelHandle for LibreFangKernel {
         };
         let result = self
             .memory
-            .task_claim(&resolved)
+            .task_claim(&resolved, resolved_name.as_deref())
             .await
             .map_err(|e| format!("Task claim failed: {e}"))?;
 
@@ -12943,21 +12956,32 @@ impl KernelHandle for LibreFangKernel {
         recipient: &str,
         message: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
         let cfg = self.config.load_full();
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13007,20 +13031,31 @@ impl KernelHandle for LibreFangKernel {
         caption: Option<&str>,
         filename: Option<&str>,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13065,6 +13100,7 @@ impl KernelHandle for LibreFangKernel {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_channel_file_data(
         &self,
         channel: &str,
@@ -13073,20 +13109,31 @@ impl KernelHandle for LibreFangKernel {
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<String, String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
+            .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
                     .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
+                match account_id.filter(|s| !s.is_empty()) {
+                    Some(aid) => format!(
+                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
+                        channel, aid, available
+                    ),
+                    None => format!(
+                        "Channel '{}' not found. Available channels: {:?}",
+                        channel, available
+                    ),
+                }
             })?
             .clone();
 
@@ -13129,11 +13176,21 @@ impl KernelHandle for LibreFangKernel {
         is_quiz: bool,
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String> {
+        let lookup_key = account_id
+            .filter(|s| !s.is_empty())
+            .map(|aid| format!("{channel}:{aid}"))
+            .unwrap_or_else(|| channel.to_string());
         let adapter = self
             .channel_adapters
-            .get(channel)
-            .ok_or_else(|| format!("Channel adapter '{channel}' not found"))?
+            .get(&lookup_key)
+            .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
+                Some(aid) => {
+                    format!("Channel adapter '{channel}' with account_id '{aid}' not found")
+                }
+                None => format!("Channel adapter '{channel}' not found"),
+            })?
             .clone();
 
         let user = librefang_channels::types::ChannelUser {

@@ -361,12 +361,12 @@ impl WorkflowEngine {
 
     /// Create a new workflow engine with run persistence.
     ///
-    /// Completed and failed runs are persisted to `<home_dir>/workflow_runs.json`.
+    /// Completed and failed runs are persisted to `<home_dir>/data/workflow_runs.json`.
     pub fn new_with_persistence(home_dir: &Path) -> Self {
         Self {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
-            persist_path: Some(home_dir.join("workflow_runs.json")),
+            persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
         }
     }
 
@@ -422,6 +422,12 @@ impl WorkflowEngine {
             }
         };
         drop(runs);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!("Failed to create workflow runs dir: {e}");
+                return;
+            }
+        }
         let tmp_path = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp_path, data.as_bytes()) {
             warn!("Failed to write workflow runs temp file: {e}");
