@@ -2312,8 +2312,22 @@ async fn tool_shell_exec(
         }
         Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
         Err(_) => {
-            // Timed out — mark the process finished with a sentinel exit code
-            // so the registry doesn't leave it perpetually Running.
+            // Timed out — kill the child process to prevent it becoming an
+            // orphan.  `Child::drop` does NOT kill the process (Tokio docs),
+            // so without an explicit kill the OS process keeps running, its
+            // piped stdout/stderr go unread, and once the child finally exits
+            // it lingers as a zombie until init reaps it.
+            //
+            // Ignore kill/wait errors: the process may have already exited on
+            // its own in the narrow window between the timeout and here.
+            let _ = child.start_kill();
+            // Wait so the kernel can release the process table entry
+            // (avoids a zombie).  This is a best-effort fire-and-forget wait;
+            // failure just means a short-lived zombie, which is acceptable.
+            let _ = child.wait().await;
+
+            // Mark the registry entry finished with a sentinel exit code so
+            // callers never see a perpetually-Running entry.
             if let (Some(reg), Some(pid)) = (process_registry, maybe_pid) {
                 reg.mark_finished(pid, -1);
             }
