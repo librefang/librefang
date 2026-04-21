@@ -7,7 +7,9 @@ use ratatui::crossterm::event::{self, Event as CtEvent, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -152,6 +154,11 @@ const MENU_RETURNING: &[MenuItem] = &[
 
 // ── Launcher state ──────────────────────────────────────────────────────────
 
+enum Screen {
+    Menu,
+    Help { lines: Vec<String>, scroll: usize },
+}
+
 struct LauncherState {
     list: ListState,
     daemon_url: Option<String>,
@@ -161,6 +168,7 @@ struct LauncherState {
     first_run: bool,
     openclaw_detected: bool,
     openfang_detected: bool,
+    screen: Screen,
 }
 
 impl LauncherState {
@@ -179,6 +187,7 @@ impl LauncherState {
             first_run,
             openclaw_detected,
             openfang_detected,
+            screen: Screen::Menu,
         }
     }
 
@@ -251,35 +260,95 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                let menu = state.menu();
-                if menu.is_empty() {
-                    choice = LauncherChoice::Quit;
-                    break;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        choice = LauncherChoice::Quit;
-                        break;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let i = state.list.selected().unwrap_or(0);
-                        let next = if i == 0 { menu.len() - 1 } else { i - 1 };
-                        state.list.select(Some(next));
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let i = state.list.selected().unwrap_or(0);
-                        let next = (i + 1) % menu.len();
-                        state.list.select(Some(next));
-                    }
-                    KeyCode::Enter => {
-                        if let Some(i) = state.list.selected() {
-                            if i < menu.len() {
-                                choice = menu[i].choice;
-                                break;
+                match &mut state.screen {
+                    Screen::Help { lines, scroll } => {
+                        let total = lines.len();
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
+                                state.screen = Screen::Menu;
                             }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if *scroll + 1 < total {
+                                    *scroll += 1;
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if *scroll > 0 {
+                                    *scroll -= 1;
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                *scroll = (*scroll + 20).min(total.saturating_sub(1));
+                            }
+                            KeyCode::PageUp => {
+                                *scroll = scroll.saturating_sub(20);
+                            }
+                            KeyCode::Home | KeyCode::Char('g') => {
+                                *scroll = 0;
+                            }
+                            KeyCode::End | KeyCode::Char('G') => {
+                                *scroll = total.saturating_sub(1);
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
+                    Screen::Menu => {
+                        let menu = state.menu();
+                        if menu.is_empty() {
+                            choice = LauncherChoice::Quit;
+                            break;
+                        }
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                choice = LauncherChoice::Quit;
+                                break;
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                let i = state.list.selected().unwrap_or(0);
+                                let next = if i == 0 { menu.len() - 1 } else { i - 1 };
+                                state.list.select(Some(next));
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let i = state.list.selected().unwrap_or(0);
+                                let next = (i + 1) % menu.len();
+                                state.list.select(Some(next));
+                            }
+                            // Number shortcuts: 1-9 jump directly to menu item
+                            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                                let idx = (c as usize) - ('1' as usize);
+                                if idx < menu.len() {
+                                    state.list.select(Some(idx));
+                                    let selected = menu[idx].choice;
+                                    if selected == LauncherChoice::ShowHelp {
+                                        state.screen = Screen::Help {
+                                            lines: build_help_lines(),
+                                            scroll: 0,
+                                        };
+                                    } else {
+                                        choice = selected;
+                                        break;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(i) = state.list.selected() {
+                                    if i < menu.len() {
+                                        let selected = menu[i].choice;
+                                        if selected == LauncherChoice::ShowHelp {
+                                            state.screen = Screen::Help {
+                                                lines: build_help_lines(),
+                                                scroll: 0,
+                                            };
+                                        } else {
+                                            choice = selected;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -289,7 +358,47 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
     choice
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut esc = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            esc = true;
+            continue;
+        }
+        if esc {
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn build_help_lines() -> Vec<String> {
+    use clap::CommandFactory;
+    let mut buf = Vec::new();
+    crate::Cli::command()
+        .write_long_help(&mut buf)
+        .unwrap_or(());
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .map(strip_ansi)
+        .collect()
+}
+
 // ── Drawing ─────────────────────────────────────────────────────────────────
+
+fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
+    match &state.screen {
+        Screen::Help { lines, scroll } => draw_help(frame, lines, *scroll),
+        Screen::Menu => draw_menu(frame, state),
+    }
+}
 
 /// Left margin for content alignment.
 const MARGIN_LEFT: u16 = 3;
@@ -310,7 +419,7 @@ fn content_area(area: Rect) -> Rect {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
+fn draw_menu(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     let area = frame.area();
 
     // Fill background
@@ -541,7 +650,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
 
     // ── Keybind hints ───────────────────────────────────────────────────────
     let hints = Line::from(vec![Span::styled(
-        "\u{2191}\u{2193} navigate  enter select  q quit",
+        "\u{2191}\u{2193}/jk navigate  1-9 quick select  enter confirm  q quit",
         theme::hint_style(),
     )]);
     frame.render_widget(Paragraph::new(hints), chunks[7]);
@@ -554,6 +663,90 @@ fn render_separator(frame: &mut ratatui::Frame, area: Rect) {
         Style::default().fg(theme::BORDER),
     )]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+// ── Help screen ─────────────────────────────────────────────────────────────
+
+fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) {
+    use ratatui::widgets::Block;
+
+    let area = frame.area();
+
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::BG_PRIMARY)),
+        area,
+    );
+
+    // Title bar (1 line)
+    let title_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    let content_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width.saturating_sub(1), // leave 1 col for scrollbar
+        height: area.height.saturating_sub(2),
+    };
+    let hint_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let scrollbar_area = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y + 1,
+        width: 1,
+        height: area.height.saturating_sub(2),
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "All commands",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  — q/Esc to go back", theme::dim_style()),
+        ])),
+        title_area,
+    );
+
+    let visible_h = content_area.height as usize;
+    let display_lines: Vec<Line> = lines
+        .iter()
+        .skip(scroll)
+        .take(visible_h)
+        .map(|l| {
+            Line::from(Span::styled(
+                l.as_str(),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ))
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(display_lines), content_area);
+
+    // Scrollbar
+    let total = lines.len();
+    let mut sb_state = ScrollbarState::new(total.saturating_sub(visible_h)).position(scroll);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        scrollbar_area,
+        &mut sb_state,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "\u{2191}\u{2193}/jk scroll  PgUp/PgDn  g/G top/bottom  q back",
+            theme::hint_style(),
+        ))),
+        hint_area,
+    );
 }
 
 // ── Desktop app launcher ────────────────────────────────────────────────────
