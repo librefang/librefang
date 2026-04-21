@@ -8,6 +8,8 @@ pub use librefang_llm_driver::llm_errors;
 pub mod backoff;
 pub use librefang_llm_driver::FailoverReason;
 pub mod drivers;
+pub mod rate_limit_tracker;
 pub mod think_filter;
 
 pub use drivers::fallback_chain::{ChainEntry, FallbackChain};
+pub use rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
