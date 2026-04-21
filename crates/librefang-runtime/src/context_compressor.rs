@@ -257,7 +257,7 @@ impl ContextCompressor {
         // `middle` and would get summarised away.  Pull it into `head` so the pair
         // travels together.
         let mut head_end = self.config.protect_head.min(n);
-        if head_end < n {
+        if head_end > 0 && head_end < n {
             let last_head = &messages[head_end - 1];
             if last_head.role == Role::Assistant && msg_has_tool_use(last_head) {
                 // Include the next message (the ToolResult delivery) in the head.
