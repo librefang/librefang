@@ -132,7 +132,7 @@ impl ToolBudgetEnforcer {
     /// Already-persisted results (those whose content starts with the
     /// [`PERSISTED_MARKER`]) are counted toward the total but are never
     /// re-persisted.
-    pub fn enforce_turn_budget(&self, results: &mut [ToolResultEntry]) {
+    pub fn enforce_turn_budget(&self, results: &mut Vec<ToolResultEntry>) {
         let total: usize = results.iter().map(|r| r.content.len()).sum();
         if total <= self.per_turn_budget {
             return;
