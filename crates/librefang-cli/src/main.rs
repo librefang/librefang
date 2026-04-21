@@ -3114,7 +3114,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .thread_stack_size(4 * 1024 * 1024)
+        .thread_stack_size(2 * 1024 * 1024)
         .enable_all()
         .build()
         .unwrap();

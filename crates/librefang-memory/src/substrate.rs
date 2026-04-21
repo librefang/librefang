@@ -55,7 +55,6 @@ impl MemorySubstrate {
             "PRAGMA journal_mode=WAL; \
              PRAGMA busy_timeout=5000; \
              PRAGMA cache_size=-2000; \
-             PRAGMA temp_store=MEMORY; \
              PRAGMA mmap_size=0;",
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
