@@ -156,7 +156,12 @@ const MENU_RETURNING: &[MenuItem] = &[
 
 enum Screen {
     Menu,
-    Help { lines: Vec<String>, scroll: usize },
+    Help {
+        lines: Vec<String>,
+        scroll: usize,
+        /// Cached viewport height from the last render frame; 0 until first draw.
+        viewport_height: usize,
+    },
 }
 
 struct LauncherState {
@@ -261,14 +266,22 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                     continue;
                 }
                 match &mut state.screen {
-                    Screen::Help { lines, scroll } => {
+                    Screen::Help {
+                        lines,
+                        scroll,
+                        viewport_height,
+                    } => {
                         let total = lines.len();
+                        // Maximum scroll offset: stop when the last line fills the bottom
+                        // of the viewport rather than when the last line is at the top.
+                        let vh = (*viewport_height).max(1);
+                        let max_scroll = total.saturating_sub(vh);
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Backspace => {
                                 state.screen = Screen::Menu;
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                if *scroll + 1 < total {
+                                if *scroll < max_scroll {
                                     *scroll += 1;
                                 }
                             }
@@ -278,7 +291,7 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                                 }
                             }
                             KeyCode::PageDown => {
-                                *scroll = (*scroll + 20).min(total.saturating_sub(1));
+                                *scroll = (*scroll + 20).min(max_scroll);
                             }
                             KeyCode::PageUp => {
                                 *scroll = scroll.saturating_sub(20);
@@ -287,7 +300,7 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                                 *scroll = 0;
                             }
                             KeyCode::End | KeyCode::Char('G') => {
-                                *scroll = total.saturating_sub(1);
+                                *scroll = max_scroll;
                             }
                             _ => {}
                         }
@@ -323,6 +336,7 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                                         state.screen = Screen::Help {
                                             lines: build_help_lines(),
                                             scroll: 0,
+                                            viewport_height: 0,
                                         };
                                     } else {
                                         choice = selected;
@@ -338,6 +352,7 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
                                             state.screen = Screen::Help {
                                                 lines: build_help_lines(),
                                                 scroll: 0,
+                                                viewport_height: 0,
                                             };
                                         } else {
                                             choice = selected;
@@ -394,8 +409,15 @@ fn build_help_lines() -> Vec<String> {
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
-    match &state.screen {
-        Screen::Help { lines, scroll } => draw_help(frame, lines, *scroll),
+    match &mut state.screen {
+        Screen::Help {
+            lines,
+            scroll,
+            viewport_height,
+        } => {
+            let vh = draw_help(frame, lines, *scroll);
+            *viewport_height = vh;
+        }
         Screen::Menu => draw_menu(frame, state),
     }
 }
@@ -667,7 +689,9 @@ fn render_separator(frame: &mut ratatui::Frame, area: Rect) {
 
 // ── Help screen ─────────────────────────────────────────────────────────────
 
-fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) {
+/// Renders the help screen and returns the viewport height (in lines) so the
+/// caller can update `Screen::Help::viewport_height` for scroll-bound clamping.
+fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) -> usize {
     use ratatui::widgets::Block;
 
     let area = frame.area();
@@ -731,9 +755,12 @@ fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) {
 
     frame.render_widget(Paragraph::new(display_lines), content_area);
 
-    // Scrollbar
+    // Scrollbar — content_length is the total number of lines; viewport_content_length
+    // is the number of visible lines so ratatui sizes the thumb correctly.
     let total = lines.len();
-    let mut sb_state = ScrollbarState::new(total.saturating_sub(visible_h)).position(scroll);
+    let mut sb_state = ScrollbarState::new(total)
+        .viewport_content_length(visible_h)
+        .position(scroll);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight),
         scrollbar_area,
@@ -747,6 +774,8 @@ fn draw_help(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) {
         ))),
         hint_area,
     );
+
+    visible_h
 }
 
 // ── Desktop app launcher ────────────────────────────────────────────────────
