@@ -1404,13 +1404,46 @@ impl LibreFangKernel {
             }
         }
 
-        // 6. delivery_tracker — remove receipts for dead agents
+        // 6. route_divergence — remove keys no longer present in assistant_routes
+        {
+            let stale: Vec<String> = self
+                .route_divergence
+                .iter()
+                .filter(|e| !self.assistant_routes.contains_key(e.key()))
+                .map(|e| e.key().clone())
+                .collect();
+            total_removed += stale.len();
+            for key in stale {
+                self.route_divergence.remove(&key);
+            }
+        }
+
+        // 7. skill_review_cooldowns — remove entries for dead agents
+        {
+            let stale: Vec<String> = self
+                .skill_review_cooldowns
+                .iter()
+                .filter(|e| {
+                    e.key()
+                        .parse::<AgentId>()
+                        .map(|id| !live_agents.contains(&id))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.key().clone())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.skill_review_cooldowns.remove(&id);
+            }
+        }
+
+        // 8. delivery_tracker — remove receipts for dead agents
         total_removed += self.delivery_tracker.gc_stale_agents(&live_agents);
 
-        // 7. event_bus agent channels — remove channels for dead agents
+        // 9. event_bus agent channels — remove channels for dead agents
         total_removed += self.event_bus.gc_stale_channels(&live_agents);
 
-        // 8. sessions — delete orphan sessions for agents no longer in registry
+        // 10. sessions — delete orphan sessions for agents no longer in registry
         {
             let live_ids: Vec<librefang_types::agent::AgentId> =
                 live_agents.iter().copied().collect();
