@@ -871,7 +871,6 @@ pub async fn execute_tool(
     process_manager: Option<&crate::process_manager::ProcessManager>,
     sender_id: Option<&str>,
     channel: Option<&str>,
-    session_id: Option<&str>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -947,7 +946,7 @@ pub async fn execute_tool(
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
             };
             match kh
-                .submit_tool_approval(agent_id_str, tool_name, &summary, deferred, session_id)
+                .submit_tool_approval(agent_id_str, tool_name, &summary, deferred)
                 .await
             {
                 Ok(librefang_types::tool::ToolApprovalSubmission::Pending { request_id }) => {
@@ -5632,7 +5631,6 @@ mod tests {
             _tool_name: &str,
             _action_summary: &str,
             _deferred: librefang_types::tool::DeferredToolExecution,
-            _session_id: Option<&str>,
         ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {

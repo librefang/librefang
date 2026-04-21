@@ -1915,6 +1915,11 @@ pub async fn list_approvals_for_session(
 /// requires TOTP, the entire batch is rejected before any mutation.
 #[derive(serde::Deserialize)]
 pub struct ApproveAllForSessionRequest {
+    /// Optional count of approvals the caller expects to be pending.
+    /// If provided, the server verifies the actual pending count matches
+    /// before approving.  Returns 409 Conflict if the count changed.
+    #[serde(default)]
+    pub expected_count: Option<usize>,
     /// Optional list of approval IDs the caller expects to be pending.
     /// If provided and non-empty, the server verifies the actual pending set
     /// matches before approving.  Returns 409 Conflict if a new high-risk
@@ -1955,6 +1960,20 @@ pub async fn approve_all_for_session(
         .kernel
         .approvals()
         .list_pending_for_session(&session_id);
+
+    // Confirmation check: verify pending count matches expected_count if provided.
+    if let Some(expected_count) = req.expected_count {
+        if pending.len() != expected_count {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Pending approval count has changed since this request was issued. Refresh and try again.",
+                    "pending_count": pending.len(),
+                    "expected_count": expected_count,
+                })),
+            );
+        }
+    }
 
     // Confirmation check: verify pending set matches expected_ids if provided.
     if let Some(ref expected) = req.expected_ids {

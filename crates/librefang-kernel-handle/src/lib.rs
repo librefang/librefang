@@ -191,9 +191,8 @@ pub trait KernelHandle: Send + Sync {
         tool_name: &str,
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
-        session_id: Option<&str>,
     ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
-        let _ = (agent_id, tool_name, action_summary, deferred, session_id);
+        let _ = (agent_id, tool_name, action_summary, deferred);
         Err("Approval system not available".to_string())
     }
 
