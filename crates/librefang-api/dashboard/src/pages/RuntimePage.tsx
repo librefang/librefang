@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -37,6 +37,8 @@ import {
   useCleanupSessions,
 } from "../lib/mutations/runtime";
 import { useReloadConfig } from "../lib/mutations/config";
+
+const OK_STATUSES = new Set(["ok", "pass", "healthy"]);
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
@@ -87,16 +89,29 @@ function ProtectionBadge({ name, enabled }: { name: string; enabled: boolean }) 
 export function RuntimePage() {
   const { t } = useTranslation();
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
+  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+  const [showDeleteBackupConfirm, setShowDeleteBackupConfirm] = useState(false);
+  const [pendingRestore, setPendingRestore] = useState<string | null>(null);
+  const [pendingDeleteBackup, setPendingDeleteBackup] = useState<string | null>(null);
   const [reloadResult, setReloadResult] = useState<string | null>(null);
+  const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (reloadTimeoutRef.current) {
+        clearTimeout(reloadTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const snapshotQuery = useDashboardSnapshot();
   const versionQuery = useVersionInfo();
   const queueQuery = useQueueStatus();
   const healthDetailQuery = useHealthDetail();
-  const securityQuery = useSecurityStatus();
+  const securityQuery = useSecurityStatus({ enabled: false }); // rarely changes
   const auditQuery = useAuditRecent(20);
-  const auditVerifyQuery = useAuditVerify();
-  const backupsQuery = useBackups();
+  const auditVerifyQuery = useAuditVerify({ enabled: false }); // rarely changes
+  const backupsQuery = useBackups({ enabled: false }); // rarely changes
   const taskStatusQuery = useTaskQueueStatus();
   const taskListQuery = useTaskQueue();
 
@@ -106,7 +121,10 @@ export function RuntimePage() {
   const reloadMutation = useReloadConfig({
     onSuccess: (data) => {
       setReloadResult(data.status);
-      setTimeout(() => setReloadResult(null), 5000);
+      if (reloadTimeoutRef.current) {
+        clearTimeout(reloadTimeoutRef.current);
+      }
+      reloadTimeoutRef.current = setTimeout(() => setReloadResult(null), 5000);
     },
   });
   const backupMutation = useCreateBackup();
@@ -126,7 +144,7 @@ export function RuntimePage() {
 
   const uptimeStr = formatUptime(status?.uptime_seconds);
   const healthChecks = snapshot?.health?.checks ?? [];
-  const allHealthy = healthChecks.length > 0 && healthChecks.every((c: HealthCheck) => c.status === "ok" || c.status === "pass" || c.status === "healthy");
+  const allHealthy = healthChecks.length > 0 && healthChecks.every((c: HealthCheck) => OK_STATUSES.has(c.status));
   const lanes = queue?.lanes ?? [];
   const queueConfig = queue?.config;
   const auditEntries = auditQuery.data?.entries ?? [];
@@ -135,10 +153,43 @@ export function RuntimePage() {
   const taskStatus = taskStatusQuery.data;
   const tasks = taskListQuery.data?.tasks ?? [];
 
+  // Derived: KPI cards
+  const kpiCards = useMemo(() => [
+    { icon: Timer, label: t("runtime.system_uptime"), value: uptimeStr, color: "text-success", bg: "bg-success/10" },
+    { icon: Layers, label: t("runtime.active_agents"), value: `${status?.active_agent_count ?? 0} / ${status?.agent_count ?? 0}`, color: "text-brand", bg: "bg-brand/10" },
+    { icon: Monitor, label: t("runtime.sessions"), value: String(status?.session_count ?? 0), color: "text-purple-500", bg: "bg-purple-500/10" },
+    { icon: HardDrive, label: t("runtime.memory_used"), value: status?.memory_used_mb ? `${status.memory_used_mb} MB` : "-", color: "text-warning", bg: "bg-warning/10" },
+  ], [uptimeStr, status, t]);
+
+  // Derived: Resource summary
+  const resourceSummary = useMemo(() => {
+    const providersCount = snapshot?.providers?.length ?? 0;
+    const configuredProviders = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
+    const channelsCount = snapshot?.channels?.length ?? 0;
+    const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
+    return [
+      { label: t("runtime.providers"), value: providersCount, sub: `${configuredProviders} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
+      { label: t("runtime.channels"), value: channelsCount, sub: `${configuredChannels} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
+      { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
+      { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
+    ];
+  }, [snapshot, t]);
+
+  // Derived: Task stats
+  const taskStats = useMemo(() => {
+    if (!taskStatus) return [];
+    return [
+      { label: t("runtime.total_tasks"), value: taskStatus.total ?? 0, color: "text-text" },
+      { label: t("runtime.pending_count"), value: taskStatus.pending ?? 0, color: "text-warning" },
+      { label: t("runtime.in_progress_count"), value: taskStatus.in_progress ?? 0, color: "text-brand" },
+      { label: t("runtime.completed_count"), value: taskStatus.completed ?? 0, color: "text-success" },
+      { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
+    ];
+  }, [taskStatus, t]);
+
   const refreshAll = () => {
     for (const q of [
       snapshotQuery,
-      versionQuery,
       queueQuery,
       healthDetailQuery,
       securityQuery,
@@ -150,6 +201,7 @@ export function RuntimePage() {
     ]) {
       q.refetch();
     }
+    // versionQuery has staleTime: Infinity, skip refetch
   };
 
   return (
@@ -168,16 +220,24 @@ export function RuntimePage() {
         <div className="grid gap-4 grid-cols-2 md:grid-cols-4 stagger-children">
           {[1, 2, 3, 4].map(i => <CardSkeleton key={i} />)}
         </div>
+      ) : snapshotQuery.isError || healthDetailQuery.isError || securityQuery.isError ? (
+        <Card padding="lg">
+          <div className="flex items-center gap-3 text-error">
+            <XCircle className="w-5 h-5" />
+            <div>
+              <p className="text-sm font-bold">{t("runtime.load_error")}</p>
+              <p className="text-xs text-text-dim mt-1">{t("runtime.load_error_desc")}</p>
+            </div>
+            <Button variant="secondary" size="sm" className="ml-auto" onClick={() => refreshAll()}>
+              {t("common.retry")}
+            </Button>
+          </div>
+        </Card>
       ) : (
         <>
           {/* ── KPI Cards ── */}
           <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
-            {[
-              { icon: Timer, label: t("runtime.system_uptime"), value: uptimeStr, color: "text-success", bg: "bg-success/10" },
-              { icon: Layers, label: t("runtime.active_agents"), value: `${status?.active_agent_count ?? 0} / ${status?.agent_count ?? 0}`, color: "text-brand", bg: "bg-brand/10" },
-              { icon: Monitor, label: t("runtime.sessions"), value: String(status?.session_count ?? 0), color: "text-purple-500", bg: "bg-purple-500/10" },
-              { icon: HardDrive, label: t("runtime.memory_used"), value: status?.memory_used_mb ? `${status.memory_used_mb} MB` : "-", color: "text-warning", bg: "bg-warning/10" },
-            ].map((kpi, i) => (
+            {kpiCards.map((kpi, i) => (
               <Card key={i} hover padding="md">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
@@ -243,10 +303,10 @@ export function RuntimePage() {
                 </Badge>
               </div>
 
-              {healthChecks.length > 0 && (
+              {healthChecks.length > 0 ? (
                 <div className="space-y-2 mb-4">
                   {healthChecks.map((check: HealthCheck) => {
-                    const ok = check.status === "ok" || check.status === "pass" || check.status === "healthy";
+                    const ok = OK_STATUSES.has(check.status);
                     return (
                       <div key={check.name} className="flex items-center gap-2.5">
                         {ok ? <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" /> : <XCircle className="w-3.5 h-3.5 text-error shrink-0" />}
@@ -256,9 +316,9 @@ export function RuntimePage() {
                     );
                   })}
                 </div>
-              )}
+              ) : null}
 
-              {hd && (
+              {hd ? (
                 <div className="space-y-3 pt-3 border-t border-border-subtle">
                   <InfoRow icon={Database} label={t("runtime.database")} value={
                     <Badge variant={hd.database === "connected" ? "success" : "error"}>{hd.database || "-"}</Badge>
@@ -275,16 +335,16 @@ export function RuntimePage() {
                   } />
                   <InfoRow icon={AlertTriangle} label={t("runtime.panics")} value={String(hd.panic_count ?? 0)} color={hd.panic_count ? "text-error font-bold" : ""} />
                   <InfoRow icon={RotateCcw} label={t("runtime.restarts")} value={String(hd.restart_count ?? 0)} />
-                  {(hd.config_warnings?.length ?? 0) > 0 && (
+                  {(hd.config_warnings?.length ?? 0) > 0 ? (
                     <div className="mt-2">
                       <p className="text-[10px] font-bold uppercase text-warning mb-1">{t("runtime.config_warnings")}</p>
                       {hd.config_warnings!.map((w, i) => (
                         <p key={i} className="text-xs text-warning/80 ml-4">- {w}</p>
                       ))}
                     </div>
-                  )}
+                  ) : null}
                 </div>
-              )}
+              ) : null}
             </Card>
 
             {/* Security Posture */}
@@ -299,7 +359,7 @@ export function RuntimePage() {
 
               {security ? (
                 <div className="space-y-4">
-                  {security.core_protections && (
+                  {security.core_protections ? (
                     <div>
                       <p className="text-[10px] font-bold uppercase tracking-wider text-text-dim/50 mb-1">{t("runtime.core_protections")}</p>
                       <div className="grid grid-cols-2 gap-x-3">
@@ -308,40 +368,40 @@ export function RuntimePage() {
                         ))}
                       </div>
                     </div>
-                  )}
+                  ) : null}
 
                   <div className="pt-3 border-t border-border-subtle grid grid-cols-2 gap-3">
-                    {security.configurable?.rate_limiter && (
+                    {security.configurable?.rate_limiter ? (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-text-dim/50">{t("runtime.rate_limiter")}</p>
                         <Badge variant={security.configurable.rate_limiter.enabled ? "success" : "default"} className="mt-1">
                           {security.configurable.rate_limiter.enabled ? `${security.configurable.rate_limiter.tokens_per_minute} ${t("runtime.tokens_per_min")}` : t("runtime.disabled")}
                         </Badge>
                       </div>
-                    )}
-                    {security.configurable?.auth && (
+                    ) : null}
+                    {security.configurable?.auth ? (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-text-dim/50">{t("runtime.auth_mode")}</p>
                         <Badge variant="info" className="mt-1">{security.configurable.auth.mode || "-"}</Badge>
                       </div>
-                    )}
-                    {security.configurable?.websocket_limits && (
+                    ) : null}
+                    {security.configurable?.websocket_limits ? (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-text-dim/50">{t("runtime.websocket_limits")}</p>
                         <p className="text-xs mt-1">{security.configurable.websocket_limits.max_per_ip} {t("runtime.max_per_ip")}</p>
                       </div>
-                    )}
-                    {security.configurable?.wasm_sandbox && (
+                    ) : null}
+                    {security.configurable?.wasm_sandbox ? (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-text-dim/50">{t("runtime.wasm_sandbox")}</p>
                         <p className="text-xs mt-1">{t("runtime.timeout")}: {security.configurable.wasm_sandbox.default_timeout_secs}s</p>
                       </div>
-                    )}
+                    ) : null}
                   </div>
 
-                  {security.monitoring && (
+                  {security.monitoring ? (
                     <div className="pt-3 border-t border-border-subtle space-y-2">
-                      {security.monitoring.audit_trail && (
+                      {security.monitoring.audit_trail ? (
                         <div className="flex items-center gap-2">
                           <Eye className="w-3.5 h-3.5 text-text-dim/40" />
                           <span className="text-xs flex-1">{t("runtime.audit_trail")}</span>
@@ -349,23 +409,23 @@ export function RuntimePage() {
                             {security.monitoring.audit_trail.algorithm || "-"}
                           </Badge>
                         </div>
-                      )}
-                      {security.monitoring.taint_tracking && (
+                      ) : null}
+                      {security.monitoring.taint_tracking ? (
                         <div className="flex items-center gap-2">
                           <Lock className="w-3.5 h-3.5 text-text-dim/40" />
                           <span className="text-xs flex-1">{t("runtime.taint_tracking")}</span>
                           <span className="text-xs text-text-dim">{security.monitoring.taint_tracking.tracked_labels?.length ?? 0} labels</span>
                         </div>
-                      )}
-                      {security.monitoring.manifest_signing && (
+                      ) : null}
+                      {security.monitoring.manifest_signing ? (
                         <div className="flex items-center gap-2">
                           <ShieldCheck className="w-3.5 h-3.5 text-text-dim/40" />
                           <span className="text-xs flex-1">{t("runtime.manifest_signing")}</span>
                           <Badge variant="success">{security.monitoring.manifest_signing.algorithm || "-"}</Badge>
                         </div>
-                      )}
+                      ) : null}
                     </div>
-                  )}
+                  ) : null}
                 </div>
               ) : (
                 <p className="text-xs text-text-dim">{t("common.loading")}</p>
@@ -382,15 +442,9 @@ export function RuntimePage() {
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.task_queue")}</h2>
               </div>
 
-              {taskStatus && (
+              {taskStats.length > 0 && (
                 <div className="grid grid-cols-5 gap-2 text-center mb-4">
-                  {[
-                    { label: t("runtime.total_tasks"), value: taskStatus.total ?? 0, color: "text-text" },
-                    { label: t("runtime.pending_count"), value: taskStatus.pending ?? 0, color: "text-warning" },
-                    { label: t("runtime.in_progress_count"), value: taskStatus.in_progress ?? 0, color: "text-brand" },
-                    { label: t("runtime.completed_count"), value: taskStatus.completed ?? 0, color: "text-success" },
-                    { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
-                  ].map(s => (
+                  {taskStats.map(s => (
                     <div key={s.label}>
                       <p className={`text-lg font-black ${s.color}`}>{s.value}</p>
                       <p className="text-[8px] text-text-dim uppercase leading-tight">{s.label}</p>
@@ -399,7 +453,7 @@ export function RuntimePage() {
                 </div>
               )}
 
-              {lanes.length > 0 && (
+              {lanes.length > 0 ? (
                 <div className="space-y-2.5 mb-4">
                   {lanes.map((lane) => {
                     const active = lane.active ?? 0;
@@ -419,7 +473,7 @@ export function RuntimePage() {
                     );
                   })}
                 </div>
-              )}
+              ) : null}
 
               {tasks.length > 0 ? (
                 <div className="space-y-1.5 max-h-40 overflow-y-auto">
@@ -429,10 +483,10 @@ export function RuntimePage() {
                         {task.status || "-"}
                       </Badge>
                       <span className="flex-1 truncate font-mono text-[10px]">{task.id?.slice(0, 12)}</span>
-                      {task.status === "failed" && (
+                      {task.status === "failed" && task.id && (
                         <button onClick={() => retryTaskMutation.mutate(task.id!)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
                       )}
-                      {(task.status === "pending" || task.status === "in_progress") && (
+                      {(task.status === "pending" || task.status === "in_progress") && task.id && (
                         <button onClick={() => deleteTaskMutation.mutate(task.id!)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
                       )}
                     </div>
@@ -442,7 +496,7 @@ export function RuntimePage() {
                 <p className="text-xs text-text-dim">{t("runtime.no_tasks")}</p>
               )}
 
-              {queueConfig && (
+              {queueConfig ? (
                 <div className="mt-4 pt-3 border-t border-border-subtle">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-text-dim/50 mb-2">{t("runtime.queue_config")}</p>
                   <div className="grid grid-cols-3 gap-2 text-center">
@@ -460,7 +514,7 @@ export function RuntimePage() {
                     </div>
                   </div>
                 </div>
-              )}
+              ) : null}
             </Card>
 
             {/* Audit Trail */}
@@ -501,14 +555,14 @@ export function RuntimePage() {
                 <p className="text-xs text-text-dim">{t("runtime.no_audit")}</p>
               )}
 
-              {auditVerifyQuery.data && (
+              {auditVerifyQuery.data ? (
                 <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between">
                   <span className="text-xs text-text-dim">{t("runtime.audit_entries", { count: auditVerifyQuery.data.entries ?? 0 })}</span>
                   <Button variant="ghost" size="sm" onClick={() => auditVerifyQuery.refetch()}>
                     {t("runtime.audit_verify")}
                   </Button>
                 </div>
-              )}
+              ) : null}
             </Card>
           </div>
 
@@ -540,18 +594,28 @@ export function RuntimePage() {
                         <p className="font-mono text-[10px] truncate">{b.filename}</p>
                         <p className="text-[9px] text-text-dim">
                           {formatBytes(b.size_bytes)}
-                          {b.created_at && ` · ${new Date(b.created_at).toLocaleDateString()}`}
+                          {b.created_at ? ` · ${new Date(b.created_at).toLocaleDateString()}` : null}
                         </p>
                       </div>
                       <button
-                        onClick={() => b.filename && restoreMutation.mutate(b.filename)}
+                        onClick={() => {
+                          if (b.filename) {
+                            setPendingRestore(b.filename);
+                            setShowRestoreConfirm(true);
+                          }
+                        }}
                         className="text-brand hover:text-brand/80 text-[10px] font-bold shrink-0"
                         disabled={restoreMutation.isPending}
                       >
                         {t("runtime.restore")}
                       </button>
                       <button
-                        onClick={() => b.filename && deleteBackupMutation.mutate(b.filename)}
+                        onClick={() => {
+                          if (b.filename) {
+                            setPendingDeleteBackup(b.filename);
+                            setShowDeleteBackupConfirm(true);
+                          }
+                        }}
                         className="text-error hover:text-error/80 shrink-0"
                       >
                         <Trash2 className="w-3 h-3" />
@@ -571,12 +635,7 @@ export function RuntimePage() {
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.resources")}</h2>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                {[
-                  { label: t("runtime.providers"), value: snapshot?.providers?.length ?? 0, sub: `${snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
-                  { label: t("runtime.channels"), value: snapshot?.channels?.length ?? 0, sub: `${snapshot?.channels?.filter(c => c.configured).length ?? 0} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
-                  { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
-                  { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
-                ].map((item) => (
+                {resourceSummary.map((item) => (
                   <div key={item.label} className="text-center">
                     <p className={`text-2xl font-black ${item.color}`}>{item.value}</p>
                     <p className="text-xs font-bold">{item.label}</p>
@@ -632,6 +691,46 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={() => shutdownMutation.mutate()}
         onClose={() => setShowShutdownConfirm(false)}
+      />
+
+      {/* Restore Confirm Dialog */}
+      <ConfirmDialog
+        isOpen={showRestoreConfirm}
+        title={t("runtime.restore_confirm_title")}
+        message={t("runtime.restore_confirm_desc")}
+        confirmLabel={t("runtime.restore_confirm")}
+        tone="destructive"
+        onConfirm={() => {
+          if (pendingRestore) {
+            restoreMutation.mutate(pendingRestore);
+          }
+          setShowRestoreConfirm(false);
+          setPendingRestore(null);
+        }}
+        onClose={() => {
+          setShowRestoreConfirm(false);
+          setPendingRestore(null);
+        }}
+      />
+
+      {/* Delete Backup Confirm Dialog */}
+      <ConfirmDialog
+        isOpen={showDeleteBackupConfirm}
+        title={t("runtime.delete_backup_confirm_title")}
+        message={t("runtime.delete_backup_confirm_desc")}
+        confirmLabel={t("runtime.delete_backup_confirm")}
+        tone="destructive"
+        onConfirm={() => {
+          if (pendingDeleteBackup) {
+            deleteBackupMutation.mutate(pendingDeleteBackup);
+          }
+          setShowDeleteBackupConfirm(false);
+          setPendingDeleteBackup(null);
+        }}
+        onClose={() => {
+          setShowDeleteBackupConfirm(false);
+          setPendingDeleteBackup(null);
+        }}
       />
     </div>
   );

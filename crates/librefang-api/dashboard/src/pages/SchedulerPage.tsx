@@ -1,5 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useAgents } from "../lib/queries/agents";
 import { useWorkflows } from "../lib/queries/workflows";
 import { Button } from "../components/ui/Button";
@@ -33,6 +34,22 @@ const TRIGGER_PATTERN_PRESETS = [
   { label: "all events", value: '"all"' },
   { label: "custom JSON…", value: "custom" },
 ] as const;
+
+const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+
+const cronHint = (expr: string, t: TFunction) => {
+  if (!expr) return "";
+  const parts = expr.split(" ");
+  if (parts.length !== 5) return expr;
+  const [min, hr, , , dow] = parts;
+  if (hr === "*" && min === "*") return t("scheduler.every_minute");
+  if (min.startsWith("*/")) return t("scheduler.every_n_minutes", { defaultValue: `Every ${min.slice(2)} min`, n: min.slice(2) });
+  if (hr.startsWith("*/")) return t("scheduler.every_n_hours", { n: hr.slice(2) });
+  if (dow === "1-5" && min !== "*" && hr !== "*") return `${t("scheduler.weekdays", { defaultValue: "Weekdays" })} ${hr}:${min.padStart(2, "0")}`;
+  if ((dow === "0" || dow === "7") && min !== "*" && hr !== "*") return `${t("scheduler.weekly")} ${hr}:${min.padStart(2, "0")}`;
+  if (min !== "*" && hr !== "*") return `${hr}:${min.padStart(2, "0")}`;
+  return expr;
+};
 
 export function SchedulerPage() {
   const { t } = useTranslation();
@@ -98,7 +115,10 @@ export function SchedulerPage() {
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
       });
       setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
   const handleCreateTrigger = async (e: FormEvent) => {
@@ -122,7 +142,10 @@ export function SchedulerPage() {
       });
       setShowCreate(false);
       setTriggerAgentId(""); setTriggerPatternPreset('"lifecycle"'); setTriggerPatternCustom(""); setTriggerPrompt(""); setTriggerMaxFires(0); setTriggerTargetAgent("");
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
   const openEditTrigger = (tr: TriggerItem) => {
@@ -144,7 +167,10 @@ export function SchedulerPage() {
     try {
       await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any, agentId: editTrigger.agent_id });
       setEditTrigger(null);
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
   const handleDeleteSchedule = async (id: string) => {
@@ -155,7 +181,10 @@ export function SchedulerPage() {
     setConfirmDelete(null);
     try {
       await deleteScheduleMut.mutateAsync(id);
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
   const handleDeleteTrigger = async (id: string) => {
@@ -167,24 +196,11 @@ export function SchedulerPage() {
     try {
       const agentId = triggersQuery.data?.find((tr: TriggerItem) => tr.id === id)?.agent_id;
       await deleteTriggerMut.mutateAsync({ id, agentId });
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
-
-  const cronHint = (expr: string) => {
-    if (!expr) return "";
-    const parts = expr.split(" ");
-    if (parts.length !== 5) return expr;
-    const [min, hr, , , dow] = parts;
-    if (hr === "*" && min === "*") return t("scheduler.every_minute");
-    if (min.startsWith("*/")) return t("scheduler.every_n_minutes", { defaultValue: `Every ${min.slice(2)} min`, n: min.slice(2) });
-    if (hr.startsWith("*/")) return t("scheduler.every_n_hours", { n: hr.slice(2) });
-    if (dow === "1-5" && min !== "*" && hr !== "*") return `${t("scheduler.weekdays", { defaultValue: "Weekdays" })} ${hr}:${min.padStart(2, "0")}`;
-    if ((dow === "0" || dow === "7") && min !== "*" && hr !== "*") return `${t("scheduler.weekly")} ${hr}:${min.padStart(2, "0")}`;
-    if (min !== "*" && hr !== "*") return `${hr}:${min.padStart(2, "0")}`;
-    return expr;
-  };
-
-  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
   const isConfirmingDelete = (type: "schedule" | "trigger", id: string) =>
     confirmDelete?.type === type && confirmDelete?.id === id;
@@ -259,7 +275,7 @@ export function SchedulerPage() {
                   </div>
                   <div className="flex items-center gap-2 sm:gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
                     <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
-                    <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
+                    <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "", t)}</span>
                     <span className="text-text-dim/40">{s.tz || "UTC"}</span>
                     {agent && <span className="font-bold text-brand truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {s.next_run && <span className="text-text-dim/40">{t("scheduler.next_run", { defaultValue: "Next" })}: {new Date(s.next_run).toLocaleString()}</span>}
@@ -274,7 +290,9 @@ export function SchedulerPage() {
       {/* Event Triggers */}
       <div>
         <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("scheduler.event_triggers")}</h2>
-        {triggers.length === 0 ? (
+        {triggersQuery.isLoading ? (
+          <ListSkeleton rows={2} />
+        ) : triggers.length === 0 ? (
           <EmptyState
             icon={<Zap className="w-7 h-7" />}
             title={t("common.no_data")}
@@ -366,7 +384,7 @@ export function SchedulerPage() {
           <form onSubmit={handleCreate} className="p-5 space-y-4">
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name")}</label>
-              <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={inputClass} />
+              <input value={name} onChange={e => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={INPUT_CLASS} />
             </div>
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp")}</label>
@@ -376,7 +394,7 @@ export function SchedulerPage() {
                 className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
               >
                 <div>
-                  <p className="text-sm">{cronHint(cron)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
+                  <p className="text-sm">{cronHint(cron, t)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
                   <p className="text-[10px] font-mono text-text-dim/50">{cron}{cronTz ? ` · ${cronTz}` : ""}</p>
                 </div>
                 <ChevronRight className="w-4 h-4 text-text-dim/40 shrink-0" />
@@ -404,12 +422,12 @@ export function SchedulerPage() {
                 </button>
               </div>
               {targetType === "agent" ? (
-                <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
+                <select value={agentId} onChange={e => setAgentId(e.target.value)} className={INPUT_CLASS}>
                   <option value="">{t("scheduler.select_agent")}</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
               ) : (
-                <select value={workflowId} onChange={e => setWorkflowId(e.target.value)} className={inputClass}>
+                <select value={workflowId} onChange={e => setWorkflowId(e.target.value)} className={INPUT_CLASS}>
                   <option value="">{t("scheduler.select_workflow", { defaultValue: "Select workflow..." })}</option>
                   {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                 </select>
@@ -418,10 +436,10 @@ export function SchedulerPage() {
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message")}</label>
               <textarea value={message} onChange={e => setMessage(e.target.value)} rows={3}
-                placeholder={t("scheduler.message_placeholder")} className={`${inputClass} resize-none`} />
+                placeholder={t("scheduler.message_placeholder")} className={`${INPUT_CLASS} resize-none`} />
             </div>
             {createMut.error && (
-              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createMut.error as any)?.message}</div>
+              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {createMut.error instanceof Error ? createMut.error.message : String(createMut.error ?? "")}</div>
             )}
             <div className="flex gap-2 pt-2">
               <Button type="submit" variant="primary" className="flex-1" disabled={createMut.isPending || !canSubmit}>
@@ -435,14 +453,14 @@ export function SchedulerPage() {
           <form onSubmit={handleCreateTrigger} className="p-5 space-y-4">
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent")}</label>
-              <select value={triggerAgentId} onChange={e => setTriggerAgentId(e.target.value)} className={inputClass} required>
+              <select value={triggerAgentId} onChange={e => setTriggerAgentId(e.target.value)} className={INPUT_CLASS} required>
                 <option value="">{t("scheduler.select_agent")}</option>
                 {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             </div>
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">Event pattern</label>
-              <select value={triggerPatternPreset} onChange={e => setTriggerPatternPreset(e.target.value)} className={inputClass}>
+              <select value={triggerPatternPreset} onChange={e => setTriggerPatternPreset(e.target.value)} className={INPUT_CLASS}>
                 {TRIGGER_PATTERN_PRESETS.map(p => (
                   <option key={p.value} value={p.value}>{p.label}</option>
                 ))}
@@ -452,7 +470,7 @@ export function SchedulerPage() {
                   value={triggerPatternCustom}
                   onChange={e => setTriggerPatternCustom(e.target.value)}
                   placeholder='e.g. "agent_spawned" or {"agent_spawned":{"name_pattern":"*"}}'
-                  className={`${inputClass} mt-1 font-mono text-xs`}
+                  className={`${INPUT_CLASS} mt-1 font-mono text-xs`}
                 />
               )}
             </div>
@@ -463,7 +481,7 @@ export function SchedulerPage() {
                 onChange={e => setTriggerPrompt(e.target.value)}
                 rows={3}
                 placeholder="Prompt template sent to the agent when the event fires…"
-                className={`${inputClass} resize-none`}
+                className={`${INPUT_CLASS} resize-none`}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -472,19 +490,19 @@ export function SchedulerPage() {
                 <input
                   type="number" min={0} value={triggerMaxFires}
                   onChange={e => setTriggerMaxFires(Number(e.target.value))}
-                  className={inputClass}
+                  className={INPUT_CLASS}
                 />
               </div>
               <div>
                 <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (optional)</label>
-                <select value={triggerTargetAgent} onChange={e => setTriggerTargetAgent(e.target.value)} className={inputClass}>
+                <select value={triggerTargetAgent} onChange={e => setTriggerTargetAgent(e.target.value)} className={INPUT_CLASS}>
                   <option value="">Same agent</option>
                   {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </select>
               </div>
             </div>
             {createTriggerMut.error && (
-              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(createTriggerMut.error as any)?.message}</div>
+              <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {createTriggerMut.error instanceof Error ? createTriggerMut.error.message : String(createTriggerMut.error ?? "")}</div>
             )}
             <div className="flex gap-2 pt-2">
               <Button type="submit" variant="primary" className="flex-1" disabled={createTriggerMut.isPending || !triggerAgentId}>
@@ -513,7 +531,7 @@ export function SchedulerPage() {
               onChange={e => setEditPrompt(e.target.value)}
               rows={3}
               placeholder="Prompt sent to the agent when the event fires…"
-              className={`${inputClass} resize-none`}
+              className={`${INPUT_CLASS} resize-none`}
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -522,7 +540,7 @@ export function SchedulerPage() {
               <input
                 type="number" min={0} value={editMaxFires}
                 onChange={e => setEditMaxFires(Number(e.target.value))}
-                className={inputClass}
+                className={INPUT_CLASS}
               />
             </div>
             <div>
@@ -531,13 +549,13 @@ export function SchedulerPage() {
                 type="number" min={0} value={editCooldown}
                 onChange={e => setEditCooldown(e.target.value)}
                 placeholder="none"
-                className={inputClass}
+                className={INPUT_CLASS}
               />
             </div>
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">Session mode (blank = agent default)</label>
-            <select value={editSessionMode} onChange={e => setEditSessionMode(e.target.value)} className={inputClass}>
+            <select value={editSessionMode} onChange={e => setEditSessionMode(e.target.value)} className={INPUT_CLASS}>
               <option value="">agent default</option>
               <option value="persistent">persistent</option>
               <option value="new">new</option>
@@ -545,7 +563,7 @@ export function SchedulerPage() {
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (blank = owner)</label>
-            <select value={editTargetAgent} onChange={e => setEditTargetAgent(e.target.value)} className={inputClass}>
+            <select value={editTargetAgent} onChange={e => setEditTargetAgent(e.target.value)} className={INPUT_CLASS}>
               <option value="">owner (default)</option>
               {agents.map(a => (
                 <option key={a.id} value={a.id}>{a.name}</option>
@@ -553,7 +571,7 @@ export function SchedulerPage() {
             </select>
           </div>
           {updateTriggerMut.error && (
-            <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(updateTriggerMut.error as any)?.message}</div>
+            <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {updateTriggerMut.error instanceof Error ? updateTriggerMut.error.message : String(updateTriggerMut.error ?? "")}</div>
           )}
           <div className="flex gap-2 pt-2">
             <Button type="submit" variant="primary" className="flex-1" disabled={updateTriggerMut.isPending}>
