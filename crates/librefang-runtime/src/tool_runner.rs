@@ -1592,7 +1592,8 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "object",
                         "description": "Delivery target: {\"kind\":\"none\"} or {\"kind\":\"channel\",\"channel\":\"telegram\"} or {\"kind\":\"last_channel\"}"
                     },
-                    "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" }
+                    "one_shot": { "type": "boolean", "description": "If true, auto-delete after execution. Default: false" },
+                    "session_mode": { "type": "string", "enum": ["persistent", "new"], "description": "Session behaviour for AgentTurn actions. 'persistent' (default): all fires share one dedicated cron session, preserving history across runs. 'new': each fire gets a fresh isolated session with no memory of previous runs." }
                 },
                 "required": ["name", "schedule", "action"]
             }),

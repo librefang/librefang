@@ -269,21 +269,12 @@ If nothing matches, default to ADD."#;
 pub struct LlmMemoryExtractor {
     driver: Arc<dyn crate::llm_driver::LlmDriver>,
     model: String,
-    /// Late-bound kernel handle — populated after the kernel is wrapped
-    /// in `Arc` (in `LibreFangKernel::set_self_handle`). Before that
-    /// point, the extractor falls back to the standalone `driver.complete()`
-    /// path. `RwLock` (not `Mutex`) because reads dominate — one write at
-    /// kernel init, many reads during `extract_memories_with_agent_id`.
-    kernel_handle:
-        std::sync::RwLock<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
-    /// Whether to stamp `prompt_caching = true` on the standalone
-    /// fallback `driver.complete()` request. Mirrors the global
+    /// Whether to stamp `prompt_caching = true` on the extraction
+    /// `driver.complete()` request. Mirrors the global
     /// `KernelConfig.prompt_caching` toggle — operators who disable
     /// caching at the kernel level (compatibility, cost accounting,
     /// debugging) should see proactive-memory requests also skip
-    /// `cache_control`. The fork path inherits this automatically
-    /// because it runs through agent_loop which reads the per-agent
-    /// manifest metadata that the kernel derives from the same global.
+    /// `cache_control`.
     prompt_caching: bool,
 }
 
@@ -293,7 +284,7 @@ impl LlmMemoryExtractor {
     }
 
     /// Explicit variant for callers that want to control the
-    /// fallback-path `prompt_caching` flag — typically the kernel,
+    /// extraction `prompt_caching` flag — typically the kernel,
     /// which passes `KernelConfig.prompt_caching` through so the
     /// extractor honours the same global toggle as the main loop.
     pub fn with_prompt_caching(
@@ -304,65 +295,18 @@ impl LlmMemoryExtractor {
         Self {
             driver,
             model,
-            kernel_handle: std::sync::RwLock::new(None),
             prompt_caching,
         }
     }
 
-    /// Install the kernel handle used for fork-based extraction. Called
-    /// by `LibreFangKernel::set_self_handle` — by then `Arc<LibreFangKernel>`
-    /// exists so the weak ref can actually be formed. Idempotent: a second
-    /// install overwrites the first (harmless; the upgrade path handles
-    /// stale weaks gracefully).
+    /// No-op kept for backwards compatibility with kernel init which still
+    /// calls this on every extractor it constructs. Previous fork-based
+    /// extraction pathway was removed because it bypassed JSON mode; see
+    /// `extract_memories_with_agent_id` for details.
     pub fn install_kernel_handle(
         &self,
-        handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
+        _handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
     ) {
-        if let Ok(mut slot) = self.kernel_handle.write() {
-            *slot = Some(handle);
-        }
-    }
-
-    /// Attempt the fork path: embed the extraction instructions into a
-    /// fork user message and invoke `run_forked_agent_oneshot`. Returns
-    /// `Ok(Some(text))` on success, `Ok(None)` when no kernel handle is
-    /// configured (caller falls back to direct driver call), or
-    /// `Ok(Some(""))` when the kernel Arc is stale (shutting down).
-    async fn try_forked_extract(
-        &self,
-        conversation_text: &str,
-        agent_id: &str,
-        categories: &[String],
-    ) -> Result<Option<String>, LibreFangError> {
-        let weak = {
-            let guard = self
-                .kernel_handle
-                .read()
-                .map_err(|e| LibreFangError::Internal(format!("kernel_handle lock: {e}")))?;
-            guard.clone()
-        };
-        let Some(weak) = weak else {
-            return Ok(None);
-        };
-        let Some(kernel) = weak.upgrade() else {
-            tracing::debug!("LlmMemoryExtractor: kernel Arc stale during extract, skipping");
-            return Ok(Some(String::new()));
-        };
-        let prompt = format!(
-            "{}\n\nExtract memories from this conversation. \
-             Return JSON only, no commentary.\n\n{conversation_text}",
-            build_extraction_prompt(categories)
-        );
-        match kernel
-            .run_forked_agent_oneshot(agent_id, &prompt, Some(Vec::new()))
-            .await
-        {
-            Ok(text) => Ok(Some(text)),
-            Err(e) => {
-                tracing::warn!(error = %e, "LlmMemoryExtractor fork extract failed, falling back to direct driver call");
-                Ok(None)
-            }
-        }
     }
 }
 
@@ -554,31 +498,22 @@ impl MemoryExtractor for LlmMemoryExtractor {
             });
         }
 
-        // Try the fork path. Falls back to standalone if no kernel
-        // handle is configured or the fork call fails (transient provider
-        // error, rate limit, etc). Standalone path has `prompt_caching =
-        // true` so the system prompt still caches across calls.
-        match self
-            .try_forked_extract(&conversation_text, agent_id, categories)
-            .await
-        {
-            Ok(Some(text)) if text.is_empty() => Ok(ExtractionResult {
-                has_content: false,
-                memories: Vec::new(),
-                relations: Vec::new(),
-                trigger: "llm_extractor_fork_skipped".to_string(),
-                conflicts: Vec::new(),
-            }),
-            Ok(Some(text)) => {
-                let mut parsed = parse_llm_extraction_response(&text)?;
-                parsed.trigger = "llm_extractor_forked".to_string();
-                Ok(parsed)
-            }
-            // No kernel handle configured (init didn't wire it) or fork
-            // call failed — fall back to the standalone path so we still
-            // get extraction, just without cache alignment.
-            Ok(None) | Err(_) => self.extract_memories(messages, categories).await,
-        }
+        // Always use the standalone path. The fork path cannot thread
+        // `response_format: json_object` through `run_forked_agent_oneshot`,
+        // so providers that honour JSON mode (ollama, OpenAI-compat,
+        // Anthropic with json schemas, …) lose that guarantee and weak
+        // models reply in prose, causing `Failed to parse extraction
+        // response JSON` warnings with no memory extracted.
+        //
+        // Standalone gives us JSON mode + dedicated EXTRACTION_SYSTEM_PROMPT
+        // + per-call system-block caching (`prompt_caching = true`). The
+        // cross-call parent-child cache sharing that fork was supposed to
+        // enable was never fully wired (see the "separate PR" note in
+        // `extract_memories`), so there is no real regression from
+        // skipping fork here.
+        let _ = agent_id; // kept in signature for forward compat
+        let _ = conversation_text;
+        self.extract_memories(messages, categories).await
     }
 
     /// LLM-powered conflict resolution: decide ADD/UPDATE/NOOP.
@@ -627,7 +562,10 @@ impl MemoryExtractor for LlmMemoryExtractor {
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
             thinking: None,
             prompt_caching: self.prompt_caching,
-            response_format: None,
+            // DECISION_SYSTEM_PROMPT asks for `{"action": "...", "existing_id": "..."}`
+            // — tell JSON-mode-capable providers to honour it so weak models
+            // can't drift into prose.
+            response_format: Some(ResponseFormat::Json),
             timeout_secs: Some(15),
             extra_body: None,
             agent_id: None,
@@ -711,7 +649,11 @@ fn parse_decision_response(
     let parsed: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(val) => val,
         Err(e) => {
-            tracing::warn!("Failed to parse decision response JSON: {e}, input: {json_str}");
+            // Weak / local models routinely reply in prose instead of JSON.
+            // The caller already falls back to the default ADD action, so
+            // this is expected fallback behavior and should not warn on
+            // every post-turn memory decision.
+            tracing::debug!("Failed to parse decision response JSON: {e}, input: {json_str}");
             serde_json::Value::Null
         }
     };
@@ -781,7 +723,11 @@ fn parse_llm_extraction_response(
     let parsed: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(val) => val,
         Err(e) => {
-            tracing::warn!("Failed to parse extraction response JSON: {e}, input: {json_str}");
+            // Weak / local models routinely reply in prose instead of JSON.
+            // Extraction is best-effort — falling back to Null just skips
+            // this turn's memory/relation updates rather than failing the
+            // conversation, so WARN is overkill.
+            tracing::debug!("Failed to parse extraction response JSON: {e}, input: {json_str}");
             serde_json::Value::Null
         }
     };
