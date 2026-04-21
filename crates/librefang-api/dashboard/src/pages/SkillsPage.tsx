@@ -1541,10 +1541,13 @@ export function SkillsPage() {
 
   // ── Filtered data ─────────────────────────────────────────────────────────
 
-  const isInstalledFromMarketplace = (slug: string, source: MarketplaceSource) =>
-    installedSkills.some(
-      (s) => s.source?.type === source && s.source?.slug === slug,
-    );
+  const isInstalledFromMarketplace = useCallback(
+    (slug: string, source: MarketplaceSource) =>
+      installedSkills.some(
+        (s) => s.source?.type === source && s.source?.slug === slug,
+      ),
+    [installedSkills],
+  );
 
   const filteredMarketplace = useMemo(
     () =>
@@ -1559,7 +1562,7 @@ export function SkillsPage() {
             s.name.toLowerCase().includes(search.toLowerCase()) ||
             s.description?.toLowerCase().includes(search.toLowerCase()),
         ),
-    [searchQuery.data, installedSkills, search],
+    [searchQuery.data, isInstalledFromMarketplace, search],
   );
 
   const filteredSkillhub = useMemo(
@@ -1571,7 +1574,7 @@ export function SkillsPage() {
         })),
         selectedCategory,
       ),
-    [activeSkillhubQuery.data, installedSkills, selectedCategory],
+    [activeSkillhubQuery.data, isInstalledFromMarketplace, selectedCategory],
   );
 
   const filteredFanghub = useMemo(
