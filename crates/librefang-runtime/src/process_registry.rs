@@ -5,9 +5,10 @@
 //! Design goals (mirroring Hermes-Agent `process_registry.py`):
 //!
 //! * **Rolling buffer**: each process keeps at most [`MAX_OUTPUT_BYTES`] of
-//!   recent output.  When the limit is exceeded the oldest half is discarded.
-//!   This is O(n) rather than a true ring-buffer but keeps the implementation
-//!   straightforward without extra dependencies.
+//!   recent output.  When the buffer exceeds the limit, bytes are dropped from
+//!   the front so that exactly [`MAX_OUTPUT_BYTES`] of the *newest* output are
+//!   retained.  This is O(n) rather than a true ring-buffer but keeps the
+//!   implementation straightforward without extra dependencies.
 //! * **Status tracking**: processes move from `Running` to `Finished(exit_code)`
 //!   when their reader task observes EOF.
 //! * **Session scoping**: optional `session_id` lets callers query processes
@@ -75,6 +76,8 @@ pub struct ProcessEntry {
     output_buf: String,
     /// When the process was registered.
     pub started_at: Instant,
+    /// When the process transitioned to a `Finished` state.  `None` while still running.
+    pub finished_at: Option<Instant>,
     /// Optional agent session this process belongs to.
     pub session_id: Option<String>,
 }
@@ -87,15 +90,17 @@ impl ProcessEntry {
             status: ProcessStatus::Running,
             output_buf: String::new(),
             started_at: Instant::now(),
+            finished_at: None,
             session_id,
         }
     }
 
     /// Append `chunk` to the rolling buffer.
     ///
-    /// If appending would exceed [`MAX_OUTPUT_BYTES`], the oldest half of the
-    /// current buffer is discarded before appending.  This keeps truncation
-    /// O(1) amortised: we pay the copy cost only every ~100 KB on average.
+    /// If appending would push the buffer past [`MAX_OUTPUT_BYTES`], bytes are
+    /// dropped from the front to bring it back to exactly [`MAX_OUTPUT_BYTES`]
+    /// of the newest output.  The truncation is O(n) but amortised O(1) in
+    /// practice because we only copy once per overflow event.
     fn append_output(&mut self, chunk: &str) {
         self.output_buf.push_str(chunk);
         if self.output_buf.len() > MAX_OUTPUT_BYTES {
@@ -139,6 +144,10 @@ impl RegistryInner {
     }
 
     /// Prune oldest finished entries to stay under [`MAX_FINISHED_ENTRIES`].
+    ///
+    /// "Oldest" is defined by `finished_at` — the time a process transitioned
+    /// to `Finished`.  This correctly retains the most recently completed
+    /// processes, not the ones that happened to start later.
     fn prune_finished(&mut self) {
         let finished_pids: Vec<u32> = self
             .entries
@@ -151,10 +160,18 @@ impl RegistryInner {
             return;
         }
 
-        // Sort by started_at (oldest first) and remove the surplus.
+        // Sort by finished_at (oldest completion first) and remove the surplus.
         let mut with_time: Vec<(u32, Instant)> = finished_pids
             .iter()
-            .map(|pid| (*pid, self.entries[pid].started_at))
+            .map(|pid| {
+                // finished_at is always Some for non-Running entries; fall back to
+                // started_at as a safety net so we never panic if the invariant
+                // is somehow violated.
+                let t = self.entries[pid]
+                    .finished_at
+                    .unwrap_or(self.entries[pid].started_at);
+                (*pid, t)
+            })
             .collect();
         with_time.sort_by_key(|(_, t)| *t);
 
@@ -201,6 +218,7 @@ impl ProcessRegistry {
         let mut inner = self.inner.lock().expect("process_registry lock poisoned");
         if let Some(entry) = inner.entries.get_mut(&pid) {
             entry.status = ProcessStatus::Finished(exit_code);
+            entry.finished_at = Some(Instant::now());
             debug!(pid, exit_code, "process_registry: process finished");
             inner.prune_finished();
         } else {
@@ -261,6 +279,7 @@ impl ProcessRegistry {
                 status: e.status.clone(),
                 output_bytes: e.output_buf.len(),
                 uptime_secs: e.started_at.elapsed().as_secs(),
+                finished_secs_ago: e.finished_at.map(|t| t.elapsed().as_secs()),
                 session_id: e.session_id.clone(),
             })
             .collect()
@@ -286,7 +305,8 @@ impl ProcessRegistry {
 
     /// Returns `true` when no processes are tracked.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        let inner = self.inner.lock().expect("process_registry lock poisoned");
+        inner.entries.is_empty()
     }
 }
 
@@ -308,7 +328,10 @@ pub struct ProcessSnapshot {
     pub status: ProcessStatus,
     /// Number of bytes currently in the rolling buffer.
     pub output_bytes: usize,
+    /// Seconds since the process was registered (wall-clock uptime).
     pub uptime_secs: u64,
+    /// Seconds since the process finished, or `None` if still running.
+    pub finished_secs_ago: Option<u64>,
     pub session_id: Option<String>,
 }
 
@@ -404,5 +427,54 @@ mod tests {
         reg.mark_finished(999, 0);
         assert_eq!(reg.get_output(999), None);
         assert_eq!(reg.get_status(999), None);
+    }
+
+    #[test]
+    fn test_prune_evicts_oldest_finished_not_oldest_started() {
+        // Register MAX_FINISHED_ENTRIES + 1 processes and finish them in order.
+        // The LAST-registered process should be the one kept when we overflow,
+        // because prune_finished evicts by finished_at (oldest completion first).
+        let reg = ProcessRegistry::new();
+        let n = MAX_FINISHED_ENTRIES + 1;
+        for pid in 0..n as u32 {
+            reg.register(pid, format!("cmd-{pid}"), None);
+        }
+        // Finish them in ascending PID order so pid=0 has the oldest finished_at.
+        for pid in 0..n as u32 {
+            reg.mark_finished(pid, 0);
+        }
+        // The registry must not exceed MAX_FINISHED_ENTRIES after pruning.
+        assert!(
+            reg.len() <= MAX_FINISHED_ENTRIES,
+            "registry len {} exceeds MAX_FINISHED_ENTRIES",
+            reg.len()
+        );
+        // The most recently finished process (highest PID) must still be present.
+        assert_eq!(
+            reg.get_status(n as u32 - 1),
+            Some(ProcessStatus::Finished(0)),
+            "most recently finished process was incorrectly pruned"
+        );
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let reg = ProcessRegistry::new();
+        assert!(reg.is_empty());
+        reg.register(1, "cmd".into(), None);
+        assert!(!reg.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_includes_finished_secs_ago() {
+        let reg = ProcessRegistry::new();
+        reg.register(42, "cmd".into(), None);
+        // Before finishing, finished_secs_ago must be None.
+        let snap = reg.snapshot();
+        assert_eq!(snap[0].finished_secs_ago, None);
+        reg.mark_finished(42, 0);
+        // After finishing, finished_secs_ago must be Some.
+        let snap = reg.snapshot();
+        assert!(snap[0].finished_secs_ago.is_some());
     }
 }
