@@ -73,7 +73,10 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // ── Low-level disk operations ────────────────────────────────────────
     dp!("format filesystem", r"\bmkfs\b"),
     dp!("disk copy", r"\bdd\s+.*if="),
-    dp!("write to block device", r">\s*/dev/sd"),
+    dp!(
+        "write to block device",
+        r">\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d+n\d+)"
+    ),
     // ── SQL destructive statements ───────────────────────────────────────
     dp!("SQL DROP", r"\bdrop\s+(table|database)\b"),
     dp!(
@@ -159,7 +162,10 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         "git clean with force (deletes untracked files)",
         r"\bgit\s+clean\s+-[^\s]*f"
     ),
-    dp!("git branch force delete", r"\bgit\s+branch\s+-d\b"),
+    dp!(
+        "git branch force delete",
+        r"\bgit\s+branch\s+(-[^\s]*D|--delete --force|-D)\b"
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -237,9 +243,11 @@ impl DangerousCommandChecker {
 
         for pat in DANGEROUS_PATTERNS {
             if pat.regex.is_match(&normalised) {
-                // Already allowlisted for this session?
+                // Already allowlisted for this session? Continue scanning so a
+                // second (non-allowlisted) pattern in the same command is still
+                // caught. Returning Safe here would prematurely stop evaluation.
                 if self.session_allowlist.contains(pat.description) {
-                    return CheckResult::Safe;
+                    continue;
                 }
                 return CheckResult::Dangerous {
                     description: pat.description,
