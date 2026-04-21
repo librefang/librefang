@@ -191,6 +191,19 @@ impl ContextCompressor {
                         Some(tools),
                     );
 
+                    if after_tokens >= before_tokens {
+                        // The summary is larger than (or equal to) the original
+                        // middle — no net reduction achieved.  Stop iterating to
+                        // avoid growing the context on subsequent passes.
+                        warn!(
+                            iteration,
+                            before_tokens,
+                            after_tokens,
+                            "Context compression summary expanded context — stopping iteration"
+                        );
+                        break;
+                    }
+
                     info!(
                         iteration,
                         before_count,
