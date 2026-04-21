@@ -64,6 +64,7 @@ export function SchedulerPage() {
   const [editMaxFires, setEditMaxFires] = useState<number>(0);
   const [editCooldown, setEditCooldown] = useState<string>("");
   const [editSessionMode, setEditSessionMode] = useState<string>("");
+  const [editTargetAgent, setEditTargetAgent] = useState<string>("");
 
   const agentsQuery = useAgents();
   const schedulesQuery = useSchedules();
@@ -130,6 +131,7 @@ export function SchedulerPage() {
     setEditMaxFires(tr.max_fires ?? 0);
     setEditCooldown(tr.cooldown_secs != null ? String(tr.cooldown_secs) : "");
     setEditSessionMode(tr.session_mode ?? "");
+    setEditTargetAgent(tr.target_agent_id ?? "");
   };
 
   const handleEditTrigger = async (e: FormEvent) => {
@@ -138,6 +140,7 @@ export function SchedulerPage() {
     const patch: Record<string, unknown> = { prompt_template: editPrompt, max_fires: editMaxFires };
     patch.cooldown_secs = editCooldown === "" ? null : Number(editCooldown);
     patch.session_mode = editSessionMode === "" ? null : editSessionMode;
+    patch.target_agent_id = editTargetAgent === "" ? null : editTargetAgent;
     try {
       await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any });
       setEditTrigger(null);
@@ -537,6 +540,15 @@ export function SchedulerPage() {
               <option value="">agent default</option>
               <option value="persistent">persistent</option>
               <option value="new">new</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (blank = owner)</label>
+            <select value={editTargetAgent} onChange={e => setEditTargetAgent(e.target.value)} className={inputClass}>
+              <option value="">owner (default)</option>
+              {agents.map(a => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
             </select>
           </div>
           {updateTriggerMut.error && (

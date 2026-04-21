@@ -1211,6 +1211,12 @@ enum TriggerCommands {
         /// Remove the session mode override (revert to agent default).
         #[arg(long)]
         clear_session_mode: bool,
+        /// Set the cross-session wake target agent ID (UUID).
+        #[arg(long)]
+        target_agent: Option<String>,
+        /// Clear the target agent (revert to owner routing).
+        #[arg(long)]
+        clear_target_agent: bool,
     },
     /// Enable a trigger.
     #[command(
@@ -1924,6 +1930,8 @@ fn main() {
                 clear_cooldown,
                 session_mode,
                 clear_session_mode,
+                target_agent,
+                clear_target_agent,
             } => cmd_trigger_update(
                 &trigger_id,
                 pattern.as_deref(),
@@ -1934,6 +1942,8 @@ fn main() {
                 clear_cooldown,
                 session_mode.as_deref(),
                 clear_session_mode,
+                target_agent.as_deref(),
+                clear_target_agent,
             ),
             TriggerCommands::Enable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, true),
             TriggerCommands::Disable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, false),
@@ -5991,6 +6001,8 @@ fn cmd_trigger_update(
     clear_cooldown: bool,
     session_mode: Option<&str>,
     clear_session_mode: bool,
+    target_agent: Option<&str>,
+    clear_target_agent: bool,
 ) {
     let base = require_daemon("trigger update");
     let client = daemon_client();
@@ -6021,6 +6033,11 @@ fn cmd_trigger_update(
         payload["session_mode"] = serde_json::Value::Null;
     } else if let Some(m) = session_mode {
         payload["session_mode"] = serde_json::json!(m);
+    }
+    if clear_target_agent {
+        payload["target_agent_id"] = serde_json::Value::Null;
+    } else if let Some(a) = target_agent {
+        payload["target_agent_id"] = serde_json::json!(a);
     }
 
     let body = daemon_json(

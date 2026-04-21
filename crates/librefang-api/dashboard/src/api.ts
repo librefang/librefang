@@ -393,6 +393,7 @@ export interface TriggerPatch {
   max_fires?: number;
   cooldown_secs?: number | null;
   session_mode?: string | null;
+  target_agent_id?: string | null;
 }
 
 export interface CreateTriggerPayload {

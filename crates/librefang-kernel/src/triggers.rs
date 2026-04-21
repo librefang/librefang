@@ -138,6 +138,9 @@ pub struct TriggerPatch {
     pub cooldown_secs: Option<Option<u64>>,
     /// `Some(None)` clears the override (inherits from agent manifest).
     pub session_mode: Option<Option<librefang_types::agent::SessionMode>>,
+    /// `Some(None)` clears the target (reverts to owner routing).
+    /// `Some(Some(id))` sets a new cross-session wake target.
+    pub target_agent: Option<Option<AgentId>>,
 }
 
 /// The trigger engine manages event-to-agent routing.
@@ -496,6 +499,9 @@ impl TriggerEngine {
         }
         if let Some(session_mode) = patch.session_mode {
             t.session_mode = session_mode;
+        }
+        if let Some(target_agent) = patch.target_agent {
+            t.target_agent = target_agent;
         }
         let id = t.id;
         drop(entry);

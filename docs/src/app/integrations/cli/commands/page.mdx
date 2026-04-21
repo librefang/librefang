@@ -541,6 +541,8 @@ librefang trigger update <TRIGGER_ID> [options]
 | `--clear-cooldown` | Remove the cooldown limit entirely. |
 | `--session-mode <MODE>` | New session mode override (`persistent` or `new`). |
 | `--clear-session-mode` | Remove the session mode override (revert to agent default). |
+| `--target-agent <ID>` | Route the triggered message to a different agent (UUID). |
+| `--clear-target-agent` | Remove the target agent override (revert to owner routing). |
 
 ```bash
 # Change prompt and set a 30s cooldown
@@ -551,6 +553,12 @@ librefang trigger update <TRIGGER_ID> --clear-cooldown
 
 # Switch to new-session mode
 librefang trigger update <TRIGGER_ID> --session-mode new
+
+# Redirect firing to a different agent
+librefang trigger update <TRIGGER_ID> --target-agent <OTHER_AGENT_ID>
+
+# Clear the target agent redirect
+librefang trigger update <TRIGGER_ID> --clear-target-agent
 ```
 
 ---

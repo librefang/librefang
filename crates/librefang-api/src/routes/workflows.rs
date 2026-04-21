@@ -1106,7 +1106,8 @@ pub async fn delete_trigger(
 ///
 /// All body fields are optional. Only provided fields are changed.
 /// Supported fields: `pattern`, `prompt_template`, `enabled`, `max_fires`,
-/// `cooldown_secs` (pass `null` to clear), `session_mode` (pass `null` to clear).
+/// `cooldown_secs` (pass `null` to clear), `session_mode` (pass `null` to clear),
+/// `target_agent_id` (pass `null` to clear, omit to leave unchanged).
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1163,6 +1164,20 @@ pub async fn update_trigger(
         }
     };
 
+    // Parse target_agent_id: absent = no change, null = clear, string = set
+    let target_agent: Option<Option<AgentId>> = if req.get("target_agent_id").is_none() {
+        None
+    } else if req["target_agent_id"].is_null() {
+        Some(None)
+    } else {
+        match req["target_agent_id"].as_str().and_then(|s| s.parse().ok()) {
+            Some(id) => Some(Some(id)),
+            None => {
+                return ApiErrorResponse::bad_request("Invalid 'target_agent_id'").into_json_tuple()
+            }
+        }
+    };
+
     let patch = TriggerPatch {
         pattern,
         prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),
@@ -1170,6 +1185,7 @@ pub async fn update_trigger(
         max_fires: req["max_fires"].as_u64(),
         cooldown_secs,
         session_mode,
+        target_agent,
     };
 
     match state.kernel.update_trigger(trigger_id, patch) {

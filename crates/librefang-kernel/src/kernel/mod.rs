@@ -3003,7 +3003,12 @@ system_prompt = "You are a helpful assistant."
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
-        let _triggered = self.triggers.evaluate(&event);
+        let triggered = self.triggers.evaluate(&event);
+        if !triggered.is_empty() {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after spawn event: {e}");
+            }
+        }
 
         Ok(agent_id)
     }

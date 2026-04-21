@@ -541,6 +541,8 @@ librefang trigger update <TRIGGER_ID> [选项]
 | `--clear-cooldown` | 完全移除冷却限制。 |
 | `--session-mode <MODE>` | 新的会话模式覆盖（`persistent` 或 `new`）。 |
 | `--clear-session-mode` | 移除会话模式覆盖，恢复 Agent 默认值。 |
+| `--target-agent <ID>` | 将触发消息路由到另一个 Agent（UUID）。 |
+| `--clear-target-agent` | 移除目标 Agent 覆盖，恢复拥有者路由。 |
 
 ```bash
 # 修改提示并设置 30 秒冷却
@@ -551,6 +553,12 @@ librefang trigger update <TRIGGER_ID> --clear-cooldown
 
 # 切换到 new 会话模式
 librefang trigger update <TRIGGER_ID> --session-mode new
+
+# 将触发重定向到另一个 Agent
+librefang trigger update <TRIGGER_ID> --target-agent <OTHER_AGENT_ID>
+
+# 清除目标 Agent 重定向
+librefang trigger update <TRIGGER_ID> --clear-target-agent
 ```
 
 ---
