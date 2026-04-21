@@ -74,7 +74,14 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
         // Find the longest prefix that fits within `limit` UTF-16 code units.
         let safe_prefix = truncate_to_utf16_limit(remaining, limit);
         // Prefer splitting at a newline inside the safe prefix.
-        let split_at = safe_prefix.rfind('\n').unwrap_or(safe_prefix.len());
+        // When the newline is preceded by \r (Windows CRLF), split *before*
+        // the \r so that the emitted chunk doesn't end with a stray '\r'.
+        // The \r\n pair is then consumed together by the strip_prefix below.
+        let split_at = match safe_prefix.rfind('\n') {
+            Some(nl) if nl > 0 && safe_prefix.as_bytes()[nl - 1] == b'\r' => nl - 1,
+            Some(nl) => nl,
+            None => safe_prefix.len(),
+        };
         let (chunk, rest) = remaining.split_at(split_at);
         // Guard against zero-progress (degenerate limit=0 or limit=1 on a
         // 2-unit char that can't fit at all).
@@ -323,6 +330,35 @@ mod tests {
         // "abc\nde" with limit=5 → should split at newline → ["abc", "de"]
         let chunks = split_to_utf16_chunks("abc\nde", 5);
         assert_eq!(chunks, vec!["abc", "de"]);
+    }
+
+    #[test]
+    fn split_crlf_no_trailing_cr() {
+        // When the newline is part of a CRLF pair, the \r must NOT bleed
+        // into the preceding chunk.  Previously rfind('\n') found the \n
+        // at byte 4 of "abc\r\n" and split_at(4) yielded chunk="abc\r".
+        let chunks = split_to_utf16_chunks("abc\r\nde", 5);
+        assert_eq!(chunks, vec!["abc", "de"]);
+        for c in &chunks {
+            assert!(
+                !c.ends_with('\r'),
+                "chunk must not end with stray \\r: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_crlf_emoji_no_trailing_cr() {
+        // Same but with emoji to exercise the UTF-16 counting path.
+        // "🎉\r\nok" = 2+1+1+2 = 6 units; limit=4 → split at \r\n → ["🎉", "ok"]
+        let chunks = split_to_utf16_chunks("🎉\r\nok", 4);
+        assert_eq!(chunks, vec!["🎉", "ok"]);
+        for c in &chunks {
+            assert!(
+                !c.ends_with('\r'),
+                "chunk must not end with stray \\r: {c:?}"
+            );
+        }
     }
 
     #[test]
