@@ -140,7 +140,18 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     /// Create a new manager with the given built-in provider.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `builtin.is_builtin()` returns `false`.  Passing a non-builtin
+    /// provider here is a programming error: the manager's invariant assumes
+    /// `self.builtin` is always the trusted built-in backend.
     pub fn new(builtin: Arc<dyn MemoryProvider>) -> Self {
+        assert!(
+            builtin.is_builtin(),
+            "MemoryManager::new requires a builtin provider, but '{}' reports is_builtin() = false",
+            builtin.name(),
+        );
         Self {
             builtin,
             external: RwLock::new(None),
@@ -344,6 +355,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "requires a builtin provider")]
+    fn new_rejects_non_builtin_provider() {
+        // Passing an external (non-builtin) provider to MemoryManager::new is a
+        // programming error and must panic immediately.
+        let _ = MemoryManager::new(null_external("not-a-builtin"));
+    }
+
+    #[test]
     fn register_external_once_succeeds() {
         let mgr = MemoryManager::new(null_builtin());
         mgr.register_external(null_external("ext1")).unwrap();
@@ -468,6 +487,10 @@ mod tests {
     impl MemoryProvider for SystemBlockProvider {
         fn name(&self) -> &str {
             "system-block-provider"
+        }
+
+        fn is_builtin(&self) -> bool {
+            true
         }
 
         async fn system_prompt_block(&self, _session_id: &str) -> Option<String> {
