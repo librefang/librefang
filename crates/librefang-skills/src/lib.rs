@@ -81,6 +81,8 @@ pub enum SkillSource {
     OpenClaw,
     /// Downloaded from ClawHub marketplace.
     ClawHub { slug: String, version: String },
+    /// Downloaded from ClawHub China mirror (mirror-cn.clawhub.com).
+    ClawHubCn { slug: String, version: String },
     /// Downloaded from Skillhub marketplace.
     Skillhub { slug: String, version: String },
 }

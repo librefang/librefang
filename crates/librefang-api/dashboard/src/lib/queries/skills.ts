@@ -6,12 +6,15 @@ import {
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
+  clawhubCnBrowse,
+  clawhubCnSearch,
+  clawhubCnGetSkill,
   skillhubBrowse,
   skillhubSearch,
   skillhubGetSkill,
   fanghubListSkills,
 } from "../http/client";
-import { skillKeys, clawhubKeys, skillhubKeys, fanghubKeys } from "./keys";
+import { skillKeys, clawhubKeys, clawhubCnKeys, skillhubKeys, fanghubKeys } from "./keys";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
@@ -62,6 +65,25 @@ export const skillQueries = {
     queryOptions({
       queryKey: clawhubKeys.detail(slug),
       queryFn: () => clawhubGetSkill(slug),
+      enabled: !!slug,
+    }),
+  clawhubCnBrowse: (sort?: string, limit?: number, cursor?: string) =>
+    queryOptions({
+      queryKey: clawhubCnKeys.browse({ sort, limit, cursor }),
+      queryFn: () => clawhubCnBrowse(sort, limit, cursor),
+      staleTime: BROWSE_STALE_MS,
+    }),
+  clawhubCnSearch: (query: string) =>
+    queryOptions({
+      queryKey: clawhubCnKeys.search(query),
+      queryFn: () => clawhubCnSearch(query),
+      enabled: !!query,
+      staleTime: STALE_MS,
+    }),
+  clawhubCnSkill: (slug: string) =>
+    queryOptions({
+      queryKey: clawhubCnKeys.detail(slug),
+      queryFn: () => clawhubCnGetSkill(slug),
       enabled: !!slug,
     }),
   skillhubBrowse: (sort?: string) =>
