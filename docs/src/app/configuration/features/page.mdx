@@ -890,6 +890,48 @@ subagent_lane = 3
 
 ---
 
+### `[tool_budget]`
+
+**Source:** `librefang-runtime/src/tool_budget.rs`
+
+The tool budget enforcer caps the size of data that tool calls can return in a single
+agent turn, preventing unexpectedly large tool outputs from filling the context window
+and driving up token costs.
+
+#### How it works
+
+Every tool result passes through a three-layer size check before being placed in the
+context:
+
+| Layer | Threshold | Behavior |
+|---|---|---|
+| **Inline** | ≤ 50 KB | Result is embedded in the context as-is. |
+| **Spill** | 50 KB – 200 KB | Result is written to a temporary file under `/tmp/librefang-results/` and replaced in the context with a short summary noting the spill path and byte count. |
+| **Truncate** | > 200 KB | Only the first 200 KB of the result is kept; the remainder is silently discarded. A `WARN` entry is emitted with the tool name and original size. |
+
+#### Spill file naming
+
+Spill files are named `<agent_id>_<tool_call_id>_<timestamp>.txt` and are written to
+`/tmp/librefang-results/`. They are not cleaned up automatically between turns; the
+directory is purged when the daemon restarts.
+
+The agent can read a spill file on a subsequent turn if needed — the summary injected
+into the context includes the full path.
+
+#### Configuration
+
+There is no per-agent configuration for the tool budget in the current release. The
+50 KB and 200 KB thresholds are fixed at compile time.
+
+#### Why these limits?
+
+50 KB of inline text is roughly 12 500 tokens — already a substantial fraction of
+most model context windows. Results beyond this point have diminishing returns for the
+agent while linearly increasing prompt cost. The 200 KB hard cap prevents a single
+runaway tool call from consuming an entire context window.
+
+---
+
 ### `[context_compression]`
 
 Context compression automatically reduces the size of an agent's context window when token usage grows too large, preventing hard context-limit errors without requiring manual session management.
