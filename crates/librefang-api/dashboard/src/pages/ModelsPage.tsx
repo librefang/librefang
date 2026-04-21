@@ -35,13 +35,13 @@ type SortHeaderProps = {
   className?: string;
 };
 
-function SortHeader({ field, active, dir: _dir, onToggle, children, className = "" }: SortHeaderProps) {
+function SortHeader({ field, active, dir, onToggle, children, className = "" }: SortHeaderProps) {
   return (
     <button type="button" onClick={() => onToggle(field)}
       className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
       {children}
       {active
-        ? <ArrowUpDown className="w-3 h-3 text-brand" />
+        ? <ArrowUpDown className={`w-3 h-3 text-brand ${dir === "desc" ? "rotate-180" : ""}`} />
         : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
     </button>
   );
@@ -263,19 +263,17 @@ export function ModelsPage() {
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
-  // Collapsed provider summary: tier badges + cheapest cost
   const providerSummary = (models: ModelItem[]) => {
-    const tierSet = new Set(models.map(m => m.tier).filter(Boolean));
-    const tiers = Array.from(tierSet).sort();
+    const tierSet = new Set<string>();
     let minCost: number | null = null;
     for (const m of models) {
+      if (m.tier) tierSet.add(m.tier);
       const cost = m.input_cost_per_m ?? 0;
-      if (cost > 0) {
-        if (minCost === null || cost < minCost) {
-          minCost = cost;
-        }
+      if (cost > 0 && (minCost === null || cost < minCost)) {
+        minCost = cost;
       }
     }
+    const tiers = Array.from(tierSet).sort();
     return (
       <div className="flex items-center gap-1.5 ml-auto mr-2">
         {tiers.slice(0, 4).map(tier => (
