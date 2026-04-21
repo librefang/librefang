@@ -1318,6 +1318,32 @@ export async function clawhubInstall(slug: string, version?: string, hand?: stri
   );
 }
 
+// ── ClawHub China mirror API (mirror-cn.clawhub.com) ──
+
+export async function clawhubCnBrowse(sort?: string, limit?: number, cursor?: string): Promise<ClawHubBrowseResponse> {
+  const params = new URLSearchParams();
+  if (sort) params.set("sort", sort);
+  if (limit) params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  return get<ClawHubBrowseResponse>(`/api/clawhub-cn/browse?${params}`);
+}
+
+export async function clawhubCnSearch(query: string): Promise<ClawHubBrowseResponse> {
+  return get<ClawHubBrowseResponse>(`/api/clawhub-cn/search?q=${encodeURIComponent(query)}`);
+}
+
+export async function clawhubCnGetSkill(slug: string): Promise<ClawHubSkillDetail> {
+  return get<ClawHubSkillDetail>(`/api/clawhub-cn/skill/${encodeURIComponent(slug)}`);
+}
+
+export async function clawhubCnInstall(slug: string, version?: string, hand?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    "/api/clawhub-cn/install",
+    { slug, version: version || "latest", hand },
+    LONG_RUNNING_TIMEOUT_MS
+  );
+}
+
 // ── Skillhub API ─────────────────────────────────────
 
 export async function skillhubSearch(query: string): Promise<ClawHubBrowseResponse> {
