@@ -474,12 +474,33 @@ mod tests {
         mgr.notify_turn_complete("sid", "summary").await;
     }
 
-    /// A provider that returns a non-empty system prompt block.
-    struct SystemBlockProvider(&'static str);
+    /// A provider that returns a non-empty system prompt block and prefetch result.
+    ///
+    /// `builtin` controls the return value of `is_builtin()`, allowing the same
+    /// struct to be used both as the mandatory builtin slot (pass `true`) and as
+    /// an external plugin (pass `false`).  The original code always returned
+    /// `true`, which caused `register_external` to reject the provider with
+    /// `MemoryError::ProviderError` (builtin providers cannot be registered as
+    /// external), making `collect_system_blocks_returns_content_from_provider`
+    /// panic on `.unwrap()`.
+    struct SystemBlockProvider {
+        content: &'static str,
+        builtin: bool,
+    }
 
     impl SystemBlockProvider {
         fn new(content: &'static str) -> Self {
-            Self(content)
+            Self {
+                content,
+                builtin: false,
+            }
+        }
+
+        fn new_builtin(content: &'static str) -> Self {
+            Self {
+                content,
+                builtin: true,
+            }
         }
     }
 
@@ -490,15 +511,15 @@ mod tests {
         }
 
         fn is_builtin(&self) -> bool {
-            true
+            self.builtin
         }
 
         async fn system_prompt_block(&self, _session_id: &str) -> Option<String> {
-            Some(self.0.to_string())
+            Some(self.content.to_string())
         }
 
         async fn prefetch(&self, _query: &str, _session_id: &str) -> Result<String, MemoryError> {
-            Ok(self.0.to_string())
+            Ok(self.content.to_string())
         }
 
         async fn on_turn_complete(
@@ -513,6 +534,7 @@ mod tests {
     #[tokio::test]
     async fn collect_system_blocks_returns_content_from_provider() {
         let mgr = MemoryManager::new(null_builtin());
+        // SystemBlockProvider::new() returns is_builtin=false, so register_external accepts it.
         mgr.register_external(Arc::new(SystemBlockProvider::new("memory context")))
             .unwrap();
         let blocks = mgr.collect_system_blocks("session-1").await;
@@ -566,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn prefetch_all_merges_multiple_provider_results() {
         // Test with builtin provider returning content and external returning content.
-        let builtin_with_content = Arc::new(SystemBlockProvider::new("builtin context"));
+        let builtin_with_content = Arc::new(SystemBlockProvider::new_builtin("builtin context"));
         let mgr = MemoryManager::new(builtin_with_content);
         mgr.register_external(Arc::new(ContentProvider::new("external context")))
             .unwrap();
