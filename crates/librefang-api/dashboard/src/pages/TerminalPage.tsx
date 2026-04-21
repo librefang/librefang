@@ -88,8 +88,6 @@ export function TerminalPage() {
     }
   }, [terminalEnabled, navigate]);
 
-
-
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "close" }));

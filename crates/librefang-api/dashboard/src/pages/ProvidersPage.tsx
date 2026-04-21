@@ -855,7 +855,7 @@ function CreateProviderWizard({
     try {
       await onSubmit(buildValues());
     } catch (err: unknown) {
-      setSubmitError(getErrorMessage(err));
+      setSubmitError(getErrorMessage(err) ?? t("common.error"));
     } finally {
       setSubmitting(false);
     }
