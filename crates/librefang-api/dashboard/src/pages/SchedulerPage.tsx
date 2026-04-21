@@ -142,7 +142,7 @@ export function SchedulerPage() {
     patch.session_mode = editSessionMode === "" ? null : editSessionMode;
     patch.target_agent_id = editTargetAgent === "" ? null : editTargetAgent;
     try {
-      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any });
+      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch as any, agentId: editTrigger.agent_id });
       setEditTrigger(null);
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
@@ -165,7 +165,8 @@ export function SchedulerPage() {
     }
     setConfirmDelete(null);
     try {
-      await deleteTriggerMut.mutateAsync(id);
+      const agentId = triggersQuery.data?.find((tr: TriggerItem) => tr.id === id)?.agent_id;
+      await deleteTriggerMut.mutateAsync({ id, agentId });
     } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
   };
 
@@ -293,7 +294,7 @@ export function SchedulerPage() {
                       <h3 className="text-xs sm:text-sm font-bold truncate">{formatTriggerPattern(tr.pattern) || truncateId(tr.id, 12)}</h3>
                     </div>
                     <button
-                      onClick={() => updateTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled } })}
+                      onClick={() => updateTriggerMut.mutate({ id: tr.id, data: { enabled: !isEnabled }, agentId: tr.agent_id })}
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors ${isEnabled ? "bg-success/10 text-success hover:bg-success/20" : "bg-main text-text-dim/40 hover:text-text-dim"}`}
                       disabled={updateTriggerMut.isPending && updateTriggerMut.variables?.id === tr.id}
                     >

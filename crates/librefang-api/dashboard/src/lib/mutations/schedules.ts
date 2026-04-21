@@ -60,8 +60,9 @@ export function useCreateTrigger() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: CreateTriggerPayload) => createTrigger(payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: triggerKeys.all });
+    onSuccess: (_data, payload) => {
+      // Invalidate the specific agent's list; falls back to all lists.
+      qc.invalidateQueries({ queryKey: triggerKeys.list(payload.agent_id) });
       qc.invalidateQueries({ queryKey: cronKeys.all });
     },
   });
@@ -70,10 +71,12 @@ export function useCreateTrigger() {
 export function useUpdateTrigger() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: TriggerPatch }) =>
+    mutationFn: ({ id, data }: { id: string; data: TriggerPatch; agentId?: string }) =>
       updateTrigger(id, data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: triggerKeys.all });
+    onSuccess: (_data, { id, agentId }) => {
+      // Invalidate the specific detail entry and the owning agent's list.
+      qc.invalidateQueries({ queryKey: triggerKeys.detail(id) });
+      qc.invalidateQueries({ queryKey: triggerKeys.list(agentId) });
       qc.invalidateQueries({ queryKey: cronKeys.all });
     },
   });
@@ -82,9 +85,11 @@ export function useUpdateTrigger() {
 export function useDeleteTrigger() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deleteTrigger,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: triggerKeys.all });
+    mutationFn: ({ id }: { id: string; agentId?: string }) => deleteTrigger(id),
+    onSuccess: (_data, { id, agentId }) => {
+      // Remove the stale detail entry and invalidate the owning agent's list.
+      qc.removeQueries({ queryKey: triggerKeys.detail(id) });
+      qc.invalidateQueries({ queryKey: triggerKeys.list(agentId) });
       qc.invalidateQueries({ queryKey: cronKeys.all });
     },
   });

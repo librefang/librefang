@@ -142,6 +142,7 @@ export const scheduleKeys = {
 export const triggerKeys = {
   all: ["triggers"] as const,
   lists: () => [...triggerKeys.all, "list"] as const,
+  list: (agentId?: string) => [...triggerKeys.lists(), agentId] as const,
   details: () => [...triggerKeys.all, "detail"] as const,
   detail: (id: string) => [...triggerKeys.details(), id] as const,
 };
