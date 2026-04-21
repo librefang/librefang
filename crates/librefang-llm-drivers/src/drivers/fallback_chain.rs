@@ -149,8 +149,12 @@ impl FallbackChain {
                         && attempts < self.max_rate_limit_retries
                     {
                         // Extract suggested delay from the LlmError, fall back to default.
+                        // Both RateLimited and Overloaded variants may carry a hint.
                         let sleep_ms = match &e {
                             LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
+                                *retry_after_ms
+                            }
+                            LlmError::Overloaded { retry_after_ms } if *retry_after_ms > 0 => {
                                 *retry_after_ms
                             }
                             _ => self.rate_limit_sleep_ms,
@@ -242,12 +246,26 @@ impl LlmDriver for FallbackChain {
             let (text_emit_tx, text_emit_rx) = watch::channel(false);
             let (wrap_tx, mut wrap_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
 
-            // Relay loop: forward events to the real sender, signal on TextDelta.
+            // Relay loop: forward events to the real sender, signal on any
+            // content-bearing event (not just TextDelta) so that tool-use and
+            // thinking streams are also detected before any failover decision.
             let tx_for_relay = tx.clone();
             let text_emit_flag = text_emit_tx.clone();
             let relay_handle = tokio::spawn(async move {
                 while let Some(event) = wrap_rx.recv().await {
-                    if let StreamEvent::TextDelta { .. } = &event {
+                    // Set the flag for any event that represents actual content
+                    // output from the provider.  Metadata-only events such as
+                    // RateLimitInfo are NOT listed here because they don't
+                    // constitute observable output to the caller.
+                    let is_content = matches!(
+                        &event,
+                        StreamEvent::TextDelta { .. }
+                            | StreamEvent::ToolUseStart { .. }
+                            | StreamEvent::ToolInputDelta { .. }
+                            | StreamEvent::ThinkingDelta { .. }
+                            | StreamEvent::ContentComplete { .. }
+                    );
+                    if is_content {
                         let _ = text_emit_flag.send(true);
                     }
                     let _ = tx_for_relay.send(event).await;
@@ -258,7 +276,10 @@ impl LlmDriver for FallbackChain {
             // is not supported); any error here triggers the skip/propagate logic.
             match entry.driver.stream(req, wrap_tx).await {
                 Ok(resp) => {
-                    // Provider succeeded — stream is complete.
+                    // Provider succeeded — wait for the relay task to drain all
+                    // buffered events to the caller before returning, so events
+                    // are not silently dropped when the relay_handle is dropped.
+                    let _ = relay_handle.await;
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -613,5 +634,35 @@ mod tests {
     fn failover_reason_parse_unknown() {
         let e = LlmError::Parse("unexpected token".to_string());
         assert_eq!(e.failover_reason(), FailoverReason::Unknown);
+    }
+
+    #[test]
+    fn failover_reason_404_generic_not_found_is_unknown() {
+        // A 404 whose message does NOT reference the model (e.g. wrong base
+        // URL) should be Unknown, not ModelUnavailable.
+        let e = LlmError::Api {
+            status: 404,
+            message: "Not found".to_string(),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::Unknown);
+    }
+
+    #[test]
+    fn failover_reason_404_model_not_found_is_model_unavailable() {
+        // A 404 whose message explicitly references the model should still
+        // be classified as ModelUnavailable.
+        let e = LlmError::Api {
+            status: 404,
+            message: "model not found: claude-4-opus".to_string(),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+    }
+
+    #[test]
+    fn failover_reason_overloaded_uses_retry_hint() {
+        let e = LlmError::Overloaded {
+            retry_after_ms: 3000,
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::RateLimit(Some(3000)));
     }
 }

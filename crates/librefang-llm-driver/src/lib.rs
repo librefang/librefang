@@ -115,12 +115,15 @@ impl LlmError {
                     }
                     413 => FailoverReason::ContextTooLong,
                     503 => FailoverReason::ModelUnavailable,
-                    // 404 is only a model error when the message references the model;
-                    // a generic 404 (e.g. wrong base URL) should not trigger failover.
+                    // 404 is only a model error when the message explicitly references
+                    // the model — generic endpoint/base-URL 404s also contain "not found"
+                    // but are not recoverable by switching models.
                     404 => {
-                        if msg.contains("model")
-                            || msg.contains("not found")
-                            || msg.contains("does not exist")
+                        if msg.contains("model not found")
+                            || msg.contains("model does not exist")
+                            || msg.contains("unknown model")
+                            || (msg.contains("model") && msg.contains("not found"))
+                            || (msg.contains("model") && msg.contains("does not exist"))
                         {
                             FailoverReason::ModelUnavailable
                         } else {
