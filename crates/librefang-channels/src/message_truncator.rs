@@ -241,7 +241,7 @@ pub fn truncate_to_utf16_limit(s: &str, limit: usize) -> &str {
     let mut hi: usize = chars.len();
 
     while lo < hi {
-        let mid = (lo + hi + 1) / 2;
+        let mid = (lo + hi).div_ceil(2);
         let count: usize = chars[..mid]
             .iter()
             .map(|(_, c)| if (*c as u32) > 0xFFFF { 2 } else { 1 })
