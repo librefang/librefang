@@ -9,6 +9,7 @@ This page covers tamper evidence, signed content, taint propagation, secret hand
 - Ed25519 Manifest Signing
 - Secret Zeroization
 - Prompt Injection Scanner
+- Prompt Injection Guard
 
 ---
 
@@ -440,5 +441,117 @@ pub struct SkillWarning {
     pub message: String,
 }
 ```
+
+---
+
+## Prompt Injection Guard
+
+**Source:** `librefang-kernel/src/injection_guard.rs`
+
+Before user input is forwarded to an LLM, the kernel scans the message for
+known prompt-injection indicators.  Unlike skill scanning, this guard operates
+on **runtime user input** rather than static skill content, and it **does not
+reject the message** — it prepends a warning prefix and emits a structured log
+entry so that the model (and any downstream auditing) can reason about the
+potentially adversarial content with full situational awareness.
+
+### Detection Approach
+
+The guard checks for two distinct threat classes:
+
+#### 1. Text Patterns (15 rules)
+
+Common English-language phrases used to hijack instruction following:
+
+| Pattern | Threat class |
+|---------|-------------|
+| `ignore previous instructions` | Override attempt |
+| `ignore all previous` | Override attempt |
+| `disregard your instructions` | Override attempt |
+| `disregard previous` | Override attempt |
+| `forget your instructions` | Override attempt |
+| `you are now` | Persona hijack |
+| `new instructions:` | Override injection |
+| `system:` | System-prompt injection |
+| `system prompt override` | Override attempt |
+| `override system` | Override attempt |
+| `ignore the above` | Override attempt |
+| `do not follow` | Override attempt |
+| `act as if you have no restrictions` | Jailbreak attempt |
+| `[system]` | Fake system-turn marker |
+| `<system>` | Fake system-turn marker |
+
+Matching is case-insensitive to catch `IGNORE PREVIOUS INSTRUCTIONS` and
+similar variants.
+
+#### 2. Invisible Unicode (10 code points)
+
+Adversarial content is sometimes hidden using characters that are visually
+absent but semantically processed by the tokenizer:
+
+| Code point | Name | Category |
+|------------|------|----------|
+| U+200B | ZERO WIDTH SPACE | Zero-width |
+| U+200C | ZERO WIDTH NON-JOINER | Zero-width |
+| U+200D | ZERO WIDTH JOINER | Zero-width |
+| U+2060 | WORD JOINER | Zero-width |
+| U+FEFF | ZERO WIDTH NO-BREAK SPACE (BOM) | Zero-width |
+| U+202A | LEFT-TO-RIGHT EMBEDDING | Bidi control |
+| U+202B | RIGHT-TO-LEFT EMBEDDING | Bidi control |
+| U+202C | POP DIRECTIONAL FORMATTING | Bidi control |
+| U+202D | LEFT-TO-RIGHT OVERRIDE | Bidi control |
+| U+202E | RIGHT-TO-LEFT OVERRIDE | Bidi control |
+
+Bidi override characters (U+202D, U+202E) are particularly dangerous because
+they can visually reverse text in a UI while the tokenizer processes the
+original byte order.
+
+### Detection Response
+
+When either check fires, the kernel:
+
+1. **Prepends a warning prefix** to the user message before it is placed in
+   the LLM context window:
+
+   ```
+   [Warning: potential prompt injection detected — proceeding with caution]
+   ```
+
+2. **Emits a structured warning log** via `tracing::warn!`:
+
+   ```
+   prompt injection indicator detected: "ignore previous instructions" in message from user <id>
+   ```
+
+The modified message is sent to the LLM unchanged except for the prefix.
+The LLM therefore sees both the warning and the potentially hostile content
+and can apply its own policy.
+
+### Why Not Reject?
+
+Legitimate messages can contain any of the detected phrases in innocuous
+contexts — for example:
+
+- A developer asking the agent to *explain* the phrase `"ignore previous instructions"`.
+- A security researcher asking the agent to write a test case that *includes*
+  injection strings.
+- Copy-pasted documentation that happens to contain `system:` as a YAML key.
+
+Outright rejection in these cases would silently break valid workflows.  The
+warning-prefix approach preserves usability while giving the model (and the
+audit trail) a clear signal to act on.
+
+### Limitations
+
+Rule-based matching cannot cover the full injection surface:
+
+- Paraphrased or multi-lingual override attempts are not detected.
+- Injections split across multiple messages may evade single-message scanning.
+- Encoding tricks (e.g. base64 payloads decoded at runtime by the model) are
+  out of scope.
+
+The prompt injection guard is one defense layer within a broader strategy that
+also includes taint tracking, capability enforcement, and human-in-the-loop
+approvals.  It is not a complete solution in isolation.
 
 ---

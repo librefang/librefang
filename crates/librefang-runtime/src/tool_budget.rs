@@ -152,7 +152,7 @@ impl ToolBudgetEnforcer {
             .filter(|(_, r)| !r.content.starts_with(PERSISTED_MARKER))
             .map(|(i, r)| (i, r.content.len()))
             .collect();
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut running_total = total;
 
@@ -286,8 +286,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn layer2_fallback_on_bad_path() {
-        // Use an unwriteable path to force the fallback.
+        // Use an unwriteable path to force the fallback. `/proc` on Linux is a
+        // read-only virtual filesystem; macOS has no `/proc` so `create_dir_all`
+        // fails at the filesystem root. Either way, the write must fail so the
+        // fallback path in `maybe_persist_result` runs.
+        //
+        // Skipped on Windows because `/proc/...` gets resolved to
+        // `C:\proc\...`, which is writeable under a standard user account.
         let enforcer = ToolBudgetEnforcer {
             per_result_threshold: 10,
             per_turn_budget: 1000,

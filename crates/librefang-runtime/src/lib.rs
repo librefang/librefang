@@ -15,6 +15,7 @@ pub mod auth_cooldown;
 pub mod browser;
 pub mod catalog_sync;
 pub mod channel_registry;
+pub mod checkpoint_manager;
 pub use librefang_runtime_oauth::chatgpt_oauth;
 pub mod command_lane;
 pub mod compactor;
