@@ -1,5 +1,4 @@
 import "@xterm/xterm/css/xterm.css";
-import "@xterm/addon-search/css/xterm-search.css";
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Terminal } from "@xterm/xterm";
