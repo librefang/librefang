@@ -75,7 +75,7 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
       console.error("Microphone access denied:", err);
       cleanup();
     }
-  }, [onTranscript, cleanup]);
+  }, [cleanup]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current) {

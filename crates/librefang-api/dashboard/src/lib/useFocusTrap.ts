@@ -27,7 +27,6 @@ export function useFocusTrap(
   containerRef: React.RefObject<HTMLElement | null>,
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
-  const focusableRef = useRef<HTMLElement[]>([]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -41,11 +40,11 @@ export function useFocusTrap(
     // programmatically without joining the tab order).
     const container = containerRef.current;
     if (container) {
-      focusableRef.current = Array.from(
+      const focusable = Array.from(
         container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
       );
-      if (focusableRef.current.length > 0) {
-        focusableRef.current[0].focus();
+      if (focusable.length > 0) {
+        focusable[0].focus();
       } else if (container.tabIndex >= -1) {
         container.focus();
       }
@@ -55,7 +54,9 @@ export function useFocusTrap(
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab" || !container) return;
-      const focusable = focusableRef.current.filter(
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      ).filter(
         (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
       );
       if (focusable.length === 0) return;
