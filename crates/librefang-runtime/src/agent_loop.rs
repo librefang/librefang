@@ -891,6 +891,12 @@ fn finalize_tool_use_results(
         return ToolResultOutcomeSummary::default();
     }
 
+    // Compute outcome_summary from the original (pre-budget) content so that
+    // is_soft_error_content checks match the actual tool error text, not the
+    // [Tool output too large ...] replacement that Layer 3 may substitute.
+    // This must happen before Layer 3 mutates the blocks.
+    let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
+
     // Layer 3: per-turn aggregate budget enforcement.
     // Convert ToolResult blocks into ToolResultEntry values, run the enforcer,
     // then write back any content that was modified (persisted or truncated).
@@ -928,8 +934,6 @@ fn finalize_tool_use_results(
             }
         }
     }
-
-    let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
     append_tool_result_guidance_blocks(tool_result_blocks);
 
     let tool_results_msg = Message {
