@@ -2024,7 +2024,7 @@ pub async fn approve_all_for_session(
     // set could change between the pre-check and the resolve loop.
     let mut resolved = 0usize;
     for pending_req in pending {
-        if let Ok(_) = state
+        if state
             .kernel
             .resolve_tool_approval(
                 pending_req.id,
@@ -2034,6 +2034,7 @@ pub async fn approve_all_for_session(
                 None,
             )
             .await
+            .is_ok()
         {
             // Non-existent / already-resolved items are skipped silently.
             resolved += 1;
@@ -2085,7 +2086,7 @@ pub async fn reject_all_for_session(
         .approvals()
         .list_pending_for_session(&session_id)
     {
-        if let Ok(_) = state
+        if state
             .kernel
             .resolve_tool_approval(
                 pending_req.id,
@@ -2095,6 +2096,7 @@ pub async fn reject_all_for_session(
                 None,
             )
             .await
+            .is_ok()
         {
             resolved += 1;
         }
