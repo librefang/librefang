@@ -1924,11 +1924,11 @@ pub struct ApproveAllForSessionRequest {
     #[serde(default)]
     pub expected_count: Option<usize>,
     /// Optional list of approval IDs the caller expects to be pending.
-    /// If provided and non-empty, the server verifies the actual pending set
-    /// matches before approving.  Returns 409 Conflict if a new high-risk
-    /// approval landed between the operator viewing the list and clicking
-    /// approve_all.
+    /// If provided, the server verifies the actual pending set matches before
+    /// approving.  Returns 409 Conflict if a new high-risk approval landed
+    /// between the operator viewing the list and clicking approve_all.
     #[serde(default)]
+    #[schema(value_type = Option<Vec<String>>)]
     pub expected_ids: Option<Vec<uuid::Uuid>>,
 }
 
@@ -1949,8 +1949,14 @@ pub struct ApproveAllForSessionRequest {
 pub async fn approve_all_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-    Json(req): Json<ApproveAllForSessionRequest>,
+    body: Option<Json<ApproveAllForSessionRequest>>,
 ) -> impl IntoResponse {
+    let req = body
+        .map(|Json(r)| r)
+        .unwrap_or(ApproveAllForSessionRequest {
+            expected_count: None,
+            expected_ids: None,
+        });
     // Validate session_id is not empty/whitespace.
     if session_id.trim().is_empty() {
         return (
@@ -1980,20 +1986,20 @@ pub async fn approve_all_for_session(
     }
 
     // Confirmation check: verify pending set matches expected_ids if provided.
+    // Always validate when expected_ids is Some(…), even for an empty slice —
+    // a caller asserting "there are zero pending approvals" must be protected too.
     if let Some(ref expected) = req.expected_ids {
-        if !expected.is_empty() {
-            let pending_ids: std::collections::HashSet<_> = pending.iter().map(|r| r.id).collect();
-            let expected_set: std::collections::HashSet<_> = expected.iter().cloned().collect();
-            if pending_ids != expected_set {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "Pending approval set has changed since this request was issued. Refresh and try again.",
-                        "pending_ids": pending_ids,
-                        "expected_ids": expected_set,
-                    })),
-                );
-            }
+        let pending_ids: std::collections::HashSet<_> = pending.iter().map(|r| r.id).collect();
+        let expected_set: std::collections::HashSet<_> = expected.iter().cloned().collect();
+        if pending_ids != expected_set {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Pending approval set has changed since this request was issued. Refresh and try again.",
+                    "pending_ids": pending_ids,
+                    "expected_ids": expected_set,
+                })),
+            );
         }
     }
 

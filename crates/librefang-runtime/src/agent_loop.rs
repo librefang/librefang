@@ -731,6 +731,7 @@ async fn execute_single_tool_call(
             ctx.process_manager,
             ctx.sender_user_id,
             ctx.sender_channel,
+            Some(ctx.session.id.to_string()).as_deref(),
         ),
     )
     .await

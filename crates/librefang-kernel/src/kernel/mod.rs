@@ -13050,6 +13050,7 @@ impl KernelHandle for LibreFangKernel {
         tool_name: &str,
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
+        session_id: Option<&str>,
     ) -> Result<ToolApprovalSubmission, String> {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
@@ -13086,10 +13087,7 @@ impl KernelHandle for LibreFangKernel {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
-            // session_id is intentionally left None here — the deferred tool path
-            // does not have session context available at submit time.  Session-scoped
-            // approvals are created through the blocking request_approval() path instead.
-            session_id: None,
+            session_id: session_id.map(|s| s.to_string()),
         };
 
         self.approval_manager
