@@ -66,7 +66,6 @@ export function TerminalPage() {
   const [isRoot, setIsRoot] = useState(false);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [pendingWindowId, setPendingWindowId] = useState<string | null>(null);
-  const [serverOs, setServerOs] = useState<string>("linux");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
   const {
@@ -74,6 +73,7 @@ export function TerminalPage() {
     isError: terminalHealthError,
   } = useTerminalHealth({ enabled: terminalEnabled === true });
 
+  const serverOs = terminalHealth?.os ?? "linux";
   const tmuxAvailable = !terminalHealthError && (terminalHealth?.tmux ?? false);
   const maxWindows = terminalHealth?.max_windows ?? 16;
 
@@ -88,11 +88,7 @@ export function TerminalPage() {
     }
   }, [terminalEnabled, navigate]);
 
-  useEffect(() => {
-    if (terminalHealth?.os) {
-      setServerOs(terminalHealth.os);
-    }
-  }, [terminalHealth]);
+
 
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -224,7 +220,9 @@ export function TerminalPage() {
     };
   }, [t, terminalEnabled, queryClient]);
 
-  connectRef.current = connect;
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
