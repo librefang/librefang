@@ -117,6 +117,11 @@ pub struct PromptContext {
     pub recalled_memories: Vec<(String, String)>,
     /// Skill summary text (from kernel.build_skill_summary()).
     pub skill_summary: String,
+    /// Total number of enabled skills represented in `skill_summary`.
+    /// Used for progressive disclosure: when this exceeds
+    /// `SKILL_INLINE_THRESHOLD`, only skill names are shown inline with
+    /// a hint to use `skill_list` for details.
+    pub skill_count: usize,
     /// Prompt context from prompt-only skills.
     pub skill_prompt_context: String,
     /// MCP server/tool summary text.
@@ -211,6 +216,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(build_skills_section(
             &ctx.skill_summary,
             &ctx.skill_prompt_context,
+            ctx.skill_count,
         ));
     }
 
@@ -446,10 +452,66 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
     out
 }
 
-fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
-    let mut out = String::from("## Skills\n");
-    if !skill_summary.is_empty() {
-        // Mandatory skill loading language — ensures agents proactively use skills
+/// When skill count exceeds this threshold, the system prompt uses a compact
+/// summary listing only skill names and instructs the agent to call
+/// `skill_list` for full descriptions. Below or at this threshold, full
+/// skill descriptions are inlined. Matches Hermes-Agent's design.
+pub const SKILL_INLINE_THRESHOLD: usize = 10;
+
+/// Build the skills index block for inclusion in a system prompt.
+///
+/// Implements progressive disclosure:
+/// - `skill_count <= SKILL_INLINE_THRESHOLD`: full descriptions are inlined
+///   inside `<available_skills>` (existing behaviour).
+/// - `skill_count > SKILL_INLINE_THRESHOLD`: only skill names are listed and
+///   the agent is told to call `skill_list` for details. This prevents the
+///   system prompt from bloating when many skills are installed.
+///
+/// `skill_summary` is the pre-built summary string from the kernel (either
+/// full descriptions or the plain name list — the caller always passes the
+/// full version; this function decides how much of it to surface).
+/// `skill_count` is the total number of enabled skills; `0` means unknown
+/// (falls back to inline mode for backward compatibility).
+pub fn build_skill_section(
+    skill_summary: &str,
+    skill_count: usize,
+    inline_threshold: usize,
+) -> String {
+    if skill_summary.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    let use_summary_mode = skill_count > inline_threshold && skill_count > 0;
+
+    if use_summary_mode {
+        // Extract only skill names from the full summary string.
+        // Lines that describe a skill look like:
+        //   `  - skill-name: description …`
+        // We collect the name tokens (part before the first `:`) and join
+        // them as a comma-separated list.
+        let names: Vec<&str> = skill_summary
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with("- ") {
+                    let after_dash = trimmed[2..].trim();
+                    // Take everything before the first `: ` as the name
+                    Some(after_dash.split(':').next().unwrap_or(after_dash).trim())
+                } else {
+                    None
+                }
+            })
+            .filter(|n| !n.is_empty())
+            .collect();
+
+        out.push_str("Available skills (use `skill_list` tool for full details): ");
+        out.push_str(&names.join(", "));
+        out.push('\n');
+        out.push_str("Use `skill_read_file` to load a skill before applying it.\n");
+    } else {
+        // Inline mode — full descriptions
         out.push_str(concat!(
             "Before replying, scan the skills below. If a skill matches or is even ",
             "partially relevant to your task, you MUST load it with `skill_read_file` ",
@@ -469,6 +531,19 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
         out.push_str(
             "Only proceed without loading a skill if genuinely none are relevant to the task.\n",
         );
+    }
+
+    out
+}
+
+fn build_skills_section(skill_summary: &str, prompt_context: &str, skill_count: usize) -> String {
+    let mut out = String::from("## Skills\n");
+    if !skill_summary.is_empty() {
+        out.push_str(&build_skill_section(
+            skill_summary,
+            skill_count,
+            SKILL_INLINE_THRESHOLD,
+        ));
     }
     // Skill evolution guidance — only inject when skills are actually installed
     if !skill_summary.is_empty() {
@@ -1142,6 +1217,69 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("web-search"));
+    }
+
+    #[test]
+    fn test_skill_section_inline_mode_below_threshold() {
+        // 2 skills ≤ 10 threshold → full descriptions inlined
+        let summary = "general:\n  - web-search: Search the web\n  - git-expert: Git commands\n";
+        let result = build_skill_section(summary, 2, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(result.contains("web-search"));
+        assert!(result.contains("Search the web"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_above_threshold() {
+        // 11 skills > 10 threshold → name list only
+        let mut summary = String::new();
+        for i in 1..=11 {
+            summary.push_str(&format!("  - skill-{i}: Description for skill {i}\n"));
+        }
+        let result = build_skill_section(&summary, 11, SKILL_INLINE_THRESHOLD);
+        // Names present
+        assert!(result.contains("skill-1"));
+        assert!(result.contains("skill-11"));
+        // Descriptions NOT inlined
+        assert!(!result.contains("Description for skill 1"));
+        // Hint to use skill_list tool
+        assert!(result.contains("skill_list"));
+        // No <available_skills> wrapper in summary mode
+        assert!(!result.contains("<available_skills>"));
+    }
+
+    #[test]
+    fn test_skill_section_zero_count_falls_back_to_inline() {
+        // skill_count == 0 (unknown) → inline mode regardless of threshold
+        let summary = "  - web-search: Search the web\n";
+        let result = build_skill_section(summary, 0, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_at_threshold_boundary_is_inline() {
+        // Exactly at threshold → inline mode (≤, not <)
+        let mut summary = String::new();
+        for i in 1..=SKILL_INLINE_THRESHOLD {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, SKILL_INLINE_THRESHOLD, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_one_above_threshold_is_summary() {
+        let count = SKILL_INLINE_THRESHOLD + 1;
+        let mut summary = String::new();
+        for i in 1..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        assert!(!result.contains("<available_skills>"));
+        assert!(result.contains("skill_list"));
     }
 
     #[test]
