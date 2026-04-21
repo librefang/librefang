@@ -105,7 +105,7 @@ impl SessionResetPolicy {
     /// # Parameters
     /// - `last_active`  – [`SystemTime`] of the last user/agent interaction.
     /// - `suspended`    – when `true`, always returns [`ResetReason::Suspended`]
-    ///                    regardless of the configured mode (hard-wipe flag).
+    ///   regardless of the configured mode (hard-wipe flag).
     ///
     /// Returns `Some(reason)` if the session should be reset, `None` if it is
     /// still valid.
@@ -445,9 +445,8 @@ mod tests {
         // Daily boundary is crossed → daily should fire.
         let policy = SessionResetPolicy {
             mode: ResetMode::Both,
-            idle_minutes: 10,
+            idle_minutes: 10_000_000,
             daily_at_hour: 4,
-            ..Default::default()
         };
         // Active 5 min ago → idle-safe, but if daily boundary crossed → daily fires.
         let last = SystemTime::now() - Duration::from_secs(25 * 3600);
