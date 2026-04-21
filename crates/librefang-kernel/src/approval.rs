@@ -477,10 +477,6 @@ impl ApprovalManager {
             }
         }
 
-        // Drop the read lock before the remove+send to minimise lock hold time.
-        drop(policy);
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
                 // Record TOTP grace on successful approval with TOTP.
