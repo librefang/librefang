@@ -82,7 +82,22 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
             Some(nl) => nl,
             None => safe_prefix.len(),
         };
-        let (chunk, rest) = remaining.split_at(split_at);
+        let raw_chunk_len = split_at;
+        let (chunk, rest) = remaining.split_at(raw_chunk_len);
+
+        // ── HTML-entity boundary guard ─────────────────────────────────────
+        // When streaming, the caller sends chunks with parse_mode=HTML.
+        // Splitting inside an HTML entity (e.g. `&lt;` → `&lt` + `<text`)
+        // causes Telegram to reject the chunk with "can't parse entities".
+        // Detect and avoid this by shrinking the chunk to the last complete
+        // entity boundary before the split point.
+        let chunk = adjust_html_entity_boundary(chunk);
+        // Recompute rest after the adjustment — the part we discarded
+        // (broken entity prefix + rest) must be prepended to `rest`.
+        let discard_len = raw_chunk_len - chunk.len();
+        let rest = &remaining[discard_len..];
+        // ─────────────────────────────────────────────────────────────────
+
         // Guard against zero-progress (degenerate limit=0 or limit=1 on a
         // 2-unit char that can't fit at all).
         if chunk.is_empty() {
@@ -116,7 +131,7 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
     chunks
 }
 
-/// Return the longest prefix of `s` whose UTF-16 length is ≤ `limit`.
+/// Return the longest prefix of `s` whose UTF-16 length is < `limit`.
 ///
 /// Uses binary search over the char-index table, so the result is always
 /// aligned to a char boundary — we never slice a surrogate pair in half.
@@ -147,7 +162,7 @@ pub fn truncate_to_utf16_limit(s: &str, limit: usize) -> &str {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
 
     // Binary-search for the largest prefix of `chars` whose cumulative
-    // UTF-16 length ≤ limit.
+    // UTF-16 length is strictly less than `limit`.
     let mut lo: usize = 0;
     let mut hi: usize = chars.len();
 
