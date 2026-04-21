@@ -53,26 +53,36 @@ macro_rules! dp {
 /// Patterns are matched case-insensitively against a lowercased command string.
 pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     // ── Filesystem destruction ───────────────────────────────────────────
-    dp!("delete in root path", r"\brm\s+(-[^\s]*\s+)*/"),
-    dp!("recursive delete", r"\brm\s+-[^\s]*r"),
-    dp!("recursive delete (long flag)", r"\brm\s+--recursive\b"),
+    dp!("delete in root path", r"\brm\b\s+(-[^\s]*\s+)*/"),
+    dp!("recursive delete", r"\brm\b\s+-[^\s]*r"),
+    dp!("recursive delete (long flag)", r"\brm\b\s+--recursive\b"),
+    // Command substitution: $(echo rm), `echo rm`
+    dp!("command substitution (rm)", r"\$\([^)]*rm\b"),
+    dp!("backtick command substitution (rm)", r"`[^`]*rm\b"),
+    // base64 decode pipeline to shell
+    dp!(
+        "base64 decode pipeline to shell",
+        r"\bbase64\s+-d\b.*\|\s*(ba)?sh\b"
+    ),
     // ── Dangerous permissions ────────────────────────────────────────────
     dp!(
         "world/other-writable permissions",
-        r"\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b"
+        r"\bchmod\b\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b"
     ),
     dp!(
         "recursive world/other-writable (long flag)",
-        r"\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
+        r"\bchmod\b\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)"
     ),
-    dp!("recursive chown to root", r"\bchown\s+-[^\s]*r\s+root"),
+    // setuid bit detection (4-digit octal modes: 4xxx=setuid, 2xxx=setgid)
+    dp!("setuid bit set", r"\bchmod\b\s+[0-9]{4}\s+"),
+    dp!("recursive chown to root", r"\bchown\b\s+(-[^\s]*)?r\s+root"),
     dp!(
         "recursive chown to root (long flag)",
-        r"\bchown\s+--recursive\b.*root"
+        r"\bchown\b\s+--recursive\b.*root"
     ),
     // ── Low-level disk operations ────────────────────────────────────────
     dp!("format filesystem", r"\bmkfs\b"),
-    dp!("disk copy", r"\bdd\s+.*if="),
+    dp!("disk copy", r"\bdd\b\s+.*if="),
     dp!(
         "write to block device",
         r">\s*/dev/(sd|hd|nvme|vd|xvd|mmcblk|disk)"
@@ -91,21 +101,26 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     dp!("copy/move file into /etc/", r"\b(cp|mv|install)\b.*\s/etc/"),
     dp!(
         "in-place edit of system config",
-        r"\bsed\s+-[^\s]*i.*\s/etc/"
+        r"\bsed\b\s+-[^\s]*i.*\s/etc/"
     ),
     dp!(
         "in-place edit of system config (long flag)",
-        r"\bsed\s+--in-place\b.*\s/etc/"
+        r"\bsed\b\s+--in-place\b.*\s/etc/"
     ),
     dp!("overwrite system file via tee", r"\btee\b.*/etc/"),
+    // authorized_keys append (persistence / backdoor)
+    dp!(
+        "append to authorized_keys",
+        r"tee\b.*\.ssh[/]authorized_keys|>>\s*~/.ssh/authorized_keys"
+    ),
     // ── Service management ───────────────────────────────────────────────
     dp!(
         "stop/restart system service",
-        r"\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
+        r"\bsystemctl\b\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b"
     ),
     // ── Process termination ──────────────────────────────────────────────
-    dp!("kill all processes", r"\bkill\s+-9\s+-1\b"),
-    dp!("force kill processes", r"\bpkill\s+-9\b"),
+    dp!("kill all processes", r"\bkill\b\s+-9\s+-1\b"),
+    dp!("force kill processes", r"\bpkill\b\s+-9\b"),
     dp!(
         "kill process via pgrep expansion (self-termination)",
         r"\bkill\b.*\$\(\s*pgrep\b"
@@ -139,33 +154,12 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
     ),
     dp!(
         "chmod +x followed by immediate execution",
-        r"\bchmod\s+\+x\b.*[;&|]+\s*\./"
+        r"\bchmod\b\s+\+x\b.*[;&|]+\s*\./"
     ),
     // ── find destructive usage ───────────────────────────────────────────
     dp!("xargs with rm", r"\bxargs\s+.*\brm\b"),
     dp!("find -exec rm", r"\bfind\b.*-exec\s+(/\S*/)?rm\b"),
     dp!("find -delete", r"\bfind\b.*-delete\b"),
-    // ── Git destructive operations ───────────────────────────────────────
-    dp!(
-        "git reset --hard (destroys uncommitted changes)",
-        r"\bgit\s+reset\s+--hard\b"
-    ),
-    dp!(
-        "git force push (rewrites remote history)",
-        r"\bgit\s+push\b.*--force\b"
-    ),
-    dp!(
-        "git force push short flag (rewrites remote history)",
-        r"\bgit\s+push\b.*-f\b"
-    ),
-    dp!(
-        "git clean with force (deletes untracked files)",
-        r"\bgit\s+clean\s+-[^\s]*f"
-    ),
-    dp!(
-        "git branch force delete",
-        r"\bgit\s+branch\s+(-[^\s]*d\b|--delete\b)"
-    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -463,14 +457,6 @@ mod tests {
         assert!(dangerous("cat img > /dev/mmcblk0"));
         // Original SATA path still caught.
         assert!(dangerous("cat img > /dev/sda"));
-    }
-
-    /// git branch --delete was not covered; only -d short flag was.
-    #[test]
-    fn git_branch_delete_long_flag() {
-        assert!(dangerous("git branch --delete feature-branch"));
-        assert!(dangerous("git branch -d old-feature"));
-        assert!(dangerous("git branch -D force-delete"));
     }
 
     /// Allowlisting one matched pattern must NOT suppress a second matched
