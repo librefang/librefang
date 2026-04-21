@@ -5,6 +5,57 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.21] - 2026-04-21
+
+### Added
+
+- Complete trigger feature — persistence, CRUD API, CLI subcommands, dashboard UI (#2827) (#2830) (@houko)
+- Add account_id to channel_send for explicit multi-bot routing (#2845) (@houko)
+- Add per-agent auto_evolve flag to skip background skill review (#2846) (@houko)
+- Implement MCP Roots capability (#2847) (@houko)
+
+### Fixed
+
+- Correct query invalidation and missing data flow across mutations (#2770) (@leszek3737)
+- Harden workflow save and draft state (#2781) (@leszek3737)
+- Align mutation flows across config channels goals and hands (#2782) (@leszek3737)
+- Unify dashboard query hooks and flow guards (#2783) (@leszek3737)
+- Exempt Unix/Slack-style timestamps from PII phone check (#2795) (@neo-wanderer)
+- Change wizard default ollama model to gemma3:4b (#2811) (@houko)
+- Strip empty assistant messages unconditionally (#2812) (@houko)
+- Auto-delete At-schedule jobs after execution (#2808) (#2814) (@houko)
+- Reimplement apply_seccomp_allowlist with libc::SYS_* constants (#2817) (@houko)
+- Allow dashboard static assets through auth gate (#2824) (@leszek3737)
+- Force wildcard bind for api_listen in Docker (#2825) (@leszek3737)
+- Resolve channel_bridge test deadlock that blocked CI for 6h (#2829) (@houko)
+- ChatPage — type safety, cache correctness, cleanup (#2832) (@leszek3737)
+- Correct event sequence in show_progress=false test (#2834) (@houko)
+- Exempt dashboard and static paths from GCRA rate limiter (#2835) (@houko)
+- Use main as default branch for ~/.librefang git repo (#2837) (@houko)
+- Task_claim() now matches assigned_to by name as well as UUID (#2844) (@houko)
+- Dashboard refresh no longer drops history — unify webui session with canonical (#2848) (@houko)
+- Type-safety and RC-safe fixes (#2849) (@leszek3737)
+- Unbreak --all-features build + stop warning on local LLM providers (#2850) (@houko)
+- Per-job session_mode override to fix context accumulation (#2647) (#2851) (@houko)
+- Proactive extraction loses JSON mode through fork path + log noise cleanup (#2852) (@houko)
+
+### Changed
+
+- RC cleanup for ModelsPage (#2833) (@leszek3737)
+- Relocate config backups under ~/.librefang/backups/ (#2838) (@houko)
+- Move stray state/log files out of ~/.librefang root (#2840) (@houko)
+
+### Documentation
+
+- Add unofficial wiki link and DeepWiki badge to READMEs (#2821) (@leszek3737)
+
+### Maintenance
+
+- Run Windows and macOS tests on affected crates for every Rust PR (#2819) (@houko)
+- Follow-up cleanup from #2783 review (#2820) (@houko)
+- Ignore rust_out build artifact (#2836) (@houko)
+
+
 ## [2026.4.20] - 2026-04-20
 
 ### Added
