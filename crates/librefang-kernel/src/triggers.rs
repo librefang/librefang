@@ -880,7 +880,7 @@ mod tests {
             }),
         );
 
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].agent_id, watcher);
         assert!(matches[0].message.contains("new-agent"));
@@ -908,7 +908,7 @@ mod tests {
                 name: "coder".to_string(),
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
 
         // This should NOT match
         let event2 = Event::new(
@@ -919,7 +919,7 @@ mod tests {
                 name: "researcher".to_string(),
             }),
         );
-        assert_eq!(engine.evaluate(&event2).len(), 0);
+        assert_eq!(engine.evaluate(&event2).0.len(), 0);
     }
 
     #[test]
@@ -944,10 +944,10 @@ mod tests {
         );
 
         // First two should match
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
         // Third should not
-        assert_eq!(engine.evaluate(&event).len(), 0);
+        assert_eq!(engine.evaluate(&event).0.len(), 0);
     }
 
     #[test]
@@ -993,7 +993,7 @@ mod tests {
                 usage_percent: 85.0,
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
     }
 
     // -- reassign_agent_triggers (#519) ------------------------------------
@@ -1019,7 +1019,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 2);
         assert!(matches.iter().all(|m| m.agent_id == new_agent));
     }
@@ -1140,7 +1140,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
             matches[0].agent_id, owner,
@@ -1170,7 +1170,7 @@ mod tests {
                 status: "ok".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
             matches[0].agent_id, target,
@@ -1207,7 +1207,7 @@ mod tests {
                 name: "worker-1".to_string(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].agent_id, target);
     }
@@ -1266,9 +1266,9 @@ mod tests {
         );
 
         // First evaluation fires
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
         // Immediate second evaluation should be suppressed by cooldown
-        assert_eq!(engine.evaluate(&event).len(), 0);
+        assert_eq!(engine.evaluate(&event).0.len(), 0);
     }
 
     #[test]
@@ -1292,9 +1292,9 @@ mod tests {
             }),
         );
 
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
     }
 
     #[test]
@@ -1324,7 +1324,7 @@ mod tests {
         );
 
         // Only 3 should fire due to budget
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 3);
     }
 
@@ -1449,7 +1449,7 @@ mod tests {
             EventTarget::Broadcast,
             EventPayload::Custom(payload),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(
             matches.len(),
             1,
@@ -1479,7 +1479,7 @@ mod tests {
                 agent_id: AgentId::new(),
             }),
         );
-        let matches = engine.evaluate(&event);
+        let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert!(matches[0].message.contains("user.prefs"));
     }
@@ -1507,7 +1507,7 @@ mod tests {
                 agent_id: AgentId::new(),
             }),
         );
-        assert_eq!(engine.evaluate(&event).len(), 1);
+        assert_eq!(engine.evaluate(&event).0.len(), 1);
 
         // Should NOT match (different key)
         let event2 = Event::new(
@@ -1523,6 +1523,6 @@ mod tests {
         for mut entry in engine.triggers.iter_mut() {
             entry.cooldown_secs = Some(0);
         }
-        assert_eq!(engine.evaluate(&event2).len(), 0);
+        assert_eq!(engine.evaluate(&event2).0.len(), 0);
     }
 }
