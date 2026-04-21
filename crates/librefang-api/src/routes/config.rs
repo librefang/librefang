@@ -37,6 +37,61 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+/// Best-effort RSS memory probe for the running process, in MB.
+///
+/// Shared between `/api/status` and `/api/dashboard/snapshot` so both
+/// endpoints surface the same number. Returns `None` on platforms where
+/// neither `ps` nor `tasklist` is available, or when parsing the output
+/// fails — callers should render a placeholder in that case rather than
+/// treating `0` as a real reading.
+fn current_process_rss_mb() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("tasklist")
+            .args([
+                "/FI",
+                &format!("PID eq {}", std::process::id()),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| {
+                // tasklist CSV: "name","pid","session","session#","mem usage"
+                let fields: Vec<&str> = s.trim().split(',').collect();
+                fields
+                    .last()
+                    .map(|v| {
+                        v.trim_matches('"')
+                            .replace(" K", "")
+                            .replace(",", "")
+                            .replace(" ", "")
+                    })
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|kb| kb / 1024)
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -81,54 +136,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // Get process RSS memory in MB (best-effort, cross-platform)
-    let memory_used_mb: Option<u64> = {
-        #[cfg(unix)]
-        {
-            std::process::Command::new("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|kb| kb / 1024)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            std::process::Command::new("tasklist")
-                .args([
-                    "/FI",
-                    &format!("PID eq {}", std::process::id()),
-                    "/FO",
-                    "CSV",
-                    "/NH",
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .and_then(|s| {
-                    // tasklist CSV: "name","pid","session","session#","mem usage"
-                    let fields: Vec<&str> = s.trim().split(',').collect();
-                    fields
-                        .last()
-                        .map(|v| {
-                            v.trim_matches('"')
-                                .replace(" K", "")
-                                .replace(",", "")
-                                .replace(" ", "")
-                        })
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(|kb| kb / 1024)
-                })
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            None
-        }
-    };
+    let memory_used_mb = current_process_rss_mb();
 
     let cfg = state.kernel.config_snapshot();
     Json(serde_json::json!({
@@ -2157,11 +2165,18 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .map(|s| s.len())
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
+    // Runtime stats shared with `/api/status` — the dashboard RuntimePage
+    // reads `uptime_seconds` / `memory_used_mb` out of this snapshot, so
+    // leaving them out renders the KPI tiles as "-".
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+    let memory_used_mb = current_process_rss_mb();
     let status = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
         "active_agent_count": active_agent_count,
         "session_count": session_count,
+        "uptime_seconds": uptime_seconds,
+        "memory_used_mb": memory_used_mb,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
