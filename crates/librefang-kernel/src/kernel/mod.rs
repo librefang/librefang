@@ -1363,6 +1363,8 @@ impl LibreFangKernel {
         ensure_workspaces_layout(&config.home_dir)?;
         migrate_legacy_agent_dirs(&config.home_dir, &config.effective_agent_workspaces_dir());
         migrate_root_backups(&config.home_dir);
+        migrate_root_state_files(&config.home_dir);
+        cleanup_legacy_root_logs(&config.home_dir);
 
         // Initialize memory substrate
         let db_path = config
@@ -1758,8 +1760,13 @@ impl LibreFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
-        model_catalog.load_suppressed(&config.home_dir.join("suppressed_providers.json"));
-        model_catalog.load_overrides(&config.home_dir.join("model_overrides.json"));
+        model_catalog.load_suppressed(
+            &config
+                .home_dir
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
+        model_catalog.load_overrides(&config.home_dir.join("data").join("model_overrides.json"));
         model_catalog.detect_auth();
         // Apply region selections first (lower priority than explicit provider_urls)
         if !config.provider_regions.is_empty() {
@@ -1794,8 +1801,8 @@ impl LibreFangKernel {
                 config.provider_proxy_urls.len()
             );
         }
-        // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
-        let custom_models_path = config.home_dir.join("custom_models.json");
+        // Load user's custom models from ~/.librefang/data/custom_models.json (highest priority)
+        let custom_models_path = config.home_dir.join("data").join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
         let available_count = model_catalog.available_models().len();
         let total_count = model_catalog.list_models().len();
@@ -7621,7 +7628,7 @@ system_prompt = "You are a helpful assistant."
 
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
@@ -8276,7 +8283,7 @@ system_prompt = "You are a helpful assistant."
     pub async fn start_background_agents(self: &Arc<Self>) {
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
-        let state_path = self.home_dir_boot.join("hand_state.json");
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());

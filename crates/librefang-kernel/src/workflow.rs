@@ -361,12 +361,12 @@ impl WorkflowEngine {
 
     /// Create a new workflow engine with run persistence.
     ///
-    /// Completed and failed runs are persisted to `<home_dir>/workflow_runs.json`.
+    /// Completed and failed runs are persisted to `<home_dir>/data/workflow_runs.json`.
     pub fn new_with_persistence(home_dir: &Path) -> Self {
         Self {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
-            persist_path: Some(home_dir.join("workflow_runs.json")),
+            persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
         }
     }
 

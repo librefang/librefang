@@ -5200,7 +5200,9 @@ mod monitoring_tests {
             skillhub_cache: dashmap::DashMap::new(),
             provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
-            webhook_store: crate::webhook_store::WebhookStore::load(home_dir.join("webhooks.json")),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("data").join("webhooks.json"),
+            ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             #[cfg(feature = "telemetry")]
             prometheus_handle: None,

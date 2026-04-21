@@ -81,13 +81,13 @@ pub struct CronScheduler {
 impl CronScheduler {
     /// Create a new scheduler.
     ///
-    /// `home_dir` is the LibreFang data directory; jobs are persisted to
-    /// `<home_dir>/cron_jobs.json`. `max_total_jobs` caps the total number
-    /// of jobs across all agents.
+    /// `home_dir` is the LibreFang home directory; jobs are persisted to
+    /// `<home_dir>/data/cron_jobs.json`. `max_total_jobs` caps the total
+    /// number of jobs across all agents.
     pub fn new(home_dir: &Path, max_total_jobs: usize) -> Self {
         Self {
             jobs: DashMap::new(),
-            persist_path: home_dir.join("cron_jobs.json"),
+            persist_path: home_dir.join("data").join("cron_jobs.json"),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
         }
     }

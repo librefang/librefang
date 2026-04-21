@@ -1580,22 +1580,12 @@ fn init_tracing_stderr(log_level: &str) {
 
     // Compact stderr format: in a one-shot CLI context the user cares about
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
-    // `daemon.log` keeps the full default format via the file layer below.
+    // One-shot CLI runs are transient — stderr is the only sink; the daemon
+    // has its own file appender under `logs/daemon.log`.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
         .compact();
-
-    // Also write logs to ~/.librefang/daemon.log
-    let log_dir = cli_librefang_home();
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_layer = std::fs::File::create(log_dir.join("daemon.log"))
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-        });
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
@@ -1607,11 +1597,7 @@ fn init_tracing_stderr(log_level: &str) {
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(file_layer)
-        .init();
+    registry.with(env_filter).with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -1650,9 +1636,11 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
 fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) {
+    // `custom_log_dir` is already a log directory (typically `daemon.log_dir`
+    // from config); use it as-is. Otherwise default to `<home>/logs/`.
     let log_dir = custom_log_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(cli_librefang_home);
+        .unwrap_or_else(|| cli_librefang_home().join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
 
@@ -9554,8 +9542,10 @@ fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         return;
     }
 
-    let tui_log_dir = daemon.log_dir.as_deref().unwrap_or(&daemon.home_dir);
-    let tui_log = tui_log_dir.join("tui.log");
+    let tui_log = match daemon.log_dir.as_deref() {
+        Some(dir) => dir.join("tui.log"),
+        None => daemon.home_dir.join("logs").join("tui.log"),
+    };
     if tui_log.exists() {
         ui::hint(&format!(
             "Daemon log not found; showing TUI log at {}",

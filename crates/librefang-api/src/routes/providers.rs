@@ -317,7 +317,11 @@ pub async fn set_model_overrides(
     Path(id): Path<String>,
     Json(body): Json<librefang_types::model_catalog::ModelOverrides>,
 ) -> impl IntoResponse {
-    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let overrides_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("model_overrides.json");
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -345,7 +349,11 @@ pub async fn delete_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let overrides_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("model_overrides.json");
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -758,7 +766,11 @@ pub async fn add_custom_model(
     // Persist to disk. If save fails, roll back the in-memory add so the
     // catalog stays consistent with what's on disk — otherwise the caller
     // sees "added" now but the model vanishes on the next daemon restart.
-    let custom_path = state.kernel.home_dir().join("custom_models.json");
+    let custom_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
         catalog.remove_custom_model(&id);
@@ -797,7 +809,11 @@ pub async fn remove_custom_model(
             .into_json_tuple();
     }
 
-    let custom_path = state.kernel.home_dir().join("custom_models.json");
+    let custom_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
         if let Some(entry) = snapshot {
@@ -864,7 +880,13 @@ pub async fn set_provider_key(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.unsuppress_provider(&name);
-        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
         catalog.detect_auth();
     }
 
@@ -1057,7 +1079,13 @@ pub async fn delete_provider_key(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.suppress_provider(&name);
-        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
         catalog.detect_auth();
     }
 

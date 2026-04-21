@@ -136,6 +136,65 @@ pub(super) fn migrate_root_backups(home_dir: &Path) {
     }
 }
 
+/// One-shot cleanup: remove stray log files left at the home-dir root by
+/// older CLI builds. Both were created (and truncated) by every CLI
+/// invocation via a `tracing_subscriber` file layer, so they never held
+/// useful history — modern CLI builds write to `logs/` (or drop the layer
+/// entirely for one-shot commands) and the real daemon logs already live
+/// in `logs/daemon.log`.
+pub(super) fn cleanup_legacy_root_logs(home_dir: &Path) {
+    for name in ["daemon.log", "tui.log"] {
+        let path = home_dir.join(name);
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// One-shot migration: relocate runtime state JSON files that older versions
+/// wrote at the home-dir root into `data/`. Moves only the filenames LibreFang
+/// is known to produce; unknown files are left alone.
+pub(super) fn migrate_root_state_files(home_dir: &Path) {
+    const STATE_FILES: &[&str] = &[
+        "cron_jobs.json",
+        "hand_state.json",
+        "sessions.json",
+        "workflow_runs.json",
+        "custom_models.json",
+        "model_overrides.json",
+        "suppressed_providers.json",
+        "webhooks.json",
+    ];
+    let data_dir = home_dir.join("data");
+    let mut created_data_dir = false;
+    for name in STATE_FILES {
+        let src = home_dir.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        if !created_data_dir {
+            if std::fs::create_dir_all(&data_dir).is_err() {
+                return;
+            }
+            created_data_dir = true;
+        }
+        let dest = data_dir.join(name);
+        if dest.exists() {
+            // Newer version already wrote the canonical copy — discard the
+            // stale root duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate state file: {e}"
+            );
+        }
+    }
+}
+
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
@@ -153,7 +212,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\ndaemon.log\nhand_state.json\nsessions.json\nworkflow_runs.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
     let _ = std::process::Command::new("git")
