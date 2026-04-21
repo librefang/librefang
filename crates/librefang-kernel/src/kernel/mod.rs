@@ -2144,6 +2144,19 @@ impl LibreFangKernel {
             }
         }
 
+        // Initialize trigger engine and reload persisted triggers
+        let trigger_engine = TriggerEngine::with_config(&trigger_config, &trigger_home_dir);
+        match trigger_engine.load() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Loaded {count} trigger job(s) from disk");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load trigger jobs: {e}");
+            }
+        }
+
         // Initialize execution approval manager
         let approval_manager = crate::approval::ApprovalManager::new_with_db(
             config.approval.clone(),
@@ -2220,6 +2233,7 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
         let trigger_config = config.triggers.clone();
+        let trigger_home_dir = config.home_dir.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -2250,7 +2264,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
-            triggers: TriggerEngine::with_config(&trigger_config),
+            triggers: trigger_engine,
             background,
             audit_log: Arc::new(AuditLog::with_db_anchored(
                 memory.usage_conn(),
@@ -7127,6 +7141,9 @@ system_prompt = "You are a helpful assistant."
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
         self.triggers.remove_agent_triggers(agent_id);
+        if let Err(e) = self.triggers.persist() {
+            warn!("Failed to persist trigger jobs after agent deletion: {e}");
+        }
 
         // Remove cron jobs so they don't linger as orphans (#504)
         let cron_removed = self.cron_scheduler.remove_agent_jobs(agent_id);
@@ -7544,6 +7561,9 @@ system_prompt = "You are a helpful assistant."
                         "Dropping saved triggers for removed hand role during reactivation"
                     );
                 }
+            }
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after hand reactivation: {e}");
             }
         }
 
@@ -8068,6 +8088,11 @@ system_prompt = "You are a helpful assistant."
 
         // Evaluate triggers before publishing (so describe_event works on the event)
         let triggered = self.triggers.evaluate(&event);
+        if !triggered.is_empty() {
+            if let Err(e) = self.triggers.persist() {
+                warn!("Failed to persist trigger jobs after fire: {e}");
+            }
+        }
 
         // Publish to the event bus
         self.event_bus.publish(event).await;
@@ -8131,23 +8156,39 @@ system_prompt = "You are a helpful assistant."
                 )));
             }
         }
-        Ok(self.triggers.register_with_target(
+        let id = self.triggers.register_with_target(
             agent_id,
             pattern,
             prompt_template,
             max_fires,
             target_agent,
-        ))
+        );
+        if let Err(e) = self.triggers.persist() {
+            warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
+        }
+        Ok(id)
     }
 
     /// Remove a trigger by ID.
     pub fn remove_trigger(&self, trigger_id: TriggerId) -> bool {
-        self.triggers.remove(trigger_id)
+        let removed = self.triggers.remove(trigger_id);
+        if removed {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after remove: {e}");
+            }
+        }
+        removed
     }
 
     /// Enable or disable a trigger. Returns true if found.
     pub fn set_trigger_enabled(&self, trigger_id: TriggerId, enabled: bool) -> bool {
-        self.triggers.set_enabled(trigger_id, enabled)
+        let found = self.triggers.set_enabled(trigger_id, enabled);
+        if found {
+            if let Err(e) = self.triggers.persist() {
+                warn!(%trigger_id, "Failed to persist trigger jobs after set_enabled: {e}");
+            }
+        }
+        found
     }
 
     /// List all triggers (optionally filtered by agent).
@@ -8358,6 +8399,11 @@ system_prompt = "You are a helpful assistant."
                                             migrated = t_migrated,
                                             "Reassigned triggers after restart"
                                         );
+                                        if let Err(e) = self.triggers.persist() {
+                                            warn!(
+                                                "Failed to persist trigger jobs after hand restore: {e}"
+                                            );
+                                        }
                                     }
                                 }
                             }

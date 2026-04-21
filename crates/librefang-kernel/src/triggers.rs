@@ -7,8 +7,10 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
+use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::event::{Event, EventPayload, LifecycleEvent, SystemEvent};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -133,10 +135,13 @@ pub struct TriggerEngine {
     max_triggers_per_event: usize,
     /// Default cooldown duration (seconds) applied when a trigger has no override.
     default_cooldown_secs: u64,
+    /// Path to the persistence file (`<home>/trigger_jobs.json`).
+    /// `None` means no persistence (used in tests).
+    persist_path: Option<PathBuf>,
 }
 
 impl TriggerEngine {
-    /// Create a new trigger engine with default settings.
+    /// Create a new trigger engine with default settings and no persistence.
     pub fn new() -> Self {
         Self {
             triggers: DashMap::new(),
@@ -144,17 +149,22 @@ impl TriggerEngine {
             last_fired: DashMap::new(),
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            persist_path: None,
         }
     }
 
-    /// Create a trigger engine configured from a `TriggersConfig`.
-    pub fn with_config(config: &librefang_types::config::TriggersConfig) -> Self {
+    /// Create a trigger engine configured from a `TriggersConfig`, with persistence.
+    ///
+    /// `home_dir` is the LibreFang data directory; triggers are persisted to
+    /// `<home_dir>/trigger_jobs.json`.
+    pub fn with_config(config: &librefang_types::config::TriggersConfig, home_dir: &Path) -> Self {
         Self {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
             max_triggers_per_event: config.max_per_event.max(1),
             default_cooldown_secs: config.cooldown_secs,
+            persist_path: Some(home_dir.join("trigger_jobs.json")),
         }
     }
 
@@ -168,6 +178,58 @@ impl TriggerEngine {
             max_triggers_per_event: max.max(1),
             ..Self::new()
         }
+    }
+
+    // -- Persistence ----------------------------------------------------------
+
+    /// Load persisted triggers from disk and rebuild the agent index.
+    ///
+    /// Returns the number of triggers loaded. Returns `Ok(0)` if the
+    /// persistence file does not exist or no path is configured.
+    pub fn load(&self) -> LibreFangResult<usize> {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to read trigger jobs: {e}")))?;
+        let triggers: Vec<Trigger> = serde_json::from_str(&data)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
+        let count = triggers.len();
+        for trigger in triggers {
+            let id = trigger.id;
+            let agent_id = trigger.agent_id;
+            self.triggers.insert(id, trigger);
+            self.agent_triggers.entry(agent_id).or_default().push(id);
+        }
+        info!(count, "Loaded trigger jobs from disk");
+        Ok(count)
+    }
+
+    /// Persist all triggers to disk via atomic write (write to `.tmp`, then rename).
+    ///
+    /// Does nothing when no persistence path is configured.
+    pub fn persist(&self) -> LibreFangResult<()> {
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let triggers: Vec<Trigger> = self.triggers.iter().map(|e| e.value().clone()).collect();
+        let data = serde_json::to_string_pretty(&triggers).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to serialize trigger jobs: {e}"))
+        })?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to write trigger jobs temp file: {e}"))
+        })?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            LibreFangError::Internal(format!("Failed to rename trigger jobs file: {e}"))
+        })?;
+        debug!(count = triggers.len(), "Persisted trigger jobs");
+        Ok(())
     }
 
     /// Register a new trigger.
