@@ -105,6 +105,12 @@ impl LlmError {
                             && (msg.contains("exceeded") || msg.contains("limit"))
                         {
                             FailoverReason::CreditExhausted
+                        } else if msg.contains("model")
+                            || msg.contains("permission")
+                            || msg.contains("not found")
+                            || msg.contains("does not exist")
+                        {
+                            FailoverReason::ModelUnavailable
                         } else {
                             FailoverReason::Unknown
                         }
