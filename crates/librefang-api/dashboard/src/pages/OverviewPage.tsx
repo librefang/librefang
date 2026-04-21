@@ -359,7 +359,16 @@ export function OverviewPage() {
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-brand" /></div>
                 <span className="text-xs text-text-dim flex-1">Hostname</span>
-                <span className="text-sm font-mono font-black truncate max-w-[140px]" title={versionInfo?.hostname}>{versionInfo?.hostname || "-"}</span>
+                {/* `/api/version` is public and deliberately omits
+                    hostname (per-machine identifier). Read from the
+                    authenticated snapshot first; fall back to versionInfo
+                    for older daemons. */}
+                <span
+                  className="text-sm font-mono font-black truncate max-w-[140px]"
+                  title={snapshot?.status?.hostname || versionInfo?.hostname}
+                >
+                  {snapshot?.status?.hostname || versionInfo?.hostname || "-"}
+                </span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0"><User className="w-4 h-4 text-accent" /></div>

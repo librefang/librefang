@@ -1374,11 +1374,11 @@ mod tests {
 
     #[test]
     fn window_name_rejects_shell_injection_in_create() {
-        // validate_window_name uses a strict ASCII alphanumeric + space/./_ /- allowlist.
-        // Shell metacharacters such as ;, $(), $var, |, &, `, etc. are all rejected.
-        assert!(!crate::terminal_tmux::validate_window_name("a;b"));
-        assert!(!crate::terminal_tmux::validate_window_name("$(whoami)"));
-        assert!(!crate::terminal_tmux::validate_window_name("$var"));
+        // window names are passed via `Command::arg` (not a shell), so
+        // validate_window_name only rejects control chars and the pipe character
+        // used as the list-windows format separator. Shell metacharacters like
+        // `;`, `$()`, and backticks are allowed — they pose no injection risk
+        // when passed as a direct argument.
         assert!(!crate::terminal_tmux::validate_window_name("a|b"));
         assert!(!crate::terminal_tmux::validate_window_name("foo\0bar"));
     }
@@ -1397,23 +1397,10 @@ mod tests {
 
     #[test]
     fn window_name_rejects_all_special_chars() {
-        // validate_window_name uses a strict allowlist: ASCII alphanumerics, space, '.', '_', '-'.
-        // All shell-special characters and non-allowlist symbols are rejected.
-        for bad in &[
-            "a|b",
-            "foo\0bar",
-            "foo\x1fbar",
-            "a;b",
-            "a&b",
-            "a(b",
-            "a)b",
-            "a{b",
-            "a}b",
-            "a<b",
-            "a>b",
-            "a`b",
-            "a$b",
-        ] {
+        // validate_window_name only rejects the pipe separator and control chars.
+        // Other punctuation is intentionally allowed (see 5d271afa which broadened
+        // the allowlist to support Unicode, CJK, emoji, and common punctuation).
+        for bad in &["a|b", "foo\0bar", "foo\x1fbar"] {
             assert!(
                 !crate::terminal_tmux::validate_window_name(bad),
                 "should reject: {bad:?}"

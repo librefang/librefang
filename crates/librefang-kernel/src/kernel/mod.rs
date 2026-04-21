@@ -485,6 +485,11 @@ pub struct LibreFangKernel {
     budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
     /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Checkpoint manager — takes automatic shadow-git snapshots before every
+    /// `file_write` / `apply_patch` tool call.  `None` when the base
+    /// directory could not be resolved at boot.
+    pub(crate) checkpoint_manager:
+        Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1897,6 +1902,13 @@ impl LibreFangKernel {
             &config.registry.registry_mirror,
         );
 
+        // One-shot: reclaim the duplicate registry checkout that older
+        // librefang versions maintained under `~/.librefang/cache/registry/`.
+        // Catalog sync now reads directly from `~/.librefang/registry/` (the
+        // directory registry_sync already maintains), so the duplicate is
+        // pure waste.
+        librefang_runtime::catalog_sync::remove_legacy_cache_dirs(&config.home_dir);
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
@@ -2380,6 +2392,7 @@ impl LibreFangKernel {
 
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
+        let checkpoint_base_dir = config.home_dir.clone();
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -2480,6 +2493,13 @@ impl LibreFangKernel {
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            checkpoint_manager: {
+                let cp_dir = checkpoint_base_dir
+                    .join(librefang_runtime::checkpoint_manager::CHECKPOINT_BASE);
+                Some(Arc::new(
+                    librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
+                ))
+            },
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -3647,6 +3667,7 @@ system_prompt = "You are a helpful assistant."
             None, // no hooks
             ctx_window,
             None, // no process manager
+            None, // no checkpoint manager (ephemeral /btw — side questions only)
             None, // no content blocks
             None, // no proactive memory
             None, // no context engine
@@ -4795,6 +4816,7 @@ system_prompt = "You are a helpful assistant."
                 Some(&kernel_clone.hooks),
                 ctx_window,
                 Some(&kernel_clone.process_manager),
+                kernel_clone.checkpoint_manager.clone(),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
@@ -6105,6 +6127,7 @@ system_prompt = "You are a helpful assistant."
             Some(&self.hooks),
             ctx_window,
             Some(&self.process_manager),
+            self.checkpoint_manager.clone(),
             content_blocks,
             proactive_memory,
             self.context_engine_for_agent(&manifest),
@@ -14051,6 +14074,7 @@ impl LibreFangKernel {
             process_manager: Some(&self.process_manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            checkpoint_manager: self.checkpoint_manager.as_ref(),
         }
     }
 
