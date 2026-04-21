@@ -21,8 +21,8 @@
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use librefang_llm_driver::FailoverReason;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::warn;
 
 /// Default sleep duration when a provider returns a rate-limit error without a
@@ -239,16 +239,16 @@ impl LlmDriver for FallbackChain {
             // safely fall through to the next provider — the caller would
             // receive a corrupted concatenation of this provider's partial
             // output and a fresh response from provider B.
-            let text_emitted = Arc::new(AtomicBool::new(false));
+            let (text_emit_tx, mut text_emit_rx) = watch::channel(false);
             let (wrap_tx, mut wrap_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
 
-            // Relay loop: forward events to the real sender, track TextDelta.
+            // Relay loop: forward events to the real sender, signal on TextDelta.
             let tx_for_relay = tx.clone();
-            let text_emit_flag = text_emitted.clone();
+            let text_emit_flag = text_emit_tx.clone();
             tokio::spawn(async move {
                 while let Some(event) = wrap_rx.recv().await {
                     if let StreamEvent::TextDelta { .. } = &event {
-                        text_emit_flag.store(true, Ordering::SeqCst);
+                        let _ = text_emit_flag.send(true);
                     }
                     let _ = tx_for_relay.send(event).await;
                 }
@@ -275,7 +275,7 @@ impl LlmDriver for FallbackChain {
                         // If any text was emitted before the error, we cannot
                         // safely fall through — bail out with the error rather
                         // than let the caller receive concatenated garbage.
-                        _ if text_emitted.load(Ordering::SeqCst) => {
+                        _ if *text_emit_rx.borrow() => {
                             return Err(e);
                         }
                         FailoverReason::CreditExhausted
