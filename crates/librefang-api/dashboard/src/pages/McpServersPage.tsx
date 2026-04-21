@@ -89,6 +89,12 @@ interface ServerFormState {
   headers: string;
 }
 
+function makeLocalId() {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 const defaultForm: ServerFormState = {
   name: "",
   transportType: "stdio",
@@ -143,10 +149,10 @@ function configuredToForm(server: McpServerConfigured): ServerFormState {
     name: server.name,
     transportType: transport.type ?? "stdio",
     command: transport.command ?? "",
-    args: (transport.args ?? []).map(v => ({ id: crypto.randomUUID(), value: v })),
+    args: (transport.args ?? []).map(v => ({ id: makeLocalId(), value: v })),
     url: transport.url ?? "",
     timeout: server.timeout_secs ?? 30,
-    env: (server.env ?? []).map(v => ({ id: crypto.randomUUID(), value: v })),
+    env: (server.env ?? []).map(v => ({ id: makeLocalId(), value: v })),
     headers: (server.headers ?? []).join("\n"),
   };
 }
@@ -170,7 +176,7 @@ function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (item
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, { id: crypto.randomUUID(), value: "" }];
+    const next = [...items, { id: makeLocalId(), value: "" }];
     onChange(next);
     // Focus the newly added input after render
     setTimeout(() => {
@@ -228,7 +234,7 @@ function EnvEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, { id: crypto.randomUUID(), value: "" }];
+    const next = [...items, { id: makeLocalId(), value: "" }];
     onChange(next);
     setTimeout(() => {
       inputRefs.current[next.length - 1]?.focus();

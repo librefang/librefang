@@ -1,5 +1,5 @@
 import { formatDateTime } from "../lib/datetime";
-import { useState, useMemo, useDeferredValue } from "react";
+import { useState, useEffect, useMemo, useDeferredValue } from "react";
 import { useTranslation } from "react-i18next";
 import { type MemoryStatsResponse } from "../api";
 import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList } from "../lib/queries/memory";
@@ -170,8 +170,11 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const configQuery = useMemoryConfig();
   const updateConfig = useUpdateMemoryConfig();
 
-  const [form, setForm] = useState<MemoryConfigForm | null>(() =>
-    configQuery.data ? {
+  const [form, setForm] = useState<MemoryConfigForm | null>(null);
+
+  useEffect(() => {
+    if (!configQuery.data || form) return;
+    setForm({
       embedding_provider: configQuery.data.embedding_provider || "",
       embedding_model: configQuery.data.embedding_model || "",
       embedding_api_key_env: configQuery.data.embedding_api_key_env || "",
@@ -181,8 +184,8 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
       pm_auto_retrieve: configQuery.data.proactive_memory?.auto_retrieve ?? true,
       pm_extraction_model: configQuery.data.proactive_memory?.extraction_model || "",
       pm_max_retrieve: String(configQuery.data.proactive_memory?.max_retrieve ?? 10),
-    } : null
-  );
+    });
+  }, [configQuery.data, form]);
 
   const handleSave = async () => {
     if (!form) return;
