@@ -9012,6 +9012,14 @@ system_prompt = "You are a helpful assistant."
                                 > = kernel.clone();
                                 // Cron jobs use a synthetic SenderContext so they
                                 // get their own isolated session (channel="cron").
+                                //
+                                // Exception: when `session_mode = "new"` the job
+                                // requested per-fire isolation. In that case we
+                                // skip the fixed channel session and instead pass
+                                // a `session_mode_override` of `New` so each fire
+                                // receives its own fresh SessionId.
+                                let wants_new_session = job.session_mode
+                                    == Some(librefang_types::agent::SessionMode::New);
                                 let cron_sender = SenderContext {
                                     channel: "cron".to_string(),
                                     user_id: job.peer_id.clone().unwrap_or_default(),
@@ -9022,6 +9030,11 @@ system_prompt = "You are a helpful assistant."
                                     account_id: None,
                                     ..Default::default()
                                 };
+                                let (sender_ctx, mode_override) = if wants_new_session {
+                                    (None, Some(librefang_types::agent::SessionMode::New))
+                                } else {
+                                    (Some(&cron_sender), None)
+                                };
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -9029,8 +9042,8 @@ system_prompt = "You are a helpful assistant."
                                         message,
                                         Some(kh),
                                         None,
-                                        Some(&cron_sender),
-                                        None,
+                                        sender_ctx,
+                                        mode_override,
                                         None,
                                     ),
                                 )
@@ -12427,6 +12440,14 @@ impl KernelHandle for LibreFangKernel {
             uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
         );
 
+        let session_mode: Option<librefang_types::agent::SessionMode> =
+            if job_json["session_mode"].is_string() {
+                serde_json::from_value(job_json["session_mode"].clone())
+                    .map_err(|e| format!("Invalid session_mode: {e}"))?
+            } else {
+                None
+            };
+
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
@@ -12435,6 +12456,7 @@ impl KernelHandle for LibreFangKernel {
             action,
             delivery,
             peer_id: None,
+            session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
             next_run: None,

@@ -1442,6 +1442,7 @@ pub async fn create_schedule(
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
         peer_id: None,
+        session_mode: None,
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,
