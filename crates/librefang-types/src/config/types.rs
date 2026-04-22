@@ -2244,6 +2244,20 @@ pub struct KernelConfig {
     /// Increase for browser automation or long-running builds.
     #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: u64,
+    /// Per-tool timeout overrides. Exact key matches take priority over glob
+    /// patterns; among globs, iteration order is unspecified (TOML tables are
+    /// unordered). Falls back to `tool_timeout_secs` when no entry matches.
+    ///
+    /// Example:
+    /// ```toml
+    /// [tool_timeouts]
+    /// agent_send    = 600
+    /// agent_spawn   = 600
+    /// "mcp_browser_*" = 900
+    /// shell_exec    = 300
+    /// ```
+    #[serde(default)]
+    pub tool_timeouts: std::collections::HashMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -3834,6 +3848,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
+            tool_timeouts: std::collections::HashMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),

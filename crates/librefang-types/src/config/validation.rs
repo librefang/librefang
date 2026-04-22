@@ -89,6 +89,7 @@ impl KernelConfig {
             "registry",
             "rate_limit",
             "tool_timeout_secs",
+            "tool_timeouts",
             "max_upload_size_bytes",
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
