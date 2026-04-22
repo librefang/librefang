@@ -41,7 +41,6 @@ export function useReloadChannels() {
   });
 }
 
-// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
 export function useSendCommsMessage() {
   const qc = useQueryClient();
   return useMutation({
@@ -56,7 +55,6 @@ export function useSendCommsMessage() {
   });
 }
 
-// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
 export function usePostCommsTask() {
   const qc = useQueryClient();
   return useMutation({

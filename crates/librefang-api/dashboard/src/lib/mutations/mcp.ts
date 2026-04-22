@@ -11,7 +11,7 @@ import {
 import { mcpKeys } from "../queries/keys";
 
 function invalidateMcpServer(qc: QueryClient, id: string) {
-  void Promise.all([
+  return Promise.all([
     qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
     qc.invalidateQueries({ queryKey: mcpKeys.server(id) }),
     qc.invalidateQueries({ queryKey: mcpKeys.authStatus(id) }),
