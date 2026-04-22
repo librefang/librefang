@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, warn};
 
 /// Maximum events retained in the history ring buffer.
-const HISTORY_SIZE: usize = 500;
+const HISTORY_SIZE: usize = 1000;
 
 /// The central event bus for inter-agent and system communication.
 pub struct EventBus {
@@ -29,7 +29,7 @@ pub struct EventBus {
 impl EventBus {
     /// Create a new event bus.
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(512);
+        let (sender, _) = broadcast::channel(1024);
         Self {
             sender,
             agent_channels: DashMap::new(),
@@ -108,7 +108,7 @@ impl EventBus {
     /// Subscribe to events for a specific agent.
     pub fn subscribe_agent(&self, agent_id: AgentId) -> broadcast::Receiver<Event> {
         let entry = self.agent_channels.entry(agent_id).or_insert_with(|| {
-            let (tx, _) = broadcast::channel(128);
+            let (tx, _) = broadcast::channel(256);
             tx
         });
         entry.subscribe()
