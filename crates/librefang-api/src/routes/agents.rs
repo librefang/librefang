@@ -984,7 +984,7 @@ pub fn inject_attachments_into_session(
         role: Role::User,
         content: MessageContent::Blocks(image_blocks),
         pinned: false,
-        timestamp: None,
+        timestamp: Some(chrono::Utc::now()),
     });
 
     if let Err(e) = kernel.memory_substrate().save_session(&session) {
