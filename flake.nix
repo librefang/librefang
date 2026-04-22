@@ -78,6 +78,13 @@
         librefang-cli = craneLib.buildPackage (cliArgs // {
           cargoArtifacts = cliCargoArtifacts;
           doCheck = false; # Tests require network/runtime setup.
+          meta = with pkgs.lib; {
+            description = "LibreFang — Open-source Agent Operating System (CLI / daemon)";
+            homepage = "https://github.com/librefang/librefang";
+            license = licenses.mit;
+            platforms = platforms.unix;
+            mainProgram = "librefang";
+          };
         });
 
         # Desktop build scope — adds the GTK / webview deps on Linux.
@@ -92,6 +99,13 @@
         librefang-desktop = craneLib.buildPackage (desktopArgs // {
           cargoArtifacts = desktopCargoArtifacts;
           doCheck = false;
+          meta = with pkgs.lib; {
+            description = "LibreFang — Open-source Agent Operating System (desktop UI)";
+            homepage = "https://github.com/librefang/librefang";
+            license = licenses.mit;
+            platforms = platforms.linux ++ platforms.darwin;
+            mainProgram = "librefang-desktop";
+          };
         });
 
         # Full-workspace args for checks (clippy runs across the whole tree
@@ -122,8 +136,12 @@
           inherit librefang-cli librefang-desktop;
         };
 
-        apps.default = flake-utils.lib.mkApp {
+        apps.default = (flake-utils.lib.mkApp {
           drv = librefang-cli;
+        }) // {
+          # Propagate the package's meta so `nix flake check` doesn't warn
+          # about the app lacking metadata.
+          meta = librefang-cli.meta;
         };
 
         devShells.default = craneLib.devShell {
