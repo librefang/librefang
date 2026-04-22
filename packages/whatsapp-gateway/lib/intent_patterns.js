@@ -64,8 +64,10 @@ const DE_RELAY = [
   'frage\\s+\\w+',
   'sende\\s+an\\s+\\w+',
   'leite\\s+an\\s+\\w+\\s+weiter',
-  'sag\\s+\\w+',
-  'sage\\s+\\w+',
+  // Exclude "Sag mir" / "Sage uns" (owner→bot self-directed) — same
+  // negative-lookahead pattern used by the English "tell" entry.
+  'sag\\s+(?!mir\\b|uns\\b)\\w+',
+  'sage\\s+(?!mir\\b|uns\\b)\\w+',
   'grüße\\s+\\w+',
   'grusse\\s+\\w+',
 ];

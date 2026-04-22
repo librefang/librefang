@@ -1249,4 +1249,18 @@ describe('ownerIntentsRelay', () => {
     assert.equal(ownerIntentsRelay('forward this to Alice'), true);
     assert.equal(ownerIntentsRelay('forward the message to the team'), true);
   });
+
+  it('German pack: rejects "Sag mir" / "Sage uns" (owner→bot), accepts explicit recipient', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['de']);
+    // Positive — explicit third-party recipient
+    assert.ok(re.test('Sag Klaus ich komme später'));
+    assert.ok(re.test('sage Anna bitte Bescheid'));
+    assert.ok(re.test('schreib an Petra'));
+    assert.ok(re.test('antworte an Marco'));
+    // Negative — self-directed (owner talking to the bot)
+    assert.equal(re.test('Sag mir was du denkst'), false);
+    assert.equal(re.test('sag mir bitte'), false);
+    assert.equal(re.test('sage uns die Wahrheit'), false);
+  });
 });
