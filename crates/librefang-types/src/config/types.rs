@@ -1461,6 +1461,88 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Session auto-reset policy types
+// ---------------------------------------------------------------------------
+
+/// Which automatic-reset strategy is active for a session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResetMode {
+    /// No automatic reset. Sessions persist indefinitely. (default)
+    #[default]
+    Off,
+    /// Reset after `idle_minutes` of inactivity.
+    Idle,
+    /// Reset once per day at `daily_at_hour` (local clock, 0-23).
+    Daily,
+    /// Reset when *either* idle or daily condition is satisfied.
+    Both,
+}
+
+/// Why a session was last reset (stored on [`AgentEntry`] for observability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResetReason {
+    /// Last-active exceeded `idle_minutes`.
+    Idle,
+    /// The daily fixed-time boundary was crossed.
+    Daily,
+    /// Session was flagged `suspended` (forced by operator / stuck-loop recovery).
+    Suspended,
+    /// Manual reset requested via API or CLI.
+    Manual,
+}
+
+impl std::fmt::Display for SessionResetReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => f.write_str("idle"),
+            Self::Daily => f.write_str("daily"),
+            Self::Suspended => f.write_str("suspended"),
+            Self::Manual => f.write_str("manual"),
+        }
+    }
+}
+
+/// Per-session auto-reset policy.
+///
+/// Configured inside `[session.reset]` in `config.toml`:
+/// ```toml
+/// [session.reset]
+/// mode = "idle"
+/// idle_minutes = 1440   # 24 h
+///
+/// # or
+/// mode = "both"
+/// idle_minutes = 60
+/// daily_at_hour = 4
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionResetPolicy {
+    /// Which reset strategy (or strategies) to apply.
+    pub mode: SessionResetMode,
+    /// Inactivity threshold in minutes for `Idle` / `Both` modes.
+    /// Default: 1440 (24 hours).
+    pub idle_minutes: u64,
+    /// Hour of day (0–23, local clock) at which the `Daily` / `Both` reset fires.
+    /// Default: 4 (04:00 local).
+    pub daily_at_hour: u8,
+}
+
+impl Default for SessionResetPolicy {
+    fn default() -> Self {
+        Self {
+            mode: SessionResetMode::Off,
+            idle_minutes: 1440,
+            daily_at_hour: 4,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// Session retention policy configuration.
 ///
 /// Controls automatic cleanup of idle or excess sessions and optional
@@ -1494,6 +1576,10 @@ pub struct SessionConfig {
     /// Optional shell script to run when a new session is created (fire-and-forget).
     #[serde(default)]
     pub on_session_start_script: Option<String>,
+    /// Automatic session-reset policy (idle timeout and/or daily fixed-time reset).
+    /// Default: `mode = "off"` — no automatic resets, fully backward-compatible.
+    #[serde(default)]
+    pub reset: SessionResetPolicy,
 }
 
 impl Default for SessionConfig {
@@ -1505,6 +1591,7 @@ impl Default for SessionConfig {
             reset_prompt: None,
             context_injection: Vec::new(),
             on_session_start_script: None,
+            reset: SessionResetPolicy::default(),
         }
     }
 }

@@ -55,6 +55,18 @@ const TOOL_TIMEOUT_SECS: u64 = 600;
 /// Raised from 3 to 5 to allow longer-form generation.
 const MAX_CONTINUATIONS: u32 = 5;
 
+/// Maximum number of concurrent LLM calls across all agents.
+///
+/// Each in-flight LLM call holds the full request + response body in RAM.
+/// On a 256 MB deployment with many hand-agents firing simultaneously this
+/// is the dominant memory spike.  Callers queue (`.await`) rather than
+/// fail when the limit is reached; the existing per-call timeout still fires.
+const MAX_CONCURRENT_LLM_CALLS: usize = 5;
+
+/// Process-global semaphore that caps simultaneous LLM HTTP calls.
+static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
+
 /// Maximum message history size before auto-trimming to prevent context overflow.
 /// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
 /// 7-10 real conversation turns instead of the previous 3-5.
@@ -558,6 +570,7 @@ struct ToolExecutionContext<'a> {
     docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&'a crate::hooks::HookRegistry>,
     process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     sender_user_id: Option<&'a str>,
     sender_channel: Option<&'a str>,
     checkpoint_manager: Option<&'a Arc<CheckpointManager>>,
@@ -732,9 +745,11 @@ async fn execute_single_tool_call(
             ctx.tts_engine,
             ctx.docker_config,
             ctx.process_manager,
+            ctx.process_registry,
             ctx.sender_user_id,
             ctx.sender_channel,
             ctx.checkpoint_manager,
+            Some(ctx.session.id.to_string()).as_deref(),
         ),
     )
     .await
@@ -2432,6 +2447,7 @@ pub async fn run_agent_loop(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -2627,6 +2643,11 @@ pub async fn run_agent_loop(
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
+
+        // Fire agent:step external hook (fire-and-forget).
+        if let Some(ref k) = kernel {
+            k.fire_agent_step(&agent_id_str, iteration);
+        }
 
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
@@ -2927,6 +2948,7 @@ pub async fn run_agent_loop(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
@@ -3270,6 +3292,14 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Acquire the permit inside the retry loop so it is held only during
+        // the actual HTTP round-trip and released before any backoff sleep.
+        // Holding it across retries would block a slot for the full backoff
+        // duration (up to minutes on rate-limit), starving other agents.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3335,6 +3365,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Same rationale as call_with_retry: acquire inside the loop so
+        // the permit is not held during backoff sleeps between retries.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3433,6 +3469,7 @@ pub async fn run_agent_loop_streaming(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -3984,6 +4021,7 @@ pub async fn run_agent_loop_streaming(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
@@ -6346,6 +6384,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6406,6 +6445,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6465,6 +6505,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6518,6 +6559,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6573,6 +6615,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6629,6 +6672,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6691,6 +6735,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6747,6 +6792,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6881,6 +6927,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6934,6 +6981,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6995,6 +7043,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7778,6 +7827,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7851,6 +7901,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7920,6 +7971,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8219,6 +8271,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8277,6 +8330,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8336,6 +8390,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8396,6 +8451,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
