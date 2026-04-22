@@ -13465,7 +13465,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
-            peer_id: None,
+            peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
             session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
