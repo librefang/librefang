@@ -51,8 +51,13 @@ impl MemorySubstrate {
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
         let conn = Connection::open(db_path).map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-2000; \
+             PRAGMA mmap_size=0;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 

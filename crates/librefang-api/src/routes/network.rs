@@ -1006,9 +1006,11 @@ pub async fn mcp_http(
             tts_opt,
             docker_opt,
             Some(state.kernel.processes()),
+            None, // process_registry (network bridge doesn't run agent tools)
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel
             None, // checkpoint_manager (network bridge doesn't run agent tools)
+            None, // session_id (MCP HTTP has no session context)
         )
         .await;
 
