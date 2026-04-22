@@ -3580,6 +3580,13 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
     /// without changing the public `send_message` signature.
+    ///
+    /// When the target agent has a configured **home channel** (a channel whose
+    /// `default_agent` matches this agent), a synthetic `SenderContext` is
+    /// attached so that downstream channel routing (prompt hints, the
+    /// `channel_send` tool account-id fallback, the `delivery.last_channel`
+    /// memory key, …) targets that home channel instead of the first channel
+    /// in the config array. See issue #2872.
     async fn send_message_with_session_mode(
         &self,
         agent_id: AgentId,
@@ -3591,16 +3598,113 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
+        let home_channel = self.resolve_agent_home_channel(agent_id);
         self.send_message_full(
             agent_id,
             message,
             handle,
             None,
-            None,
+            home_channel.as_ref(),
             session_mode_override,
             None,
         )
         .await
+    }
+
+    /// Resolve the **home channel** for an agent, if any.
+    ///
+    /// An agent's home channel is the channel instance in `config.toml` whose
+    /// `default_agent` field names this agent. It represents the natural
+    /// return path for proactive / trigger-fired messages that don't carry
+    /// an inbound `SenderContext`.
+    ///
+    /// Returns a synthetic `SenderContext` populated with:
+    /// - `channel` — the channel type (e.g. `"telegram"`, `"discord"`)
+    /// - `account_id` — the specific bot instance's `account_id` (when set)
+    /// - `use_canonical_session = true` — preserves the trigger's existing
+    ///   `session_mode` semantics; without this the kernel would switch to a
+    ///   channel-scoped `SessionId::for_channel(agent, channel)` which would
+    ///   break the "persistent vs new" contract triggers rely on.
+    ///
+    /// Returns `None` when no channel's `default_agent` matches this agent —
+    /// in that case callers should fall back to sender-context-less dispatch
+    /// (the pre-#2872 behavior).
+    pub(crate) fn resolve_agent_home_channel(&self, agent_id: AgentId) -> Option<SenderContext> {
+        let entry = self.registry.get(agent_id)?;
+        let agent_name = entry.name.clone();
+        let cfg = self.config.load_full();
+        let channels = &cfg.channels;
+
+        // Scan each channel type for the first instance whose default_agent
+        // names this agent. The `first` semantics match `channel_overrides`
+        // in channel_bridge.rs when multiple instances share a default_agent.
+        //
+        // The macro keeps this compact across 40+ channel types without
+        // forgetting any; the `channel_name` str is used as the SenderContext
+        // `channel` field (matches `channel_adapters` map keys).
+        macro_rules! check {
+            ($field:ident, $channel_name:literal) => {{
+                if let Some(entry) = channels
+                    .$field
+                    .iter()
+                    .find(|c| c.default_agent.as_deref() == Some(agent_name.as_str()))
+                {
+                    return Some(SenderContext {
+                        channel: $channel_name.to_string(),
+                        account_id: entry.account_id.clone(),
+                        use_canonical_session: true,
+                        ..Default::default()
+                    });
+                }
+            }};
+        }
+
+        check!(telegram, "telegram");
+        check!(discord, "discord");
+        check!(slack, "slack");
+        check!(whatsapp, "whatsapp");
+        check!(signal, "signal");
+        check!(matrix, "matrix");
+        check!(email, "email");
+        check!(teams, "teams");
+        check!(mattermost, "mattermost");
+        check!(irc, "irc");
+        check!(google_chat, "google_chat");
+        check!(twitch, "twitch");
+        check!(rocketchat, "rocketchat");
+        check!(zulip, "zulip");
+        check!(xmpp, "xmpp");
+        check!(line, "line");
+        check!(viber, "viber");
+        check!(messenger, "messenger");
+        check!(reddit, "reddit");
+        check!(mastodon, "mastodon");
+        check!(bluesky, "bluesky");
+        check!(feishu, "feishu");
+        check!(revolt, "revolt");
+        check!(nextcloud, "nextcloud");
+        check!(guilded, "guilded");
+        check!(keybase, "keybase");
+        check!(threema, "threema");
+        check!(nostr, "nostr");
+        check!(webex, "webex");
+        check!(pumble, "pumble");
+        check!(flock, "flock");
+        check!(twist, "twist");
+        check!(mumble, "mumble");
+        check!(dingtalk, "dingtalk");
+        check!(qq, "qq");
+        check!(discourse, "discourse");
+        check!(gitter, "gitter");
+        check!(ntfy, "ntfy");
+        check!(gotify, "gotify");
+        check!(webhook, "webhook");
+        check!(voice, "voice");
+        check!(linkedin, "linkedin");
+        check!(wechat, "wechat");
+        check!(wecom, "wecom");
+
+        None
     }
 
     /// Send an ephemeral "side question" to an agent (`/btw` command).
