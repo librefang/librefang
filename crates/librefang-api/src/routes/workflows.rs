@@ -1224,7 +1224,6 @@ pub async fn update_trigger(
 // shared memory, which had no execution engine. Now they delegate to the real
 // CronScheduler so scheduled jobs actually fire via the kernel tick loop (#2024).
 
-/// Helper: parse a CronJobId from a string, returning an API error on failure.
 /// Normalize a trigger-pattern JSON value so legacy and new shapes both parse.
 ///
 /// Variants that gained optional fields after shipping need to accept both
@@ -1241,6 +1240,7 @@ fn normalize_pattern_json(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Helper: parse a CronJobId from a string, returning an API error on failure.
 fn parse_cron_job_id(
     id: &str,
 ) -> Result<librefang_types::scheduler::CronJobId, (StatusCode, Json<serde_json::Value>)> {
