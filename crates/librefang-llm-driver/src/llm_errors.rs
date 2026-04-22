@@ -759,7 +759,7 @@ pub fn is_html_error_page(body: &str) -> bool {
 /// Why an LLM API call failed, used to decide the provider-switching strategy.
 ///
 /// Mirrors the `FailoverReason` taxonomy from Hermes-Agent's `error_classifier.py`
-/// but simplified to the six variants that drive distinct recovery actions in
+/// but simplified to the eight variants that drive distinct recovery actions in
 /// `librefang_llm_drivers::FallbackChain`:
 ///
 /// | Variant           | HTTP hint            | Recovery                            |
@@ -769,6 +769,8 @@ pub fn is_html_error_page(body: &str) -> bool {
 /// | `ModelUnavailable`| 503 / 404            | skip to next provider               |
 /// | `ContextTooLong`  | 413 / "context"      | propagate (caller must compress)   |
 /// | `Timeout`         | network timeout      | skip to next provider               |
+/// | `HttpError`       | other 4xx/5xx        | skip to next provider               |
+/// | `AuthError`       | 401 / bad API key    | skip to next provider               |
 /// | `Unknown`         | anything else        | propagate immediately               |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum FailoverReason {
@@ -783,6 +785,11 @@ pub enum FailoverReason {
     ModelUnavailable,
     /// Connection or read timeout — try next provider.
     Timeout,
+    /// Other HTTP 4xx/5xx error — skip to next provider.
+    HttpError,
+    /// 401 or invalid API key — skip to next provider (another slot may have a
+    /// valid key).
+    AuthError,
     /// Unclassifiable error — propagate to caller.
     Unknown,
 }

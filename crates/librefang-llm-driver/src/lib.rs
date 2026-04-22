@@ -85,6 +85,8 @@ impl LlmError {
                 let msg = message.to_lowercase();
                 match status {
                     429 => FailoverReason::RateLimit(None),
+                    // 401 Unauthorized is always an auth failure.
+                    401 => FailoverReason::AuthError,
                     // 402 Payment Required is always a billing/credit issue.
                     402 => FailoverReason::CreditExhausted,
                     // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
@@ -110,7 +112,7 @@ impl LlmError {
                         {
                             FailoverReason::ModelUnavailable
                         } else {
-                            FailoverReason::Unknown
+                            FailoverReason::HttpError
                         }
                     }
                     413 => FailoverReason::ContextTooLong,
@@ -127,7 +129,7 @@ impl LlmError {
                         {
                             FailoverReason::ModelUnavailable
                         } else {
-                            FailoverReason::Unknown
+                            FailoverReason::HttpError
                         }
                     }
                     400 => {
@@ -139,7 +141,7 @@ impl LlmError {
                         {
                             FailoverReason::ContextTooLong
                         } else {
-                            FailoverReason::Unknown
+                            FailoverReason::HttpError
                         }
                     }
                     _ => {
@@ -166,7 +168,7 @@ impl LlmError {
                         {
                             FailoverReason::ModelUnavailable
                         } else {
-                            FailoverReason::Unknown
+                            FailoverReason::HttpError
                         }
                     }
                 }
@@ -188,19 +190,19 @@ impl LlmError {
             LlmError::ModelNotFound(_) => FailoverReason::ModelUnavailable,
 
             // Auth failures and missing keys indicate a misconfigured provider
-            // slot, not a transient error.  Skip to the next provider so a chain
-            // like [expired_anthropic, valid_openai] can still succeed.
+            // slot.  Classify as AuthError so FallbackChain can skip to the
+            // next slot, which may have a valid key.
             LlmError::AuthenticationFailed(_) | LlmError::MissingApiKey(_) => {
-                FailoverReason::ModelUnavailable
+                FailoverReason::AuthError
             }
 
             // Parse errors are opaque and not recoverable by switching providers.
             LlmError::Parse(_) => FailoverReason::Unknown,
 
-            // HTTP transport errors (connection refused, TLS failure, etc.) are
-            // indistinguishable from transient timeouts — treat as Timeout so
-            // FallbackChain will skip to the next provider.
-            LlmError::Http(_) => FailoverReason::Timeout,
+            // HTTP transport errors (connection refused, TLS failure, etc.).
+            // Distinct from Timeout (inactivity/subprocess) — these are network
+            // layer failures before the API even responded.
+            LlmError::Http(_) => FailoverReason::HttpError,
         }
     }
 }

@@ -10,6 +10,8 @@
 //! | `CreditExhausted`   | skip immediately to next provider                     |
 //! | `ModelUnavailable`  | skip immediately to next provider                     |
 //! | `Timeout`           | skip immediately to next provider                     |
+//! | `HttpError`         | skip immediately to next provider                     |
+//! | `AuthError`         | skip immediately to next provider                     |
 //! | `ContextTooLong`    | propagate — caller must compress the context          |
 //! | `Unknown`           | propagate — do not waste attempts on opaque errors    |
 //!
@@ -192,6 +194,8 @@ impl LlmDriver for FallbackChain {
                         FailoverReason::CreditExhausted
                         | FailoverReason::ModelUnavailable
                         | FailoverReason::Timeout
+                        | FailoverReason::HttpError
+                        | FailoverReason::AuthError
                         | FailoverReason::RateLimit(_) => {
                             last_error = Some(e);
                             continue;
@@ -291,6 +295,8 @@ impl LlmDriver for FallbackChain {
                         FailoverReason::CreditExhausted
                         | FailoverReason::ModelUnavailable
                         | FailoverReason::Timeout
+                        | FailoverReason::HttpError
+                        | FailoverReason::AuthError
                         | FailoverReason::RateLimit(_) => {
                             last_error = Some(e);
                             continue;
@@ -598,15 +604,30 @@ mod tests {
     #[test]
     fn failover_reason_auth_skips_to_next_provider() {
         // A bad API key on one slot must not stop the entire chain — classify
-        // as ModelUnavailable so later slots (with valid keys) can still run.
+        // as AuthError so later slots (with valid keys) can still run.
         let e = LlmError::AuthenticationFailed("bad key".to_string());
-        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+        assert_eq!(e.failover_reason(), FailoverReason::AuthError);
     }
 
     #[test]
     fn failover_reason_missing_key_skips_to_next_provider() {
         let e = LlmError::MissingApiKey("OPENAI_API_KEY".to_string());
-        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
+        assert_eq!(e.failover_reason(), FailoverReason::AuthError);
+    }
+
+    #[test]
+    fn failover_reason_401_is_auth_error() {
+        let e = LlmError::Api {
+            status: 401,
+            message: "Unauthorized".to_string(),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::AuthError);
+    }
+
+    #[test]
+    fn failover_reason_http_transport_error() {
+        let e = LlmError::Http("connection refused".to_string());
+        assert_eq!(e.failover_reason(), FailoverReason::HttpError);
     }
 
     #[tokio::test]
