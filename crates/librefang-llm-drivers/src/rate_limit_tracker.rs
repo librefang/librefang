@@ -117,15 +117,21 @@ impl RateLimitSnapshot {
     pub fn from_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
         // Collect all header names into a lowercase map so we can do O(1) lookups
         // without caring about capitalisation.
-        let lowered: std::collections::HashMap<String, &str> = headers
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|v| (name.as_str().to_ascii_lowercase(), v))
-            })
-            .collect();
+        //
+        // Use first-value-wins semantics via `entry().or_insert()`: if the same
+        // header name appears more than once in the response (which RFC 7230
+        // permits for list-valued headers), the first occurrence is kept and
+        // later duplicates are silently dropped rather than overwriting the
+        // earlier value.  This prevents silent data loss caused by a plain
+        // `collect::<HashMap>()` which would keep only the last value.
+        let mut lowered: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+        for (name, value) in headers.iter() {
+            if let Ok(v) = value.to_str() {
+                lowered
+                    .entry(name.as_str().to_ascii_lowercase())
+                    .or_insert(v);
+            }
+        }
 
         // Quick guard: at least one rate-limit header must be present.
         let has_any = lowered
@@ -307,6 +313,12 @@ impl RateLimitSnapshot {
 /// Parse a reset value that may be expressed as:
 /// - A plain number of seconds (`"42.5"`)
 /// - An ISO 8601 duration (`"PT42.5S"`, `"PT1M30S"`, `"PT1H"`)
+/// - An ISO 8601 datetime (`"2026-01-22T12:34:56Z"`, `"2026-01-22T12:34:56+00:00"`)
+///   — Anthropic sends absolute timestamps for `*-reset` headers; we convert
+///   to seconds-until-reset by subtracting the current UTC wall time.
+/// - An RFC 7231 HTTP-date (`"Thu, 01 Jan 2026 12:00:00 GMT"`)
+///   — Anthropic may send this format in `Retry-After`; treated the same way
+///   as an ISO 8601 datetime.
 fn parse_reset_value(s: &str) -> Option<f64> {
     // Plain numeric seconds
     if let Ok(v) = s.parse::<f64>() {
@@ -338,7 +350,176 @@ fn parse_reset_value(s: &str) -> Option<f64> {
         return Some(secs);
     }
 
+    // ISO 8601 datetime or RFC 7231 HTTP-date: try to parse as a point in time
+    // and compute seconds until that moment from now.
+    if let Some(secs_until) = parse_datetime_to_secs_from_now(s) {
+        return Some(secs_until);
+    }
+
     None
+}
+
+/// Attempt to parse `s` as an absolute datetime (ISO 8601 or RFC 7231) and
+/// return the number of seconds from now until that moment.  Returns `None`
+/// if the string cannot be recognised as a datetime, or `0.0` if the moment
+/// has already passed (i.e. the reset is already due).
+fn parse_datetime_to_secs_from_now(s: &str) -> Option<f64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Try ISO 8601 / RFC 3339: "2026-01-22T12:34:56Z" or "…+00:00"
+    // We parse manually to avoid pulling in a date-time crate dependency.
+    // Expected format: YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
+    if let Some(unix) = parse_iso8601_to_unix(s) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        return Some((unix - now).max(0.0));
+    }
+
+    // Try RFC 7231 HTTP-date: "Thu, 01 Jan 2026 12:00:00 GMT"
+    if let Some(unix) = parse_http_date_to_unix(s) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        return Some((unix - now).max(0.0));
+    }
+
+    None
+}
+
+/// Parse an ISO 8601 / RFC 3339 timestamp to a Unix timestamp (seconds).
+/// Handles `Z` and `+HH:MM` / `-HH:MM` timezone offsets.
+/// Returns `None` if the string doesn't match the expected pattern.
+fn parse_iso8601_to_unix(s: &str) -> Option<f64> {
+    // Minimum: "2026-01-22T12:34:56Z" = 20 chars
+    if s.len() < 20 {
+        return None;
+    }
+
+    // Check rough shape: digits and dashes in date part
+    let bytes = s.as_bytes();
+    if !(bytes[4] == b'-' && bytes[7] == b'-' && (bytes[10] == b'T' || bytes[10] == b't')) {
+        return None;
+    }
+
+    let year: i64 = s[0..4].parse().ok()?;
+    let month: i64 = s[5..7].parse().ok()?;
+    let day: i64 = s[8..10].parse().ok()?;
+    let hour: i64 = s[11..13].parse().ok()?;
+    let minute: i64 = s[14..16].parse().ok()?;
+    // seconds may include fractional part
+    let sec_str = &s[17..];
+    let (sec_frac, tz_str) = split_sec_and_tz(sec_str);
+    let sec: f64 = sec_frac.parse().ok()?;
+
+    let tz_offset_secs = parse_tz_offset(tz_str)?;
+
+    // Days-since-epoch calculation using the proleptic Gregorian calendar.
+    let days = days_since_epoch(year, month, day)?;
+    let unix =
+        days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + sec - tz_offset_secs;
+
+    Some(unix)
+}
+
+/// Split the seconds field (e.g. `"56Z"`, `"56.789+05:30"`) into the numeric
+/// part and the timezone suffix.
+fn split_sec_and_tz(s: &str) -> (&str, &str) {
+    // Find where the numeric part ends: digits and optional '.'
+    let end = s
+        .find(|c: char| c != '.' && !c.is_ascii_digit())
+        .unwrap_or(s.len());
+    (&s[..end], &s[end..])
+}
+
+/// Parse a timezone suffix such as `"Z"`, `"+05:30"`, `"-07:00"` into a
+/// signed offset in seconds.  Returns `None` for unrecognised formats.
+fn parse_tz_offset(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("z") {
+        return Some(0.0);
+    }
+    if (s.starts_with('+') || s.starts_with('-')) && s.len() >= 6 {
+        let sign: f64 = if s.starts_with('-') { -1.0 } else { 1.0 };
+        let h: f64 = s[1..3].parse().ok()?;
+        let m: f64 = s[4..6].parse().ok()?;
+        return Some(sign * (h * 3600.0 + m * 60.0));
+    }
+    None
+}
+
+/// Compute the number of days between the Unix epoch (1970-01-01) and the
+/// given calendar date using the proleptic Gregorian calendar.
+fn days_since_epoch(year: i64, month: i64, day: i64) -> Option<i64> {
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return None;
+    }
+    // Use the algorithm from https://howardhinnant.github.io/date_algorithms.html
+    // (civil_from_days inverse: days_from_civil)
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = month as i64;
+    let d = day as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146097 + doe - 719468)
+}
+
+/// Parse an RFC 7231 HTTP-date to a Unix timestamp.
+/// Format: "Thu, 01 Jan 2026 12:00:00 GMT"
+/// Returns `None` if the string doesn't look like an HTTP-date.
+fn parse_http_date_to_unix(s: &str) -> Option<f64> {
+    // Expected format after optional weekday+comma: "DD Mon YYYY HH:MM:SS GMT"
+    // Strip optional "DDD, " prefix
+    let s = if let Some(pos) = s.find(',') {
+        s[pos + 1..].trim()
+    } else {
+        s.trim()
+    };
+
+    // Now expect: "DD Mon YYYY HH:MM:SS GMT"
+    let parts: Vec<&str> = s.splitn(5, ' ').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+
+    let day: i64 = parts[0].parse().ok()?;
+    let month = month_name_to_num(parts[1])?;
+    let year: i64 = parts[2].parse().ok()?;
+
+    // Time part: "HH:MM:SS"
+    let time_parts: Vec<&str> = parts[3].splitn(3, ':').collect();
+    if time_parts.len() < 3 {
+        return None;
+    }
+    let hour: f64 = time_parts[0].parse().ok()?;
+    let minute: f64 = time_parts[1].parse().ok()?;
+    let sec: f64 = time_parts[2].trim_end_matches(" GMT").parse().ok()?;
+
+    let days = days_since_epoch(year, month, day)?;
+    Some(days as f64 * 86400.0 + hour * 3600.0 + minute * 60.0 + sec)
+}
+
+/// Convert a 3-letter English month abbreviation to its 1-based month number.
+fn month_name_to_num(s: &str) -> Option<i64> {
+    match s {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
 }
 
 /// Human-readable count: `7_999_856` → `"8.0M"`, `33_599` → `"33.6K"`, `799` → `"799"`.
@@ -611,5 +792,88 @@ mod tests {
         let snap = RateLimitSnapshot::from_headers(&headers).expect("should parse");
         assert_eq!(snap.requests_per_hour.limit, 10_000);
         assert_eq!(snap.tokens_per_hour.limit, 5_000_000);
+    }
+
+    // ── Bug fix: duplicate header → first-value-wins ──────────────────────
+
+    #[test]
+    fn test_duplicate_header_first_value_wins() {
+        // When the same header name appears twice in the response (RFC 7230 allows
+        // this), the first occurrence must be kept.  A plain collect() into a HashMap
+        // would silently keep the last value, potentially hiding the real rate-limit.
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        use std::str::FromStr;
+
+        let mut map = HeaderMap::new();
+        let name = HeaderName::from_str("x-ratelimit-limit-requests").unwrap();
+        // First occurrence: the real limit
+        map.append(name.clone(), HeaderValue::from_str("1000").unwrap());
+        // Second occurrence: a bogus duplicate
+        map.append(name, HeaderValue::from_str("9999").unwrap());
+
+        let snap = RateLimitSnapshot::from_headers(&map).expect("should parse");
+        assert_eq!(
+            snap.requests_per_minute.limit, 1000,
+            "first header value must be used, not the duplicate"
+        );
+    }
+
+    // ── Bug fix: ISO 8601 datetime and RFC 7231 HTTP-date reset headers ───
+
+    #[test]
+    fn test_parse_reset_value_iso8601_datetime_utc() {
+        // Anthropic sends absolute ISO 8601 datetimes for reset headers.
+        // The result must be non-negative (time-until-reset >= 0).
+        // We use a far-future date to ensure it's always positive.
+        let far_future = "2099-12-31T23:59:59Z";
+        let secs = parse_reset_value(far_future).expect("should parse ISO 8601 datetime");
+        assert!(
+            secs > 0.0,
+            "far-future datetime must yield a positive seconds-until-reset, got {secs}"
+        );
+    }
+
+    #[test]
+    fn test_parse_reset_value_iso8601_datetime_with_offset() {
+        // Same as above but with an explicit UTC offset rather than 'Z'.
+        let far_future = "2099-12-31T23:59:59+00:00";
+        let secs = parse_reset_value(far_future).expect("should parse ISO 8601 with offset");
+        assert!(secs > 0.0, "got {secs}");
+    }
+
+    #[test]
+    fn test_parse_reset_value_past_datetime_returns_zero() {
+        // A datetime in the past must return 0.0 (already reset), not a negative number.
+        let past = "2000-01-01T00:00:00Z";
+        let secs = parse_reset_value(past).expect("should parse past ISO 8601 datetime");
+        assert_eq!(secs, 0.0, "past datetime must clamp to 0, got {secs}");
+    }
+
+    #[test]
+    fn test_parse_reset_value_http_date() {
+        // Anthropic may send RFC 7231 HTTP-date in Retry-After.
+        // Far-future date to ensure it's positive.
+        let http_date = "Thu, 01 Jan 2099 00:00:00 GMT";
+        let secs = parse_reset_value(http_date).expect("should parse RFC 7231 HTTP-date");
+        assert!(
+            secs > 0.0,
+            "far-future HTTP-date must yield positive seconds-until-reset, got {secs}"
+        );
+    }
+
+    #[test]
+    fn test_parse_reset_value_unrecognised_returns_none() {
+        assert!(parse_reset_value("not-a-date").is_none());
+        assert!(parse_reset_value("").is_none());
+    }
+
+    #[test]
+    fn test_days_since_epoch_known_values() {
+        // 1970-01-01 = day 0
+        assert_eq!(days_since_epoch(1970, 1, 1), Some(0));
+        // 1970-01-02 = day 1
+        assert_eq!(days_since_epoch(1970, 1, 2), Some(1));
+        // 2000-01-01 = 10957 days after epoch (well-known value)
+        assert_eq!(days_since_epoch(2000, 1, 1), Some(10957));
     }
 }
