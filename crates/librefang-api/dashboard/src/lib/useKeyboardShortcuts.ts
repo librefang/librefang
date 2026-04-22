@@ -51,6 +51,8 @@ interface KeyboardShortcutsOptions {
 /// window level so any component can subscribe.
 export const CREATE_EVENT = "librefang:create";
 
+const G_TIMEOUT_MS = 1500;
+
 /// Registers global keyboard shortcuts for the dashboard.
 ///
 /// - `g` + letter → navigate to page (vim-style, see G_NAV_SHORTCUTS)
@@ -65,7 +67,6 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
 
   useEffect(() => {
     let gPressedAt = 0;
-    const G_TIMEOUT_MS = 1500;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       // Never intercept keystrokes while the user is typing into a field,

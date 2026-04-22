@@ -5,6 +5,81 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.22] - 2026-04-22
+
+### Added
+
+- Search, font size, tab drag reorder, copy/paste hint (#2864) (@houko)
+- Add ClawHub CN mirror support with source dropdown switcher (#2865) (@houko)
+- Show-all-commands in TUI scrollable view, add 1-9 number shortcuts (#2876) (@houko)
+- Ctrl+L clear, tab overflow arrows, cursor inactive style, auto-dismiss reconnect toast (#2879) (@houko)
+- Three-layer tool result budget enforcement (#2881) (@houko)
+- Chat input history, channels inline actions, memory delete confirmation (#2888) (@houko)
+- Checkpoint manager with shadow git repos for transparent file snapshots (#2903) (@houko)
+- Event hook system with wildcard matching and fire-and-forget execution (#2904) (@houko)
+- Session auto-reset with idle/daily policies (#2905) (@houko)
+- UTF-16 aware message truncation for Telegram and Discord (#2906) (@houko)
+- Background process registry with rolling output buffer (#2907) (@houko)
+- Skill config variable declaration and system prompt injection (#2908) (@houko)
+- Session-scoped approval resolution and per-session batch approve (#2909) (@houko)
+- Rate limit header tracking with ASCII progress display (#2910) (@houko)
+- Jittered exponential backoff for retry decorrelation (#2911) (@houko)
+- Pluggable ContextEngine trait with SummaryContextEngine and NullContextEngine (#2912) (@houko)
+- MemoryProvider plugin trait with error isolation (#2913) (@houko)
+- Multi-credential pool with fill-first/round-robin/least-used strategies (#2914) (@houko)
+- Session-scoped interrupt signaling for multi-tenant safety (#2915) (@houko)
+- Dangerous command detection with approval mode (#2916) (@houko)
+- Prompt injection guard + cron [SILENT] marker (#2917) (@houko)
+- Context compression with iterative refinement (#2918) (@houko)
+- Skill index progressive disclosure in system prompt (#2919) (@houko)
+- FailoverReason classification and provider fallback chain (#2920) (@houko)
+- Schedule a hand from its detail page (closes #2691) (#2946) (@houko)
+
+### Fixed
+
+- Suppress NO_REPLY sentinel in streaming text bridge (#2855) (@houko)
+- Fix height overflow, invalid resize errors, and polish UI (#2861) (@houko)
+- Fix terminal height collapse and tmux duplicate session race (#2862) (@houko)
+- Allow Unicode (CJK, emoji, accented) in window names (#2863) (@houko)
+- Remove non-existent addon-search CSS import (#2870) (@houko)
+- Fix help popover not showing due to overflow-x-auto clipping (#2871) (@houko)
+- Dashboard snapshot exposes uptime_seconds + memory_used_mb (#2877) (@houko)
+- Dashboard snapshot also exposes api_listen / home_dir / log_level (#2882) (@houko)
+- Audit badge width + verify chain button always clickable (#2892) (@houko)
+- Audit card readability + visible verify-chain feedback (#2897) (@houko)
+- Populate Hostname row via authenticated endpoints (#2899) (@houko)
+- Trust agent_send delegation results over untrusted data prompt (#2900) (@houko)
+- Use slice instead of vec in enforce_turn_budget + update terminal tests (#2902) (@houko)
+- Use sort_by_key instead of sort_by in enforce_turn_budget (#2921) (@houko)
+- Use sort_by_key; chore: upgrade actions/github-script to v9 (#2922) (@houko)
+- Pass None checkpoint_manager to run_agent_loop test call sites (#2928) (@houko)
+- Reduce memory footprint for 256 MB fly.io deployment (#2929) (@houko)
+- Add missing checkpoint_manager arg to last skipped run_agent_loop call site (#2930) (@houko)
+- Repair main branch build + tests (#2932) (@houko)
+- Launcher clippy + workflow selective-build on bin-only crates (#2933) (@houko)
+- Tighten page regressions (#2936) (@leszek3737)
+- Address bugs found in merged PRs #2904-#2913 (#2940) (@houko)
+- Repair main build — struct fields, call sites, warnings (#2942) (@houko)
+- Repair main — truncator entity regression + clippy 1.95 lint (#2943) (@houko)
+- Scope CLI build to librefang-cli only (fixes #2937) (#2944) (@houko)
+- Fork inherits parent's SessionInterrupt for external cancel (#2939) (#2945) (@houko)
+
+### Changed
+
+- Optimize TerminalPage, SettingsPage, SkillsPage, PluginsPage, and ProvidersPage (#2843) (@leszek3737)
+- Clean up SkillsPage (#2858) (@houko)
+- Unify two separate checkouts of the upstream repo (#2859) (@houko)
+- Apply RC-safe perf and correctness fixes across lib utils (#2935) (@leszek3737)
+
+### Performance
+
+- Optimize rendering and runtime query behavior (#2856) (@leszek3737)
+
+### Documentation
+
+- Document 19 hermes-agent ported features (#2927) (@houko)
+
+
 ## [2026.4.21] - 2026-04-21
 
 ### Added

@@ -2,6 +2,14 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n from "./i18n";
 
+function createClientId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
 interface Toast {
   id: string;
   message: string;
@@ -82,7 +90,7 @@ export const useUIStore = create<UIState>()(
       toggleNavGroup: (key) => set((state) => ({ collapsedNavGroups: { ...state.collapsedNavGroups, [key]: !state.collapsedNavGroups[key] } })),
       addToast: (message, type = "info") =>
         set((state) => ({
-          toasts: [...state.toasts, { id: Date.now().toString(), message, type }],
+          toasts: [...state.toasts, { id: createClientId(), message, type }],
         })),
       removeToast: (id) =>
         set((state) => ({
@@ -91,7 +99,7 @@ export const useUIStore = create<UIState>()(
       addSkillOutput: (output) =>
         set((state) => ({
           skillOutputs: [
-            { ...output, id: Date.now().toString(), timestamp: Date.now() },
+            { ...output, id: createClientId(), timestamp: Date.now() },
             ...state.skillOutputs,
           ].slice(0, 50),
         })),
@@ -121,6 +129,7 @@ export const useUIStore = create<UIState>()(
       partialize: (state) => ({
         theme: state.theme,
         language: state.language,
+        isSidebarCollapsed: state.isSidebarCollapsed,
         navLayout: state.navLayout,
         hiddenModelKeys: state.hiddenModelKeys,
         modelsAvailableOnly: state.modelsAvailableOnly,
