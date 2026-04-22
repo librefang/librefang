@@ -173,7 +173,12 @@ impl ContextCompressor {
                 compactor::estimate_token_count(&current, Some(system_prompt), Some(tools));
 
             // Need at least head + 1 (middle) + tail messages to compress anything.
-            let min_for_compress = self.config.protect_head + self.config.keep_recent + 1;
+            // Add an extra +1 to account for the possible head-boundary expansion
+            // that occurs when the last head message is an assistant ToolUse: the
+            // following ToolResult delivery is pulled into the head, consuming one
+            // slot.  Without the extra margin `compress_once` would find no middle
+            // section and return an Err even though the guard passed.
+            let min_for_compress = self.config.protect_head + self.config.keep_recent + 2;
             if before_count <= min_for_compress {
                 debug!(
                     before_count,

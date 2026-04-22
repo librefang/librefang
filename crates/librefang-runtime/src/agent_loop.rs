@@ -2682,6 +2682,9 @@ pub async fn run_agent_loop(
             if !compression_events.is_empty() {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Keep session.messages in sync with the compressed LLM working copy
+                // so subsequent turns don't re-read the uncompressed history.
+                session.messages = messages.clone();
                 // Re-estimate after soft compression; only invoke hard trim if still
                 // above the 70% threshold used by recover_from_overflow.
                 let remaining_tokens = crate::compactor::estimate_token_count(
@@ -3739,6 +3742,9 @@ pub async fn run_agent_loop_streaming(
             if !compression_events.is_empty() {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Keep session.messages in sync with the compressed LLM working copy
+                // so subsequent turns don't re-read the uncompressed history.
+                session.messages = messages.clone();
                 // Re-estimate after soft compression; only invoke hard trim if still
                 // above the 70% threshold used by recover_from_overflow.
                 let remaining_tokens = crate::compactor::estimate_token_count(
