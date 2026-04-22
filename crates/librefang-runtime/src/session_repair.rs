@@ -1735,9 +1735,16 @@ mod tests {
         ];
 
         let (repaired, stats) = validate_and_repair_with_stats(&messages);
+        // Phase 1 (rescue_misplaced_tool_results) extracts the stray ToolResult
+        // before Phase 2a1 runs, so `misplaced_results_ignored` is 0 and
+        // `misplaced_results_rescued` is 1.
         assert_eq!(
-            stats.misplaced_results_ignored, 1,
-            "ToolResult inside assistant blocks must be counted as misplaced"
+            stats.misplaced_results_rescued, 1,
+            "ToolResult inside assistant blocks must be rescued by Phase 1"
+        );
+        assert_eq!(
+            stats.misplaced_results_ignored, 0,
+            "Phase 1 already rescued the misplaced result before Phase 2a1 counts"
         );
         assert_eq!(
             stats.positional_synthetic_inserted, 1,

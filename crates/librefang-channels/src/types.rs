@@ -678,6 +678,18 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         // from safe_end: if we find `&` without a subsequent `;` before the
         // boundary, move the split point to just before that `&`.
         let safe_end = retreat_past_html_entity(remaining, safe_end);
+        // Avoid splitting inside an unclosed Telegram HTML tag (e.g. `<code>`).
+        // If there is an unclosed tag at the boundary, retreat to just before
+        // its opening `<`.  Fall back to safe_end if retreating would produce
+        // an empty chunk (tag longer than max_len).
+        let safe_end = {
+            let retreated = retreat_past_html_tag(remaining, safe_end);
+            if retreated == 0 {
+                safe_end
+            } else {
+                retreated
+            }
+        };
         let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk);
@@ -688,6 +700,81 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
             .unwrap_or(rest);
     }
     chunks
+}
+
+/// If `pos` falls inside an unclosed Telegram HTML tag in `text[..pos]`,
+/// return the byte index of the opening `<` so the caller splits before it.
+/// Otherwise return `pos` unchanged.
+///
+/// Only `/>` (slash immediately before `>`) marks a tag as self-closing.
+/// A `/` elsewhere in the tag body (e.g. in a URL attribute like
+/// `<a href="https://example.com/path">`) does NOT make the tag self-closing.
+///
+/// Telegram's supported tags: `b`, `i`, `u`, `s`, `code`, `pre`, `a`.
+/// If retreating would produce an empty chunk (result == 0), the caller
+/// should fall back to the original position to avoid an infinite loop.
+fn retreat_past_html_tag(text: &str, pos: usize) -> usize {
+    const TELEGRAM_TAGS: &[&str] = &["b", "i", "u", "s", "code", "pre", "a"];
+
+    let slice = &text[..pos];
+    let mut opens: Vec<(String, usize)> = Vec::new();
+    let mut i = 0usize;
+    let bytes = slice.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let lt_pos = i;
+        i += 1;
+        if i >= bytes.len() {
+            break;
+        }
+        let is_closing = bytes[i] == b'/';
+        if is_closing {
+            i += 1;
+        }
+        let name_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let name = &slice[name_start..i];
+        if name.is_empty() {
+            continue;
+        }
+        let name_lower = name.to_ascii_lowercase();
+        if !TELEGRAM_TAGS.contains(&name_lower.as_str()) {
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            continue;
+        }
+        // Advance to `>`. Self-closing requires `/` immediately before `>`.
+        // A `/` elsewhere in the tag (e.g. in a URL) is NOT self-closing.
+        while i < bytes.len() && bytes[i] != b'>' {
+            i += 1;
+        }
+        let self_closing = i >= 1 && i < bytes.len() && bytes[i - 1] == b'/';
+        if i < bytes.len() {
+            i += 1;
+        }
+        if self_closing {
+            continue;
+        }
+        if is_closing {
+            if let Some(last_match) = opens.iter().rposition(|(n, _)| n == &name_lower) {
+                opens.remove(last_match);
+            }
+        } else {
+            opens.push((name_lower, lt_pos));
+        }
+    }
+
+    if let Some(&(_, lt_pos)) = opens.first() {
+        lt_pos
+    } else {
+        pos
+    }
 }
 
 /// If `pos` falls inside an HTML entity (`&...;`), return the index of the
@@ -835,6 +922,50 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 40);
         }
+    }
+
+    // ── retreat_past_html_tag regression tests ────────────────────────────
+
+    /// Regression: `<a href="https://example.com/path/to/page">` must NOT be
+    /// treated as self-closing. A `/` in a URL attribute is not `/>`.
+    /// Only `/>` (slash immediately before `>`) is self-closing.
+    #[test]
+    fn test_anchor_with_url_not_self_closing() {
+        let text = "prefix\n<a href=\"https://example.com/path/to/page\">link text</a>";
+        // max_len=57: fits the anchor block (56 chars) but not the full string (63)
+        let chunks = split_message(text, 57);
+        let anchor_chunk = chunks.iter().find(|c| c.contains("<a "));
+        let close_chunk = chunks.iter().find(|c| c.contains("</a>"));
+        assert!(anchor_chunk.is_some(), "no chunk contains opening <a>");
+        assert_eq!(
+            anchor_chunk, close_chunk,
+            "opening <a> and closing </a> ended up in different chunks: {:?}",
+            chunks
+        );
+    }
+
+    /// Direct unit test: `retreat_past_html_tag` retreats past an unclosed `<code>`.
+    #[test]
+    fn test_retreat_past_html_tag_unclosed_code() {
+        let text = "hello <code>world";
+        let result = retreat_past_html_tag(text, text.len());
+        assert_eq!(&text[result..], "<code>world");
+    }
+
+    /// Direct unit test: balanced tags return `pos` unchanged.
+    #[test]
+    fn test_retreat_past_html_tag_balanced_returns_pos() {
+        let text = "hello <b>world</b> end";
+        let pos = text.len();
+        assert_eq!(retreat_past_html_tag(text, pos), pos);
+    }
+
+    /// A tag block longer than max_len must not cause an infinite loop.
+    #[test]
+    fn test_very_long_tag_no_infinite_loop() {
+        let text = "<code>abcdefghijklmnopqrstuvwxyz</code>";
+        let chunks = split_message(text, 8);
+        assert_eq!(chunks.concat(), text);
     }
 
     #[test]
