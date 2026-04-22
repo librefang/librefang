@@ -937,13 +937,21 @@ pub async fn create_trigger(
     };
 
     let pattern: TriggerPattern = match req.get("pattern") {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(pat) => pat,
-            Err(e) => {
-                tracing::warn!("Invalid trigger pattern: {e}");
-                return ApiErrorResponse::bad_request("Invalid trigger pattern").into_json_tuple();
+        Some(p) => {
+            // Legacy clients send `"task_posted"` as a bare string, but the
+            // variant now carries an optional `assignee_match` field and
+            // expects the struct form `{"task_posted": {...}}`. Rewrite the
+            // bare strings to `{"<variant>": {}}` so both shapes parse.
+            let normalized = normalize_pattern_json(p.clone());
+            match serde_json::from_value(normalized) {
+                Ok(pat) => pat,
+                Err(e) => {
+                    tracing::warn!("Invalid trigger pattern: {e}");
+                    return ApiErrorResponse::bad_request("Invalid trigger pattern")
+                        .into_json_tuple();
+                }
             }
-        },
+        }
         None => {
             return ApiErrorResponse::bad_request("Missing 'pattern'").into_json_tuple();
         }
@@ -1217,6 +1225,22 @@ pub async fn update_trigger(
 // CronScheduler so scheduled jobs actually fire via the kernel tick loop (#2024).
 
 /// Helper: parse a CronJobId from a string, returning an API error on failure.
+/// Normalize a trigger-pattern JSON value so legacy and new shapes both parse.
+///
+/// Variants that gained optional fields after shipping need to accept both
+/// `"task_posted"` (the old bare-string form) and
+/// `{"task_posted": {...}}` (the new struct form). Rewrite bare strings of
+/// variants that carry optional data into empty-object form so serde
+/// deserialises the `#[serde(default)]` fields cleanly.
+fn normalize_pattern_json(value: serde_json::Value) -> serde_json::Value {
+    match value.as_str() {
+        Some(tag @ "task_posted") => {
+            serde_json::json!({ tag: {} })
+        }
+        _ => value,
+    }
+}
+
 fn parse_cron_job_id(
     id: &str,
 ) -> Result<librefang_types::scheduler::CronJobId, (StatusCode, Json<serde_json::Value>)> {
