@@ -4403,7 +4403,11 @@ impl ContextEngine for NoCompactContextEngine {
     ) -> LibreFangResult<CompactionResult> {
         // NoCompactContextEngine must never compress — return all messages as-is.
         Ok(CompactionResult {
+            summary: String::new(),
             kept_messages: messages.to_vec(),
+            compacted_count: 0,
+            chunks_used: 0,
+            used_fallback: false,
         })
     }
 
