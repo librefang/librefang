@@ -4320,6 +4320,21 @@ pub struct ChannelsConfig {
     pub wechat: OneOrMany<WeChatConfig>,
     /// WeCom/WeChat Work configuration(s).
     pub wecom: OneOrMany<WeComConfig>,
+
+    // --- Global file-download settings ---
+    /// Maximum file size in bytes for channel file downloads (default: 50 MB).
+    #[serde(default = "default_file_download_max_bytes")]
+    pub file_download_max_bytes: u64,
+
+    /// Directory to store downloaded files.
+    /// When `None`, defaults to `std::env::temp_dir()/librefang_uploads`.
+    #[serde(default)]
+    pub file_download_dir: Option<String>,
+}
+
+/// Default max file download size: 50 MB.
+fn default_file_download_max_bytes() -> u64 {
+    50 * 1024 * 1024
 }
 
 /// Telegram channel adapter configuration.

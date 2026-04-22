@@ -1933,3 +1933,81 @@ fn test_skill_evolve_tools_default_available_to_restricted_agent() {
         );
     }
 }
+
+// Regression test for the fix that reads peer_id from job_json.
+// Before the fix, cron_create always set peer_id: None regardless of the
+// job payload, so OFP-triggered cron jobs lost the peer context entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cron_create_preserves_peer_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agents = kernel.registry.list();
+    let assistant = agents
+        .iter()
+        .find(|a| a.name == "assistant")
+        .expect("assistant should exist");
+    let agent_id = assistant.id.to_string();
+
+    let job_json = serde_json::json!({
+        "name": "peer-id-regression",
+        "peer_id": "peer-abc-123",
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
+    });
+
+    kernel
+        .cron_create(&agent_id, job_json)
+        .await
+        .expect("cron_create should succeed");
+
+    let jobs = kernel
+        .cron_list(&agent_id)
+        .await
+        .expect("cron_list should succeed");
+
+    let job = jobs
+        .iter()
+        .find(|j| j["name"].as_str() == Some("peer-id-regression"))
+        .expect("created job should appear in list");
+
+    assert_eq!(
+        job["peer_id"].as_str(),
+        Some("peer-abc-123"),
+        "peer_id must be preserved from job_json, not silently dropped"
+    );
+
+    // Also verify that a job created WITHOUT peer_id has peer_id = null.
+    let job_no_peer = serde_json::json!({
+        "name": "no-peer-id",
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
+    });
+    kernel
+        .cron_create(&agent_id, job_no_peer)
+        .await
+        .expect("cron_create without peer_id should succeed");
+    let jobs2 = kernel
+        .cron_list(&agent_id)
+        .await
+        .expect("cron_list should succeed");
+    let job2 = jobs2
+        .iter()
+        .find(|j| j["name"].as_str() == Some("no-peer-id"))
+        .expect("second job should appear in list");
+    assert!(
+        job2["peer_id"].is_null(),
+        "peer_id should be null when not provided"
+    );
+
+    kernel.shutdown();
+}

@@ -1606,7 +1606,11 @@ mod tests {
 
         // Should have: removed orphan, removed empty, inserted synthetic for tu-b
         assert_eq!(stats.orphaned_results_removed, 1, "ghost result removed");
-        assert_eq!(stats.synthetic_results_inserted, 1, "tu-b gets synthetic");
+        assert_eq!(
+            stats.synthetic_results_inserted + stats.positional_synthetic_inserted,
+            1,
+            "tu-b gets synthetic"
+        );
         assert!(stats.empty_messages_removed >= 1, "empty message removed");
 
         // Verify tu-b has a synthetic result somewhere
