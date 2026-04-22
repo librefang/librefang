@@ -28,6 +28,7 @@ import {
   MessageCircle,
   AlertCircle,
   FileText,
+  Plus,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -54,7 +55,8 @@ import {
   useSetHandSecret,
   useUpdateHandSettings,
 } from "../lib/mutations/hands";
-import { useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
+import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { useCronJobs } from "../lib/queries/runtime";
 
 
@@ -504,8 +506,14 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
           </div>
         )}
 
-        {activeTab === "schedules" && (
-          <HandSchedulesTab cronJobs={cronJobs} isLoading={cronJobsQuery.isLoading} onRefresh={() => cronJobsQuery.refetch()} />
+        {activeTab === "schedules" && agentId && (
+          <HandSchedulesTab
+            cronJobs={cronJobs}
+            isLoading={cronJobsQuery.isLoading}
+            onRefresh={() => cronJobsQuery.refetch()}
+            agentId={agentId}
+            handName={hand.name || hand.id}
+          />
         )}
       </div>
     </div>
@@ -688,76 +696,211 @@ function HandSettingsEditor({
 
 /* ── Schedules tab content for a hand ─────────────────────── */
 
-function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
+function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }: {
   cronJobs: CronJobItem[];
   isLoading: boolean;
   onRefresh: () => void;
+  agentId: string;
+  handName: string;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const toggleSchedule = useUpdateSchedule();
   const deleteScheduleMut = useDeleteSchedule();
+  const createScheduleMut = useCreateSchedule();
+  const [showCreate, setShowCreate] = useState(false);
+  const [showCronPicker, setShowCronPicker] = useState(false);
+  const [name, setName] = useState("");
+  const [message, setMessage] = useState("");
+  const [cron, setCron] = useState("0 9 * * *");
+  const [cronTz, setCronTz] = useState<string | undefined>(undefined);
+
+  const resetForm = () => {
+    setShowCreate(false);
+    setName("");
+    setMessage("");
+    setCron("0 9 * * *");
+    setCronTz(undefined);
+  };
 
   const handleToggle = async (job: CronJobItem) => {
     if (!job.id) return;
     try {
       await toggleSchedule.mutateAsync({ id: job.id, data: { enabled: !job.enabled } });
       onRefresh();
-    } catch (err: unknown) { addToast(err instanceof Error ? err.message : t("common.error"), "error"); }
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    if (confirmDeleteId !== id) {
+      setConfirmDeleteId(id);
+      return;
+    }
     setConfirmDeleteId(null);
     try {
       await deleteScheduleMut.mutateAsync(id);
       onRefresh();
-    } catch (err: unknown) { addToast(err instanceof Error ? err.message : t("common.error"), "error"); }
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
   };
 
-  if (isLoading) return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
+  const handleCreate = async () => {
+    if (!name.trim() || !message.trim()) return;
+    try {
+      await createScheduleMut.mutateAsync({
+        name: name.trim(),
+        cron,
+        tz: cronTz,
+        message: message.trim(),
+        enabled: true,
+        agent_id: agentId,
+      });
+      resetForm();
+      addToast(t("hands.schedule_created", { defaultValue: "Schedule created" }), "success");
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
+  };
 
-  if (cronJobs.length === 0) return <p className="text-xs text-text-dim/50 py-4 text-center">{t("scheduler.no_schedules", { defaultValue: "No scheduled tasks" })}</p>;
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand transition-colors";
+
+  if (isLoading) {
+    return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
+  }
 
   return (
     <div className="space-y-2">
-      {cronJobs.map((job) => {
-        const isEnabled = job.enabled !== false;
-        const scheduleConfig = typeof job.schedule === "object" && job.schedule !== null
-          ? job.schedule as { expr?: string; every_secs?: number }
-          : null;
-        const schedule = typeof job.schedule === "string"
-          ? job.schedule
-          : scheduleConfig?.expr ?? (scheduleConfig?.every_secs != null ? `every ${scheduleConfig.every_secs}s` : "-");
-        return (
-          <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
-            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>
-              <Activity className="w-4 h-4" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
-              <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
-            </div>
-            <button
-              onClick={() => handleToggle(job)}
-              className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition-colors ${isEnabled ? "bg-success/15 text-success hover:bg-success/25" : "bg-main text-text-dim/50 hover:text-text-dim"}`}
-            >
-              {isEnabled ? "ON" : "OFF"}
-            </button>
-            {confirmDeleteId === job.id ? (
-              <div className="flex items-center gap-1">
-                <button onClick={() => handleDelete(job.id!)} className="px-2 py-1 rounded-md bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
-                <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-md bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
-              </div>
-            ) : (
-              <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title="Delete schedule">
-                <XCircle className="w-3.5 h-3.5" />
-              </button>
-            )}
+      {!showCreate ? (
+        <button
+          onClick={() => setShowCreate(true)}
+          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand/40 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("hands.new_schedule", { defaultValue: "New schedule" })}
+        </button>
+      ) : (
+        <form
+          onSubmit={(e) => { e.preventDefault(); void handleCreate(); }}
+          className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5"
+        >
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name", { defaultValue: "Name" })}</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t("hands.schedule_name_placeholder", { defaultValue: "e.g. Daily status check" })}
+              className={inputCls}
+              autoFocus
+            />
           </div>
-        );
-      })}
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent", { defaultValue: "Target Agent" })}</label>
+            <div className="px-3 py-2 rounded-lg border border-border-subtle bg-main text-sm text-text-dim">
+              {handName}
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message", { defaultValue: "Message" })}</label>
+            <textarea
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder={t("hands.schedule_message_placeholder", { defaultValue: "What should the hand do when this fires?" })}
+              rows={2}
+              className={`${inputCls} resize-none`}
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp", { defaultValue: "Schedule" })}</label>
+            <button
+              type="button"
+              onClick={() => setShowCronPicker(true)}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+            >
+              <code className="text-xs font-mono text-text-dim">
+                {cron}{cronTz && cronTz !== "UTC" ? ` · ${cronTz}` : ""}
+              </code>
+              <span className="text-[10px] text-brand">{t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}</span>
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={!name.trim() || !message.trim() || createScheduleMut.isPending}
+              className="flex-1 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold hover:bg-brand/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {createScheduleMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mx-auto" /> : t("common.create", { defaultValue: "Create" })}
+            </button>
+            <button
+              type="button"
+              onClick={resetForm}
+              className="px-3 py-1.5 rounded-lg bg-main text-text-dim text-xs font-bold hover:text-text-main transition-colors"
+            >
+              {t("common.cancel")}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {cronJobs.length === 0 ? (
+        <p className="text-xs text-text-dim/50 py-4 text-center">{t("scheduler.no_schedules", { defaultValue: "No scheduled tasks" })}</p>
+      ) : (
+        cronJobs.map((job) => {
+          const isEnabled = job.enabled !== false;
+          const scheduleObj = typeof job.schedule === "object" && job.schedule !== null
+            ? job.schedule as { expr?: string; every_secs?: number }
+            : null;
+          const schedule = typeof job.schedule === "string"
+            ? job.schedule
+            : scheduleObj?.expr ?? (scheduleObj?.every_secs != null ? `every ${scheduleObj.every_secs}s` : "-");
+
+          return (
+            <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>
+                <Activity className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
+                <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
+              </div>
+              <button
+                onClick={() => handleToggle(job)}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition-colors ${isEnabled ? "bg-success/15 text-success hover:bg-success/25" : "bg-main text-text-dim/50 hover:text-text-dim"}`}
+              >
+                {isEnabled ? "ON" : "OFF"}
+              </button>
+              {confirmDeleteId === job.id ? (
+                <div className="flex items-center gap-1">
+                  <button onClick={() => handleDelete(job.id!)} className="px-2 py-1 rounded-md bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                  <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-md bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+                </div>
+              ) : (
+                <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title="Delete schedule">
+                  <XCircle className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          );
+        })
+      )}
+
+      {showCronPicker && (
+        <ScheduleModal
+          title={t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}
+          subtitle={handName}
+          initialCron={cron}
+          initialTz={cronTz}
+          onSave={(c, tz) => {
+            setCron(c);
+            setCronTz(tz);
+            setShowCronPicker(false);
+          }}
+          onClose={() => setShowCronPicker(false)}
+        />
+      )}
     </div>
   );
 }

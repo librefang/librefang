@@ -226,26 +226,26 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
         <div className="space-y-4 max-h-[60vh] overflow-y-auto">
           {/* Embedding */}
           <div>
-            <h4 className="text-xs font-bold mb-3">Embedding</h4>
+            <h4 className="text-xs font-bold mb-3">{t("memory.embedding_section", { defaultValue: "Embedding" })}</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <span className={labelCls}>Provider</span>
+                <span className={labelCls}>{t("memory.provider", { defaultValue: "Provider" })}</span>
                 <select value={form.embedding_provider ?? ""} onChange={e => setForm({ ...form, embedding_provider: e.target.value })} className={inputCls}>
-                  <option value="">Auto-detect</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="ollama">Ollama</option>
-                  <option value="gemini">Gemini</option>
-                  <option value="minimax">MiniMax</option>
+                  <option value="">{t("memory.auto_detect", { defaultValue: "Auto-detect" })}</option>
+                  <option value="openai">{t("memory.provider_openai", { defaultValue: "OpenAI" })}</option>
+                  <option value="ollama">{t("memory.provider_ollama", { defaultValue: "Ollama" })}</option>
+                  <option value="gemini">{t("memory.provider_gemini", { defaultValue: "Gemini" })}</option>
+                  <option value="minimax">{t("memory.provider_minimax", { defaultValue: "MiniMax" })}</option>
                 </select>
               </div>
               <div>
-                <span className={labelCls}>Model</span>
+                <span className={labelCls}>{t("memory.model", { defaultValue: "Model" })}</span>
                 <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
                   placeholder="text-embedding-3-small" className={inputCls} />
               </div>
             </div>
             <div className="mt-2">
-              <span className={labelCls}>API Key Env</span>
+              <span className={labelCls}>{t("memory.api_key_env", { defaultValue: "API Key Env" })}</span>
               <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
                 placeholder="OPENAI_API_KEY" className={inputCls} />
             </div>
@@ -253,7 +253,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
           {/* Proactive Memory */}
           <div>
-            <h4 className="text-xs font-bold mb-3">Proactive Memory</h4>
+            <h4 className="text-xs font-bold mb-3">{t("memory.proactive_memory", { defaultValue: "Proactive Memory" })}</h4>
             <div className="space-y-2">
               {[
                 { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
@@ -271,12 +271,12 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
-                <span className={labelCls}>Extraction Model</span>
+                <span className={labelCls}>{t("memory.extraction_model_label", { defaultValue: "Extraction Model" })}</span>
                 <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
                   placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
               </div>
               <div>
-                <span className={labelCls}>Max Retrieve</span>
+                <span className={labelCls}>{t("memory.max_retrieve", { defaultValue: "Max Retrieve" })}</span>
                 <input type="number" min={1} max={50} value={form.pm_max_retrieve ?? 10}
                   onChange={e => setForm({ ...form, pm_max_retrieve: e.target.value })} className={inputCls} />
               </div>
@@ -285,7 +285,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
           {/* Decay */}
           <div>
-            <span className={labelCls}>Decay Rate</span>
+            <span className={labelCls}>{t("memory.decay_rate", { defaultValue: "Decay Rate" })}</span>
             <input type="number" step={0.01} min={0} max={1} value={form.decay_rate ?? 0.05}
               onChange={e => setForm({ ...form, decay_rate: e.target.value })} className={inputCls} />
           </div>
@@ -404,7 +404,7 @@ export function MemoryPage() {
             <div className="flex items-center gap-1.5">
               <span className="text-text-dim">{t("memory.embedding_provider", { defaultValue: "Embedding" })}:</span>
               <Badge variant={memoryConfig.embedding_available ? "success" : "warning"}>
-                {memoryConfig.embedding_provider || "auto"} / {memoryConfig.embedding_model || "-"}
+                {memoryConfig.embedding_provider || t("memory.auto", { defaultValue: "auto" })} / {memoryConfig.embedding_model || "-"}
               </Badge>
             </div>
             <div className="flex items-center gap-1.5">
@@ -414,7 +414,7 @@ export function MemoryPage() {
             <div className="flex items-center gap-1.5">
               <span className="text-text-dim">{t("memory.proactive", { defaultValue: "Proactive" })}:</span>
               <Badge variant={memoryConfig.proactive_memory_enabled ? "success" : "default"}>
-                {memoryConfig.proactive_memory_enabled ? "ON" : "OFF"}
+                {memoryConfig.proactive_memory_enabled ? t("common.on", { defaultValue: "ON" }) : t("common.off", { defaultValue: "OFF" })}
               </Badge>
             </div>
           </div>
@@ -521,7 +521,7 @@ export function MemoryPage() {
                   <span>{t("memory.access_count", { defaultValue: "Accessed" })}: {m.access_count}x</span>
                 )}
                 {m.agent_id && (
-                  <span>Agent: <span className="font-mono">{m.agent_id.slice(0, 8)}</span></span>
+                  <span>{t("memory.agent_label", { defaultValue: "Agent:" })} <span className="font-mono">{m.agent_id.slice(0, 8)}</span></span>
                 )}
                 {m.category && (
                   <span>{t("memory.category", { defaultValue: "Category" })}: {m.category}</span>

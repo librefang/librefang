@@ -95,6 +95,10 @@ function makeLocalId() {
     : `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 const defaultForm: ServerFormState = {
   name: "",
   transportType: "stdio",
@@ -353,7 +357,7 @@ function AuthBadge({
       if (authWindow && !authWindow.closed) {
         authWindow.close();
       }
-      addToast(e instanceof Error ? e.message : String(e) || t("mcp.auth_start_failed"), "error");
+      addToast(errorMessage(e, t("mcp.auth_start_failed")), "error");
     }
   }, [serverIdentity, startAuthMutation, addToast, t]);
 
@@ -363,7 +367,7 @@ function AuthBadge({
       onAuthSuccess?.();
       addToast(t("mcp.auth_revoked"), "success");
     } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : String(e) || t("mcp.auth_revoke_failed"), "error");
+      addToast(errorMessage(e, t("mcp.auth_revoke_failed")), "error");
     }
   }, [serverIdentity, revokeAuthMutation, onAuthSuccess, addToast, t]);
 
@@ -696,7 +700,7 @@ export function McpServersPage() {
             setForm(defaultForm);
             addToast(t("mcp.update_success"), "success");
           },
-          onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.update_failed"), "error"),
+          onError: (e: unknown) => addToast(errorMessage(e, t("mcp.update_failed")), "error"),
         },
       );
     } else {
@@ -708,7 +712,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
       });
     }
   }
@@ -716,7 +720,7 @@ export function McpServersPage() {
   function handleReload() {
     reloadMutation.mutate(undefined, {
       onSuccess: () => addToast(t("mcp.reload_success"), "success"),
-      onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.reload_failed"), "error"),
+      onError: (e: unknown) => addToast(errorMessage(e, t("mcp.reload_failed")), "error"),
     });
   }
 
@@ -744,7 +748,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
       });
     }
   }
@@ -770,7 +774,7 @@ export function McpServersPage() {
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
-        onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.add_failed"), "error"),
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
       },
     );
   }
@@ -816,7 +820,7 @@ export function McpServersPage() {
     <div className="space-y-6">
       <PageHeader
         icon={<Plug className="h-5 w-5" />}
-        badge="MCP"
+        badge={t("mcp.badge", { defaultValue: "MCP" })}
         title={t("mcp.title")}
         subtitle={tab === "catalog" ? t("mcp.catalog_subtitle") : t("mcp.subtitle")}
         isFetching={serversQuery.isFetching || catalogQuery.isFetching || healthQuery.isFetching}
@@ -1306,7 +1310,7 @@ export function McpServersPage() {
               setDeletingServer(null);
               addToast(t("mcp.delete_success"), "success");
             },
-            onError: (e: unknown) => addToast(e instanceof Error ? e.message : String(e) || t("mcp.delete_failed"), "error"),
+            onError: (e: unknown) => addToast(errorMessage(e, t("mcp.delete_failed")), "error"),
           });
         }}
         onClose={() => setDeletingServer(null)}

@@ -319,7 +319,7 @@ function ImagePanel({
           />
         </FormField>
         <FormField label={t("media.aspect_ratio")}>
-          <Input value={aspect} onChange={(e) => setAspect(e.target.value)} placeholder="1:1" />
+          <Input value={aspect} onChange={(e) => setAspect(e.target.value)} placeholder={t("media.aspect_ratio_placeholder", { defaultValue: "1:1" })} />
         </FormField>
       </div>
       <div className="flex items-center gap-3">
@@ -344,9 +344,9 @@ function ImagePanel({
                 className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
               >
                 {img.url ? (
-                  <img src={img.url} alt={`generated ${i + 1}`} className="w-full h-auto" />
+                  <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
                 ) : (
-                  <img src={`data:image/png;base64,${img.data_base64}`} alt={`generated ${i + 1}`} className="w-full h-auto" />
+                  <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
                 )}
               </a>
             ))}
@@ -424,12 +424,12 @@ function SpeechPanel({
         </FormField>
         <FormField label={t("media.format")}>
           <select value={format} onChange={(e) => setFormat(e.target.value)} className={inputClass}>
-            <option value="mp3">mp3</option>
-            <option value="wav">wav</option>
-            <option value="flac">flac</option>
-            <option value="ogg">ogg</option>
-            <option value="opus">opus</option>
-            <option value="aac">aac</option>
+            <option value="mp3">{t("media.format_mp3", { defaultValue: "mp3" })}</option>
+            <option value="wav">{t("media.format_wav", { defaultValue: "wav" })}</option>
+            <option value="flac">{t("media.format_flac", { defaultValue: "flac" })}</option>
+            <option value="ogg">{t("media.format_ogg", { defaultValue: "ogg" })}</option>
+            <option value="opus">{t("media.format_opus", { defaultValue: "opus" })}</option>
+            <option value="aac">{t("media.format_aac", { defaultValue: "aac" })}</option>
           </select>
         </FormField>
         <FormField label={t("media.speed")}>
@@ -766,13 +766,14 @@ function ResultBlock({
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const { t } = useTranslation();
   const variant: "success" | "error" | "default" =
     status === "completed"
       ? "success"
       : status === "failed"
         ? "error"
         : "default";
-  return <Badge variant={variant}>{status}</Badge>;
+  return <Badge variant={variant}>{t(`media.status_${status}`, { defaultValue: status })}</Badge>;
 }
 
 function NoProviderHint({ tab }: { tab: MediaTab }) {

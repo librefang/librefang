@@ -143,7 +143,7 @@ describe("useDeleteTrigger", () => {
 
     const { result } = renderHook(() => useDeleteTrigger(), { wrapper });
 
-    await result.current.mutateAsync("trig-1");
+    await result.current.mutateAsync({ id: "trig-1" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);
