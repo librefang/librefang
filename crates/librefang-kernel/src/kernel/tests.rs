@@ -1961,8 +1961,8 @@ async fn test_cron_create_preserves_peer_id() {
     let job_json = serde_json::json!({
         "name": "peer-id-regression",
         "peer_id": "peer-abc-123",
-        "schedule": { "cron": "0 * * * *" },
-        "action": { "message": "ping" },
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
     });
 
     let job_id = kernel
@@ -1990,8 +1990,8 @@ async fn test_cron_create_preserves_peer_id() {
     // Also verify that a job created WITHOUT peer_id has peer_id = null.
     let job_no_peer = serde_json::json!({
         "name": "no-peer-id",
-        "schedule": { "cron": "0 * * * *" },
-        "action": { "message": "ping" },
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
     });
     let job_id2 = kernel
         .cron_create(&agent_id, job_no_peer)
