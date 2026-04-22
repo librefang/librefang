@@ -78,6 +78,16 @@
           # Restore CLI locales dir
           rm -rf $out/crates/librefang-cli/locales
           cp -a ${./.}/crates/librefang-cli/locales $out/crates/librefang-cli/
+          # Restore Tauri desktop files (config, capabilities, icons)
+          rm -rf $out/crates/librefang-desktop/tauri.conf.json
+          cp -a ${./.}/crates/librefang-desktop/tauri.conf.json $out/crates/librefang-desktop/
+          rm -rf $out/crates/librefang-desktop/capabilities
+          cp -a ${./.}/crates/librefang-desktop/capabilities $out/crates/librefang-desktop/
+          rm -rf $out/crates/librefang-desktop/icons
+          cp -a ${./.}/crates/librefang-desktop/icons $out/crates/librefang-desktop/
+          # Restore desktop gen directory
+          rm -rf $out/crates/librefang-desktop/gen
+          cp -a ${./.}/crates/librefang-desktop/gen $out/crates/librefang-desktop/
         '';
 
         commonArgs = {
