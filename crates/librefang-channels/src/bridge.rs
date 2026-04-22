@@ -2301,11 +2301,11 @@ async fn dispatch_message(
             .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
         let max_bytes = handle
             .channels_download_max_bytes()
-            .unwrap_or(50 * 1024 * 1024);
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
         if blocks.iter().any(|b| match b {
             ContentBlock::ImageFile { .. } => true,
-            ContentBlock::Text { text, .. } => text.starts_with("[File: "),
+            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
             _ => false,
         }) {
             dispatch_with_blocks(
@@ -3230,6 +3230,15 @@ fn media_type_from_url(url: &str) -> String {
     }
 }
 
+/// Default max bytes for file downloads when the bridge has no config (50 MB).
+/// Keep in sync with `default_file_download_max_bytes` in `librefang-types`.
+const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Prefix string for a successfully saved non-image file block.
+/// Used both by `download_file_to_blocks` to produce the text and by
+/// `dispatch_message` to detect success vs failure.
+const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
+
 /// Sanitize a file extension to alphanumeric characters only.
 ///
 /// Strips everything that isn't ASCII alphanumeric. Returns `"bin"` when the
@@ -3424,7 +3433,7 @@ async fn download_file_to_blocks(
         }]
     } else {
         vec![ContentBlock::Text {
-            text: format!("[File: {filename}] saved to {path_str}"),
+            text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
             provider_metadata: None,
         }]
     }
