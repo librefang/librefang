@@ -496,6 +496,9 @@ function VideoPanel({
   );
 
   const status: MediaVideoStatus | null = videoTaskQuery.data ?? submittedDraft;
+  const statusState = status?.status;
+  const statusError = status?.error;
+  const statusResult = status?.result;
 
   useEffect(() => {
     if (!videoTaskQuery.isError) return;
@@ -506,26 +509,25 @@ function VideoPanel({
   }, [videoTaskQuery.error, videoTaskQuery.isError, onToast, t]);
 
   useEffect(() => {
-    if (!status) return;
-    if (status.status === "completed") {
+    if (!statusState) return;
+    if (statusState === "completed") {
       if (completionToastShown.current === taskId) return;
       completionToastShown.current = taskId;
       onToast(t("media.video_done"), "success");
       return;
     }
-    if (status.error) {
-      if (errorToastShown.current === status.error) return;
-      errorToastShown.current = status.error;
-      onToast(status.error, "error");
+    if (statusError) {
+      if (errorToastShown.current === statusError) return;
+      errorToastShown.current = statusError;
+      onToast(statusError, "error");
     }
-    // Keep deps narrowed to used fields; add more `status` deps if this effect starts reading them.
-  }, [onToast, status?.status, status?.error, t, taskId]);
+  }, [onToast, statusError, statusState, t, taskId]);
 
   const isPolling = !!(taskId && taskProvider)
-    && !!status
-    && status.status !== "completed"
-    && status.status !== "failed"
-    && !status.error;
+    && !!statusState
+    && statusState !== "completed"
+    && statusState !== "failed"
+    && !statusError;
 
   return (
     <form
@@ -586,34 +588,34 @@ function VideoPanel({
 
       {status && (
         <ResultBlock
-          provider={status.result?.provider ?? taskProvider ?? ""}
-          model={status.result?.model ?? ""}
+          provider={statusResult?.provider ?? taskProvider ?? ""}
+          model={statusResult?.model ?? ""}
         >
           <div className="flex items-center gap-2 mb-3">
             <span className="text-xs font-bold text-text-dim">{t("media.status")}:</span>
-            <StatusBadge status={status.status} />
+            <StatusBadge status={statusState ?? "submitted"} />
           </div>
-          {status.status === "completed" && status.result && (
+          {statusState === "completed" && statusResult && (
             <div className="flex flex-col gap-2">
-              <video controls src={status.result.file_url} className="w-full rounded-xl border border-border-subtle" />
+              <video controls src={statusResult.file_url} className="w-full rounded-xl border border-border-subtle" />
               <div className="text-xs text-text-dim flex flex-wrap gap-3">
-                {status.result.width && status.result.height && (
-                  <span>{status.result.width}×{status.result.height}</span>
+                {statusResult.width && statusResult.height && (
+                  <span>{statusResult.width}×{statusResult.height}</span>
                 )}
-                {status.result.duration_secs != null && <span>{status.result.duration_secs.toFixed(1)}s</span>}
-                <a href={status.result.file_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
+                {statusResult.duration_secs != null && <span>{statusResult.duration_secs.toFixed(1)}s</span>}
+                <a href={statusResult.file_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
                   {t("media.download")}
                 </a>
               </div>
             </div>
           )}
-          {status.status !== "completed" && status.status !== "failed" && !status.error && (
+          {statusState !== "completed" && statusState !== "failed" && !statusError && (
             <div className="flex items-center gap-2 text-xs text-text-dim">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>{t("media.video_polling")}</span>
             </div>
           )}
-          {status.error && <p className="text-xs text-error">{status.error}</p>}
+          {statusError && <p className="text-xs text-error">{statusError}</p>}
         </ResultBlock>
       )}
     </form>

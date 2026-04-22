@@ -11,13 +11,6 @@ import { truncateId } from "../lib/string";
 import { useAuditRecent } from "../lib/queries/runtime";
 import type { AuditEntry } from "../api";
 
-type LogEntry = AuditEntry & {
-  source?: string;
-  message?: string;
-  event_type?: string;
-  id?: string;
-};
-
 const REFRESH_MS = 5000;
 
 const LOG_LEVELS = {
@@ -26,6 +19,10 @@ const LOG_LEVELS = {
   error: { color: "text-error", bg: "bg-error/10" },
   debug: { color: "text-text-dim", bg: "bg-text-dim/10" },
 };
+
+function logModule(entry: AuditEntry) {
+  return entry.action;
+}
 
 export function LogsPage() {
   const { t } = useTranslation();
@@ -36,7 +33,7 @@ export function LogsPage() {
 
   const logs = auditQuery.data?.entries ?? [];
   const modules = useMemo(
-    () => Array.from(new Set(logs.map((l: LogEntry) => l.action || l.source).filter(Boolean))) as string[],
+    () => Array.from(new Set(logs.map(logModule).filter(Boolean))) as string[],
     [logs],
   );
   const [search, setSearch] = useState("");
@@ -45,9 +42,9 @@ export function LogsPage() {
   const searchLower = useMemo(() => search.toLowerCase(), [search]);
 
   const filteredLogs = useMemo(
-    () => logs.filter((l: LogEntry) => {
-      const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(searchLower);
-      const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
+    () => logs.filter((l: AuditEntry) => {
+      const matchesSearch = !search || (l.detail || l.outcome || "").toLowerCase().includes(searchLower);
+      const matchesModule = !moduleFilter || logModule(l) === moduleFilter;
       return matchesSearch && matchesModule;
     }),
     [logs, searchLower, moduleFilter],
@@ -128,21 +125,21 @@ export function LogsPage() {
               message={t("common.no_data")}
             />
           ) : (
-            filteredLogs.map((l: LogEntry, i: number) => {
+            filteredLogs.map((l: AuditEntry, i: number) => {
               const outcome = l.outcome || "";
               const isError = outcome.startsWith("error");
-              const level = isError ? "error" : (l.event_type || "info").toLowerCase();
+              const level = isError ? "error" : "info";
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
               const time = formatTime(l.timestamp);
-              const detail = l.detail || l.message || "-";
+              const detail = l.detail || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
               const agentId = l.agent_id ? truncateId(l.agent_id) : "";
               return (
-                <div key={l.seq || l.id || i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
+                <div key={l.seq ?? i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <div className="flex items-center gap-2 sm:contents">
                     <span className="text-text-dim/40 shrink-0 sm:w-16 text-[10px]">{time}</span>
                     <span className="shrink-0 sm:w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
-                    <span className="text-brand font-bold shrink-0 sm:w-28 truncate text-[10px]">{l.action || l.source || "-"}</span>
+                    <span className="text-brand font-bold shrink-0 sm:w-28 truncate text-[10px]">{logModule(l) || "-"}</span>
                     <span className="text-text-dim/40 font-mono shrink-0 sm:w-16 text-[9px] hidden sm:inline">{agentId || "-"}</span>
                   </div>
                   <div className="min-w-0 flex-1">

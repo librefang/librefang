@@ -22,7 +22,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const [content, setContent] = useState("");
   const [agentId, setAgentId] = useState("");
-  const [level, setLevel] = useState("episodic");
+  const [level, setLevel] = useState("session");
 
   const addMutation = useAddMemory();
 
@@ -55,9 +55,9 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setLevel(e.target.value)}
               className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
             >
-              <option value="episodic">{t("memory.episodic", { defaultValue: "episodic" })}</option>
-              <option value="semantic">{t("memory.semantic", { defaultValue: "semantic" })}</option>
-              <option value="working">{t("memory.working", { defaultValue: "working" })}</option>
+              <option value="user">{t("memory.user", { defaultValue: "user" })}</option>
+              <option value="session">{t("memory.session", { defaultValue: "session" })}</option>
+              <option value="agent">{t("memory.agent", { defaultValue: "agent" })}</option>
             </select>
           </div>
 
@@ -129,9 +129,9 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
 
   const kpis = useMemo(() => [
     { icon: Database, label: t("memory.total_memories"), value: stats?.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
-    { icon: Sparkles, label: t("memory.episodic"), value: stats?.episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
-    { icon: Zap, label: t("memory.semantic"), value: stats?.semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
-    { icon: Clock, label: t("memory.working"), value: stats?.working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
+    { icon: Sparkles, label: t("memory.user", { defaultValue: "User" }), value: stats?.user_count ?? 0, color: "text-success", bg: "bg-success/10" },
+    { icon: Clock, label: t("memory.session", { defaultValue: "Session" }), value: stats?.session_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
+    { icon: Zap, label: t("memory.agent", { defaultValue: "Agent" }), value: stats?.agent_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
   ], [stats, t]);
 
   if (!stats) return null;
@@ -483,8 +483,8 @@ export function MemoryPage() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
                 <div className="flex items-center gap-2 min-w-0 flex-wrap">
                   <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-45 sm:max-w-none">{m.id}</h2>
-                  <Badge variant={m.level === "episodic" ? "info" : m.level === "semantic" ? "warning" : m.level === "working" ? "brand" : "default"}>
-                    {m.level || "session"}
+                  <Badge variant={m.level === "user" ? "info" : m.level === "session" ? "warning" : m.level === "agent" ? "brand" : "default"}>
+                    {m.level || t("memory.session", { defaultValue: "session" })}
                   </Badge>
                   {m.source && (
                     <Badge variant="default">{m.source}</Badge>

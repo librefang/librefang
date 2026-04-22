@@ -685,20 +685,6 @@ export function McpServersPage() {
     setDeletingServer(server);
   }, []);
 
-  // Stable per-server callbacks for ServerCard
-  const serverCallbacks = useMemo(() => {
-    const map = new Map<string, { toggle: () => void; edit: () => void; del: () => void }>();
-    for (const server of filteredServers) {
-      const id = serverIdentityOf(server);
-      map.set(id, {
-        toggle: () => toggleTools(server),
-        edit: () => openEdit(server),
-        del: () => deleteServer(server),
-      });
-    }
-    return map;
-  }, [filteredServers, toggleTools, openEdit, deleteServer]);
-
   function handleSubmit() {
     const payload = formToPayload(form);
     if (editingServer) {
@@ -977,17 +963,15 @@ export function McpServersPage() {
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
               {filteredServers.map((server) => {
                 const id = serverIdentityOf(server);
-                const callbacks = serverCallbacks.get(id);
-                if (!callbacks) return null;
                 return (
                   <ServerCard
                     key={id}
                     server={server}
                     conn={connectedMap.get(id)}
                     isExpanded={expandedTools.has(id)}
-                    onToggleTools={callbacks.toggle}
-                    onEdit={callbacks.edit}
-                    onDelete={callbacks.del}
+                    onToggleTools={() => toggleTools(server)}
+                    onEdit={() => openEdit(server)}
+                    onDelete={() => deleteServer(server)}
                     t={t}
                   />
                 );
