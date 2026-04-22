@@ -14453,6 +14453,31 @@ impl KernelHandle for LibreFangKernel {
 
         Ok(result)
     }
+
+    fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
+        let Ok(aid) = agent_id.parse::<AgentId>() else {
+            return vec![];
+        };
+        let Some(entry) = self.registry.get(aid) else {
+            return vec![];
+        };
+        if entry.manifest.workspaces.is_empty() {
+            return vec![];
+        }
+        let workspaces_root = self.config.load().effective_workspaces_dir();
+        entry
+            .manifest
+            .workspaces
+            .iter()
+            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
+            .filter_map(|(_, decl)| {
+                if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
+                    return None;
+                }
+                workspaces_root.join(&decl.path).canonicalize().ok()
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -14941,31 +14966,6 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 
     fn uptime_secs(&self) -> u64 {
         self.booted_at.elapsed().as_secs()
-    }
-
-    fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
-        let Ok(aid) = agent_id.parse::<AgentId>() else {
-            return vec![];
-        };
-        let Some(entry) = self.registry.get(aid) else {
-            return vec![];
-        };
-        if entry.manifest.workspaces.is_empty() {
-            return vec![];
-        }
-        let workspaces_root = self.config.load().effective_workspaces_dir();
-        entry
-            .manifest
-            .workspaces
-            .iter()
-            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
-            .filter_map(|(_, decl)| {
-                if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
-                    return None;
-                }
-                workspaces_root.join(&decl.path).canonicalize().ok()
-            })
-            .collect()
     }
 }
 
