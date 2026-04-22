@@ -124,6 +124,10 @@ pub struct PromptContext {
     pub skill_count: usize,
     /// Prompt context from prompt-only skills.
     pub skill_prompt_context: String,
+    /// Resolved skill config variable section (pre-formatted, from
+    /// `config_injection::format_config_section`).  Empty when no skills
+    /// declare config variables or when no values could be resolved.
+    pub skill_config_section: String,
     /// MCP server/tool summary text.
     pub mcp_summary: String,
     /// Agent workspace path.
@@ -212,11 +216,15 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     sections.push(mem_section);
 
     // Section 5 — Skills (only if skills available)
-    if !ctx.skill_summary.is_empty() || !ctx.skill_prompt_context.is_empty() {
+    if !ctx.skill_summary.is_empty()
+        || !ctx.skill_prompt_context.is_empty()
+        || !ctx.skill_config_section.is_empty()
+    {
         sections.push(build_skills_section(
             &ctx.skill_summary,
             &ctx.skill_prompt_context,
             ctx.skill_count,
+            &ctx.skill_config_section,
         ));
     }
 
@@ -576,7 +584,12 @@ pub fn build_skill_section(
     out
 }
 
-fn build_skills_section(skill_summary: &str, prompt_context: &str, skill_count: usize) -> String {
+fn build_skills_section(
+    skill_summary: &str,
+    prompt_context: &str,
+    skill_count: usize,
+    config_section: &str,
+) -> String {
     let mut out = String::from("## Skills\n");
     if !skill_summary.is_empty() {
         out.push_str(&build_skill_section(
@@ -618,6 +631,13 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str, skill_count: 
             );
         }
         out.push_str(&cap_str(prompt_context, SKILL_PROMPT_CONTEXT_TOTAL_CAP));
+    }
+    // Config variables section — appended after prompt context so skills'
+    // runtime instructions come first.  Injected only when at least one
+    // enabled skill declared a config variable with a resolvable value.
+    if !config_section.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(config_section);
     }
     out
 }
@@ -1381,6 +1401,37 @@ mod tests {
             result.contains("skill_list"),
             "skill_list hint missing: {result}"
         );
+    }
+
+    #[test]
+    fn test_skill_config_section_injected() {
+        let mut ctx = basic_ctx();
+        ctx.skill_summary = "- wiki-helper: Wiki integration".to_string();
+        ctx.skill_config_section =
+            "## Skill Config Variables\nwiki.base_url = https://wiki.example.com".to_string();
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Skill Config Variables"));
+        assert!(prompt.contains("wiki.base_url = https://wiki.example.com"));
+    }
+
+    #[test]
+    fn test_skill_config_section_omitted_when_empty() {
+        let mut ctx = basic_ctx();
+        ctx.skill_summary = "- wiki-helper: Wiki integration".to_string();
+        // skill_config_section defaults to empty
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Skill Config Variables"));
+    }
+
+    #[test]
+    fn test_skill_config_section_present_without_summary() {
+        // A skill with no summary but with config vars should still surface
+        // the config section (e.g. a prompt-only skill with config_vars).
+        let mut ctx = basic_ctx();
+        ctx.skill_config_section = "## Skill Config Variables\ndb.host = localhost".to_string();
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Skill Config Variables"));
+        assert!(prompt.contains("db.host = localhost"));
     }
 
     #[test]

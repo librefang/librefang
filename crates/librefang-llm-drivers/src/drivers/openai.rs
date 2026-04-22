@@ -4,6 +4,7 @@
 
 use crate::backoff::{standard_retry_delay, tool_use_retry_delay};
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::rate_limit_tracker::RateLimitSnapshot;
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -766,6 +767,23 @@ impl LlmDriver for OpenAIDriver {
                 });
             }
 
+            // Extract and log rate limit headers before consuming the response body.
+            if let Some(snap) = RateLimitSnapshot::from_headers(resp.headers()) {
+                if snap.has_warning() {
+                    warn!(
+                        target: "librefang::rate_limit",
+                        "OpenAI-compatible rate limit warning:\n{}",
+                        snap.display()
+                    );
+                } else {
+                    debug!(
+                        target: "librefang::rate_limit",
+                        "OpenAI-compatible rate limits OK:\n{}",
+                        snap.display()
+                    );
+                }
+            }
+
             let body = resp
                 .text()
                 .await
@@ -1126,6 +1144,23 @@ impl LlmDriver for OpenAIDriver {
                     status,
                     message: body,
                 });
+            }
+
+            // Extract and log rate limit headers before consuming the stream.
+            if let Some(snap) = RateLimitSnapshot::from_headers(resp.headers()) {
+                if snap.has_warning() {
+                    warn!(
+                        target: "librefang::rate_limit",
+                        "OpenAI-compatible rate limit warning (stream):\n{}",
+                        snap.display()
+                    );
+                } else {
+                    debug!(
+                        target: "librefang::rate_limit",
+                        "OpenAI-compatible rate limits OK (stream):\n{}",
+                        snap.display()
+                    );
+                }
             }
 
             // Parse the SSE stream
