@@ -10063,6 +10063,47 @@ system_prompt = "You are a helpful assistant."
                                     (Some(cron_sender), None)
                                 };
                                 let sender_ctx = sender_ctx_owned.as_ref();
+
+                                // Prune the persistent cron session before firing
+                                // if the user has configured a size cap.
+                                if !wants_new_session {
+                                    let cfg_snap = kernel.config.load();
+                                    let max_tokens = cfg_snap.cron_session_max_tokens;
+                                    let max_messages = cfg_snap.cron_session_max_messages;
+                                    drop(cfg_snap);
+                                    if max_tokens.is_some() || max_messages.is_some() {
+                                        let cron_sid = SessionId::for_channel(agent_id, "cron");
+                                        if let Ok(Some(mut session)) =
+                                            kernel.memory.get_session(cron_sid)
+                                        {
+                                            // Prune by message count first.
+                                            if let Some(max_msgs) = max_messages {
+                                                while session.messages.len() > max_msgs {
+                                                    session.messages.remove(0);
+                                                }
+                                            }
+                                            // Prune by token count.
+                                            if let Some(max_tok) = max_tokens {
+                                                use librefang_runtime::compactor::estimate_token_count;
+                                                loop {
+                                                    let est = estimate_token_count(
+                                                        &session.messages,
+                                                        None,
+                                                        None,
+                                                    );
+                                                    if est <= max_tok as usize
+                                                        || session.messages.is_empty()
+                                                    {
+                                                        break;
+                                                    }
+                                                    session.messages.remove(0);
+                                                }
+                                            }
+                                            let _ = kernel.memory.save_session(&session);
+                                        }
+                                    }
+                                }
+
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(

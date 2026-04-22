@@ -2102,6 +2102,21 @@ pub struct KernelConfig {
     /// Cron scheduler max total jobs across all agents. Default: 500.
     #[serde(default = "default_max_cron_jobs")]
     pub max_cron_jobs: usize,
+    /// Maximum estimated token count for the cron session before automatic
+    /// pruning. Oldest messages are removed from the front of the session
+    /// until the estimated count falls below this threshold.
+    ///
+    /// `None` (default) disables pruning and preserves existing behaviour.
+    /// Set to e.g. `100000` for a rolling 100k-token window.
+    #[serde(default)]
+    pub cron_session_max_tokens: Option<u64>,
+    /// Maximum number of messages retained in a cron session. When the
+    /// session exceeds this count the oldest messages are pruned before
+    /// each cron fire. Applied in addition to `cron_session_max_tokens`.
+    ///
+    /// `None` (default) disables message-count pruning.
+    #[serde(default)]
+    pub cron_session_max_messages: Option<usize>,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -3824,6 +3839,8 @@ impl Default for KernelConfig {
             approval: crate::approval::ApprovalPolicy::default(),
             notification: crate::approval::NotificationConfig::default(),
             max_cron_jobs: default_max_cron_jobs(),
+            cron_session_max_tokens: None,
+            cron_session_max_messages: None,
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
