@@ -141,7 +141,16 @@ librefang/
 │   └── integrations/          #   集成配置
 ├── workspaces/
 │   ├── agents/                #   活跃 Agent 工作目录
-│   └── hands/                 #   活跃 Hand 工作目录
+│   │   └── <name>/            #     每个 Agent 的私有 home
+│   │       ├── .identity/     #       Identity 文件（SOUL.md、IDENTITY.md …）
+│   │       ├── sessions/      #       对话历史
+│   │       ├── memory/        #       每日记忆日志
+│   │       ├── data/          #       Agent 专属数据
+│   │       ├── output/        #       生成的输出文件
+│   │       ├── skills/        #       Agent 专属技能
+│   │       └── logs/          #       Agent 日志
+│   ├── hands/                 #   活跃 Hand 工作目录
+│   └── shared/                #   命名共享工作区（用户声明）
 ├── skills/                    # 用户安装的技能
 ├── plugins/                   # 用户安装的插件
 ├── integrations.toml          # 已配置的集成
