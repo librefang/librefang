@@ -95,6 +95,7 @@ struct CachedWorkspaceMetadata {
     bootstrap_md: Option<String>,
     identity_md: Option<String>,
     heartbeat_md: Option<String>,
+    tools_md: Option<String>,
     created_at: std::time::Instant,
 }
 
@@ -3690,6 +3691,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -4636,6 +4638,7 @@ system_prompt = "You are a helpful assistant."
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace (streaming): {e}");
             } else {
+                migrate_identity_files(&workspace_dir);
                 manifest.workspace = Some(workspace_dir);
                 let _ = self
                     .registry
@@ -4736,6 +4739,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -5981,6 +5985,7 @@ system_prompt = "You are a helpful assistant."
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
             } else {
+                migrate_identity_files(&workspace_dir);
                 manifest.workspace = Some(workspace_dir);
                 // Persist updated workspace in registry
                 let _ = self
@@ -6082,6 +6087,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -12086,6 +12092,7 @@ system_prompt = "You are a helpful assistant."
             } else {
                 None
             },
+            tools_md: read_identity_file(workspace, "TOOLS.md"),
             created_at: std::time::Instant::now(),
         };
 

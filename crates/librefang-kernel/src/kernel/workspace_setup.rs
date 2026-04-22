@@ -592,7 +592,9 @@ pub(super) fn ensure_named_workspaces(
             tracing::warn!(name, path = %abs.display(), "Failed to create named workspace: {e}");
             continue;
         }
-        resolved.insert(name.clone(), (abs, decl.mode.clone()));
+        // Canonicalize so readonly_workspace_prefixes and TOOLS.md paths are consistent
+        let canonical = abs.canonicalize().unwrap_or(abs);
+        resolved.insert(name.clone(), (canonical, decl.mode.clone()));
     }
     resolved
 }
