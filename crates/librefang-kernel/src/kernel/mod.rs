@@ -4361,15 +4361,22 @@ system_prompt = "You are a helpful assistant."
                 "run_forked_agent_streaming is only supported for LLM agents".to_string(),
             )));
         }
+        // Inherit the parent turn's interrupt when one exists so a caller
+        // invoking `stop_agent_run(agent_id)` on the parent also cancels
+        // tools that are in-flight inside this fork (#2939). Both handles
+        // wrap the same `Arc<AtomicBool>`, so `cancel()` on either one is
+        // observed by both. When no parent is running (e.g. auto_memorize
+        // fires from an idle agent), fall back to a fresh interrupt so the
+        // fork still has a cancellation primitive for its own tools.
+        let interrupt = self
+            .session_interrupts
+            .get(&agent_id)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,
-            // TODO: fork should inherit parent's interrupt so cancelling the
-            // parent also cancels in-flight tools inside the fork.  For now,
-            // each fork gets an independent interrupt; the fork is short-lived
-            // (dream / auto_memorize) and driven by its own JoinHandle, so
-            // external cancellation via stop_agent_run is not wired for forks.
-            interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
+            interrupt: Some(interrupt),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -5118,15 +5125,25 @@ system_prompt = "You are a helpful assistant."
 
                     // Task is finishing normally — remove the interrupt handle
                     // so the map doesn't grow without bound.
-                    kernel_clone.session_interrupts.remove(&agent_id);
-                    kernel_clone.running_tasks.remove(&agent_id);
+                    //
+                    // Forks share the parent's `SessionInterrupt` entry (see
+                    // `run_forked_agent_streaming`), so a fork must NOT remove
+                    // it on its own completion — that would orphan the parent
+                    // from `stop_agent_run` cancellation. Only the original
+                    // parent turn cleans up the map.
+                    if !loop_opts.is_fork {
+                        kernel_clone.session_interrupts.remove(&agent_id);
+                        kernel_clone.running_tasks.remove(&agent_id);
+                    }
                     Ok(result)
                 }
                 Err(e) => {
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
-                    kernel_clone.session_interrupts.remove(&agent_id);
-                    kernel_clone.running_tasks.remove(&agent_id);
+                    if !loop_opts.is_fork {
+                        kernel_clone.session_interrupts.remove(&agent_id);
+                        kernel_clone.running_tasks.remove(&agent_id);
+                    }
                     Err(KernelError::LibreFang(e))
                 }
             }
