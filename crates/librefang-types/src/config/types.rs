@@ -2393,7 +2393,14 @@ pub struct VertexAiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextEngineTomlConfig {
-    /// Built-in engine name. Default: `"default"`.
+    /// Built-in engine name. Supported values:
+    /// - `"default"`: plain [`DefaultContextEngine`] with no additional wrapping
+    /// - `"summary"`: [`SummaryContextEngine`] — threshold-gated LLM summarisation
+    ///   that fires when prompt tokens cross ~80 % of the context window
+    /// - `"no_compact"`: [`NoCompactContextEngine`] — disables automatic compaction
+    ///   while wiring all other lifecycle hooks
+    ///
+    /// Default: `"default"`.
     pub engine: String,
     /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
     /// Takes precedence over manual `hooks` if set.
