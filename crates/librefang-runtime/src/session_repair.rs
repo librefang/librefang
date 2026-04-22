@@ -828,7 +828,7 @@ fn content_to_blocks(content: MessageContent) -> Vec<ContentBlock> {
 // ---------------------------------------------------------------------------
 
 /// Check if a message contains any `ToolUse` blocks.
-fn message_has_tool_use(msg: &Message) -> bool {
+pub fn message_has_tool_use(msg: &Message) -> bool {
     match &msg.content {
         MessageContent::Blocks(blocks) => blocks
             .iter()
@@ -839,7 +839,7 @@ fn message_has_tool_use(msg: &Message) -> bool {
 
 /// Check if a message contains only `ToolResult` blocks (i.e. it is a tool-
 /// result delivery, not a fresh user question).
-fn message_is_only_tool_results(msg: &Message) -> bool {
+pub fn message_is_only_tool_results(msg: &Message) -> bool {
     match &msg.content {
         MessageContent::Blocks(blocks) => {
             !blocks.is_empty()
