@@ -54,41 +54,23 @@
           pango
         ]);
 
-               # Filter source to only include Rust-relevant files
-        # Include locale/files needed for i18n compile-time embedding
-        cleanSrc = craneLib.cleanCargoSource ./.;
-        src = pkgs.runCommand "librefang-src" {} ''
-          cp -a ${cleanSrc} $out
-          chmod -R u+w $out
-          # Restore locale dirs stripped by cleanCargoSource
-          rm -rf $out/crates/librefang-types/locales
-          cp -a ${./.}/crates/librefang-types/locales $out/crates/librefang-types/
-          # Restore packages dir stripped by cleanCargoSource
-          rm -rf $out/packages
-          cp -a ${./.}/packages $out/packages
-          # Restore static dir (locales, logo, favicon) stripped by cleanCargoSource
-          rm -rf $out/crates/librefang-api/static
-          cp -a ${./.}/crates/librefang-api/static $out/crates/librefang-api/
-          # Restore login_page.html stripped by cleanCargoSource
-          mkdir -p $out/crates/librefang-api/src
-          cp -a ${./.}/crates/librefang-api/src/login_page.html $out/crates/librefang-api/src/
-          # Restore CLI templates dir
-          rm -rf $out/crates/librefang-cli/templates
-          cp -a ${./.}/crates/librefang-cli/templates $out/crates/librefang-cli/
-          # Restore CLI locales dir
-          rm -rf $out/crates/librefang-cli/locales
-          cp -a ${./.}/crates/librefang-cli/locales $out/crates/librefang-cli/
-          # Restore Tauri desktop files (config, capabilities, icons)
-          rm -rf $out/crates/librefang-desktop/tauri.conf.json
-          cp -a ${./.}/crates/librefang-desktop/tauri.conf.json $out/crates/librefang-desktop/
-          rm -rf $out/crates/librefang-desktop/capabilities
-          cp -a ${./.}/crates/librefang-desktop/capabilities $out/crates/librefang-desktop/
-          rm -rf $out/crates/librefang-desktop/icons
-          cp -a ${./.}/crates/librefang-desktop/icons $out/crates/librefang-desktop/
-          # Restore desktop gen directory
-          rm -rf $out/crates/librefang-desktop/gen
-          cp -a ${./.}/crates/librefang-desktop/gen $out/crates/librefang-desktop/
-        '';
+        # Filter source to only include Rust-relevant files plus non-Rust assets needed at compile time
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./packages
+            ./crates/librefang-types/locales
+            ./crates/librefang-api/static
+            ./crates/librefang-api/src/login_page.html
+            ./crates/librefang-cli/templates
+            ./crates/librefang-cli/locales
+            ./crates/librefang-desktop/tauri.conf.json
+            ./crates/librefang-desktop/capabilities
+            ./crates/librefang-desktop/icons
+            ./crates/librefang-desktop/gen
+          ];
+        };
 
         commonArgs = {
           inherit src nativeBuildInputs buildInputs;
