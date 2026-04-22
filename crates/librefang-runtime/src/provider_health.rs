@@ -21,9 +21,13 @@ pub struct DiscoveredModelInfo {
     /// Quantization level (e.g., "Q4_K_M", "Q8_0").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization_level: Option<String>,
-    /// Model family (e.g., "llama", "gemma").
+    /// Primary model family (e.g., "llama", "gemma").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    /// All model families reported by Ollama (e.g., ["llama", "clip"]).
+    /// "clip" indicates a vision-capable model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub families: Option<Vec<String>>,
     /// On-disk size in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
@@ -221,6 +225,15 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
             .filter_map(|m| {
                 let name = m.get("name").and_then(|n| n.as_str())?.to_string();
                 let details = m.get("details");
+                let families = details
+                    .and_then(|d| d.get("families"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty());
                 Some(DiscoveredModelInfo {
                     name,
                     parameter_size: details
@@ -235,6 +248,7 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
                         .and_then(|d| d.get("family"))
                         .and_then(|v| v.as_str())
                         .map(String::from),
+                    families,
                     size: m.get("size").and_then(|v| v.as_u64()),
                 })
             })

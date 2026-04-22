@@ -9638,10 +9638,27 @@ system_prompt = "You are a helpful assistant."
                                 librefang_types::model_catalog::AuthStatus::NotRequired,
                             );
                             if !result.discovered_models.is_empty() {
-                                catalog.merge_discovered_models(
-                                    provider_id,
-                                    &result.discovered_models,
-                                );
+                                // Use enriched metadata when available (Ollama populates
+                                // discovered_model_info; other providers leave it empty).
+                                let info: Vec<_> = if result.discovered_model_info.is_empty() {
+                                    result
+                                        .discovered_models
+                                        .iter()
+                                        .map(|name| {
+                                            librefang_runtime::provider_health::DiscoveredModelInfo {
+                                                name: name.clone(),
+                                                parameter_size: None,
+                                                quantization_level: None,
+                                                family: None,
+                                                families: None,
+                                                size: None,
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    result.discovered_model_info.clone()
+                                };
+                                catalog.merge_discovered_models(provider_id, &info);
                             }
                         }
                     } else {
