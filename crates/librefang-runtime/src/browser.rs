@@ -99,7 +99,11 @@ impl CdpConnection {
         .await
         .map_err(|_| format!("CDP WebSocket connect timed out: {ws_url}"))?
         .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
+        Self::from_stream(stream)
+    }
 
+    /// Wrap an already-connected WebSocket stream in a CdpConnection.
+    fn from_stream(stream: WsStream) -> Result<Self, String> {
         let (write, read) = stream.split();
         let write = Arc::new(Mutex::new(write));
         let pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>> =
@@ -223,14 +227,20 @@ impl Drop for CdpConnection {
 
 // ── Browser session ────────────────────────────────────────────────────────
 
-/// A live browser session: one Chromium process + one CDP connection per agent.
+/// A live browser session: one CDP connection per agent.
+///
+/// `process` is `Some` for locally-spawned Chromium, `None` when attaching to
+/// a remote CDP endpoint (the operator manages the browser lifecycle).
+/// `attached_target_id` tracks the tab created during attach so it can be
+/// closed when the session ends.
 struct BrowserSession {
-    /// Local Chromium child process. `None` when in attach mode (externally
-    /// managed browser) — we never kill a browser we didn't start.
     process: Option<tokio::process::Child>,
     cdp: CdpConnection,
     #[allow(dead_code)]
     last_active: Instant,
+    /// Target ID of a tab created via `/json/new` during attach mode.
+    /// `None` for local-launch sessions or direct WS attach.
+    attached_target_id: Option<String>,
 }
 
 impl BrowserSession {
@@ -349,105 +359,92 @@ impl BrowserSession {
             process: Some(child),
             cdp,
             last_active: Instant::now(),
+            attached_target_id: None,
         })
     }
 
-    /// Attach to an existing browser via a remote CDP endpoint.
+    /// Attach to a remote CDP endpoint instead of spawning a local Chromium.
     ///
-    /// `endpoint` may be:
-    /// - `ws://host:port/devtools/browser/<id>` — create a new tab via `Target.createTarget`
-    /// - `ws://host:port/devtools/page/<id>` — use the given page directly
-    /// - `ws://host:port` — discover a page via `/json/list`
-    /// - `http://host:port` — discover the browser WS via `/json/version`,
-    ///   then create a new tab via `Target.createTarget`
+    /// Accepted formats for `cdp_endpoint`:
+    /// - `http[s]://host:port` — HTTP discovery; `POST /json/new` creates a fresh
+    ///   tab and returns its WebSocket URL. The created target ID is stored for
+    ///   cleanup when the session ends.
+    /// - `ws[s]://…` — Direct WebSocket attach (assumes page-level endpoint).
     ///
-    /// A new blank tab is created so each agent session gets its own isolated
-    /// browsing context. The browser process is never killed on drop.
-    async fn attach(endpoint: &str) -> Result<Self, String> {
-        info!(endpoint, "Attaching to remote CDP endpoint");
+    /// `auth_token` is sent as `Authorization: Bearer <token>` on the WS upgrade,
+    /// for CDP proxies that require authentication (e.g. Browserless).
+    async fn attach(cdp_endpoint: &str, auth_token: Option<&str>) -> Result<Self, String> {
+        let page_ws: String;
+        let mut target_id: Option<String> = None;
 
-        // Resolve the page WebSocket URL from the given endpoint.
-        let page_ws = if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
-            if endpoint.contains("/devtools/page/") {
-                // Specific page WS URL — use it directly.
-                endpoint.to_string()
-            } else if endpoint.contains("/devtools/browser/") {
-                // Browser-level WS — create a new isolated tab.
-                Self::attach_via_browser_ws(endpoint).await?
-            } else {
-                // Bare ws://host:port — derive HTTP base and use /json/list.
-                let http_base = endpoint
-                    .replacen("wss://", "https://", 1)
-                    .replacen("ws://", "http://", 1)
-                    .trim_end_matches('/')
-                    .to_string();
-                let list_url = format!("{http_base}/json/list");
-                Self::find_page_ws(&list_url).await?
-            }
+        let lower = cdp_endpoint.to_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            // Normalise: strip trailing slash
+            let base = cdp_endpoint.trim_end_matches('/');
+            let new_url = format!("{base}/json/new");
+            let resp = tokio::time::timeout(
+                Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
+                crate::http_client::new_client().post(&new_url).send(),
+            )
+            .await
+            .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
+            .map_err(|e| format!("Failed to reach CDP endpoint {cdp_endpoint}: {e}"))?;
+
+            let target: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("Invalid JSON from /json/new: {e}"))?;
+
+            page_ws = target["webSocketDebuggerUrl"]
+                .as_str()
+                .ok_or("Missing webSocketDebuggerUrl in /json/new response")?
+                .to_string();
+            target_id = target["id"].as_str().map(|s| s.to_string());
+            debug!(ws = %page_ws, "Attached via HTTP discovery (/json/new)");
+        } else if lower.starts_with("ws://") || lower.starts_with("wss://") {
+            page_ws = cdp_endpoint.to_string();
+            debug!(ws = %page_ws, "Attaching to CDP WebSocket directly");
         } else {
-            // http:// or https:// — discover browser WS via /json/version first.
-            let base = endpoint.trim_end_matches('/');
-            let version_url = format!("{base}/json/version");
-            let browser_ws = Self::fetch_browser_ws(&version_url).await?;
-            Self::attach_via_browser_ws(&browser_ws).await?
-        };
+            return Err(format!(
+                "Unsupported cdp_endpoint scheme. Use http://, https://, ws://, or wss://. Got: {cdp_endpoint}"
+            ));
+        }
 
-        debug!(page_ws = %page_ws, "Connecting to remote page");
-        let cdp = CdpConnection::connect(&page_ws).await?;
+        let cdp = Self::connect_with_auth(&page_ws, auth_token).await?;
 
+        // Enable required domains (same as launch)
         let _ = cdp.send("Page.enable", serde_json::json!({})).await;
         let _ = cdp.send("Runtime.enable", serde_json::json!({})).await;
 
         Ok(Self {
-            process: None, // externally managed — never kill
+            process: None,
             cdp,
             last_active: Instant::now(),
+            attached_target_id: target_id,
         })
     }
 
-    /// Fetch `/json/version` and return the `webSocketDebuggerUrl`.
-    async fn fetch_browser_ws(version_url: &str) -> Result<String, String> {
-        let resp = crate::http_client::new_client()
-            .get(version_url)
-            .send()
-            .await
-            .map_err(|e| format!("Cannot reach CDP endpoint {version_url}: {e}"))?;
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Invalid JSON from {version_url}: {e}"))?;
-        json["webSocketDebuggerUrl"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                format!("No webSocketDebuggerUrl in response from {version_url}. Is CDP enabled?")
-            })
-    }
-
-    /// Open a new blank tab via `Target.createTarget` on the browser WS,
-    /// then return its page WS URL.
-    async fn attach_via_browser_ws(browser_ws: &str) -> Result<String, String> {
-        let browser_cdp = CdpConnection::connect(browser_ws)
-            .await
-            .map_err(|e| format!("Cannot connect to browser WS {browser_ws}: {e}"))?;
-
-        let result = browser_cdp
-            .send(
-                "Target.createTarget",
-                serde_json::json!({"url": "about:blank"}),
+    /// Connect with an optional bearer auth token (for CDP proxies like Browserless).
+    async fn connect_with_auth(
+        ws_url: &str,
+        auth_token: Option<&str>,
+    ) -> Result<CdpConnection, String> {
+        if let Some(token) = auth_token {
+            let req = http::Request::get(ws_url)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(())
+                .map_err(|e| format!("Failed to build CDP auth request: {e}"))?;
+            let (stream, _) = tokio::time::timeout(
+                Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
+                tokio_tungstenite::connect_async(req),
             )
             .await
-            .map_err(|e| format!("Target.createTarget failed: {e}"))?;
-
-        let target_id = result["result"]["targetId"]
-            .as_str()
-            .ok_or("No targetId in Target.createTarget response")?
-            .to_string();
-
-        // Derive the page WS URL from the browser WS by replacing
-        // `/devtools/browser/<id>` with `/devtools/page/<targetId>`.
-        let base = browser_ws.split("/devtools/").next().unwrap_or(browser_ws);
-        Ok(format!("{base}/devtools/page/{target_id}"))
+            .map_err(|_| format!("CDP WebSocket connect timed out: {ws_url}"))?
+            .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
+            CdpConnection::from_stream(stream)
+        } else {
+            CdpConnection::connect(ws_url).await
+        }
     }
 
     /// Read stderr until we find "DevTools listening on ws://...".
@@ -785,12 +782,11 @@ impl BrowserSession {
 
 impl Drop for BrowserSession {
     fn drop(&mut self) {
-        // Only kill the browser if we spawned it. In attach mode the browser
-        // lifecycle belongs to the operator; we just close our tab (done via
-        // BrowserCommand::Close before drop in normal flows).
         if let Some(ref mut child) = self.process {
             let _ = child.start_kill();
         }
+        // Tabs created via /json/new in attach mode are closed asynchronously
+        // by BrowserManager::close_session() before drop is called.
     }
 }
 
@@ -962,6 +958,20 @@ impl BrowserManager {
     /// Close an agent's browser session.
     pub async fn close_session(&self, agent_id: &str) {
         if let Some((_, session)) = self.sessions.remove(agent_id) {
+            // For attach mode: close the tab we created before dropping the session.
+            {
+                let guard = session.lock().await;
+                if let Some(ref target_id) = guard.attached_target_id {
+                    let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
+                    let base = cdp_endpoint.trim_end_matches('/');
+                    let close_url = format!("{base}/json/close/{target_id}");
+                    let _ = crate::http_client::new_client()
+                        .get(&close_url)
+                        .send()
+                        .await;
+                    debug!(agent_id, target_id, "Closed remote CDP tab");
+                }
+            }
             drop(session);
             info!(agent_id, "Browser session closed");
         }
@@ -986,18 +996,21 @@ impl BrowserManager {
         }
 
         let session = if let Some(ref endpoint) = self.config.cdp_endpoint {
-            BrowserSession::attach(endpoint).await?
+            let auth_token = self
+                .config
+                .cdp_auth_token_env
+                .as_deref()
+                .and_then(|var| std::env::var(var).ok());
+            let session = BrowserSession::attach(endpoint, auth_token.as_deref()).await?;
+            info!(agent_id, endpoint, "Browser session attached (remote CDP)");
+            session
         } else {
-            BrowserSession::launch(&self.config).await?
+            let session = BrowserSession::launch(&self.config).await?;
+            info!(agent_id, "Browser session created (native CDP)");
+            session
         };
         let arc = Arc::new(Mutex::new(session));
         self.sessions.insert(agent_id.to_string(), Arc::clone(&arc));
-        let mode = if self.config.cdp_endpoint.is_some() {
-            "attached"
-        } else {
-            "launched"
-        };
-        info!(agent_id, mode, "Browser session created (native CDP)");
         Ok(arc)
     }
 }

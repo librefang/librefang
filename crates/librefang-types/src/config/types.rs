@@ -531,21 +531,28 @@ pub struct BrowserConfig {
     pub max_sessions: usize,
     /// Path to Chromium/Chrome binary. Auto-detected if None.
     pub chromium_path: Option<String>,
-    /// Remote CDP endpoint URL. When set, librefang attaches to an
-    /// already-running browser instead of spawning a local Chromium process.
+    /// Remote CDP endpoint to attach to instead of spawning a local Chromium.
     ///
-    /// Accepts either a WebSocket URL (`ws://host:9222`) or an HTTP URL
-    /// (`http://host:9222`) from which the browser WebSocket URL is discovered
-    /// via `/json/version`.
+    /// Accepted formats:
+    /// - `ws://host:port/devtools/browser/<id>` — page-level WebSocket (direct attach)
+    /// - `http://host:port` — HTTP discovery endpoint; librefang calls `GET /json/new`
+    ///   to create a fresh tab and connects to the returned WebSocket URL.
     ///
-    /// **Security**: CDP provides full browser control and is unauthenticated.
-    /// Never expose this port on a public interface. Use SSH tunnels, WireGuard,
-    /// or a loopback-only port on a trusted host.
+    /// When set, `headless`, `chromium_path`, and local-process discovery are
+    /// ignored. Browser lifecycle (start/stop) is the operator's responsibility.
     ///
-    /// When set, `headless`, `viewport_*`, and the local chromium discovery
-    /// path are ignored — browser lifecycle is the operator's responsibility.
+    /// **Security**: CDP is unauthenticated. Never expose the debugging port on a
+    /// public interface. Use SSH tunnels, WireGuard, or a trusted-network path.
     #[serde(default)]
     pub cdp_endpoint: Option<String>,
+    /// Environment variable that holds a bearer token for the CDP endpoint.
+    ///
+    /// Some CDP proxies (e.g. Browserless) require `Authorization: Bearer <token>`
+    /// on the WebSocket upgrade request. Set this to the name of an env var that
+    /// contains the token (e.g. `"LIBREFANG_CDP_TOKEN"`); librefang reads the
+    /// value at connect time and never logs it.
+    #[serde(default)]
+    pub cdp_auth_token_env: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -560,6 +567,7 @@ impl Default for BrowserConfig {
             max_sessions: 5,
             chromium_path: None,
             cdp_endpoint: None,
+            cdp_auth_token_env: None,
         }
     }
 }
