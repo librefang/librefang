@@ -228,6 +228,13 @@ impl SessionId {
     }
 }
 
+impl std::str::FromStr for SessionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(s).map(SessionId)
+    }
+}
+
 impl Default for SessionId {
     fn default() -> Self {
         Self::new()
@@ -1944,5 +1951,19 @@ model = "llama-3.3-70b-versatile"
         let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
         let sid = SessionId::for_channel(agent, "telegram");
         assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
+    }
+
+    #[test]
+    fn session_id_from_str_parses_uuid() {
+        use std::str::FromStr;
+        let s = "550e8400-e29b-41d4-a716-446655440000";
+        let sid = SessionId::from_str(s).expect("valid uuid");
+        assert_eq!(sid.0.to_string(), s);
+    }
+
+    #[test]
+    fn session_id_from_str_rejects_garbage() {
+        use std::str::FromStr;
+        assert!(SessionId::from_str("not-a-uuid").is_err());
     }
 }
