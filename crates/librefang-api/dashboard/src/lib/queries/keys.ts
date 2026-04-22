@@ -194,8 +194,9 @@ export const memoryKeys = {
     limit?: number;
     category?: string;
   } = {}) => [...memoryKeys.lists(), filters] as const,
+  statsAll: () => [...memoryKeys.all, "stats"] as const,
   stats: (agentId?: string) =>
-    [...memoryKeys.all, "stats", agentId] as const,
+    [...memoryKeys.statsAll(), agentId] as const,
   config: () => [...memoryKeys.all, "config"] as const,
 };
 

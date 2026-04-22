@@ -73,6 +73,7 @@ export {
   getNetworkStatus,
   listPeers,
   listA2AAgents,
+  getA2ATaskStatus,
   // plugins
   listPlugins,
   listPluginRegistries,
@@ -238,6 +239,8 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
+  A2AAgentItem,
+  A2ATaskStatus,
   AutoDreamAbortOutcome,
   AutoDreamAgentStatus,
   AutoDreamProgress,

@@ -5,7 +5,9 @@ FROM node:20-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
-RUN npm install && npm run build
+RUN corepack enable \
+    && pnpm install --frozen-lockfile --config.strict-dep-builds=false \
+    && pnpm run build
 
 # Stage 2: Build Rust binary
 FROM rust:1-slim-bookworm AS builder

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { type ApprovalAuditEntry } from "../api";
 import {
@@ -24,7 +24,23 @@ import { CheckCircle, XCircle, Clock, MessageSquare, ChevronLeft, ChevronRight }
 
 const AUDIT_PAGE_SIZE = 20;
 
+const TOTP_REGEX = /^\d{6}$/;
+const RECOVERY_REGEX = /^\d{4}-\d{4}$/;
+
+function isValidTotpOrRecovery(v: string) {
+  return TOTP_REGEX.test(v) || RECOVERY_REGEX.test(v);
+}
+
 type Tab = "pending" | "audit";
+type PendingTarget = { kind: "item"; id: string } | { kind: "batch" } | null;
+
+function tabClass(_tab: Tab, isActive: boolean) {
+  return `px-4 py-2 text-sm font-bold rounded-lg transition-colors ${
+    isActive
+      ? "bg-brand/10 text-brand border border-brand/20"
+      : "text-text-dim hover:text-text-main hover:bg-surface-hover border border-transparent"
+  }`;
+}
 
 function statusBadge(status: string | undefined, t: (key: string) => string) {
   switch (status) {
@@ -100,8 +116,8 @@ function ModifyForm({
       await modifyAndRetry.mutateAsync({ id, feedback: feedback.trim() });
       addToast(t("approvals.modifiedToast"), "success");
       onDone();
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : String(e), "error");
     }
   }
 
@@ -243,8 +259,8 @@ function AuditLogTab() {
 
 export function ApprovalsPage() {
   const { t } = useTranslation();
-  const [pendingId, setPendingId] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [pendingTarget, setPendingTarget] = useState<PendingTarget>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [modifyingId, setModifyingId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("pending");
   const [totpPromptId, setTotpPromptId] = useState<string | null>(null);
@@ -260,7 +276,10 @@ export function ApprovalsPage() {
   const totpEnforced = totpQuery.data?.enforced ?? false;
 
   const approvals = approvalsQuery.data ?? [];
-  const pendingApprovals = approvals.filter((a) => !a.status || a.status === "pending");
+  const pendingApprovals = useMemo(
+    () => approvals.filter((a) => !a.status || a.status === "pending"),
+    [approvals]
+  );
 
   async function handleDecision(id: string, decision: "approve" | "reject") {
     // If TOTP is enforced and user is approving, prompt for code
@@ -272,10 +291,6 @@ export function ApprovalsPage() {
     await executeDecision(id, decision);
   }
 
-  // Accept 6-digit TOTP codes or xxxx-xxxx recovery codes
-  const isValidTotpOrRecovery = (v: string) =>
-    /^\d{6}$/.test(v) || /^\d{4}-\d{4}$/.test(v);
-
   async function handleTotpSubmit() {
     if (!totpPromptId || !isValidTotpOrRecovery(totpInput)) return;
     await executeDecision(totpPromptId, "approve", totpInput);
@@ -284,7 +299,7 @@ export function ApprovalsPage() {
   }
 
   async function executeDecision(id: string, decision: "approve" | "reject", totpCode?: string) {
-    setPendingId(id);
+    setPendingTarget({ kind: "item", id });
     try {
       if (decision === "approve") {
         await approveMutation.mutateAsync({ id, totpCode });
@@ -298,25 +313,25 @@ export function ApprovalsPage() {
         next.delete(id);
         return next;
       });
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : String(e), "error");
     } finally {
-      setPendingId(null);
+      setPendingTarget(null);
     }
   }
 
   async function handleBatchAction(decision: "approve" | "reject") {
     if (selected.size === 0) return;
     const ids = Array.from(selected);
-    setPendingId("batch");
+    setPendingTarget({ kind: "batch" });
     try {
       await batchResolve.mutateAsync({ ids, decision });
       addToast(t("approvals.batchSuccess"), "success");
       setSelected(new Set());
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : String(e), "error");
     } finally {
-      setPendingId(null);
+      setPendingTarget(null);
     }
   }
 
@@ -337,13 +352,6 @@ export function ApprovalsPage() {
     }
   }
 
-  const tabClass = (tab: Tab) =>
-    `px-4 py-2 text-sm font-bold rounded-lg transition-colors ${
-      activeTab === tab
-        ? "bg-brand/10 text-brand border border-brand/20"
-        : "text-text-dim hover:text-text-main hover:bg-surface-hover border border-transparent"
-    }`;
-
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -358,7 +366,7 @@ export function ApprovalsPage() {
 
       {/* Tab toggle */}
       <div className="flex gap-2">
-        <button className={tabClass("pending")} onClick={() => setActiveTab("pending")}>
+        <button className={tabClass("pending", activeTab === "pending")} onClick={() => setActiveTab("pending")}>
           {t("approvals.tabPending")}
           {pendingApprovals.length > 0 && (
             <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/20 px-1.5 text-[10px] font-bold text-warning">
@@ -366,7 +374,7 @@ export function ApprovalsPage() {
             </span>
           )}
         </button>
-        <button className={tabClass("audit")} onClick={() => setActiveTab("audit")}>
+        <button className={tabClass("audit", activeTab === "audit")} onClick={() => setActiveTab("audit")}>
           {t("approvals.tabAuditLog")}
         </button>
       </div>
@@ -396,8 +404,8 @@ export function ApprovalsPage() {
                     variant="success"
                     size="sm"
                     onClick={() => handleBatchAction("approve")}
-                    disabled={pendingId === "batch" || totpEnforced}
-                    isLoading={pendingId === "batch"}
+                    disabled={pendingTarget?.kind === "batch" || totpEnforced}
+                    isLoading={pendingTarget?.kind === "batch"}
                     title={totpEnforced ? t("approvals.batch_disabled_totp") : undefined}
                   >
                     {t("approvals.approveSelected")}
@@ -406,8 +414,8 @@ export function ApprovalsPage() {
                     variant="danger"
                     size="sm"
                     onClick={() => handleBatchAction("reject")}
-                    disabled={pendingId === "batch"}
-                    isLoading={pendingId === "batch"}
+                    disabled={pendingTarget?.kind === "batch"}
+                    isLoading={pendingTarget?.kind === "batch"}
                   >
                     {t("approvals.rejectSelected")}
                   </Button>
@@ -464,10 +472,10 @@ export function ApprovalsPage() {
                           >
                             {t("approvals.modify")}
                           </Button>
-                          <Button variant="danger" size="sm" onClick={() => handleDecision(a.id, "reject")} disabled={pendingId === a.id}>
+                          <Button variant="danger" size="sm" onClick={() => handleDecision(a.id, "reject")} disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}>
                             {t("approvals.reject")}
                           </Button>
-                          <Button variant="success" size="sm" onClick={() => handleDecision(a.id, "approve")} disabled={pendingId === a.id}>
+                          <Button variant="success" size="sm" onClick={() => handleDecision(a.id, "approve")} disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}>
                             {t("approvals.approve")}
                           </Button>
                         </div>
@@ -485,7 +493,7 @@ export function ApprovalsPage() {
                           maxLength={9}
                           value={totpInput}
                           onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
-                          placeholder="000000 / 0000-0000"
+                          placeholder={t("approvals.totpPlaceholder", { defaultValue: "000000 / 0000-0000" })}
                           className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
                           autoFocus
                           onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
@@ -494,8 +502,8 @@ export function ApprovalsPage() {
                           variant="success"
                           size="sm"
                           onClick={handleTotpSubmit}
-                          disabled={!isValidTotpOrRecovery(totpInput) || pendingId === a.id}
-                          isLoading={pendingId === a.id}
+                          disabled={!isValidTotpOrRecovery(totpInput) || (pendingTarget?.kind === "item" && pendingTarget.id === a.id)}
+                          isLoading={pendingTarget?.kind === "item" && pendingTarget.id === a.id}
                         >
                           {t("approvals.approve")}
                         </Button>
@@ -506,7 +514,7 @@ export function ApprovalsPage() {
                         >
                           {t("common.cancel", "Cancel")}
                         </Button>
-                        <span className="text-xs text-text-dim">TOTP</span>
+                        <span className="text-xs text-text-dim">{t("approvals.totpLabel", { defaultValue: "TOTP" })}</span>
                       </div>
                     )}
                     {/* Modify form */}
