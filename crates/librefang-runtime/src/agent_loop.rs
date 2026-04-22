@@ -2681,6 +2681,9 @@ pub async fn run_agent_loop(
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
+    // Context compressor — triggers LLM-based summarisation when token usage
+    // exceeds 80% of the context window, before falling back to brute-force trim.
+    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
@@ -2808,14 +2811,59 @@ pub async fn run_agent_loop(
                 warn!("Context overflow unrecoverable — suggest /reset or /compact");
             }
         } else {
-            // Inline fallback: overflow recovery + context guard
-            let recovery =
-                recover_from_overflow(&mut messages, &system_prompt, available_tools, ctx_window);
-            if recovery == RecoveryStage::FinalError {
-                warn!("Context overflow unrecoverable — suggest /reset or /compact");
-            }
-            if recovery != RecoveryStage::None {
+            // Inline fallback: LLM-based context compression (soft), then
+            // overflow recovery (hard trim), then context guard.
+            let (compressed, compression_events) = context_compressor
+                .compress_if_needed(
+                    messages.clone(),
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                    &manifest.model.model,
+                    driver.clone(),
+                )
+                .await;
+            if !compression_events.is_empty() {
+                messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Keep session.messages in sync with the compressed LLM working copy
+                // so subsequent turns don't re-read the uncompressed history.
+                session.messages = messages.clone();
+                // Re-estimate after soft compression; only invoke hard trim if still
+                // above the 70% threshold used by recover_from_overflow.
+                let remaining_tokens = crate::compactor::estimate_token_count(
+                    &messages,
+                    Some(&system_prompt),
+                    Some(available_tools),
+                );
+                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+                if remaining_tokens > hard_trim_threshold {
+                    let recovery = recover_from_overflow(
+                        &mut messages,
+                        &system_prompt,
+                        available_tools,
+                        ctx_window,
+                    );
+                    if recovery == RecoveryStage::FinalError {
+                        warn!("Context overflow unrecoverable — suggest /reset or /compact");
+                    }
+                    if recovery != RecoveryStage::None {
+                        messages = crate::session_repair::validate_and_repair(&messages);
+                    }
+                }
+            } else {
+                let recovery = recover_from_overflow(
+                    &mut messages,
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                );
+                if recovery == RecoveryStage::FinalError {
+                    warn!("Context overflow unrecoverable — suggest /reset or /compact");
+                }
+                if recovery != RecoveryStage::None {
+                    messages = crate::session_repair::validate_and_repair(&messages);
+                }
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -3852,6 +3900,8 @@ pub async fn run_agent_loop_streaming(
     // Build context budget from model's actual context window (or fallback to default)
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
+    // Context compressor — LLM-based soft compression before hard trim.
+    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
@@ -3964,13 +4014,60 @@ pub async fn run_agent_loop_streaming(
                 .await?;
             result.recovery
         } else {
-            let recovery =
-                recover_from_overflow(&mut messages, &system_prompt, available_tools, ctx_window);
-            if recovery != RecoveryStage::None {
+            // LLM-based soft compression first, then hard overflow recovery.
+            let (compressed, compression_events) = context_compressor
+                .compress_if_needed(
+                    messages.clone(),
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                    &manifest.model.model,
+                    driver.clone(),
+                )
+                .await;
+            if !compression_events.is_empty() {
+                messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Keep session.messages in sync with the compressed LLM working copy
+                // so subsequent turns don't re-read the uncompressed history.
+                session.messages = messages.clone();
+                // Re-estimate after soft compression; only invoke hard trim if still
+                // above the 70% threshold used by recover_from_overflow.
+                let remaining_tokens = crate::compactor::estimate_token_count(
+                    &messages,
+                    Some(&system_prompt),
+                    Some(available_tools),
+                );
+                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+                let recovery = if remaining_tokens > hard_trim_threshold {
+                    let r = recover_from_overflow(
+                        &mut messages,
+                        &system_prompt,
+                        available_tools,
+                        ctx_window,
+                    );
+                    if r != RecoveryStage::None {
+                        messages = crate::session_repair::validate_and_repair(&messages);
+                    }
+                    r
+                } else {
+                    RecoveryStage::None
+                };
+                apply_context_guard(&mut messages, &context_budget, available_tools);
+                recovery
+            } else {
+                let recovery = recover_from_overflow(
+                    &mut messages,
+                    &system_prompt,
+                    available_tools,
+                    ctx_window,
+                );
+                if recovery != RecoveryStage::None {
+                    messages = crate::session_repair::validate_and_repair(&messages);
+                }
+                apply_context_guard(&mut messages, &context_budget, available_tools);
+                recovery
             }
-            apply_context_guard(&mut messages, &context_budget, available_tools);
-            recovery
         };
         match &recovery {
             RecoveryStage::None => {}
