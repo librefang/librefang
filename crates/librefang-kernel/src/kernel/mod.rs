@@ -1315,7 +1315,25 @@ impl LibreFangKernel {
             self.registry.list().iter().map(|e| e.id).collect();
         let mut total_removed: usize = 0;
 
-        // 1. agent_msg_locks — remove locks for dead agents
+        // 1. running_tasks — abort and remove handles for dead agents; also
+        //    remove handles for agents that are still live but whose task has
+        //    already finished (is_finished() == true).  Without this, every
+        //    completed agent turn leaves an orphan AbortHandle in the map
+        //    that is never cleaned up by stop_agent_run / suspend_agent.
+        {
+            let finished: Vec<AgentId> = self
+                .running_tasks
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()) || e.value().is_finished())
+                .map(|e| *e.key())
+                .collect();
+            total_removed += finished.len();
+            for id in finished {
+                self.running_tasks.remove(&id);
+            }
+        }
+
+        // 3. agent_msg_locks — remove locks for dead agents
         {
             let stale: Vec<AgentId> = self
                 .agent_msg_locks
@@ -1329,7 +1347,7 @@ impl LibreFangKernel {
             }
         }
 
-        // 2. injection_senders / injection_receivers — remove for dead agents
+        // 4. injection_senders / injection_receivers — remove for dead agents
         {
             let stale: Vec<AgentId> = self
                 .injection_senders
@@ -1344,7 +1362,7 @@ impl LibreFangKernel {
             }
         }
 
-        // 3. assistant_routes — evict entries unused for >30 minutes
+        // 5. assistant_routes — evict entries unused for >30 minutes
         {
             let ttl = std::time::Duration::from_secs(30 * 60);
             let stale: Vec<String> = self
@@ -1359,7 +1377,7 @@ impl LibreFangKernel {
             }
         }
 
-        // 4. decision_traces — remove dead agents, cap per-agent at 50
+        // 6. decision_traces — remove dead agents, cap per-agent at 15
         {
             let stale: Vec<AgentId> = self
                 .decision_traces
@@ -1374,14 +1392,14 @@ impl LibreFangKernel {
             // Cap surviving entries
             for mut entry in self.decision_traces.iter_mut() {
                 let traces = entry.value_mut();
-                if traces.len() > 50 {
-                    let drain = traces.len() - 50;
+                if traces.len() > 15 {
+                    let drain = traces.len() - 15;
                     traces.drain(..drain);
                 }
             }
         }
 
-        // 5. prompt_metadata_cache — clear expired + cap at 100 entries
+        // 7. prompt_metadata_cache — clear expired + cap at 100 entries
         {
             self.prompt_metadata_cache
                 .workspace
@@ -1404,13 +1422,46 @@ impl LibreFangKernel {
             }
         }
 
-        // 6. delivery_tracker — remove receipts for dead agents
+        // 8. route_divergence — remove keys no longer present in assistant_routes
+        {
+            let stale: Vec<String> = self
+                .route_divergence
+                .iter()
+                .filter(|e| !self.assistant_routes.contains_key(e.key()))
+                .map(|e| e.key().clone())
+                .collect();
+            total_removed += stale.len();
+            for key in stale {
+                self.route_divergence.remove(&key);
+            }
+        }
+
+        // 9. skill_review_cooldowns — remove entries for dead agents
+        {
+            let stale: Vec<String> = self
+                .skill_review_cooldowns
+                .iter()
+                .filter(|e| {
+                    e.key()
+                        .parse::<AgentId>()
+                        .map(|id| !live_agents.contains(&id))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.key().clone())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.skill_review_cooldowns.remove(&id);
+            }
+        }
+
+        // 10. delivery_tracker — remove receipts for dead agents
         total_removed += self.delivery_tracker.gc_stale_agents(&live_agents);
 
-        // 7. event_bus agent channels — remove channels for dead agents
+        // 11. event_bus agent channels — remove channels for dead agents
         total_removed += self.event_bus.gc_stale_channels(&live_agents);
 
-        // 8. sessions — delete orphan sessions for agents no longer in registry
+        // 10. sessions — delete orphan sessions for agents no longer in registry
         {
             let live_ids: Vec<librefang_types::agent::AgentId> =
                 live_agents.iter().copied().collect();

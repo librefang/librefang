@@ -20,6 +20,7 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -37,6 +38,12 @@ pub const CHECKPOINT_BASE: &str = "checkpoints";
 
 /// Git subprocess timeout in seconds.
 const GIT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum number of snapshot operations that may run concurrently across all
+/// agents.  Each snapshot spawns a `git add -A` process that can consume
+/// 20–50 MB of RAM; limiting concurrency prevents OOM on memory-constrained
+/// deployments (e.g. fly.io 256 MB machines).
+const MAX_CONCURRENT_SNAPSHOTS: usize = 1;
 
 /// Default exclude patterns written into each shadow repo's `info/exclude`.
 const DEFAULT_EXCLUDES: &[&str] = &[
@@ -134,6 +141,12 @@ pub struct SnapshotEntry {
 pub struct CheckpointManager {
     /// `~/.librefang/checkpoints/` — base directory for all shadow repos.
     base_dir: PathBuf,
+    /// Global concurrency limit: at most `MAX_CONCURRENT_SNAPSHOTS` git
+    /// processes may run at the same time.  `try_acquire` is used so a
+    /// snapshot that cannot immediately obtain the permit is **skipped**
+    /// rather than queued — preventing memory pressure from accumulated
+    /// waiting tasks.
+    semaphore: Arc<std::sync::Mutex<usize>>,
 }
 
 impl CheckpointManager {
@@ -142,7 +155,10 @@ impl CheckpointManager {
     /// `base_dir` is typically `~/.librefang/checkpoints/`.  The directory
     /// is created on first use.
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dir,
+            semaphore: Arc::new(std::sync::Mutex::new(0)),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -160,6 +176,34 @@ impl CheckpointManager {
     /// contains more than [`MAX_FILES`] files, to avoid freezing the daemon
     /// on huge work trees.
     pub fn snapshot(&self, work_dir: &Path, reason: &str) -> Result<String, CheckpointError> {
+        // Concurrency guard: skip snapshot if another one is already running.
+        // This prevents multiple concurrent `git add -A` processes from
+        // exhausting RAM on memory-constrained hosts (each git process can
+        // use 20–50 MB).  The skipped snapshot is non-fatal — the next
+        // file_write/apply_patch will attempt a fresh snapshot.
+        {
+            let mut count = self.semaphore.lock().unwrap();
+            if *count >= MAX_CONCURRENT_SNAPSHOTS {
+                debug!(
+                    reason,
+                    "checkpoint snapshot skipped: another snapshot in progress"
+                );
+                return Ok("skipped".to_string());
+            }
+            *count += 1;
+            // MutexGuard drops here — lock released before git runs.
+        }
+        // Decrement the counter when this function returns (success or error).
+        struct ConcurrencyGuard(Arc<std::sync::Mutex<usize>>);
+        impl Drop for ConcurrencyGuard {
+            fn drop(&mut self) {
+                if let Ok(mut c) = self.0.lock() {
+                    *c = c.saturating_sub(1);
+                }
+            }
+        }
+        let _guard = ConcurrencyGuard(Arc::clone(&self.semaphore));
+
         let work_dir = normalize_path(work_dir)?;
         let shadow = self.shadow_repo_dir(&work_dir);
 
@@ -477,6 +521,9 @@ fn git_env(shadow: &Path, work_dir: &Path) -> Vec<(String, String)> {
 /// Returns `(ok, stdout, stderr)`.  `allowed_non_zero` lists exit codes that
 /// are expected (e.g. `1` from `git diff --quiet` when there are changes) and
 /// should not be logged as errors.
+///
+/// On timeout the child process is killed so it does not linger as a zombie
+/// and consume memory.
 fn run_git(
     args: &[&str],
     shadow: &Path,
@@ -484,6 +531,9 @@ fn run_git(
     timeout_secs: u64,
     allowed_non_zero: &[i32],
 ) -> (bool, String, String) {
+    use std::io::ErrorKind;
+    use std::process::Stdio;
+
     if !work_dir.exists() || !work_dir.is_dir() {
         warn!(
             path = %work_dir.display(),
@@ -497,40 +547,71 @@ fn run_git(
     }
 
     let env = git_env(shadow, work_dir);
-
-    // Build owned copies of the path strings so we can move them into a
-    // thread without lifetime issues.
-    let shadow_str = shadow.to_string_lossy().into_owned();
-    let work_dir_str = work_dir.to_string_lossy().into_owned();
-    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let env_owned: Vec<(String, String)> = env;
     let allowed_owned: Vec<i32> = allowed_non_zero.to_vec();
 
-    // Spawn a thread so we can join with a timeout — std::process::Command
-    // has no native timeout support.
-    use std::sync::mpsc;
-    let (tx, rx) = mpsc::channel::<Result<std::process::Output, std::io::Error>>();
+    // Spawn the child process with captured stdout/stderr.
+    let child = match Command::new("git")
+        .args(args)
+        .current_dir(work_dir)
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            warn!("git executable not found (shadow={})", shadow.display());
+            return (false, String::new(), "git not found".to_string());
+        }
+        Err(e) => {
+            warn!(error = %e, "git command spawn failed");
+            return (false, String::new(), e.to_string());
+        }
+    };
+
+    // Spawn a killer thread that enforces the wall-clock deadline.
+    // Using wait_with_output() (instead of the try_wait poll loop) ensures
+    // stdout/stderr pipes are drained continuously, so git can never block
+    // on a full pipe buffer and cause a spurious timeout.
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let pid = child.id();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_c = Arc::clone(&timed_out);
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
     std::thread::spawn(move || {
-        let mut cmd = Command::new("git");
-        cmd.args(&args_owned)
-            .current_dir(&work_dir_str)
-            .env_clear()
-            .envs(env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let _ = tx.send(cmd.output());
+        std::thread::sleep(timeout_dur);
+        timed_out_c.store(true, Ordering::SeqCst);
+        // Best-effort SIGKILL; harmless if the process already exited.
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+        }
     });
 
-    match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            warn!("git executable not found (shadow={})", shadow_str);
-            (false, String::new(), "git not found".to_string())
+    match child.wait_with_output() {
+        Err(e) => {
+            warn!(error = %e, "git wait_with_output failed");
+            (false, String::new(), e.to_string())
         }
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            warn!(error = %msg, "git command spawn failed");
-            (false, String::new(), msg)
+        Ok(_) if timed_out.load(Ordering::SeqCst) => {
+            warn!(?args, timeout_secs, "git command timed out");
+            (
+                false,
+                String::new(),
+                format!("timed out after {timeout_secs}s"),
+            )
         }
-        Ok(Ok(output)) => {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let code = output.status.code().unwrap_or(-1);
@@ -538,21 +619,13 @@ fn run_git(
 
             if !ok && !allowed_owned.contains(&code) {
                 warn!(
-                    args = ?args,
+                    ?args,
                     exit_code = code,
-                    stderr = %stderr,
+                    %stderr,
                     "git command failed"
                 );
             }
             (ok, stdout, stderr)
-        }
-        Err(_) => {
-            warn!(args = ?args, timeout_secs, "git command timed out");
-            (
-                false,
-                String::new(),
-                format!("timed out after {timeout_secs}s"),
-            )
         }
     }
 }

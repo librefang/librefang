@@ -55,6 +55,18 @@ const TOOL_TIMEOUT_SECS: u64 = 600;
 /// Raised from 3 to 5 to allow longer-form generation.
 const MAX_CONTINUATIONS: u32 = 5;
 
+/// Maximum number of concurrent LLM calls across all agents.
+///
+/// Each in-flight LLM call holds the full request + response body in RAM.
+/// On a 256 MB deployment with many hand-agents firing simultaneously this
+/// is the dominant memory spike.  Callers queue (`.await`) rather than
+/// fail when the limit is reached; the existing per-call timeout still fires.
+const MAX_CONCURRENT_LLM_CALLS: usize = 5;
+
+/// Process-global semaphore that caps simultaneous LLM HTTP calls.
+static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
+
 /// Maximum message history size before auto-trimming to prevent context overflow.
 /// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
 /// 7-10 real conversation turns instead of the previous 3-5.
@@ -3270,6 +3282,14 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Acquire the permit inside the retry loop so it is held only during
+        // the actual HTTP round-trip and released before any backoff sleep.
+        // Holding it across retries would block a slot for the full backoff
+        // duration (up to minutes on rate-limit), starving other agents.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3335,6 +3355,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Same rationale as call_with_retry: acquire inside the loop so
+        // the permit is not held during backoff sleeps between retries.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);

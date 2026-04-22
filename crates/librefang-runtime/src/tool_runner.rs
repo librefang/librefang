@@ -364,12 +364,12 @@ pub async fn execute_tool_raw(
         // Filesystem tools
         "file_read" => tool_file_read(input, *workspace_root).await,
         "file_write" => {
-            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write");
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             tool_file_write(input, *workspace_root).await
         }
         "file_list" => tool_file_list(input, *workspace_root).await,
         "apply_patch" => {
-            maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch");
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch").await;
             tool_apply_patch(input, *workspace_root).await
         }
 
@@ -1993,12 +1993,20 @@ fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<Pa
 /// Take a snapshot of `workspace_root` before a file-mutating operation.
 ///
 /// If an explicit `CheckpointManager` is provided (injected from the kernel),
-/// it is used.  Otherwise, a transient manager is derived from the standard
-/// home directory (`~/.librefang/checkpoints/`).
+/// it is used.  When `mgr` is `None` no snapshot is taken — callers that
+/// pass `None` are test or ephemeral contexts that do not need filesystem
+/// rollback coverage.
 ///
 /// Failures are **non-fatal**: they are logged as warnings and the calling
 /// tool proceeds normally.
-fn maybe_snapshot(
+///
+/// ## Async safety
+///
+/// `CheckpointManager::snapshot` spawns `git` subprocesses and calls
+/// blocking I/O.  This wrapper offloads the work to a dedicated thread pool
+/// via `tokio::task::spawn_blocking` so that tokio worker threads are never
+/// blocked by slow git operations.
+async fn maybe_snapshot(
     mgr: &Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
     workspace_root: Option<&Path>,
     reason: &str,
@@ -2006,24 +2014,27 @@ fn maybe_snapshot(
     let Some(root) = workspace_root else {
         return;
     };
-
-    let snapshot_result = if let Some(m) = mgr {
-        m.snapshot(root, reason)
-    } else {
-        // No injected manager — derive the checkpoint directory from the
-        // standard home layout so file_write always has snapshot coverage.
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let base = home
-            .join(".librefang")
-            .join(crate::checkpoint_manager::CHECKPOINT_BASE);
-        let transient_mgr = crate::checkpoint_manager::CheckpointManager::new(base);
-        transient_mgr.snapshot(root, reason)
+    let Some(m) = mgr else {
+        // No manager injected — skip snapshot entirely.
+        // (Test call sites pass None deliberately; production code always
+        // passes Some via the kernel.)
+        return;
     };
 
-    if let Err(e) = snapshot_result {
-        warn!(reason, root = %root.display(), "checkpoint snapshot failed (non-fatal): {e}");
+    let mgr_arc = Arc::clone(m);
+    let root_owned = root.to_path_buf();
+    let reason_owned = reason.to_string();
+
+    // Offload blocking git I/O to the blocking thread pool.
+    let result =
+        tokio::task::spawn_blocking(move || mgr_arc.snapshot(&root_owned, &reason_owned)).await;
+
+    match result {
+        Ok(Err(e)) => {
+            warn!(reason, root = %root.display(), "checkpoint snapshot failed (non-fatal): {e}")
+        }
+        Err(e) => warn!(reason, root = %root.display(), "checkpoint spawn_blocking panicked: {e}"),
+        Ok(Ok(_)) => {}
     }
 }
 
