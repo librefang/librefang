@@ -2691,6 +2691,18 @@ pub async fn run_agent_loop(
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
 
+        // Check for session-scoped interrupt at each iteration boundary.
+        // This allows a /stop signal to abort the loop between LLM calls
+        // without affecting other concurrent sessions.
+        if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+            debug!(iteration, "Agent loop interrupted by session cancel signal");
+            return Ok(AgentLoopResult {
+                silent: true,
+                new_messages_start,
+                ..Default::default()
+            });
+        }
+
         // Fire agent:step external hook (fire-and-forget).
         if let Some(ref k) = kernel {
             k.fire_agent_step(&agent_id_str, iteration);
@@ -3818,6 +3830,19 @@ pub async fn run_agent_loop_streaming(
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
+
+        // Check for session-scoped interrupt at each iteration boundary.
+        if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+            debug!(
+                iteration,
+                "Streaming agent loop interrupted by session cancel signal"
+            );
+            return Ok(AgentLoopResult {
+                silent: true,
+                new_messages_start,
+                ..Default::default()
+            });
+        }
 
         // Pluggable context engine: threshold-gated compaction (same as the
         // non-streaming loop). `last_prompt_tokens` carries only the previous
