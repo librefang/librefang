@@ -734,6 +734,104 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
   });
 });
 
+// §A — owner_notify channel (Phase 02 Plan 01)
+// ---------------------------------------------------------------------------
+describe('§A owner_notify channel', () => {
+  let mockServer;
+  let nextResponse = { response: 'public reply' };
+  const sentRequests = [];
+
+  before(async () => {
+    mockServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        sentRequests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ id: 'owner-notice-agent', name: 'Test' }]));
+          return;
+        }
+        if (req.url && req.url.endsWith('/message') && req.method === 'POST') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(nextResponse));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mockServer.listen(MOCK_LIBREFANG_PORT, '127.0.0.1', resolve));
+  });
+
+  after(async () => {
+    if (mockServer) await new Promise((r) => mockServer.close(r));
+  });
+
+  it('Test 1: forwardToLibreFang surfaces owner_notice via onOwnerNotice callback', async () => {
+    nextResponse = {
+      response: 'Public reply to chat',
+      owner_notice: '🎩 confirmation_needed: Caterina has asked for confirmation',
+    };
+    const captured = [];
+    const reply = await forwardToLibreFang(
+      'hi', '', '+39111', 'Alice', false, [],
+      {
+        isGroup: true,
+        wasMentioned: true,
+        chatJid: '120363@g.us',
+        onOwnerNotice: (txt) => captured.push(txt),
+      }
+    );
+    assert.equal(reply, 'Public reply to chat');
+    assert.equal(captured.length, 1);
+    assert.match(captured[0], /confirmation_needed/);
+    assert.match(captured[0], /Caterina/);
+  });
+
+  it('Test 2: forwardToLibreFang does not invoke callback when owner_notice absent (BC-01)', async () => {
+    nextResponse = { response: 'plain reply, no owner notice' };
+    const captured = [];
+    const reply = await forwardToLibreFang(
+      'hi', '', '+39222', 'Bob', false, [],
+      {
+        isGroup: false, wasMentioned: false, chatJid: '39222@s.whatsapp.net',
+        onOwnerNotice: (txt) => captured.push(txt),
+      }
+    );
+    assert.equal(reply, 'plain reply, no owner notice');
+    assert.equal(captured.length, 0);
+  });
+
+  it('Test 3: extractNotifyOwner still parses legacy [NOTIFY_OWNER] tags (BC kept for one release)', () => {
+    const text = 'Hello [NOTIFY_OWNER]{"reason":"x","summary":"y"}[/NOTIFY_OWNER] tail.';
+    const { notifications, cleanedText } = extractNotifyOwner(text);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].reason, 'x');
+    assert.equal(notifications[0].summary, 'y');
+    assert.equal(cleanedText, 'Hello  tail.');
+  });
+
+  it('Test 4: LIBREFANG_OWNER_CHANNEL flag is read from env at module load', () => {
+    // Sanity: verify the module exposes a stable on/off contract by source.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.match(src, /LIBREFANG_OWNER_CHANNEL/);
+    assert.match(src, /OWNER_CHANNEL_ENABLED/);
+  });
+
+  it('Test 5: gateway dual-send code path exists for owner_notify event', () => {
+    // Source-level invariant: the dual-send block must reference both the
+    // OWNER_JIDS set and the structured owner_notify log event so Task 5
+    // smoke can rely on log scraping.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.match(src, /event:\s*'owner_notify'/);
+    assert.match(src, /for \(const ownerJid of OWNER_JIDS\)/);
+    assert.match(src, /target_jids:/);
+  });
+});
+
 // Cleanup temp DB and force exit (SQLite keeps event loop alive)
 // ---------------------------------------------------------------------------
 // ID-01 identity refactor — equivalence between pre-refactor inline logic

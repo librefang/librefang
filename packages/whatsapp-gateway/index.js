@@ -257,6 +257,13 @@ const OWNER_JIDS = deriveOwnerJids(OWNER_NUMBERS);
 // Primary owner JID for unsolicited/scheduled messages only
 const OWNER_JID = OWNER_JIDS.size > 0 ? [...OWNER_JIDS][0] : '';
 
+// §A — Feature flag: when set to "off" the gateway ignores the typed
+// owner_notice channel introduced by the notify_owner LLM tool and falls
+// back to the legacy NOTIFY_OWNER text-tag path. Lets ops roll back the
+// new behaviour without a rebuild. Defaults to "on".
+const OWNER_CHANNEL_MODE = (process.env.LIBREFANG_OWNER_CHANNEL || 'on').toLowerCase();
+const OWNER_CHANNEL_ENABLED = OWNER_CHANNEL_MODE !== 'off';
+
 // Conversation TTL from config.toml (default 24 hours)
 const CONVERSATION_TTL_HOURS = parseInt(process.env.CONVERSATION_TTL_HOURS || String(tomlConfig.conversation_ttl_hours), 10);
 const CONVERSATION_TTL_MS = CONVERSATION_TTL_HOURS * 3600 * 1000;
@@ -756,6 +763,13 @@ function extractNotifyOwner(responseText) {
     } catch {
       console.error('[gateway] Failed to parse NOTIFY_OWNER JSON:', match[1]);
     }
+  }
+  // §A — legacy text-tag path is kept one release for compatibility, but
+  // every hit is loud-logged so callers can migrate to the typed
+  // `notify_owner` tool. Suppressed when the new envelope already routed
+  // the same payload (caller checks collectedOwnerNotices first).
+  if (notifications.length > 0) {
+    console.warn('[gateway][deprecated] NOTIFY_OWNER text tag detected; migrate to the notify_owner LLM tool. Hits:', notifications.length);
   }
   const cleanedText = responseText.replace(NOTIFY_OWNER_RE, '').trim();
   return { notifications, cleanedText };
@@ -1670,13 +1684,49 @@ async function startConnection() {
         };
 
         // Phase 2 §C — fetch participant roster for groups (cached 5min).
-        // Empty for DMs and on fetch failure (graceful degradation per
-        // GS-01 minimal: addressee guard simply can't fire without roster).
         const groupParticipants = isGroup ? await getGroupParticipants(sock, sender) : [];
 
+        // §A — collect typed owner notices emitted via the notify_owner tool.
+        const collectedOwnerNotices = [];
+        const onOwnerNotice = (text) => {
+          if (!text) return;
+          collectedOwnerNotices.push(text);
+        };
         const rawResponse = await forwardToLibreFangStreaming(
-          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, groupParticipants },
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, groupParticipants, onOwnerNotice },
         );
+
+        // §A — fan out collected owner notices to every configured OWNER_JID.
+        // OB-01: happens regardless of whether a public reply will be sent
+        // below; the owner receives the private payload even when the model
+        // elects to stay silent in the source chat.
+        if (OWNER_CHANNEL_ENABLED && collectedOwnerNotices.length > 0) {
+          if (OWNER_JIDS.size === 0) {
+            console.log(JSON.stringify({
+              event: 'owner_notify_skip',
+              reason: 'no_owner_configured',
+              source_chat: sender,
+              count: collectedOwnerNotices.length,
+            }));
+          } else {
+            for (const noticeText of collectedOwnerNotices) {
+              for (const ownerJid of OWNER_JIDS) {
+                try {
+                  await sock.sendMessage(ownerJid, { text: noticeText });
+                } catch (e) {
+                  console.error(`[gateway] owner_notify send failed to ${ownerJid}: ${e.message}`);
+                }
+              }
+              console.log(JSON.stringify({
+                event: 'owner_notify',
+                target_jids: [...OWNER_JIDS],
+                source_chat: sender,
+                bytes: noticeText.length,
+              }));
+            }
+          }
+        }
+
         // Scrub NO_REPLY before markdown conversion — if the model emitted it
         // trailing or glued to an emoji it would otherwise reach WhatsApp.
         const response = markdownToWhatsApp(stripNoReply(rawResponse));
@@ -2144,7 +2194,7 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '', groupParticipants = [] } = {}, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '', groupParticipants = [], onOwnerNotice = null } = {}, retryCount = 0) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
   // `whatsapp` channel loses per-conversation session isolation; the kernel
   // would merge unrelated chats into the same session.
@@ -2230,6 +2280,15 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
           try {
             const data = JSON.parse(body);
+            // §A — surface owner_notice envelope field (BC-02: absent on
+            // older daemon builds, then we just behave like before).
+            if (OWNER_CHANNEL_ENABLED && data.owner_notice && typeof onOwnerNotice === 'function') {
+              try {
+                onOwnerNotice(data.owner_notice);
+              } catch (e) {
+                console.warn(`[gateway] onOwnerNotice handler threw: ${e.message}`);
+              }
+            }
             // Silent completion — agent intentionally chose not to reply (NO_REPLY)
             if (data.silent) {
               resolve('');
@@ -2281,7 +2340,7 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @param {(text: string) => Promise<void>} onProgress
  * @returns {Promise<string>} complete response
  */
-async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, groupParticipants = [] } = {}) {
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, groupParticipants = [], onOwnerNotice = null } = {}) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid (same
   // rationale as `forwardToLibreFang`). Keeps streaming parity.
   if (!chatJid) {
@@ -2350,7 +2409,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
             console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
-            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
               .then(resolve)
               .catch(reject);
           });
@@ -2392,6 +2451,17 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
                   onProgress(display).catch(() => {});
                 }
               } catch { /* ignore */ }
+            } else if (eventType === 'owner_notice') {
+              // §A — typed owner-side payload from notify_owner tool.
+              // Forward to caller's onOwnerNotice handler unless flag disabled.
+              if (OWNER_CHANNEL_ENABLED && typeof onOwnerNotice === 'function') {
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  if (parsed.text) onOwnerNotice(parsed.text);
+                } catch (e) {
+                  console.warn(`[gateway] owner_notice SSE parse failed: ${e.message}`);
+                }
+              }
             } else if (eventType === 'chunk') {
               try {
                 const parsed = JSON.parse(dataStr);
@@ -2434,7 +2504,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         res.on('error', (err) => {
           clearTimeout(pendingEdit);
           console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
-          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
             .then(resolve)
             .catch(reject);
         });
@@ -2443,7 +2513,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
     req.on('error', (err) => {
       console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
-      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
         .then(resolve)
         .catch(reject);
     });

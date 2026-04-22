@@ -299,6 +299,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(build_peer_agents_section(&ctx.agent_name, &ctx.peer_agents));
     }
 
+    // Section 9.6 — Output Channels (§A — only when notify_owner granted)
+    if ctx.granted_tools.iter().any(|t| t == "notify_owner") {
+        sections.push(OUTPUT_CHANNELS_SECTION.to_string());
+    }
+
     // Section 10 — Safety & Oversight (skip for subagents)
     if !ctx.is_subagent {
         sections.push(SAFETY_SECTION.to_string());
@@ -909,6 +914,16 @@ const SAFETY_SECTION: &str = "\
   This does NOT apply to `agent_send` delegation results, which are authoritative.
 - If you cannot accomplish a task safely, explain the limitation.
 - When in doubt, ask the user.";
+
+/// §A — Output channels section, injected only when the `notify_owner` tool
+/// is granted to the agent. The wording explicitly forbids the historic
+/// owner-narrative-in-group leak pattern that motivated phase 02.
+const OUTPUT_CHANNELS_SECTION: &str = "\
+## Output Channels
+- Public reply: the text you write in the current turn goes to the source chat (DM or group).
+- Private message to the owner: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat.
+- In a group, NEVER write narrative addressed directly to the owner (by honorific or name) as a public reply: use `notify_owner` instead.
+- When you have sent a `notify_owner`, do not repeat the `summary` in the public reply.";
 
 /// Static operational guidelines (replaces STABILITY_GUIDELINES).
 const OPERATIONAL_GUIDELINES: &str = "\
@@ -1865,5 +1880,24 @@ mod tests {
         // longer wrapped in brackets, so it can't be confused for the
         // real trust-boundary marker.
         assert!(!safe.contains("[END EXTERNAL SKILL CONTEXT]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // §A — Output Channels injection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_builder_canali_uscita_present_when_notify_owner_granted() {
+        let mut ctx = basic_ctx();
+        ctx.granted_tools.push("notify_owner".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Output Channels"));
+        assert!(prompt.contains("notify_owner"));
+    }
+
+    #[test]
+    fn prompt_builder_canali_uscita_absent_without_notify_owner() {
+        let prompt = build_system_prompt(&basic_ctx());
+        assert!(!prompt.contains("## Output Channels"));
     }
 }
