@@ -284,6 +284,7 @@ fn test_send_to_agent_by_name_resolution() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(entry).unwrap();
 
@@ -323,6 +324,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e1).unwrap();
 
@@ -348,6 +350,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e2).unwrap();
 

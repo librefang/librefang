@@ -263,6 +263,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         registry.register(non_autonomous_entry).unwrap();
 
@@ -288,6 +289,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         registry.register(autonomous_entry).unwrap();
 

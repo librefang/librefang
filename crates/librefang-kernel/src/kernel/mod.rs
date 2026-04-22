@@ -3239,6 +3239,7 @@ system_prompt = "You are a helpful assistant."
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand,
+            ..Default::default()
         };
         self.registry
             .register(entry.clone())
@@ -5763,6 +5764,78 @@ system_prompt = "You are a helpful assistant."
                 context_window_tokens: 0,
                 label: None,
             });
+
+        // ── Session auto-reset policy check ────────────────────────────────
+        // Evaluate the global session reset policy against this agent's
+        // last_active timestamp.  The `force_session_wipe` flag on the entry
+        // acts as an operator-forced hard-wipe signal that always wins
+        // regardless of the configured mode.
+        //
+        // When a reset is required:
+        //   - `session.messages` is cleared so the LLM starts a fresh context.
+        //   - The registry entry's `force_session_wipe` / `resume_pending`
+        //     flags and `reset_reason` are updated in-place.
+        //
+        // `mode = "off"` (the default) is a no-op — fully backward compatible.
+        //
+        // Skip entirely for `session_mode = "new"`: every invocation already
+        // gets a fresh ephemeral session_id, so there is nothing to reset and
+        // we must not touch the `force_session_wipe` / `resume_pending` flags
+        // that belong to the persistent session path.
+        {
+            use crate::session_policy::SessionResetPolicy as KernelPolicy;
+            let effective_mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
+            // `New` mode creates a fresh ephemeral session_id on every call;
+            // there is nothing persistent to reset, and mutating
+            // `force_session_wipe`/`resume_pending` flags would corrupt state
+            // for future persistent-mode invocations.
+            let skip_reset = matches!(effective_mode, librefang_types::agent::SessionMode::New);
+            if !skip_reset {
+                let policy: KernelPolicy = cfg.session.reset.clone().into();
+                let last_active: std::time::SystemTime = entry.last_active.into();
+                if let Some(reason) = policy.should_reset(last_active, entry.force_session_wipe) {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        agent = %entry.name,
+                        reason = %reason,
+                        event = "session_reset",
+                        "Auto-resetting session per policy"
+                    );
+                    session.messages.clear();
+                    // Persist the cleared session immediately so the next
+                    // invocation loads an empty transcript from storage rather
+                    // than re-loading the stale pre-reset messages.  Without
+                    // this the downstream "persist if anything was injected"
+                    // guard (which is skipped when there are no injections)
+                    // would leave the storage copy untouched and the reset
+                    // would be invisible to subsequent calls.
+                    if let Err(e) = self.memory.save_session(&session) {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Failed to persist session after auto-reset"
+                        );
+                    }
+                    let types_reason: librefang_types::config::SessionResetReason = reason.into();
+                    let _ = self
+                        .registry
+                        .update_session_reset_state(agent_id, types_reason);
+                    // Persist the updated entry so the reset state survives a crash.
+                    // Other registry updates (update_skills, update_mcp_servers, etc.)
+                    // follow the same pattern: update + save_agent.
+                    if let Some(updated) = self.registry.get(agent_id) {
+                        if let Err(e) = self.memory.save_agent(&updated) {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                error = %e,
+                                "Failed to persist agent entry after auto-reset"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
 
         let tools = self.available_tools(agent_id);
         let tools = entry.mode.filter_tools((*tools).clone());
