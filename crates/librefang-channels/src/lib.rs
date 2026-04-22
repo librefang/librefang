@@ -11,11 +11,17 @@ pub mod bridge;
 pub mod formatter;
 pub(crate) mod http_client;
 pub mod message_journal;
+pub mod message_truncator;
 pub mod rate_limiter;
 pub mod router;
 pub mod sanitizer;
 pub mod sidecar;
 pub mod types;
+
+pub use message_truncator::{
+    split_to_utf16_chunks, truncate_to_utf16_limit, utf16_len, DISCORD_MESSAGE_LIMIT,
+    TELEGRAM_CAPTION_LIMIT, TELEGRAM_MESSAGE_LIMIT,
+};
 
 // Individual channel adapters — feature-gated (alphabetical order)
 #[cfg(feature = "channel-bluesky")]

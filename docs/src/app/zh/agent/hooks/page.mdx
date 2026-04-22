@@ -1,0 +1,178 @@
+# 事件 Hook 系统
+
+生命周期 hook 让外部脚本无需修改 agent 代码即可响应 agent 和会话事件。当事件触发时，LibreFang 启动配置的可执行文件，通过环境变量传递结构化数据，然后继续运行——无论 hook 是否正常退出。
+
+## 目录
+- [目录结构](#directory-layout)
+- [HOOK.yaml 格式](#hookyaml-format)
+- [支持的事件](#supported-events)
+- [环境变量](#environment-variables)
+- [载荷参考](#payload-reference)
+- [示例脚本](#example-script)
+- [错误处理](#error-handling)
+- [限制](#limitations)
+
+---
+
+## 目录结构
+
+将每个 hook 放在 `~/.librefang/hooks/` 下的独立子目录中：
+
+```
+~/.librefang/hooks/
+  notify-on-end/
+    HOOK.yaml
+    run.sh
+  log-session-reset/
+    HOOK.yaml
+    run.py
+```
+
+每个子目录必须包含且只包含一个 `HOOK.yaml`。`command` 中指定的可执行文件可以是同目录下的任意文件，也可以是系统上的绝对路径——只需确保它是可执行的（`chmod +x`）。
+
+---
+
+## HOOK.yaml 格式
+
+```yaml
+name: notify-on-agent-end
+description: "POST to a webhook when an agent finishes a run"
+events:
+  - agent:end
+command: ./run.sh
+```
+
+| 字段 | 是否必填 | 说明 |
+|---|---|---|
+| `name` | 是 | 在日志中显示的人类可读标识符 |
+| `description` | 否 | 用于文档目的的自由文本备注 |
+| `events` | 是 | 事件名称列表或 glob 模式（如 `agent:*`、`*`） |
+| `command` | 是 | 事件触发时要调用的可执行文件 |
+
+---
+
+## 支持的事件
+
+| 事件 | 触发时机 |
+|---|---|
+| `agent:start` | Agent 循环开始处理新请求 |
+| `agent:end` | Agent 循环完成（成功、错误或达到最大步数） |
+| `agent:step` | 一次运行中的每个中间推理步骤 |
+| `session:start` | 在 daemon 生命周期中首次创建或恢复会话 |
+| `session:end` | 会话被显式关闭 |
+| `session:reset` | 会话因自动重置策略或手动 API 调用而被清空 |
+| `gateway:startup` | LibreFang daemon 完成启动序列 |
+
+通配符模式：
+| 模式 | 匹配范围 |
+|---|---|
+| `agent:*` | `agent:start`、`agent:end`、`agent:step` |
+| `session:*` | `session:start`、`session:end`、`session:reset` |
+| `*` | 所有事件 |
+
+---
+
+## 环境变量
+
+| 变量 | 类型 | 内容 |
+|---|---|---|
+| `HOOK_EVENT` | string | 触发的确切事件名称，如 `agent:end` |
+| `HOOK_EVENT_DATA` | JSON string | 事件的结构化载荷 |
+
+---
+
+## 载荷参考
+
+### `agent:start`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 启动本次运行的 agent |
+| `session_id` | string | 与本次运行关联的会话 |
+| `sender` | string | 触发本次运行的发送方标识符 |
+| `message_preview` | string | 入站消息的前 120 个字符 |
+
+### `agent:end`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 完成本次运行的 agent |
+| `session_id` | string | 与本次运行关联的会话 |
+| `status` | string | `"ok"`、`"error"` 或 `"max_steps"` |
+| `tokens_used` | integer | 消耗的总 token 数（prompt + completion） |
+| `steps` | integer | 执行的推理步骤数 |
+| `duration_ms` | integer | 本次运行的墙钟时间（毫秒） |
+| `response_preview` | string | 最终响应的前 120 个字符 |
+
+### `agent:step`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 执行该步骤的 agent |
+| `session_id` | string | 本次运行的会话 |
+| `step_index` | integer | 当前运行中从零开始的步骤计数器 |
+| `tool_call` | string \| null | 正在调用的工具名称（如有） |
+
+### `session:start`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 所属 agent |
+| `session_id` | string | 新启动的会话 |
+
+### `session:end`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 所属 agent |
+| `session_id` | string | 已关闭的会话 |
+
+### `session:reset`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string (UUID) | 所属 agent |
+| `session_id` | string | 被重置的会话 |
+| `reset_reason` | string | `"idle"`、`"daily"`、`"suspended"` 或 `"manual"` |
+| `message_count_cleared` | integer | 已清除的历史消息数量 |
+
+### `gateway:startup`
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `version` | string | LibreFang daemon 版本 |
+| `started_at` | string (ISO 8601) | 启动完成的 UTC 时间戳 |
+
+---
+
+## 示例脚本
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$HOOK_EVENT" != "agent:end" ]; then
+  exit 0
+fi
+
+AGENT_ID=$(echo "$HOOK_EVENT_DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['agent_id'])")
+STATUS=$(echo "$HOOK_EVENT_DATA"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
+TOKENS=$(echo "$HOOK_EVENT_DATA"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tokens_used'])")
+
+WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+if [ -z "$WEBHOOK_URL" ]; then
+  exit 0
+fi
+
+curl -s -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d "{\"text\": \"Agent \`${AGENT_ID}\` finished with status *${STATUS}* (${TOKENS} tokens)\"}"
+```
+
+---
+
+## 错误处理
+- 非零退出码：记录 WARN 并继续
+- 5 秒墙钟超时；超时后将被终止
+- 可执行文件缺失：记录为 WARN，其他 hook 仍正常触发
+
+---
+
+## 限制
+- hook 内部无法调用 LLM
+- 无返回值——hook 不能修改 agent 的响应
+- 无密钥注入
+- 每个 `HOOK.yaml` 只能指定一个可执行文件

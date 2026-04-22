@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import type { HealthCheck } from "../api";
@@ -13,6 +13,18 @@ import { formatRelativeTime } from "../lib/datetime";
 import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import { useQuickInit } from "../lib/mutations/overview";
 
+function formatUptime(seconds?: number): string {
+  if (seconds === undefined || seconds < 0) return "-";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return "<1m";
+}
+
 export function OverviewPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -24,39 +36,21 @@ export function OverviewPage() {
   const versionInfo = versionQuery.data;
   const isLoading = snapshotQuery.isLoading;
 
-  const [initLoading, setInitLoading] = useState(false);
   const needsInit = snapshot?.status?.config_exists === false;
-
-  const handleInit = async () => {
-    setInitLoading(true);
-    try {
-      await quickInitMutation.mutateAsync();
-    } catch {
-      // ignore — banner will remain if init failed
-    } finally {
-      setInitLoading(false);
-    }
-  };
 
   const agentsActive = snapshot?.status?.active_agent_count ?? 0;
   const agentsTotal = snapshot?.status?.agent_count ?? 0;
-  const providersReady = snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0;
+  const providersReady = useMemo(
+    () => snapshot?.providers?.filter(p => isProviderAvailable(p.auth_status)).length ?? 0,
+    [snapshot?.providers],
+  );
   const providersTotal = snapshot?.providers?.length ?? 0;
-  const channelsReady = snapshot?.channels?.filter(c => c.configured).length ?? 0;
+  const channelsReady = useMemo(
+    () => snapshot?.channels?.filter(c => c.configured).length ?? 0,
+    [snapshot?.channels],
+  );
   const skillsCount = snapshot?.skillCount ?? 0;
   const sessionsCount = snapshot?.status?.session_count ?? 0;
-
-  const formatUptime = (seconds?: number): string => {
-    if (seconds === undefined || seconds < 0) return "-";
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-
-    if (d > 0) return `${d}d ${h}h`;
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m`;
-    return "<1m";
-  };
 
   const translateStatus = (s?: string) => {
     if (!s) return t("status.unknown");
@@ -143,15 +137,15 @@ export function OverviewPage() {
             className="flex h-9 items-center gap-2 rounded-full border border-border-subtle bg-surface px-3 text-text-dim hover:text-brand transition-colors shadow-sm"
           >
             <RefreshCw className={`h-4 w-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
-            {snapshotQuery.dataUpdatedAt > 0 && (
+            {snapshotQuery.dataUpdatedAt > 0 ? (
               <span className="text-[10px] font-medium hidden md:inline">{formatRelativeTime(snapshotQuery.dataUpdatedAt)}</span>
-            )}
+            ) : null}
           </button>
         </div>
       </header>
 
       {/* Setup Banner */}
-      {needsInit && (
+      {needsInit ? (
         <Card padding="lg" className="border-brand/30 bg-linear-to-r from-brand/5 via-brand/10 to-brand/5">
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand/15">
@@ -169,16 +163,16 @@ export function OverviewPage() {
                 {t("overview.setup_wizard", { defaultValue: "Use Wizard" })}
               </button>
               <button
-                onClick={handleInit}
-                disabled={initLoading}
+                onClick={() => quickInitMutation.mutateAsync().catch(() => {})}
+                disabled={quickInitMutation.isPending}
                 className="rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {initLoading ? t("overview.setup_running") : t("overview.setup_button")}
+                {quickInitMutation.isPending ? t("overview.setup_running") : t("overview.setup_button")}
               </button>
             </div>
           </div>
         </Card>
-      )}
+      ) : null}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 stagger-children">
@@ -190,9 +184,9 @@ export function OverviewPage() {
             ))}
           </>
         ) : (
-          statsCards.map((stat, i) => (
+          statsCards.map((stat) => (
             <Card
-              key={i}
+              key={stat.link}
               hover
               padding="md"
               className="cursor-pointer relative overflow-hidden group"
@@ -206,14 +200,14 @@ export function OverviewPage() {
                 <span className="text-2xl sm:text-4xl font-black tracking-tight">{stat.value}</span>
                 <span className="text-xs font-semibold text-text-dim">{stat.subValue}</span>
               </div>
-              {stat.progress !== undefined && (
+              {stat.progress !== undefined ? (
                 <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 relative z-10">
                   <div
                     className="h-full bg-brand shadow-[0_0_8px_var(--brand-color)] transition-all duration-500"
                     style={{ width: `${stat.progress}%` }}
                   />
                 </div>
-              )}
+              ) : null}
             </Card>
           ))
         )}
@@ -229,9 +223,9 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.quick_actions")}</h3>
             </div>
             <div className="grid grid-cols-2 gap-2 sm:gap-3 sm:grid-cols-4 stagger-children">
-              {quickActions.map((action, i) => (
+              {quickActions.map((action) => (
                 <button
-                  key={i}
+                  key={action.to}
                   onClick={() => navigate({ to: action.to as any })}
                   className={`group flex flex-col items-center gap-2 sm:gap-3 rounded-2xl border p-3 sm:p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
                     action.primary
@@ -264,7 +258,7 @@ export function OverviewPage() {
             {isLoading ? (
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {[1, 2].map(i => (
-                  <div key={i} className="h-16 rounded-xl bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%]" style={{ animation: "shimmer 1.5s ease-in-out infinite" }} />
+                  <div key={i} className="h-16 rounded-xl bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%] animate-shimmer" />
                 ))}
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (
@@ -358,7 +352,7 @@ export function OverviewPage() {
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-brand" /></div>
-                <span className="text-xs text-text-dim flex-1">Hostname</span>
+                <span className="text-xs text-text-dim flex-1">{t("overview.hostname")}</span>
                 {/* `/api/version` is public and deliberately omits
                     hostname (per-machine identifier). Read from the
                     authenticated snapshot first; fall back to versionInfo

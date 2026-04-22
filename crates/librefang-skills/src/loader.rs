@@ -667,6 +667,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: None,
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "greet", &serde_json::json!({}))
@@ -717,6 +718,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: None,
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
@@ -767,6 +769,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: None,
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
@@ -813,6 +816,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: None,
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let err = execute_skill_tool(
@@ -860,6 +864,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: Some("You are a helpful assistant.".to_string()),
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "test_tool", &serde_json::json!({}))
@@ -908,6 +913,7 @@ echo '{"greeting": "hello from shell"}'
             prompt_context: None,
             source: None,
             config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
         };
 
         let err = execute_skill_tool(&manifest, dir.path(), "evil_tool", &serde_json::json!({}))

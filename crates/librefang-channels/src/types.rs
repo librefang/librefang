@@ -327,6 +327,15 @@ pub struct SenderContext {
     /// `switch_agent_session` actually affect what the user sees.
     #[serde(default)]
     pub use_canonical_session: bool,
+    /// Set by the kernel's internal cron runner only — never by external API
+    /// callers. Gates [SILENT] marker processing so a regular user who
+    /// happens to type "[SILENT]" in chat does not accidentally suppress
+    /// their session history.
+    ///
+    /// Intentionally excluded from serialization so external callers cannot
+    /// inject `"is_internal_cron": true` through a JSON payload.
+    #[serde(skip)]
+    pub is_internal_cron: bool,
 }
 
 /// Reference to a participant in a group chat.

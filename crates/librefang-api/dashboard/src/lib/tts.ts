@@ -71,6 +71,7 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
   const cacheRef = useRef<Map<string, string>>(new Map());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const currentMessageIdRef = useRef<string | null>(null);
+  const currentAudioUrlRef = useRef<string | null>(null);
 
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [status, setStatus] = useState<TtsStatus>("idle");
@@ -82,6 +83,13 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
       audioRef.current.currentTime = 0;
       audioRef.current = null;
     }
+    if (
+      currentAudioUrlRef.current?.startsWith("blob:") &&
+      !Array.from(cacheRef.current.values()).includes(currentAudioUrlRef.current)
+    ) {
+      URL.revokeObjectURL(currentAudioUrlRef.current);
+    }
+    currentAudioUrlRef.current = null;
     currentMessageIdRef.current = null;
     setStatus("idle");
     setSpeakingMessageId(null);
@@ -89,6 +97,11 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
   const clearCache = useCallback(() => {
     stop();
+    for (const url of cacheRef.current.values()) {
+      if (url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
+    }
     cacheRef.current.clear();
   }, [stop]);
 
@@ -143,19 +156,22 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
       const audio = new Audio(objectUrl);
       audioRef.current = audio;
+      currentAudioUrlRef.current = objectUrl;
 
       audio.addEventListener("ended", () => {
         setStatus("idle");
         setSpeakingMessageId(null);
         currentMessageIdRef.current = null;
-      });
+        currentAudioUrlRef.current = null;
+      }, { once: true });
 
       audio.addEventListener("error", () => {
         setStatus("idle");
         setSpeakingMessageId(null);
         setError("tts_error");
         currentMessageIdRef.current = null;
-      });
+        currentAudioUrlRef.current = null;
+      }, { once: true });
 
       try {
         await audio.play();
@@ -165,6 +181,7 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
         setSpeakingMessageId(null);
         setError("tts_error");
         currentMessageIdRef.current = null;
+        currentAudioUrlRef.current = null;
       }
     },
     [status, stop, config?.provider, config?.voice, config?.language, config?.speed],
@@ -172,10 +189,17 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
   useEffect(() => {
     return () => {
+      for (const url of cacheRef.current.values()) {
+        if (url.startsWith("blob:")) {
+          URL.revokeObjectURL(url);
+        }
+      }
+      cacheRef.current.clear();
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
       }
+      currentAudioUrlRef.current = null;
     };
   }, []);
 

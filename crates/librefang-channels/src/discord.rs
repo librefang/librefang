@@ -3,9 +3,8 @@
 //! Uses Discord Gateway WebSocket (v10) for receiving messages and the REST API
 //! for sending responses. No external Discord crate — just `tokio-tungstenite` + `reqwest`.
 
-use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-};
+use crate::message_truncator::{split_to_utf16_chunks, DISCORD_MESSAGE_LIMIT};
+use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
 use async_trait::async_trait;
 use futures::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
@@ -17,7 +16,6 @@ use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
-const DISCORD_MSG_LIMIT: usize = 2000;
 
 /// Discord Gateway opcodes.
 mod opcode {
@@ -125,7 +123,8 @@ impl DiscordAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
-        let chunks = split_message(text, DISCORD_MSG_LIMIT);
+        // Discord's 2000-character limit is measured in UTF-16 code units.
+        let chunks = split_to_utf16_chunks(text, DISCORD_MESSAGE_LIMIT);
 
         for chunk in chunks {
             let body = serde_json::json!({ "content": chunk });

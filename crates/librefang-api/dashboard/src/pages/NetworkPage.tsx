@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
 import { useNetworkStatus, usePeers } from "../lib/queries/network";
@@ -16,7 +17,11 @@ export function NetworkPage() {
 
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
-  const isLoading = statusQuery.isLoading || peersQuery.isLoading;
+  const isLoading = statusQuery.isPending || peersQuery.isPending;
+
+  const handleRefresh = useCallback(() => {
+    void Promise.all([statusQuery.refetch(), peersQuery.refetch()]);
+  }, [statusQuery, peersQuery]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -25,10 +30,7 @@ export function NetworkPage() {
         title={t("network.title")}
         subtitle={t("network.subtitle")}
         isFetching={statusQuery.isFetching || peersQuery.isFetching}
-        onRefresh={() => {
-          void statusQuery.refetch();
-          void peersQuery.refetch();
-        }}
+        onRefresh={handleRefresh}
         icon={<Network className="h-4 w-4" />}
         helpText={t("network.help")}
       />
@@ -87,9 +89,9 @@ export function NetworkPage() {
                 </div>
               </div>
               <p className="text-lg font-black mt-2">{status?.protocol_version || "-"}</p>
-              {status?.listen_addr && (
+              {status?.listen_addr ? (
                 <p className="text-[10px] text-text-dim font-mono mt-1">{status.listen_addr}</p>
-              )}
+              ) : null}
             </Card>
           </div>
 
@@ -117,9 +119,9 @@ export function NetworkPage() {
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-bold truncate">{peer.name || peer.id}</p>
-                          {peer.addr && (
+                          {peer.addr ? (
                             <p className="text-[10px] text-text-dim font-mono">{peer.addr}</p>
-                          )}
+                          ) : null}
                         </div>
                       </div>
                       <Badge
@@ -129,20 +131,20 @@ export function NetworkPage() {
                         {peer.status || t("common.unknown")}
                       </Badge>
                     </div>
-                    {(peer.version || peer.last_seen) && (
+                    {(peer.version || peer.last_seen) ? (
                       <div className="flex items-center gap-3 mt-3 text-[10px] text-text-dim">
-                        {peer.version && (
+                        {peer.version ? (
                           <span className="flex items-center gap-1">
                             <Globe className="w-3 h-3" /> v{peer.version}
                           </span>
-                        )}
-                        {peer.last_seen && (
+                        ) : null}
+                        {peer.last_seen ? (
                           <span className="flex items-center gap-1">
                             <Clock className="w-3 h-3" /> {formatDateTime(peer.last_seen)}
                           </span>
-                        )}
+                        ) : null}
                       </div>
-                    )}
+                    ) : null}
                   </Card>
                 ))}
               </div>

@@ -890,3 +890,77 @@ subagent_lane = 3
 
 ---
 
+### `[tool_budget]`
+
+**Source:** `librefang-runtime/src/tool_budget.rs`
+
+The tool budget enforcer caps the size of data that tool calls can return in a single
+agent turn, preventing unexpectedly large tool outputs from filling the context window
+and driving up token costs.
+
+#### How it works
+
+Every tool result passes through a three-layer size check before being placed in the
+context:
+
+| Layer | Threshold | Behavior |
+|---|---|---|
+| **Inline** | ≤ 50 KB | Result is embedded in the context as-is. |
+| **Spill** | 50 KB – 200 KB | Result is written to a temporary file under `/tmp/librefang-results/` and replaced in the context with a short summary noting the spill path and byte count. |
+| **Truncate** | > 200 KB | Only the first 200 KB of the result is kept; the remainder is silently discarded. A `WARN` entry is emitted with the tool name and original size. |
+
+#### Spill file naming
+
+Spill files are named `<agent_id>_<tool_call_id>_<timestamp>.txt` and are written to
+`/tmp/librefang-results/`. They are not cleaned up automatically between turns; the
+directory is purged when the daemon restarts.
+
+The agent can read a spill file on a subsequent turn if needed — the summary injected
+into the context includes the full path.
+
+#### Configuration
+
+There is no per-agent configuration for the tool budget in the current release. The
+50 KB and 200 KB thresholds are fixed at compile time.
+
+#### Why these limits?
+
+50 KB of inline text is roughly 12 500 tokens — already a substantial fraction of
+most model context windows. Results beyond this point have diminishing returns for the
+agent while linearly increasing prompt cost. The 200 KB hard cap prevents a single
+runaway tool call from consuming an entire context window.
+
+---
+
+### `[context_compression]`
+
+Context compression automatically reduces the size of an agent's context window when token usage grows too large, preventing hard context-limit errors without requiring manual session management.
+
+#### How it works
+
+When an LLM call is about to be dispatched, the `ContextEngine` measures the estimated token count of the assembled context (system prompt + session history + tool schemas). If usage exceeds **80% of the model's context window**, the engine triggers a compression pass before sending the request.
+
+Compression happens automatically — there is no configuration required to enable it. The `[context_compression]` section exists for future tunability; currently all thresholds are fixed internally.
+
+#### Three-layer protection
+
+| Layer | Trigger | Mechanism |
+|-------|---------|-----------|
+| **LLM summarization** | ≥ 80% of context window | An internal LLM call condenses the oldest portion of the session history into a compact summary message. The summary is injected back into the history in place of the original turns. |
+| **Hard truncation** | Still over limit after summarization | Oldest non-system messages are removed outright until the context fits. Applied only when the summary itself is too large to help. |
+| **Context guard** | Final safety backstop | A hard-coded ceiling prevents the constructed prompt from ever exceeding the model's declared maximum. Excess tokens are truncated with a warning logged at `ERROR` level. |
+
+#### Summary retention and iterative refinement
+
+Summary messages are stored in the session history as regular `assistant` turns with a special internal tag. On subsequent compression passes, an existing summary is included in the material to be re-summarized rather than preserved verbatim. This means long-running sessions undergo iterative refinement — older summaries are folded into newer, more compact ones over time.
+
+#### Pluggable `ContextEngine`
+
+The compression algorithm is implemented behind a `ContextEngine` trait. The current implementation uses an LLM-based summarizer. Future versions of LibreFang will allow configuring alternative compression algorithms — including DAG-based compression and LCM (Latent Context Modeling) — once those implementations stabilize.
+
+#### No configuration needed
+
+Context compression is always active for all agents. There are no knobs to enable, disable, or tune in `config.toml` today. The 80% threshold, hard-truncation fallback, and context guard ceiling are all enforced automatically by the runtime.
+
+---
+

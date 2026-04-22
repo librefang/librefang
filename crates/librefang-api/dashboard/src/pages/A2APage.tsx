@@ -1,8 +1,8 @@
 import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { sendA2ATask, getA2ATaskStatus } from "../api";
-import type { A2AAgentItem, A2ATaskStatus } from "../api";
+import { sendA2ATask, getA2ATaskStatus } from "../lib/http/client";
+import type { A2AAgentItem, A2ATaskStatus } from "../lib/http/client";
 import { useA2AAgents } from "../lib/queries/network";
 import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -17,7 +17,6 @@ export function A2APage() {
   const { t } = useTranslation();
 
   const [discoverUrl, setDiscoverUrl] = useState("");
-  const [isDiscovering, setIsDiscovering] = useState(false);
   const [showDiscover, setShowDiscover] = useState(false);
   useCreateShortcut(() => setShowDiscover(true));
 
@@ -34,15 +33,12 @@ export function A2APage() {
 
   async function handleDiscover() {
     if (!discoverUrl.trim()) return;
-    setIsDiscovering(true);
     try {
       await discoverMutation.mutateAsync(discoverUrl.trim());
       setDiscoverUrl("");
       setShowDiscover(false);
     } catch {
       // error handled by UI
-    } finally {
-      setIsDiscovering(false);
     }
   }
 
@@ -55,7 +51,7 @@ export function A2APage() {
         message: taskMessage.trim(),
       });
       // Track the task if we get an ID back
-      const taskId = (result as Record<string, unknown>).task_id as string | undefined;
+      const taskId = result.task_id as string | undefined;
       if (taskId) {
         setTrackedTasks((prev) => [
           { id: taskId, status: "pending", created_at: new Date().toISOString() },
@@ -118,10 +114,10 @@ export function A2APage() {
             />
             <button
               onClick={handleDiscover}
-              disabled={isDiscovering || !discoverUrl.trim()}
+              disabled={discoverMutation.isPending || !discoverUrl.trim()}
               className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
             >
-              {isDiscovering ? (
+              {discoverMutation.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Plus className="h-4 w-4" />

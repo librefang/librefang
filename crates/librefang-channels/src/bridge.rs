@@ -1746,6 +1746,9 @@ fn build_sender_context(
         // Channel bridges land in per-channel sessions (the default); only
         // the dashboard WS opts into canonical storage.
         use_canonical_session: false,
+        // Channel-originated traffic is never internal cron — [SILENT] markers
+        // coming from real users must be treated as literal message content.
+        is_internal_cron: false,
     }
 }
 
