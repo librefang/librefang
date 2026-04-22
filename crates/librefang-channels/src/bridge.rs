@@ -3187,6 +3187,27 @@ async fn download_image_to_blocks(
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
+    // Validate URL scheme — only allow http/https to prevent SSRF via file:// etc.
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                warn!("Rejecting image download with disallowed scheme: {scheme}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download rejected: unsupported URL scheme '{scheme}']"),
+                    provider_metadata: None,
+                }];
+            }
+        },
+        Err(e) => {
+            warn!("Rejecting image download with invalid URL: {e}");
+            return vec![ContentBlock::Text {
+                text: "[Image download rejected: invalid URL]".to_string(),
+                provider_metadata: None,
+            }];
+        }
+    }
+
     let client = crate::http_client::new_client();
     let resp = match client.get(url).send().await {
         Ok(r) => r,
@@ -3209,16 +3230,61 @@ async fn download_image_to_blocks(
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
         .filter(|ct| ct.starts_with("image/"));
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("Failed to read image bytes: {e}");
+    // Early rejection if Content-Length header exceeds limit
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_IMAGE_BYTES {
+            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    len / 1024
+                ),
+                None => format!("[Image too large for vision ({} KB)]", len / 1024),
+            };
             return vec![ContentBlock::Text {
-                text: format!("[Image read failed: {e}]"),
+                text: desc,
                 provider_metadata: None,
             }];
         }
-    };
+    }
+
+    // Stream body with size accumulator to enforce limit even without Content-Length
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read image bytes: {e}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image read failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        };
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_IMAGE_BYTES {
+            warn!(
+                "Image stream exceeded {} byte limit, aborting download",
+                MAX_IMAGE_BYTES
+            );
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+                None => format!(
+                    "[Image too large for vision ({} KB)]",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
+    let bytes = bytes::Bytes::from(buf);
 
     // Four-tier media type detection:
     // 1. Adapter-provided hint (e.g. Telegram file path extension) — most
@@ -3230,24 +3296,6 @@ async fn download_image_to_blocks(
         .map(|s| s.to_string())
         .or(header_type)
         .unwrap_or_else(|| detect_image_magic(&bytes).unwrap_or_else(|| media_type_from_url(url)));
-
-    if bytes.len() > MAX_IMAGE_BYTES {
-        warn!(
-            "Image too large ({} bytes), skipping vision — sending as text",
-            bytes.len()
-        );
-        let desc = match caption {
-            Some(c) => format!(
-                "[Image too large for vision ({} KB)]\nCaption: {c}",
-                bytes.len() / 1024
-            ),
-            None => format!("[Image too large for vision ({} KB)]", bytes.len() / 1024),
-        };
-        return vec![ContentBlock::Text {
-            text: desc,
-            provider_metadata: None,
-        }];
-    }
 
     // Downscale large images so batches of many photos fit within the LLM
     // context window.  Max dimension 1024px keeps enough detail for analysis
@@ -3323,6 +3371,16 @@ async fn download_image_to_blocks(
             data,
         });
         return blocks;
+    }
+    // Restrict directory permissions to owner-only on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            tokio::fs::set_permissions(&upload_dir, std::fs::Permissions::from_mode(0o700)).await
+        {
+            warn!("Failed to set permissions on {}: {e}", upload_dir.display());
+        }
     }
 
     let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);

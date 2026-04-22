@@ -132,16 +132,19 @@ impl OpenAIDriver {
             .map_err(|e| LlmError::Http(format!("Moonshot file upload failed: {e}")))?;
 
         let status = resp.status();
-        let body: serde_json::Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .map_err(|e| LlmError::Http(format!("Moonshot file upload parse error: {e}")))?;
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload read error: {e}")))?;
 
         if !status.is_success() {
             return Err(LlmError::Http(format!(
-                "Moonshot file upload returned {status}: {body}"
+                "Moonshot file upload returned {status}: {text}"
             )));
         }
+
+        let body: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload parse error: {e}")))?;
 
         body["id"]
             .as_str()
@@ -172,17 +175,7 @@ impl OpenAIDriver {
                         let decoded = base64::engine::general_purpose::STANDARD
                             .decode(data)
                             .map_err(|e| LlmError::Http(format!("base64 decode: {e}")))?;
-                        let ext = match media_type.as_str() {
-                            "image/jpeg" => "jpg",
-                            "image/png" => "png",
-                            "image/webp" => "webp",
-                            "image/gif" => "gif",
-                            "application/pdf" => "pdf",
-                            "audio/ogg" => "ogg",
-                            "audio/mpeg" => "mp3",
-                            "video/mp4" => "mp4",
-                            _ => "bin",
-                        };
+                        let ext = ext_from_media_type(media_type);
                         (decoded, media_type.clone(), format!("file.{ext}"))
                     }
                     ContentBlock::ImageFile { media_type, path } => {
@@ -205,22 +198,29 @@ impl OpenAIDriver {
                 // Hash full file content with SHA-256 for cache key
                 let hash: [u8; 32] = Sha256::digest(&bytes).into();
 
-                let file_id = {
+                // Short lock: check cache only, release before any network I/O
+                let cached = {
+                    let cache = self.moonshot_file_cache.lock().await;
+                    cache.get(&hash).cloned()
+                };
+
+                let file_id = if let Some(id) = cached {
+                    id
+                } else {
+                    let id = self
+                        .upload_file_to_moonshot(&bytes, &filename, &mime)
+                        .await?;
+                    debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
+                    // Short lock: insert result into cache
                     let mut cache = self.moonshot_file_cache.lock().await;
-                    if let Some(cached) = cache.get(&hash) {
-                        cached.clone()
-                    } else {
-                        let id = self
-                            .upload_file_to_moonshot(&bytes, &filename, &mime)
-                            .await?;
-                        debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
-                        // Simple LRU cap: clear when cache exceeds 256 entries
-                        if cache.len() > 256 {
-                            cache.clear();
-                        }
-                        cache.insert(hash, id.clone());
-                        id
+                    // Cap at 256 entries — full eviction (not true LRU) is acceptable
+                    // because the cache is only a dedup optimisation; stale entries just
+                    // trigger a re-upload which Moonshot handles idempotently.
+                    if cache.len() >= 256 {
+                        cache.clear();
                     }
+                    cache.insert(hash, id.clone());
+                    id
                 };
 
                 // Replace the block with a text marker
@@ -261,6 +261,21 @@ impl OpenAIDriver {
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
+    }
+}
+
+/// Map a MIME type to a file extension for Moonshot file uploads.
+fn ext_from_media_type(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "application/pdf" => "pdf",
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        _ => "bin",
     }
 }
 
