@@ -1753,6 +1753,47 @@ impl Default for QueueConcurrencyConfig {
     }
 }
 
+/// Task-board (shared-task-queue) safety knobs.
+///
+/// When a worker agent calls `task_claim` the task transitions to
+/// `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls
+/// (empty response, crash, timeout) it will never call `task_complete`
+/// and the task would otherwise stay `in_progress` forever — no retry,
+/// no external signal, no way for the delegator to know something broke
+/// (issues #2923, #2926).
+///
+/// The sweeper runs in the kernel and flips stuck tasks back to `pending`
+/// so they can be reclaimed, clearing `assigned_to` in the process.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [task_board]
+/// claim_ttl_secs = 600         # 10 minutes — auto-reset after this
+/// sweep_interval_secs = 30     # how often the sweeper runs
+/// ```
+///
+/// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
+/// for long-running human-in-the-loop tasks where a 10 minute reset
+/// would be wrong.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskBoardConfig {
+    /// How long an `in_progress` task may stay claimed before the sweeper
+    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables.
+    pub claim_ttl_secs: u64,
+    /// How often the sweeper scans for stuck tasks. Default: 30 s.
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for TaskBoardConfig {
+    fn default() -> Self {
+        Self {
+            claim_ttl_secs: 600,
+            sweep_interval_secs: 30,
+        }
+    }
+}
+
 /// HTTP proxy configuration.
 ///
 /// Configure in config.toml:
@@ -2127,6 +2168,9 @@ pub struct KernelConfig {
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
+    /// Task-board (shared task queue) safety knobs — see [`TaskBoardConfig`].
+    #[serde(default)]
+    pub task_board: TaskBoardConfig,
     /// External authentication provider configuration (OAuth2/OIDC).
     #[serde(default)]
     pub external_auth: ExternalAuthConfig,
@@ -3767,6 +3811,7 @@ impl Default for KernelConfig {
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
             queue: QueueConfig::default(),
+            task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),

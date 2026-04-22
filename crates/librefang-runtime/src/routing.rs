@@ -209,6 +209,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::text("Hello!"),
                 pinned: false,
+                timestamp: None,
             }],
             vec![],
         );
@@ -228,6 +229,7 @@ mod tests {
                      ```rust\nfn main() { }\n```"
                 ),
                 pinned: false,
+                timestamp: None,
             }],
             vec![],
         );
@@ -251,6 +253,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::text("Use the available tools to solve this problem."),
                 pinned: false,
+                timestamp: None,
             }],
             tools,
         );
@@ -271,6 +274,7 @@ mod tests {
                     i
                 )),
                 pinned: false,
+                timestamp: None,
             })
             .collect();
         let request = make_request(messages, vec![]);
@@ -368,6 +372,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::text("Hi"),
                 pinned: false,
+                timestamp: None,
             }],
             vec![],
         );
@@ -379,6 +384,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::text("Hi"),
                 pinned: false,
+                timestamp: None,
             }],
             vec![],
         );

@@ -525,6 +525,7 @@ fn stage_tool_use_turn(
         role: Role::Assistant,
         content: MessageContent::Blocks(response.content.clone()),
         pinned: false,
+        timestamp: Some(chrono::Utc::now()),
     };
 
     let tool_call_ids: Vec<(String, String)> = response
@@ -966,6 +967,7 @@ fn finalize_tool_use_results(
         role: Role::User,
         content: MessageContent::Blocks(tool_result_blocks.clone()),
         pinned: false,
+        timestamp: Some(chrono::Utc::now()),
     };
     session.messages.push(tool_results_msg.clone());
     messages.push(tool_results_msg);
@@ -2791,6 +2793,7 @@ pub async fn run_agent_loop(
                                     result.summary
                                 )),
                                 pinned: false,
+                                timestamp: None,
                             });
                         }
                         compacted.extend(result.kept_messages);
@@ -4006,6 +4009,7 @@ pub async fn run_agent_loop_streaming(
                                     result.summary
                                 )),
                                 pinned: false,
+                                timestamp: None,
                             });
                         }
                         compacted.extend(result.kept_messages);
@@ -5765,6 +5769,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(Vec::new()),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: Vec::new(),
             tool_result_blocks: Vec::new(),
@@ -5833,6 +5838,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: vec![
                 ("tool-hard-fail".to_string(), "nonexistent_tool".to_string()),
@@ -5946,6 +5952,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![waiting_result.clone()]),
                 pinned: false,
+                timestamp: None,
             }],
             context_window_tokens: 0,
             label: None,
@@ -5969,6 +5976,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: vec![
                 ("tool-hard-fail".to_string(), "failing_tool".to_string()),
@@ -6154,6 +6162,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
             session_messages.push(Message {
                 role: Role::User,
@@ -6166,6 +6175,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
         }
         // Capture the OLD (buggy) index: len BEFORE pushing the current
@@ -6237,6 +6247,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
             session.messages.push(Message {
                 role: Role::User,
@@ -6249,6 +6260,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
         }
 
@@ -6298,6 +6310,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
             session.messages.push(Message {
                 role: Role::User,
@@ -6310,6 +6323,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             });
         }
 
@@ -6434,6 +6448,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: vec![("tool-hard-fail".to_string(), "nonexistent_tool".to_string())],
             tool_result_blocks: vec![ContentBlock::ToolResult {
@@ -8935,6 +8950,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: vec![
                 ("tool-a".to_string(), "tool_a".to_string()),
@@ -9191,6 +9207,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             tool_call_ids: vec![
                 ("t0".to_string(), "web_fetch".to_string()),
