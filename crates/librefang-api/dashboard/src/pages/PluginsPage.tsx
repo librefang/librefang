@@ -1,6 +1,7 @@
 import { formatBytes } from "../lib/format";
-import { useState } from "react";
+import { useState, useCallback, startTransition } from "react";
 import { useTranslation } from "react-i18next";
+import type { PluginItem, RegistryEntry } from "../api";
 import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
 import {
   useInstallPlugin,
@@ -22,6 +23,21 @@ import {
   GitBranch, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
 
+const EMPTY_PLUGINS: PluginItem[] = [];
+const EMPTY_REGISTRIES: RegistryEntry[] = [];
+
+function getErrorMessage(e: unknown): string | null {
+  if (e instanceof Error) {
+    return e.message.trim() || null;
+  }
+
+  if (typeof e === "string") {
+    return e.trim() || null;
+  }
+
+  return null;
+}
+
 export function PluginsPage() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<"installed" | "registry">("installed");
@@ -29,7 +45,8 @@ export function PluginsPage() {
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
-  useCreateShortcut(() => setShowInstall(true));
+  const openInstall = useCallback(() => setShowInstall(true), []);
+  useCreateShortcut(openInstall);
 
   // Install form
   const [installSource, setInstallSource] = useState<"registry" | "local" | "git">("registry");
@@ -53,64 +70,62 @@ export function PluginsPage() {
   const scaffoldMutation = useScaffoldPlugin();
   const depsMutation = useInstallPluginDeps();
 
-  const plugins = pluginsQuery.data?.plugins ?? [];
-  const registries = registriesQuery.data?.registries ?? [];
+  const plugins = pluginsQuery.data?.plugins ?? EMPTY_PLUGINS;
+  const registries = registriesQuery.data?.registries ?? EMPTY_REGISTRIES;
 
-  const resetInstallForm = () => {
+  const onRefresh = useCallback(() => {
+    pluginsQuery.refetch();
+    registriesQuery.refetch();
+  }, [pluginsQuery.refetch, registriesQuery.refetch]);
+
+  const resetInstallForm = useCallback(() => {
     setInstallName(""); setInstallPath(""); setInstallUrl(""); setInstallBranch(""); setInstallRepo("");
-  };
+  }, []);
 
-  const onInstallSuccess = () => {
+  const onInstallSuccess = useCallback(() => {
     setShowInstall(false);
     resetInstallForm();
     addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success");
-  };
-  const onInstallError = (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
+  }, [addToast, resetInstallForm, t]);
+  const onInstallError = useCallback((e: unknown) => {
+    addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
+  }, [addToast, t]);
 
-  const handleInstall = () => {
-    if (installSource === "registry") {
-      installMutation.mutate(
-        { source: "registry", name: installName, github_repo: installRepo || undefined },
-        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
-      );
-    } else if (installSource === "local") {
-      installMutation.mutate(
-        { source: "local", path: installPath },
-        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
-      );
-    } else {
-      installMutation.mutate(
-        { source: "git", url: installUrl, branch: installBranch || undefined },
-        { onSuccess: onInstallSuccess, onError: onInstallError, onSettled: () => setInstallingName(null) },
-      );
-    }
-  };
+  const handleInstall = useCallback(() => {
+    const payload = {
+      registry: { source: "registry" as const, name: installName, github_repo: installRepo || undefined },
+      local: { source: "local" as const, path: installPath },
+      git: { source: "git" as const, url: installUrl, branch: installBranch || undefined },
+    };
+    installMutation.mutate(payload[installSource], {
+      onSuccess: onInstallSuccess,
+      onError: onInstallError,
+      onSettled: () => setInstallingName(null),
+    });
+  }, [installSource, installName, installRepo, installPath, installUrl, installBranch, installMutation.mutate, onInstallSuccess, onInstallError]);
 
-  const handleRegistryInstall = (name: string, repo: string) => {
+  const handleRegistryInstall = useCallback((name: string, repo: string) => {
     setInstallingName(`${repo}:${name}`);
     installMutation.mutate(
       { source: "registry", name, github_repo: repo },
       {
         onSuccess: () => addToast(t("plugins.install_success", { defaultValue: "Plugin installed" }), "success"),
-        onError: (e: any) => addToast(e?.message || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
+        onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error"),
         onSettled: () => setInstallingName(null),
       },
     );
-  };
+  }, [installMutation.mutate, addToast, t]);
 
-  const handleDelete = (name: string) => {
+  const handleDelete = useCallback((name: string) => {
     if (confirmDelete !== name) { setConfirmDelete(name); return; }
-    setConfirmDelete(null);
     uninstallMutation.mutate(name, {
       onSuccess: () => {
         setConfirmDelete(null);
         addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
       },
-      onError: (e: any) => addToast(e?.message || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
+      onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
     });
-  };
-
-  const formatSize = formatBytes;
+  }, [confirmDelete, uninstallMutation.mutate, addToast, t]);
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20";
 
@@ -121,7 +136,7 @@ export function PluginsPage() {
         title={t("plugins.title")}
         subtitle={t("plugins.subtitle")}
         isFetching={pluginsQuery.isFetching}
-        onRefresh={() => { pluginsQuery.refetch(); registriesQuery.refetch(); }}
+        onRefresh={onRefresh}
         icon={<Puzzle className="h-4 w-4" />}
         helpText={t("plugins.help")}
         actions={
@@ -136,13 +151,13 @@ export function PluginsPage() {
 
       {/* Tabs */}
       <div className="flex gap-4 border-b border-border-subtle">
-        <button onClick={() => setTab("installed")}
+        <button onClick={() => startTransition(() => setTab("installed"))}
           className={`pb-2 text-sm font-bold transition-colors ${tab === "installed" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
           <Package className="w-4 h-4 inline mr-1.5" />
           {t("plugins.installed_tab")}
-          <Badge variant="default" className="ml-2">{plugins.length}</Badge>
+          {plugins.length > 0 && <Badge variant="default" className="ml-2">{plugins.length}</Badge>}
         </button>
-        <button onClick={() => setTab("registry")}
+        <button onClick={() => startTransition(() => setTab("registry"))}
           className={`pb-2 text-sm font-bold transition-colors ${tab === "registry" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
           <FolderOpen className="w-4 h-4 inline mr-1.5" />
           {t("plugins.registry_tab")}
@@ -178,14 +193,14 @@ export function PluginsPage() {
                     <p className="text-[10px] text-text-dim mt-0.5">{p.description || "-"}</p>
                     <div className="flex items-center gap-3 mt-1 text-[9px] text-text-dim/50">
                       {p.author && <span>{p.author}</span>}
-                      <span>{formatSize(p.size_bytes)}</span>
+                      <span>{formatBytes(p.size_bytes)}</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                     <Button variant="secondary" size="sm"
                       onClick={() => depsMutation.mutate(p.name, {
                         onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
-                        onError: (e: any) => addToast(e?.message || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+                        onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
                       })}
                       disabled={depsMutation.isPending}>
                       {depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
@@ -271,13 +286,8 @@ export function PluginsPage() {
                             </div>
                           </div>
                           <p
-                            className="text-xs text-text-dim leading-relaxed overflow-hidden"
-                            style={{
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              minHeight: "2.25rem",
-                            }}
+                            className="text-xs text-text-dim leading-relaxed overflow-hidden line-clamp-2"
+                            style={{ minHeight: "2.25rem" }}
                           >
                             {rp.description || t("plugins.no_description", { defaultValue: "No description provided." })}
                           </p>
@@ -373,7 +383,7 @@ export function PluginsPage() {
               {installMutation.error && (
                 <div className="flex items-center gap-2 text-error text-xs">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  {(installMutation.error as any)?.message || String(installMutation.error)}
+                  {getErrorMessage(installMutation.error) ?? t("plugins.install_failed", { defaultValue: "Install failed" })}
                 </div>
               )}
 
@@ -392,15 +402,15 @@ export function PluginsPage() {
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
-            <input value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" />
+            <input value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" disabled={scaffoldMutation.isPending} />
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
-            <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} />
+            <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} disabled={scaffoldMutation.isPending} />
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
-            <select value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass}>
+            <select value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass} disabled={scaffoldMutation.isPending}>
               <option value="python">Python</option>
               <option value="node">Node.js</option>
               <option value="deno">Deno (TypeScript)</option>
@@ -426,7 +436,7 @@ export function PluginsPage() {
                     setScaffoldRuntime("python");
                     addToast(t("plugins.scaffold_success", { defaultValue: "Plugin created" }), "success");
                   },
-                  onError: (e: any) => addToast(e?.message || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
+                  onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.scaffold_failed", { defaultValue: "Create failed" }), "error"),
                 },
               )}
               disabled={!scaffoldName.trim() || scaffoldMutation.isPending}>

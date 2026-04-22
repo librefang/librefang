@@ -6,6 +6,7 @@ Skills are pluggable tool bundles that extend agent capabilities in LibreFang. A
 
 - [Overview](#overview)
 - [Skill Format](#skill-format)
+- [Skill Config Variables](#skill-config-variables)
 - [Python Skills](#python-skills)
 - [WASM Skills](#wasm-skills)
 - [Skill Requirements](#skill-requirements)
@@ -162,6 +163,61 @@ Each `[[tools.provided]]` entry defines one tool that the skill provides:
 |-------|------|-------------|
 | `tools` | array | Built-in tools this skill needs the host to provide |
 | `capabilities` | array | Capability strings the agent must have |
+
+---
+
+## Skill Config Variables
+
+Skills can declare configuration variables in `skill.toml`. At agent startup, LibreFang resolves each variable from the user's `~/.librefang/config.toml` and injects the resolved values into the agent's system prompt, making them available to the skill without hard-coding secrets or environment-specific values.
+
+### Declaring variables in `skill.toml`
+
+Add one `[[config_vars]]` entry per variable:
+
+```toml
+[[config_vars]]
+key = "wiki.base_url"
+description = "Base URL of the internal wiki"
+default = "https://wiki.example.com"
+
+[[config_vars]]
+key = "db.host"
+description = "Database hostname"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | Yes | Dot-separated key in the form `<namespace>.<field>`. |
+| `description` | string | No | Human-readable description shown in the dashboard. |
+| `default` | string | No | Fallback value when the key is absent from the user's config. |
+
+### Storing values in `~/.librefang/config.toml`
+
+The namespace before the first dot maps to a TOML table under `[skills.config]`:
+
+```toml
+[skills.config.wiki]
+base_url = "https://wiki.corp.example.com"
+
+[skills.config.db]
+host = "postgres.internal"
+```
+
+### System prompt injection
+
+Resolved variables are appended to the system prompt as a labeled block before the skill's own prompt content:
+
+```
+## Skill Config Variables
+wiki.base_url = https://wiki.corp.example.com
+db.host = postgres.internal
+```
+
+### Resolution rules
+
+- **Default fallback**: If a key is not present in `~/.librefang/config.toml` but the skill declares a `default`, the default value is used.
+- **Missing without default**: If a key is absent from both the user config and the skill declaration (no `default`), the variable is silently omitted from the injected block.
+- **Deduplication**: When multiple installed skills declare the same key, the value from the **first** skill loaded takes precedence. Subsequent declarations of the same key are ignored for injection purposes, though each skill may still specify its own `default` for documentation.
 
 ---
 

@@ -400,3 +400,48 @@ http://127.0.0.1:4545/
 - Agent 选择（在运行中的 Agent 之间切换）
 - Token 用量显示
 - 在 localhost 上无需认证（通过 CORS 保护）
+
+---
+
+## 平台限制下的消息截断
+
+**源码：** `librefang-channels/src/message_truncator.rs`
+
+消息平台对出站消息有严格的字符数限制，以 **UTF-16 编码单元**（而非字节或 Unicode 码位）计量。LibreFang 以 UTF-16 单元数衡量消息长度，并自动处理超长消息。
+
+### 平台限制
+
+| 平台 | UTF-16 单元限制 | 超出时的行为 |
+|---|---|---|
+| Telegram | 4 096 | 消息被拆分为多条连续消息 |
+| Discord | 2 000 | 消息被拆分为多条连续消息 |
+| 其他渠道 | 可配置 | 默认截断，除非启用拆分 |
+
+### UTF-16 长度与字节长度的区别
+
+大多数 ASCII 文本的字节数和 UTF-16 单元数相同。以下情况存在差异：
+
+- **Emoji**（`😀`）：2 个 UTF-16 单元，但 UTF-8 占 4 字节
+- **补充区 CJK 字符**：2 个 UTF-16 单元，UTF-8 占 4 字节
+- **基本区 CJK / 韩文 / 阿拉伯文**：1 个 UTF-16 单元，UTF-8 占 3 字节
+
+一个字节数在 2 000 以内的字符串，其 UTF-16 单元数可能超过 2 000，反之亦然。以字节数代替会静默产生截断或被拒绝的消息。
+
+### 截断
+
+`truncate_to_utf16_limit(text, limit)` 对字符串的 UTF-16 单元位置进行二分搜索，找到在限制范围内的最长前缀，然后在有效的 Unicode 标量边界处截断。结果不会在码位或代理对中间切断。
+
+### 拆分
+
+`split_to_utf16_chunks(text, limit)` 将消息分割为多个连续块，每块的 UTF-16 单元数均在 `limit` 以内。LibreFang 按顺序发送各块，保留所有内容。拆分边界遵守 Unicode 标量边界——不会在字符中间结束一个块。
+
+### 禁用自动拆分
+
+如需 LibreFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
+
+```toml
+[channels.telegram]
+split_long_messages = false   # 在 4096 处截断，不拆分
+```
+
+Telegram 和 Discord 的默认值为 `true`。

@@ -273,10 +273,11 @@ pub enum WebSearchAugmentationMode {
 }
 
 /// The current lifecycle state of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Agent has been created but not yet started.
+    #[default]
     Created,
     /// Agent is actively running and processing events.
     Running,
@@ -901,6 +902,59 @@ pub struct AgentEntry {
     /// Whether this agent was spawned by a Hand (true) or is a regular agent (false).
     #[serde(default)]
     pub is_hand: bool,
+
+    // -----------------------------------------------------------------------
+    // Session auto-reset state (mirrors hermes-agent SessionEntry flags)
+    // -----------------------------------------------------------------------
+    /// When `true`, the next call to `execute_llm_agent` will force a hard
+    /// reset (cleared message history) before processing the message.
+    /// The session_id is kept; only the stored messages are wiped.
+    /// Set by operator action or stuck-loop recovery.  Takes priority over
+    /// `resume_pending`.
+    ///
+    /// Named `force_session_wipe` (not `suspended`) to avoid confusion with
+    /// `AgentState::Suspended` / `suspend_agent()`.
+    #[serde(default)]
+    pub force_session_wipe: bool,
+
+    /// When `true`, the agent was interrupted by a restart/shutdown but
+    /// recovery is expected.  Unlike `suspended`, the existing `session_id`
+    /// is preserved and the agent continues on the same transcript.
+    /// Cleared after the next successful turn.
+    #[serde(default)]
+    pub resume_pending: bool,
+
+    /// The reason for the most recent automatic session reset, if any.
+    /// `None` until the first auto-reset occurs.
+    #[serde(default)]
+    pub reset_reason: Option<crate::config::SessionResetReason>,
+}
+
+impl Default for AgentEntry {
+    fn default() -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: AgentId::default(),
+            name: String::new(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: now,
+            last_active: now,
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::default(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            force_session_wipe: false,
+            resume_pending: false,
+            reset_reason: None,
+        }
+    }
 }
 
 /// A stored prompt version for an agent.
@@ -1372,6 +1426,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1436,6 +1491,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();

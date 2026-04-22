@@ -4,6 +4,7 @@
 //! calling the LLM, executing tool calls, and saving the conversation.
 
 use crate::auth_cooldown::{CooldownVerdict, ProviderCooldown};
+use crate::checkpoint_manager::CheckpointManager;
 use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, ContextBudget};
 use crate::context_engine::ContextEngine;
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
@@ -15,6 +16,7 @@ use crate::llm_driver::{
 use crate::llm_errors;
 use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
+use crate::tool_budget::{ToolBudgetEnforcer, ToolResultEntry};
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use crate::workspace_sandbox::{ERR_PATH_TRAVERSAL, ERR_SANDBOX_ESCAPE};
@@ -52,6 +54,18 @@ const TOOL_TIMEOUT_SECS: u64 = 600;
 /// Maximum consecutive MaxTokens continuations before returning partial response.
 /// Raised from 3 to 5 to allow longer-form generation.
 const MAX_CONTINUATIONS: u32 = 5;
+
+/// Maximum number of concurrent LLM calls across all agents.
+///
+/// Each in-flight LLM call holds the full request + response body in RAM.
+/// On a 256 MB deployment with many hand-agents firing simultaneously this
+/// is the dominant memory spike.  Callers queue (`.await`) rather than
+/// fail when the limit is reached; the existing per-call timeout still fires.
+const MAX_CONCURRENT_LLM_CALLS: usize = 5;
+
+/// Process-global semaphore that caps simultaneous LLM HTTP calls.
+static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
 
 /// Maximum message history size before auto-trimming to prevent context overflow.
 /// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
@@ -556,8 +570,10 @@ struct ToolExecutionContext<'a> {
     docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&'a crate::hooks::HookRegistry>,
     process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     sender_user_id: Option<&'a str>,
     sender_channel: Option<&'a str>,
+    checkpoint_manager: Option<&'a Arc<CheckpointManager>>,
     context_budget: &'a ContextBudget,
     context_engine: Option<&'a dyn ContextEngine>,
     context_window_tokens: usize,
@@ -729,8 +745,11 @@ async fn execute_single_tool_call(
             ctx.tts_engine,
             ctx.docker_config,
             ctx.process_manager,
+            ctx.process_registry,
             ctx.sender_user_id,
             ctx.sender_channel,
+            ctx.checkpoint_manager,
+            Some(ctx.session.id.to_string()).as_deref(),
         ),
     )
     .await
@@ -890,7 +909,49 @@ fn finalize_tool_use_results(
         return ToolResultOutcomeSummary::default();
     }
 
+    // Compute outcome_summary from the original (pre-budget) content so that
+    // is_soft_error_content checks match the actual tool error text, not the
+    // [Tool output too large ...] replacement that Layer 3 may substitute.
+    // This must happen before Layer 3 mutates the blocks.
     let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
+
+    // Layer 3: per-turn aggregate budget enforcement.
+    // Convert ToolResult blocks into ToolResultEntry values, run the enforcer,
+    // then write back any content that was modified (persisted or truncated).
+    {
+        let enforcer = ToolBudgetEnforcer::default();
+        let mut entries: Vec<ToolResultEntry> = tool_result_blocks
+            .iter()
+            .filter_map(|b| {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = b
+                {
+                    Some(ToolResultEntry {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        enforcer.enforce_turn_budget(&mut entries);
+
+        // Write back potentially-modified content using the same index order
+        // (only ToolResult blocks participate; Text guidance blocks are skipped).
+        let mut entry_iter = entries.into_iter();
+        for block in tool_result_blocks.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                if let Some(entry) = entry_iter.next() {
+                    *content = entry.content;
+                }
+            }
+        }
+    }
     append_tool_result_guidance_blocks(tool_result_blocks);
 
     let tool_results_msg = Message {
@@ -2385,6 +2446,8 @@ pub async fn run_agent_loop(
     hooks: Option<&crate::hooks::HookRegistry>,
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -2580,6 +2643,11 @@ pub async fn run_agent_loop(
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
+
+        // Fire agent:step external hook (fire-and-forget).
+        if let Some(ref k) = kernel {
+            k.fire_agent_step(&agent_id_str, iteration);
+        }
 
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
@@ -2880,8 +2948,10 @@ pub async fn run_agent_loop(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        checkpoint_manager: checkpoint_manager.as_ref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
@@ -2896,10 +2966,15 @@ pub async fn run_agent_loop(
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
+                    // Layer 2: per-result budget — persist oversized outputs to disk.
+                    let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
+                        &executed.final_content,
+                        &executed.result.tool_use_id,
+                    );
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
                         tool_name: tool_call.name.clone(),
-                        content: executed.final_content,
+                        content: budgeted_content,
                         is_error: executed.result.is_error,
                         status: executed.result.status,
                         approval_request_id: executed.result.approval_request_id.clone(),
@@ -3217,6 +3292,14 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Acquire the permit inside the retry loop so it is held only during
+        // the actual HTTP round-trip and released before any backoff sleep.
+        // Holding it across retries would block a slot for the full backoff
+        // duration (up to minutes on rate-limit), starving other agents.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3282,6 +3365,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Same rationale as call_with_retry: acquire inside the loop so
+        // the permit is not held during backoff sleeps between retries.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3379,6 +3468,8 @@ pub async fn run_agent_loop_streaming(
     hooks: Option<&crate::hooks::HookRegistry>,
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -3930,8 +4021,10 @@ pub async fn run_agent_loop_streaming(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
+                        checkpoint_manager: checkpoint_manager.as_ref(),
                         context_budget: &context_budget,
                         context_engine,
                         context_window_tokens: ctx_window,
@@ -3946,8 +4039,14 @@ pub async fn run_agent_loop_streaming(
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
+                    // Layer 2: per-result budget — persist oversized outputs to disk.
+                    let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
+                        &executed.final_content,
+                        &executed.result.tool_use_id,
+                    );
+
                     // Notify client of tool execution result (detect dead consumer)
-                    let preview: String = executed.final_content.chars().take(300).collect();
+                    let preview: String = budgeted_content.chars().take(300).collect();
                     if stream_tx
                         .send(StreamEvent::ToolExecutionResult {
                             name: tool_call.name.clone(),
@@ -3963,7 +4062,7 @@ pub async fn run_agent_loop_streaming(
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
                         tool_name: tool_call.name.clone(),
-                        content: executed.final_content,
+                        content: budgeted_content,
                         is_error: executed.result.is_error,
                         status: executed.result.status,
                         approval_request_id: executed.result.approval_request_id.clone(),
@@ -6284,6 +6383,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6343,6 +6444,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6401,6 +6504,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6453,6 +6558,8 @@ mod tests {
             None,
             None,
             None,
+            None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6507,6 +6614,8 @@ mod tests {
             None,
             None,
             None,
+            None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6562,6 +6671,8 @@ mod tests {
             None,
             None,
             None,
+            None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6623,6 +6734,8 @@ mod tests {
             None,
             None,
             None,
+            None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6678,6 +6791,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6811,6 +6926,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6863,6 +6980,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6923,6 +7042,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7705,6 +7826,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7777,6 +7900,8 @@ mod tests {
             None,
             None,
             None,
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7845,6 +7970,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8143,6 +8270,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8200,6 +8329,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8258,6 +8389,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8317,6 +8450,8 @@ mod tests {
             None, // hooks
             None, // context_window_tokens
             None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine

@@ -4,9 +4,10 @@
 //! No external Telegram crate — just `reqwest` for full control over error handling.
 
 use crate::formatter;
+use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
-    split_message, truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType,
-    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction,
+    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -426,8 +427,11 @@ impl TelegramAdapter {
         // Any other tag (e.g. <name>, <thinking>) causes a 400 Bad Request.
         let sanitized = sanitize_telegram_html(text);
 
-        // Telegram has a 4096 character limit per message — split if needed
-        let chunks = split_message(&sanitized, 4096);
+        // Telegram's 4096-character limit is measured in UTF-16 code units.
+        // Emoji and CJK Extension B characters consume 2 units each, so we
+        // must use `split_to_utf16_chunks` rather than a plain byte/codepoint
+        // split to avoid 400 errors on messages heavy with such characters.
+        let chunks = split_to_utf16_chunks(&sanitized, TELEGRAM_MESSAGE_LIMIT);
         for chunk in chunks {
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
@@ -2123,12 +2127,14 @@ impl ChannelAdapter for TelegramAdapter {
             // Split *before* sanitization — api_edit_message / api_send_message
             // sanitize internally, so pre-sanitizing here would double-escape
             // HTML entities.
-            let chunks = split_message(&formatted, 4096);
+            // Use UTF-16-aware splitting: Telegram's 4096-char limit is in
+            // UTF-16 code units, so emoji-heavy text must use this variant.
+            let chunks = split_to_utf16_chunks(&formatted, TELEGRAM_MESSAGE_LIMIT);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
                 let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;
             } else {
-                // Response exceeds 4096 chars — edit the first chunk in place,
+                // Response exceeds limit — edit the first chunk in place,
                 // then send remaining chunks as new messages.
                 let _ = self.api_edit_message(chat_id, msg_id, chunks[0]).await;
                 for chunk in &chunks[1..] {

@@ -3,6 +3,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
@@ -11,13 +12,12 @@ import {
   Terminal as TerminalIcon,
   Maximize2,
   Minimize2,
+  AlertCircle,
+  X,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { buildAuthenticatedWebSocketUrl } from "../api";
-import { PageHeader } from "../components/ui/PageHeader";
-import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { EmptyState } from "../components/ui/EmptyState";
 import { TerminalTabs } from "../components/TerminalTabs";
 import { useTerminalHealth } from "../lib/queries/terminal";
 
@@ -37,6 +37,19 @@ interface ServerMessage {
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
+const TERM_MIN_COLS = 1;
+const TERM_MAX_COLS = 1000;
+const TERM_MIN_ROWS = 1;
+const TERM_MAX_ROWS = 500;
+
+function clampTermSize(cols: number, rows: number): { cols: number; rows: number } | null {
+  const c = Math.max(TERM_MIN_COLS, Math.min(TERM_MAX_COLS, Math.floor(cols)));
+  const r = Math.max(TERM_MIN_ROWS, Math.min(TERM_MAX_ROWS, Math.floor(rows)));
+  if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+  return { cols: c, rows: r };
+}
+
 function getTmuxInstallCommand(os: string): string {
   switch (os) {
     case "macos":
@@ -46,6 +59,31 @@ function getTmuxInstallCommand(os: string): string {
   }
 }
 
+// GitHub Dark-inspired terminal theme.
+const TERMINAL_THEME = {
+  background: "#0d1117",
+  foreground: "#e6edf3",
+  cursor: "#58a6ff",
+  cursorAccent: "#0d1117",
+  selectionBackground: "rgba(88,166,255,0.25)",
+  black: "#21262d",
+  red: "#ff7b72",
+  green: "#3fb950",
+  yellow: "#d29922",
+  blue: "#58a6ff",
+  magenta: "#bc8cff",
+  cyan: "#39c5cf",
+  white: "#b1bac4",
+  brightBlack: "#6e7681",
+  brightRed: "#ffa198",
+  brightGreen: "#56d364",
+  brightYellow: "#e3b341",
+  brightBlue: "#79c0ff",
+  brightMagenta: "#d2a8ff",
+  brightCyan: "#56d4dd",
+  brightWhite: "#f0f6fc",
+} as const;
+
 export function TerminalPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -53,8 +91,11 @@ export function TerminalPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false);
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
@@ -66,14 +107,25 @@ export function TerminalPage() {
   const [isRoot, setIsRoot] = useState(false);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [pendingWindowId, setPendingWindowId] = useState<string | null>(null);
-  const [serverOs, setServerOs] = useState<string>("linux");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const stored = localStorage.getItem("terminal.fontSize");
+    const parsed = stored ? parseInt(stored, 10) : NaN;
+    return Number.isFinite(parsed) ? Math.max(10, Math.min(20, parsed)) : 13;
+  });
+
   const terminalEnabled = useUIStore((s) => s.terminalEnabled);
+  const addToast = useUIStore((s) => s.addToast);
+  const removeToast = useUIStore((s) => s.removeToast);
   const {
     data: terminalHealth,
     isError: terminalHealthError,
   } = useTerminalHealth({ enabled: terminalEnabled === true });
 
+  const serverOs = terminalHealth?.os ?? "linux";
   const tmuxAvailable = !terminalHealthError && (terminalHealth?.tmux ?? false);
   const maxWindows = terminalHealth?.max_windows ?? 16;
 
@@ -88,12 +140,6 @@ export function TerminalPage() {
     }
   }, [terminalEnabled, navigate]);
 
-  useEffect(() => {
-    if (terminalHealth?.os) {
-      setServerOs(terminalHealth.os);
-    }
-  }, [terminalHealth]);
-
   const sendCloseMessage = useCallback((ws: WebSocket | null) => {
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "close" }));
@@ -101,9 +147,7 @@ export function TerminalPage() {
   }, []);
 
   const connect = useCallback(() => {
-    if (terminalEnabled !== true) {
-      return;
-    }
+    if (terminalEnabled !== true) return;
 
     if (wsRef.current) {
       wsRef.current.close();
@@ -114,23 +158,48 @@ export function TerminalPage() {
     setIsRoot(false);
     const url = new URL(buildAuthenticatedWebSocketUrl("/api/terminal/ws"));
     if (terminalRef.current) {
-      url.searchParams.set("cols", String(terminalRef.current.cols));
-      url.searchParams.set("rows", String(terminalRef.current.rows));
+      const size = clampTermSize(terminalRef.current.cols, terminalRef.current.rows);
+      if (size) {
+        url.searchParams.set("cols", String(size.cols));
+        url.searchParams.set("rows", String(size.rows));
+      }
     }
     const ws = new WebSocket(url.toString());
     wsRef.current = ws;
 
     ws.onopen = () => {
+      const wasReconnect = attemptRef.current > 0;
       setIsConnecting(false);
       setIsConnected(true);
       attemptRef.current = 0;
+      setReconnectAttempt(0);
       setError(null);
       if (terminalRef.current && fitAddonRef.current) {
-        const { cols, rows } = terminalRef.current;
-        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+        const size = clampTermSize(terminalRef.current.cols, terminalRef.current.rows);
+        if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
       }
       if (desiredWindowIdRef.current) {
         ws.send(JSON.stringify({ type: "switch_window", window: desiredWindowIdRef.current }));
+      }
+      if (wasReconnect) {
+        addToast(t("terminal.reconnected"), "success");
+        // Grab the id that addToast just inserted (it uses Date.now() as id).
+        const toasts = useUIStore.getState().toasts;
+        const latest = toasts[toasts.length - 1];
+        if (latest) {
+          if (toastDismissTimerRef.current) {
+            clearTimeout(toastDismissTimerRef.current);
+          }
+          toastDismissTimerRef.current = setTimeout(() => {
+            removeToast(latest.id);
+            toastDismissTimerRef.current = null;
+          }, 3000);
+        }
+      }
+      const hintKey = "terminal.copyPasteHintShown";
+      if (!localStorage.getItem(hintKey)) {
+        localStorage.setItem(hintKey, "1");
+        addToast(t("terminal.copy_paste_hint"), "info");
       }
     };
 
@@ -199,7 +268,6 @@ export function TerminalPage() {
         return;
       }
 
-      // Non-transient close codes: stop reconnecting
       const isAppError = event.code >= 4000 && event.code <= 4999;
       const isNonTransient = event.code === 1008 || event.code === 1011 || isAppError;
       if (isNonTransient) {
@@ -213,16 +281,15 @@ export function TerminalPage() {
       }
       const delay = Math.min(RECONNECT_DELAY_MS * 2 ** attemptRef.current, 30_000) + Math.random() * 1000;
       attemptRef.current += 1;
+      setReconnectAttempt(attemptRef.current);
+      setIsConnecting(true);
       reconnectTimeoutRef.current = setTimeout(() => {
-        if (
-          wsRef.current === null ||
-          wsRef.current.readyState === WebSocket.CLOSED
-        ) {
+        if (wsRef.current === null || wsRef.current.readyState === WebSocket.CLOSED) {
           connect();
         }
       }, delay);
     };
-  }, [t, terminalEnabled, queryClient]);
+  }, [t, terminalEnabled, queryClient, addToast]);
 
   connectRef.current = connect;
 
@@ -231,7 +298,6 @@ export function TerminalPage() {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-
     if (wsRef.current) {
       intentionalDisconnectRef.current = true;
       sendCloseMessage(wsRef.current);
@@ -244,6 +310,7 @@ export function TerminalPage() {
     setPendingWindowId(null);
     setIsConnected(false);
     setIsConnecting(false);
+    setReconnectAttempt(0);
   }, [sendCloseMessage, activeWindowId]);
 
   useEffect(() => {
@@ -255,7 +322,7 @@ export function TerminalPage() {
   const handleInstallTmux = useCallback(() => {
     const cmd = getTmuxInstallCommand(serverOs);
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "input", data: cmd }));
+      wsRef.current.send(JSON.stringify({ type: "input", data: cmd + "\n" }));
     }
   }, [serverOs]);
 
@@ -268,21 +335,42 @@ export function TerminalPage() {
     setIsFullscreen((v) => !v);
   }, []);
 
-  // Refit the terminal after fullscreen toggles, and notify the remote pty of
-  // the new size. We rAF twice so layout has actually settled before we measure.
+  // Focus search input when search bar becomes visible.
+  useEffect(() => {
+    if (!searchVisible) return;
+    const raf = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [searchVisible]);
+
+  // Update terminal font size when fontSize state changes.
+  useEffect(() => {
+    const term = terminalRef.current;
+    const fit = fitAddonRef.current;
+    if (!term || !fit) return;
+    term.options.fontSize = fontSize;
+    try { fit.fit(); } catch { /* ignore */ }
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      const size = clampTermSize(term.cols, term.rows);
+      if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
+    }
+  }, [fontSize]);
+
+  // Refit the terminal after fullscreen toggles.
   useEffect(() => {
     if (!terminalRef.current || !fitAddonRef.current) return;
     const raf1 = requestAnimationFrame(() => {
       const raf2 = requestAnimationFrame(() => {
         try {
           fitAddonRef.current?.fit();
-        } catch {
-          /* xterm not attached yet */
-        }
+        } catch { /* xterm not attached yet */ }
         const term = terminalRef.current;
         const ws = wsRef.current;
         if (term && ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+          const size = clampTermSize(term.cols, term.rows);
+          if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
         }
       });
       return () => cancelAnimationFrame(raf2);
@@ -290,8 +378,7 @@ export function TerminalPage() {
     return () => cancelAnimationFrame(raf1);
   }, [isFullscreen]);
 
-  // ESC exits fullscreen — but not when focus is inside the terminal, since
-  // vim/less/tmux all use Escape as a meaningful key.
+  // ESC exits fullscreen, but not when focus is inside the terminal.
   useEffect(() => {
     if (!isFullscreen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -305,30 +392,52 @@ export function TerminalPage() {
   }, [isFullscreen]);
 
   useEffect(() => {
-    if (terminalEnabled !== true) {
-      return;
-    }
-
+    if (terminalEnabled !== true) return;
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      theme: {
-        background: "#1a1a2e",
-        foreground: "#eee",
-        cursor: "#f00",
-      },
-      fontSize: 14,
-      fontFamily: "monospace",
+      theme: TERMINAL_THEME,
+      fontSize: fontSize,
+      fontFamily:
+        "'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, 'Liberation Mono', monospace",
+      lineHeight: 1.2,
+      cursorBlink: true,
+      cursorStyle: "block",
+      // Show a dimmed underline cursor when the terminal loses focus (xterm v5.5+).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({"cursorInactiveStyle": "underline"} as any),
+      scrollback: 5000,
     });
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+
+    const searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
 
     term.open(containerRef.current);
     fitAddon.fit();
 
     terminalRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.key === "f") {
+        setSearchVisible(true);
+        return false; // prevent xterm default
+      }
+      // Ctrl+L: clear the visible terminal buffer and forward \x0c to the shell
+      // so the shell's own clear handler also runs (e.g. bash/zsh clear scrollback).
+      if (e.type === "keydown" && e.ctrlKey && e.key === "l") {
+        term.clear();
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: "input", data: "\x0c" }));
+        }
+        return false; // prevent xterm from passing the keystroke a second time
+      }
+      return true;
+    });
 
     term.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -338,7 +447,8 @@ export function TerminalPage() {
 
     term.onResize(({ cols, rows }) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "resize", cols, rows }));
+        const size = clampTermSize(cols, rows);
+        if (size) wsRef.current.send(JSON.stringify({ type: "resize", ...size }));
       }
     });
 
@@ -347,14 +457,8 @@ export function TerminalPage() {
     const handleResize = () => fitAddon.fit();
     window.addEventListener("resize", handleResize);
 
-    // Also refit when the container itself changes size (sidebar toggle,
-    // parent layout changes, etc) so we don't get a mismatched pty size.
     const ro = new ResizeObserver(() => {
-      try {
-        fitAddon.fit();
-      } catch {
-        /* ignore */
-      }
+      try { fitAddon.fit(); } catch { /* ignore */ }
     });
     ro.observe(containerRef.current);
 
@@ -363,6 +467,9 @@ export function TerminalPage() {
       ro.disconnect();
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (toastDismissTimerRef.current) {
+        clearTimeout(toastDismissTimerRef.current);
       }
       if (wsRef.current) {
         intentionalDisconnectRef.current = true;
@@ -376,78 +483,100 @@ export function TerminalPage() {
     };
   }, [sendCloseMessage, terminalEnabled]);
 
-  if (terminalEnabled === null) {
-    return (
-      <div className="flex flex-col h-full">
-        <PageHeader
-          badge={t("terminal.badge")}
-          title={t("nav.terminal")}
-          subtitle={t("common.loading")}
-          icon={<TerminalIcon className="h-4 w-4" />}
-        />
-        <div className="flex-1 p-4">
-          <Card className="h-full flex items-center justify-center">
-            <EmptyState title={t("common.loading")} icon={<TerminalIcon className="h-6 w-6" />} />
-          </Card>
-        </div>
-      </div>
-    );
-  }
+  // ── Derived UI state ─────────────────────────────────────────────────────────
 
-  const statusLabel = error
-    ? t("terminal.subtitle_error", { error })
+  const statusDotClass = error
+    ? "bg-red-400"
+    : isConnecting
+      ? "bg-amber-400 animate-pulse"
+      : isConnected
+        ? "bg-emerald-400"
+        : "bg-gray-500";
+
+  const statusLabel = isConnecting
+    ? reconnectAttempt > 0
+      ? t("terminal.subtitle_reconnecting", {
+          attempt: reconnectAttempt,
+          max: MAX_RECONNECT_ATTEMPTS,
+        })
+      : t("terminal.subtitle_connecting")
     : isConnected
       ? t("terminal.subtitle_connected")
       : t("terminal.subtitle_disconnected");
 
+  // ── Actions ──────────────────────────────────────────────────────────────────
+
   const actions = (
-    <>
+    <div className="flex items-center gap-2">
       {!tmuxAvailable && isConnected && (
-        <Button onClick={handleInstallTmux} variant="secondary">
+        <Button onClick={handleInstallTmux} variant="secondary" size="sm">
           {t("terminal.install_tmux")}
         </Button>
       )}
-      <Button onClick={connect} disabled={isConnected || isConnecting}>
-        {isConnected
-          ? t("terminal.subtitle_connected")
-          : t("terminal.connect")}
-      </Button>
-      {isConnected && (
-        <Button onClick={disconnect} variant="secondary">
+      <div className="flex items-center gap-0.5">
+        <button
+          onClick={() => setFontSize(s => { const n = Math.max(10, s - 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
+          title={t("terminal.font_decrease")}
+        >A-</button>
+        <button
+          onClick={() => setFontSize(s => { const n = Math.min(20, s + 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          className="flex items-center justify-center w-7 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
+          title={t("terminal.font_increase")}
+        >A+</button>
+      </div>
+      {isConnected ? (
+        <Button onClick={disconnect} variant="secondary" size="sm">
           {t("terminal.disconnect")}
         </Button>
+      ) : (
+        <Button
+          onClick={connect}
+          isLoading={isConnecting}
+          disabled={isConnecting}
+          size="sm"
+        >
+          {t("terminal.connect")}
+        </Button>
       )}
-      <Button
+      <button
         onClick={toggleFullscreen}
-        variant="secondary"
+        className="flex items-center justify-center w-8 h-8 rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors shadow-sm"
         aria-label={
-          isFullscreen
-            ? t("terminal.exit_fullscreen")
-            : t("terminal.enter_fullscreen")
+          isFullscreen ? t("terminal.exit_fullscreen") : t("terminal.enter_fullscreen")
         }
-        title={
-          isFullscreen
-            ? t("terminal.exit_fullscreen")
-            : t("terminal.enter_fullscreen")
-        }
+        title={isFullscreen ? t("terminal.exit_fullscreen") : t("terminal.enter_fullscreen")}
       >
         {isFullscreen ? (
-          <Minimize2 className="h-4 w-4" />
+          <Minimize2 className="h-3.5 w-3.5" />
         ) : (
-          <Maximize2 className="h-4 w-4" />
+          <Maximize2 className="h-3.5 w-3.5" />
         )}
-      </Button>
-    </>
+      </button>
+    </div>
   );
 
-  // The terminal body. Rendered identically in normal and fullscreen modes so
-  // xterm never unmounts — otherwise the pty session would be torn down every
-  // time we toggle fullscreen.
+  // ── Terminal body ─────────────────────────────────────────────────────────────
+
   const terminalBody = (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {isRoot && (
-        <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-4 py-2 text-sm shrink-0">
-          {t("terminal.root_warning")}
+        <div className="shrink-0 flex items-center gap-2 bg-red-950/60 border-b border-red-800/50 px-4 py-2 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span>{t("terminal.root_warning")}</span>
+        </div>
+      )}
+      {error && (
+        <div className="shrink-0 flex items-center gap-2 bg-red-950/40 border-b border-red-800/40 px-4 py-2 text-xs text-red-400">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1 truncate min-w-0">{error}</span>
+          <button
+            onClick={() => setError(null)}
+            className="shrink-0 ml-1 hover:text-red-300 transition-colors"
+            aria-label={t("terminal.dismiss_error")}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
       <TerminalTabs
@@ -459,12 +588,107 @@ export function TerminalPage() {
         terminalRef={terminalRef}
         fitAddonRef={fitAddonRef}
       />
-      <div
-        ref={containerRef}
-        className="flex-1 bg-[#1a1a2e] p-2 overflow-hidden min-h-0"
-      />
+      {searchVisible && (
+        <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 bg-[#1c2128] border-b border-gray-700/50">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              searchAddonRef.current?.findNext(e.target.value, { incremental: true });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.shiftKey
+                  ? searchAddonRef.current?.findPrevious(searchQuery)
+                  : searchAddonRef.current?.findNext(searchQuery);
+              }
+              if (e.key === "Escape") {
+                setSearchVisible(false);
+                terminalRef.current?.focus();
+              }
+              e.stopPropagation();
+            }}
+            placeholder={t("terminal.search_placeholder")}
+            className="flex-1 min-w-0 bg-gray-900/60 text-gray-200 text-xs px-2 py-1 rounded border border-gray-700/60 outline-none focus:border-blue-500/60 placeholder:text-gray-600"
+          />
+          <button
+            onClick={() => searchAddonRef.current?.findPrevious(searchQuery)}
+            className="text-gray-500 hover:text-gray-300 transition-colors text-xs px-1.5 py-1 rounded hover:bg-gray-700/40"
+            title={t("terminal.search_prev")}
+          >↑</button>
+          <button
+            onClick={() => searchAddonRef.current?.findNext(searchQuery)}
+            className="text-gray-500 hover:text-gray-300 transition-colors text-xs px-1.5 py-1 rounded hover:bg-gray-700/40"
+            title={t("terminal.search_next")}
+          >↓</button>
+          <button
+            onClick={() => { setSearchVisible(false); terminalRef.current?.focus(); }}
+            className="text-gray-500 hover:text-gray-300 transition-colors"
+            aria-label={t("terminal.search_close")}
+          ><X className="h-3.5 w-3.5" /></button>
+        </div>
+      )}
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden" />
     </div>
   );
+
+  // ── Loading state ─────────────────────────────────────────────────────────────
+
+  if (terminalEnabled === null) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <header className="shrink-0 flex items-center gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
+          <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+            <TerminalIcon className="h-4 w-4" />
+          </div>
+          <h1 className="text-sm font-extrabold tracking-tight">{t("nav.terminal")}</h1>
+        </header>
+        <div className="flex-1 min-h-0 flex items-center justify-center bg-[#0d1117] text-gray-500 text-sm">
+          {t("common.loading")}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Headers ───────────────────────────────────────────────────────────────────
+
+  const normalHeader = (
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+          <TerminalIcon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <h1 className="text-sm font-extrabold tracking-tight leading-tight">
+            {t("nav.terminal")}
+          </h1>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+            <p className="text-[11px] text-text-dim truncate">{statusLabel}</p>
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">{actions}</div>
+    </header>
+  );
+
+  const fullscreenHeader = (
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-2 bg-[#161b22] border-b border-gray-700/50">
+      <div className="flex items-center gap-2 min-w-0">
+        <TerminalIcon className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+        <span className="text-sm font-semibold text-gray-200 truncate">
+          {t("nav.terminal")}
+        </span>
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDotClass}`} />
+        <span className="text-xs text-gray-400 truncate">{statusLabel}</span>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">{actions}</div>
+    </header>
+  );
+
+  // ── Main render ───────────────────────────────────────────────────────────────
 
   // Single tree in both modes so React doesn't unmount the xterm container
   // when toggling fullscreen. Only the header chrome and outer className swap.
@@ -472,34 +696,17 @@ export function TerminalPage() {
     <div
       className={
         isFullscreen
-          ? "fixed inset-0 z-50 flex flex-col bg-[#1a1a2e]"
-          : "flex flex-col h-full"
+          ? "fixed inset-0 z-50 flex flex-col bg-[#0d1117]"
+          : "flex flex-col flex-1 min-h-0"
       }
     >
-      {isFullscreen ? (
-        <div className="flex items-center justify-between gap-3 px-4 py-2 bg-surface border-b border-border-subtle shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <TerminalIcon className="h-4 w-4 text-text-dim shrink-0" />
-            <span className="font-semibold truncate">{t("nav.terminal")}</span>
-            <span className="text-xs text-text-dim truncate">· {statusLabel}</span>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">{actions}</div>
-        </div>
-      ) : (
-        <PageHeader
-          badge={t("terminal.badge")}
-          title={t("nav.terminal")}
-          subtitle={statusLabel}
-          icon={<TerminalIcon className="h-4 w-4" />}
-          actions={actions}
-        />
-      )}
-      <div className={isFullscreen ? "flex-1 min-h-0" : "flex-1 p-4 min-h-0"}>
+      {isFullscreen ? fullscreenHeader : normalHeader}
+      <div className={isFullscreen ? "flex flex-col flex-1 min-h-0" : "flex flex-col flex-1 px-4 pb-4 pt-3 min-h-0"}>
         <div
           className={
             isFullscreen
-              ? "h-full flex flex-col overflow-hidden"
-              : "h-full flex flex-col overflow-hidden rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm"
+              ? "flex flex-col flex-1 min-h-0 overflow-hidden"
+              : "flex flex-col flex-1 min-h-0 overflow-hidden rounded-xl sm:rounded-2xl border border-gray-800 bg-[#0d1117] shadow-lg"
           }
         >
           {terminalBody}

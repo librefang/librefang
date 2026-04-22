@@ -1,0 +1,160 @@
+# Session Auto-Reset
+
+Long-running sessions accumulate message history. As history grows, prompt tokens increase,
+context windows fill, and per-request cost rises. Session auto-reset clears the history on a
+schedule so agents start each work window with a fresh context, while preserving agent
+identity, configuration, and skills.
+
+This feature is designed for unattended deployments — cron-driven agents, always-on
+assistants, and multi-tenant setups where individual users share an agent but should not see
+each other's history.
+
+## Included Topics
+
+- [Configuration](#configuration)
+- [Reset Modes](#reset-modes)
+- [Suspended State](#suspended-state)
+- [Reset Record](#reset-record)
+- [Use Cases](#use-cases)
+- [Relation to session_mode](#relation-to-session_mode)
+
+---
+
+## Configuration
+
+Add a `[session_reset]` section to `~/.librefang/config.toml`:
+
+```toml
+[session_reset]
+# "off" | "idle" | "daily" | "both"
+mode = "idle"
+
+# Minutes of inactivity before the session is reset (used by "idle" and "both").
+idle_minutes = 30
+
+# UTC hour (0–23) at which the daily reset fires (used by "daily" and "both").
+# The reset runs at the first check after this hour boundary.
+daily_at_hour = 3
+```
+
+All fields have defaults — an empty `[session_reset]` section is valid and applies
+`mode = "off"`.
+
+| Field | Default | Constraints |
+|---|---|---|
+| `mode` | `"off"` | `"off"`, `"idle"`, `"daily"`, `"both"` |
+| `idle_minutes` | `30` | `1`–`1440` |
+| `daily_at_hour` | `0` | `0`–`23` (UTC) |
+
+---
+
+## Reset Modes
+
+| Mode | Behavior |
+|---|---|
+| `off` | Auto-reset disabled. Sessions persist indefinitely until explicitly closed. |
+| `idle` | Session is reset after `idle_minutes` of no incoming messages. The timer resets on each new message. |
+| `daily` | Session is reset once per day at `daily_at_hour` UTC, regardless of activity. |
+| `both` | Either condition triggers a reset — whichever comes first. |
+
+Resets are **per-session**, not per-agent. A single agent running multiple concurrent
+sessions (e.g. one per channel) has each session tracked independently.
+
+When a reset fires, the message history is cleared. The next message to the agent starts a
+new conversation with only the system prompt and any injected context (memory, skills) — not
+the previous exchange.
+
+---
+
+## Suspended State
+
+In addition to automatic resets, a session can be **suspended** via the API:
+
+```bash
+# Suspend a session — queued messages will not be delivered until resumed
+curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
+  -H "Content-Type: application/json" \
+  -d '{"suspended": true}'
+
+# Resume a suspended session
+curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
+  -H "Content-Type: application/json" \
+  -d '{"suspended": false}'
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `suspended` | boolean | When `true`, the session queues incoming messages but does not process them |
+| `resume_pending` | boolean (read-only) | `true` when messages arrived while suspended and are waiting for delivery |
+
+A suspended session is **not** reset automatically — the idle timer and daily clock still
+advance, but history is preserved until the reset fires or you issue a manual reset.
+This is useful for maintenance windows: suspend to pause processing, perform external
+operations, then resume.
+
+To perform a manual reset at any time:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/reset
+```
+
+---
+
+## Reset Record
+
+After every reset (automatic or manual), LibreFang records the reason in the session
+metadata. The `reset_reason` field is surfaced in the `session:reset` event hook payload and
+in the session detail API response.
+
+| `reset_reason` value | Trigger |
+|---|---|
+| `idle` | Idle timeout expired |
+| `daily` | Daily clock boundary crossed |
+| `suspended` | Reset was triggered while the session was in suspended state |
+| `manual` | `POST /api/.../sessions/{id}/reset` called explicitly |
+
+Use this field in monitoring hooks to distinguish routine scheduled resets from unexpected
+manual interventions.
+
+---
+
+## Use Cases
+
+**Idle reset for interactive assistants.** An agent that answers employee questions during
+business hours accumulates history from dozens of conversations. With `mode = "idle"` and
+`idle_minutes = 60`, the session clears after an hour of silence — each new conversation
+starts unencumbered by unrelated prior exchanges.
+
+**Daily reset for cron-driven agents.** An agent that runs nightly data processing jobs
+should start each morning from a known state. `mode = "daily"` with `daily_at_hour = 2`
+resets the session at 02:00 UTC before the first scheduled job, ensuring yesterday's
+context does not leak into today's run.
+
+**Both for high-volume shared agents.** A channel bot that serves multiple users in a busy
+team room benefits from `mode = "both"`: idle resets handle quiet periods, and the daily
+reset acts as a backstop if the channel is continuously active.
+
+---
+
+## Relation to session_mode
+
+`session_reset` and `session_mode` are independent controls that operate at different layers.
+
+| Setting | Location | What it controls |
+|---|---|---|
+| `session_mode` | `agent.toml` (per-agent manifest) | Whether automated invocations **create a new session** or **reuse the persistent one** |
+| `session_reset` | `config.toml` (global) | Whether an existing persistent session has its **history cleared** on a schedule |
+
+A common misconception: setting `session_mode = "new"` in an agent manifest does *not* clear
+history on a schedule — it creates a fresh session object per invocation. The original
+persistent session is untouched and continues to grow.
+
+Conversely, `session_reset` does not create new session objects. It clears the message
+history of the **existing** session in place. The session ID stays the same; only the
+conversation turns are removed.
+
+For cron jobs that need full isolation between fires, neither setting alone is sufficient —
+use `session_mode = "new"` in the trigger definition. For agents that need continuity within
+a day but a clean slate each morning, `session_reset` with `mode = "daily"` is the right
+tool. See [session_mode reference](/agent/workflows#session-mode) for the resolution order
+and cron-specific caveats.
