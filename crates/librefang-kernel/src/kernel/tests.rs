@@ -1205,6 +1205,102 @@ async fn test_spawn_approval_sweep_task_is_idempotent() {
     assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
 }
 
+/// The task-board sweeper must be spawn-idempotent so repeated callers
+/// (server bootstrap, CLI helpers, tests) don't end up with multiple loops
+/// hammering the DB (issue #2923).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_task_board_sweep_task_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    Arc::clone(&kernel).spawn_task_board_sweep_task();
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+
+    // Re-spawning while already running is a no-op — the atomic guard
+    // short-circuits instead of starting a second loop.
+    Arc::clone(&kernel).spawn_task_board_sweep_task();
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+
+    kernel.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    assert!(!kernel.task_board_sweep_started.load(Ordering::Acquire));
+}
+
+/// End-to-end sanity check at the kernel layer: after a worker claims a task
+/// and stalls, the sweeper flips it back to `pending` so another worker can
+/// re-claim (issue #2923). Bypasses the background loop by invoking the
+/// substrate directly with a small TTL so the test doesn't have to wait
+/// 10 minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_task_board_sweep_resets_stuck_in_progress_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let mem = kernel.memory_substrate();
+
+    // Post and claim a task so status = in_progress.
+    let task_id = mem
+        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .await
+        .expect("post");
+    let claimed = mem
+        .task_claim("worker", Some("worker"))
+        .await
+        .expect("claim")
+        .expect("should find task");
+    assert_eq!(claimed["status"], "in_progress");
+    assert_eq!(claimed["id"], task_id);
+
+    // Simulate the worker stalling: back-date claimed_at so a 1 s TTL trips.
+    // This mirrors what happens in production when an LLM returns an empty
+    // response after the claim and the session silently dies.
+    {
+        let _ = mem; // borrow so the raw connection dance below compiles cleanly
+    }
+
+    // Manually tick: set claimed_at to the past, then reset with a small TTL.
+    // Sleeping for real 1 s would bloat the suite for no gain.
+    let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    // The substrate does not expose raw SQL so we re-post + re-claim + reset
+    // via a short TTL that will immediately apply to the fresh claim.
+    // Instead, we leverage task_reset_stuck's own TTL to cover "now < cutoff"
+    // by waiting the full TTL window once.
+    // Use the internal API directly with a tiny TTL so the just-claimed row
+    // is already past the cutoff by the time we call it.
+    // claimed_at was stamped ~now, so cutoff = now - 0s will NOT include it.
+    // Sleep one second to push it past a 1 s TTL.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let _ = past; // keep the variable (documents intent) even if unused
+
+    let reset = mem.task_reset_stuck(1).await.expect("sweep");
+    assert_eq!(reset, vec![task_id.clone()], "stuck task should be reset");
+
+    let pending = mem.task_list(Some("pending")).await.expect("list");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], task_id);
+    assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_evaluate_condition_none() {
     let tags = vec!["chat".to_string(), "dev".to_string()];

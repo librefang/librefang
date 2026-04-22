@@ -468,6 +468,8 @@ pub struct LibreFangKernel {
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
     approval_sweep_started: AtomicBool,
+    /// Idempotency guard for the task-board stuck-task sweeper (issue #2923).
+    task_board_sweep_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -994,6 +996,80 @@ impl LibreFangKernel {
                 .approval_sweep_started
                 .store(false, Ordering::Release);
             tracing::debug!("Approval expiry sweep task stopped");
+        });
+    }
+
+    /// Spawn the task-board stuck-task sweep loop (issue #2923 / #2926).
+    ///
+    /// Periodically scans the `task_queue` for `in_progress` rows whose
+    /// `claimed_at` is older than `config.task_board.claim_ttl_secs`. Stuck
+    /// tasks are flipped back to `pending` and their `assigned_to` is cleared
+    /// so another worker (or the same one on the next trigger fire) can pick
+    /// them up.
+    ///
+    /// Idempotent: re-calling while the loop is already running is a no-op.
+    /// The interval and TTL are read *live* from the kernel config on every
+    /// tick, so hot-reloading `[task_board]` does not require a kernel
+    /// restart. `claim_ttl_secs = 0` disables the sweeper (tick is a no-op)
+    /// for deployments that legitimately hold tasks `in_progress` for hours
+    /// (human-in-the-loop workflows).
+    pub fn spawn_task_board_sweep_task(self: Arc<Self>) {
+        let handle = tokio::runtime::Handle::current();
+        if self.task_board_sweep_started.swap(true, Ordering::AcqRel) {
+            debug!("Task board sweep task already running");
+            return;
+        }
+
+        let kernel = Arc::clone(&self);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        handle.spawn(async move {
+            loop {
+                // Read sweeper knobs live — hot reload takes effect on next tick.
+                let (interval_secs, ttl_secs) = {
+                    let cfg = kernel.config.load();
+                    (
+                        cfg.task_board.sweep_interval_secs.max(1),
+                        cfg.task_board.claim_ttl_secs,
+                    )
+                };
+
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                if ttl_secs == 0 {
+                    // Sweeper disabled by operator — keep the loop alive so a
+                    // later hot-reload can flip it back on without restart.
+                    continue;
+                }
+
+                match kernel.memory.task_reset_stuck(ttl_secs).await {
+                    Ok(reset) if !reset.is_empty() => {
+                        warn!(
+                            count = reset.len(),
+                            ttl_secs,
+                            task_ids = ?reset,
+                            "Auto-reset stuck in_progress tasks past claim TTL (issue #2923)"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "Task board sweep failed");
+                    }
+                }
+            }
+
+            kernel
+                .task_board_sweep_started
+                .store(false, Ordering::Release);
+            tracing::debug!("Task board sweep task stopped");
         });
     }
 
@@ -2571,6 +2647,7 @@ impl LibreFangKernel {
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
+            task_board_sweep_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir
