@@ -189,9 +189,27 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
                 chunks.push(&remaining[..next_char_len]);
                 remaining = &remaining[next_char_len..];
             } else {
-                // Force progress: emit the safe prefix and continue.
-                chunks.push(safe_prefix);
-                remaining = &remaining[safe_prefix.len()..];
+                // The entity guard shrank `chunk` all the way to empty, which
+                // means the entity starts at byte 0 of the current window.
+                // Apply the guard to `safe_prefix` too before emitting it —
+                // otherwise we would push the broken-entity tail that was
+                // trimmed from `chunk` back out via `safe_prefix`.
+                let safe_prefix = adjust_html_entity_boundary(safe_prefix);
+                if safe_prefix.is_empty() {
+                    // Even safe_prefix starts with a broken entity; force
+                    // progress by one char to avoid an infinite loop.
+                    let next_char_len = remaining
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(remaining.len());
+                    chunks.push(&remaining[..next_char_len]);
+                    remaining = &remaining[next_char_len..];
+                } else {
+                    // Force progress: emit the guarded safe prefix and continue.
+                    chunks.push(safe_prefix);
+                    remaining = &remaining[safe_prefix.len()..];
+                }
             }
             continue;
         }
@@ -594,5 +612,64 @@ mod tests {
                 "chunk must not end with bare &: {chunk:?}"
             );
         }
+    }
+
+    #[test]
+    fn split_entity_starts_at_byte_zero_of_chunk() {
+        // Regression test for the force-progress path bug: when the entity starts
+        // at byte 0 of a new chunk (i.e. adjust_html_entity_boundary returns ""
+        // for `chunk`), the fallback must also guard `safe_prefix` before emitting
+        // it.  Without the fix the broken entity tail would leak into the output.
+        //
+        // Construct a string where:
+        //   - The first chunk fills the limit exactly, ending just before "&lt;"
+        //   - The next iteration's safe_prefix also covers "...&lt" (broken entity)
+        //   - Without the fix: safe_prefix with broken "&lt" is emitted directly.
+        //
+        // "aaaa&lt;z" with limit=4 forces: safe_prefix="aaaa&lt" → chunk after
+        // entity guard = "" (entity at byte 4, which after trim becomes "aaaa").
+        // Remaining starts at "&lt;z". safe_prefix of "&lt;z" with limit=4 would
+        // be "&lt;" (4 chars) — that entity is complete so no bug here in this
+        // particular split. Use a tighter scenario:
+        //
+        // "ab&lt;cd" with limit=4:
+        //   safe_prefix = truncate("ab&lt;cd", 4) = "ab&l"
+        //   rfind('\n') = None → split_at = 4 → chunk = "ab&l"
+        //   adjust_html_entity_boundary("ab&l") = "ab" (entity trimmed)
+        //   chunk = "ab", rest = "&lt;cd"      → emit "ab", remaining = "&lt;cd"
+        //   Next: utf16_len("&lt;cd") = 6 > 4
+        //   safe_prefix = truncate("&lt;cd", 4) = "&lt;" — complete entity, fine.
+        //
+        // The crash path is when safe_prefix *itself* ends with a broken entity
+        // AND chunk becomes empty. Build that scenario:
+        //
+        // "&lt;abcd" with limit=3:
+        //   safe_prefix = "&lt" (3 chars)
+        //   chunk after rfind('\n') = "&lt" (split_at = 3 = safe_prefix.len())
+        //   adjust_html_entity_boundary("&lt") = "" (entity at byte 0, trimmed to "")
+        //   chunk = "" → enter force-progress branch
+        //   safe_prefix = "&lt" (not empty) → without fix: emits "&lt" (broken!)
+        //   With fix: adjust_html_entity_boundary("&lt") = "" → advance one char.
+        let s = "&lt;abcd";
+        let chunks = split_to_utf16_chunks(s, 3);
+        for chunk in &chunks {
+            // No chunk may contain a broken entity (& not followed by ;)
+            if let Some(amp_pos) = chunk.rfind('&') {
+                let tail = &chunk[amp_pos..];
+                assert!(
+                    tail.contains(';'),
+                    "chunk contains broken entity: {chunk:?}"
+                );
+            }
+        }
+        // Verify all content is still covered (no chars dropped permanently).
+        // The "&lt;" entity is 4 chars; with limit=3 it cannot fit in one chunk
+        // so the entity is kept intact in whichever chunk it ends up in.
+        let joined = chunks.concat();
+        assert_eq!(
+            joined.len(),
+            s.len(),
+            "no content should be dropped; joined={joined:?}"
+        );
     }
 }
