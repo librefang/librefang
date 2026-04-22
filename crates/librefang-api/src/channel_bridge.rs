@@ -2006,6 +2006,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
     }
+
+    fn channels_download_dir(&self) -> Option<std::path::PathBuf> {
+        self.kernel
+            .config_ref()
+            .channels
+            .file_download_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+    }
+
+    fn channels_download_max_bytes(&self) -> Option<u64> {
+        Some(self.kernel.config_ref().channels.file_download_max_bytes)
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
