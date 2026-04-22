@@ -407,6 +407,7 @@ fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
                         role: Role::User,
                         content: MessageContent::Blocks(synthetic_blocks),
                         pinned: false,
+                        timestamp: None,
                     },
                 );
             }
@@ -416,6 +417,7 @@ fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
                 role: Role::User,
                 content: MessageContent::Blocks(synthetic_blocks),
                 pinned: false,
+                timestamp: None,
             });
         }
 
