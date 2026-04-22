@@ -122,6 +122,8 @@ taskkill //PID <pid> //F
 | `/api/approvals/totp` | DELETE | Revoke TOTP enrollment |
 
 ## Architecture Notes
+- **Agent workspace layout**: identity files (SOUL.md, IDENTITY.md, etc.) live in `{workspace}/.identity/`, not the workspace root. `read_identity_file()` checks `.identity/` first, falls back to root for pre-migration workspaces. `migrate_identity_files()` is called on every spawn to auto-move any root-level files.
+- **Named workspaces** (`[workspaces]` in agent.toml): declare shared directories with `path` (relative to `workspaces_dir`) and `mode` (`rw` / `r`). Multiple agents sharing the same path never collide — identity files stay in their private `.identity/`. Resolved absolute paths are injected into TOOLS.md as `@name → /abs/path (mode)`. See `workspace_setup.rs: ensure_named_workspaces()`.
 - `KernelHandle` trait avoids circular deps between runtime and kernel
 - `AppState` in `server.rs` bridges kernel to API routes
 - New routes must be registered in `server.rs` router AND implemented in `routes.rs`

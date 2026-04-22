@@ -637,6 +637,20 @@ pub struct AgentManifest {
     /// Whether to generate workspace identity files (SOUL.md, USER.md, etc.) on creation.
     #[serde(default = "default_true")]
     pub generate_identity_files: bool,
+    /// Named shared workspaces this agent can access.
+    ///
+    /// Each entry maps a symbolic name to a directory path (relative to `workspaces_dir`)
+    /// and an access mode. Multiple agents can declare the same path — they share the
+    /// directory without identity-file collisions because identity files live in the
+    /// agent's private home (`.identity/`), not in the shared workspace.
+    ///
+    /// ```toml
+    /// [workspaces]
+    /// library  = { path = "shared/library",  mode = "rw" }
+    /// archive  = { path = "shared/archive",  mode = "r"  }
+    /// ```
+    #[serde(default)]
+    pub workspaces: HashMap<String, WorkspaceDecl>,
     /// Per-agent exec policy override. If None, uses global exec_policy.
     /// Accepts string shorthand ("allow", "deny", "full", "allowlist") or full table.
     #[serde(default, deserialize_with = "crate::serde_compat::exec_policy_lenient")]
@@ -723,6 +737,29 @@ pub struct AgentManifest {
     pub auto_evolve: bool,
 }
 
+/// Access mode for a named workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    /// Full read-write access (default).
+    #[default]
+    #[serde(alias = "rw")]
+    ReadWrite,
+    /// Read-only access — write tool calls are rejected by the kernel.
+    #[serde(alias = "r", alias = "read")]
+    ReadOnly,
+}
+
+/// Declaration of a named workspace in `agent.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDecl {
+    /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
+    pub path: PathBuf,
+    /// Access mode. Defaults to read-write.
+    #[serde(default)]
+    pub mode: WorkspaceMode,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -754,6 +791,7 @@ impl Default for AgentManifest {
             pinned_model: None,
             workspace: None,
             generate_identity_files: true,
+            workspaces: HashMap::new(),
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),

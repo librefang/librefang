@@ -3230,8 +3230,11 @@ system_prompt = "You are a helpful assistant."
             agent_id,
         )?;
         ensure_workspace(&workspace_dir)?;
+        migrate_identity_files(&workspace_dir);
+        let resolved_workspaces =
+            ensure_named_workspaces(&cfg.effective_workspaces_dir(), &manifest.workspaces);
         if manifest.generate_identity_files {
-            generate_identity_files(&workspace_dir, &manifest);
+            generate_identity_files(&workspace_dir, &manifest, &resolved_workspaces);
         }
         manifest.workspace = Some(workspace_dir);
 
@@ -9241,7 +9244,12 @@ system_prompt = "You are a helpful assistant."
                             warn!(hand = %def.id, role = %role, error = %e, "Failed to scaffold hand workspace");
                             continue;
                         }
-                        generate_identity_files(&workspace, &agent.manifest);
+                        migrate_identity_files(&workspace);
+                        let resolved_ws = ensure_named_workspaces(
+                            &cfg.effective_workspaces_dir(),
+                            &agent.manifest.workspaces,
+                        );
+                        generate_identity_files(&workspace, &agent.manifest, &resolved_ws);
                     }
                 }
                 // Write an empty state file so subsequent boots skip this block.
