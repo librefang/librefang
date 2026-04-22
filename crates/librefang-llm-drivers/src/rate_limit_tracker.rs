@@ -453,14 +453,14 @@ fn parse_tz_offset(s: &str) -> Option<f64> {
 /// Compute the number of days between the Unix epoch (1970-01-01) and the
 /// given calendar date using the proleptic Gregorian calendar.
 fn days_since_epoch(year: i64, month: i64, day: i64) -> Option<i64> {
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
     // Use the algorithm from https://howardhinnant.github.io/date_algorithms.html
     // (civil_from_days inverse: days_from_civil)
     let y = if month <= 2 { year - 1 } else { year };
-    let m = month as i64;
-    let d = day as i64;
+    let m = month;
+    let d = day;
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400; // [0, 399]
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
@@ -697,10 +697,12 @@ mod tests {
 
     #[test]
     fn test_has_warning_true_when_one_hot() {
-        let mut snap = RateLimitSnapshot::default();
-        snap.tokens_per_minute = RateLimitBucket {
-            limit: 100,
-            remaining: 5, // 95% used
+        let snap = RateLimitSnapshot {
+            tokens_per_minute: RateLimitBucket {
+                limit: 100,
+                remaining: 5, // 95% used
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert!(snap.has_warning());
@@ -751,12 +753,14 @@ mod tests {
 
     #[test]
     fn test_display_with_data() {
-        let mut snap = RateLimitSnapshot::default();
-        snap.requests_per_minute = RateLimitBucket {
-            limit: 1000,
-            remaining: 600,
-            reset_after_secs: 42.0,
-            captured_at: Instant::now(),
+        let snap = RateLimitSnapshot {
+            requests_per_minute: RateLimitBucket {
+                limit: 1000,
+                remaining: 600,
+                reset_after_secs: 42.0,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
         };
         let s = snap.display();
         assert!(s.contains("Rate Limits:"));
@@ -767,12 +771,14 @@ mod tests {
 
     #[test]
     fn test_display_shows_warning_section() {
-        let mut snap = RateLimitSnapshot::default();
-        snap.tokens_per_minute = RateLimitBucket {
-            limit: 100,
-            remaining: 5, // 95% used
-            reset_after_secs: 20.0,
-            captured_at: Instant::now(),
+        let snap = RateLimitSnapshot {
+            tokens_per_minute: RateLimitBucket {
+                limit: 100,
+                remaining: 5, // 95% used
+                reset_after_secs: 20.0,
+                captured_at: Instant::now(),
+            },
+            ..Default::default()
         };
         let s = snap.display();
         assert!(s.contains('⚠'));

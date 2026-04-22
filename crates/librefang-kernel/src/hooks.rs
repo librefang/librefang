@@ -33,6 +33,15 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, warn};
 
+/// Limits the number of hook tasks that may execute concurrently.
+///
+/// `agent:step` fires on every tool-loop iteration and can produce a large
+/// number of concurrent spawns when several agents run simultaneously.  Eight
+/// concurrent executions is enough for normal workloads while preventing
+/// unbounded task accumulation.
+static HOOK_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(8));
+
 /// Lifecycle events that external hooks can subscribe to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExternalHookEvent {
@@ -287,15 +296,31 @@ impl ExternalHookSystem {
         dir: &std::path::Path,
         payload: &str,
     ) {
+        // Acquire a concurrency permit before doing any work.  This caps the
+        // total number of simultaneously-running hook processes system-wide and
+        // prevents unbounded task accumulation on high-frequency events such as
+        // `agent:step`.  The permit is held for the duration of the process
+        // execution and released automatically when this function returns.
+        let _permit = HOOK_CONCURRENCY.acquire().await.ok();
+
         debug!(
             hook = %hook_name,
             event = %ev,
             "Firing external hook"
         );
 
+        // Support commands that include arguments (e.g. `/usr/bin/python3 script.py`).
+        // `Command::new` treats its argument as the binary path verbatim, so a
+        // string like "/usr/bin/python3 script.py" would fail with ENOENT.
+        // Split on whitespace: first token is the binary, the rest are args.
+        let mut parts = command.split_whitespace();
+        let binary = parts.next().unwrap_or(command);
+        let args: Vec<&str> = parts.collect();
+
         let result = tokio::time::timeout(
             Duration::from_secs(30),
-            tokio::process::Command::new(command)
+            tokio::process::Command::new(binary)
+                .args(&args)
                 .current_dir(dir)
                 .env("HOOK_EVENT", ev)
                 .env("HOOK_EVENT_DATA", payload)

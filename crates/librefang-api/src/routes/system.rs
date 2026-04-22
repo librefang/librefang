@@ -1888,6 +1888,13 @@ pub async fn list_approvals_for_session(
             Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
         );
     }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
+        );
+    }
     let registry_agents = state.kernel.agent_registry().list();
     let pending = state
         .kernel
@@ -1962,6 +1969,13 @@ pub async fn approve_all_for_session(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
+        );
+    }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
         );
     }
 
@@ -2074,6 +2088,13 @@ pub async fn reject_all_for_session(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
+        );
+    }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
         );
     }
 

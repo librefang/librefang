@@ -228,23 +228,40 @@ impl MemoryManager {
 
     /// Collect system-prompt blocks from every provider.
     ///
-    /// `system_prompt_block` returns `Option<String>`, not `Result`, so there is
-    /// no error channel — provider failures manifest as `None` (no block).  Panics
-    /// in a provider's `system_prompt_block` will propagate through the calling
-    /// task and are **not** caught.  Only [`prefetch`] and [`on_turn_complete`]
-    /// perform error isolation.
-    ///
-    /// [`prefetch`]: MemoryProvider::prefetch
-    /// [`on_turn_complete`]: MemoryProvider::on_turn_complete
+    /// Each call to `system_prompt_block` is isolated via
+    /// [`tokio::task::spawn`]: if a provider panics, the panic is caught by
+    /// the spawned task's join handle and logged at `error` level rather than
+    /// crashing the calling task.  Providers that return `None` or an empty
+    /// string are silently skipped.
     pub async fn collect_system_blocks(&self, session_id: &str) -> Vec<String> {
         let mut blocks = Vec::new();
         for provider in self.snapshot_providers() {
-            match provider.system_prompt_block(session_id).await {
-                Some(block) if !block.trim().is_empty() => {
+            let sid = session_id.to_owned();
+            let name = provider.name().to_owned();
+            // Spawn onto a fresh task so that a panic in the provider does not
+            // propagate to the caller.  The JoinHandle carries the panic as an
+            // error variant that we can inspect and log.
+            let handle =
+                tokio::task::spawn(async move { provider.system_prompt_block(&sid).await });
+            match handle.await {
+                Ok(Some(block)) if !block.trim().is_empty() => {
                     blocks.push(block);
                 }
-                Some(_) => {} // empty block — skip
-                None => {}    // provider has nothing to contribute
+                Ok(Some(_)) | Ok(None) => {} // empty or absent — skip
+                Err(join_err) if join_err.is_panic() => {
+                    tracing::error!(
+                        provider = %name,
+                        "MemoryProvider::system_prompt_block panicked"
+                    );
+                }
+                Err(join_err) => {
+                    // Task was cancelled (should not happen in normal operation).
+                    tracing::warn!(
+                        provider = %name,
+                        error = %join_err,
+                        "MemoryProvider::system_prompt_block task failed unexpectedly"
+                    );
+                }
             }
         }
         blocks
@@ -617,5 +634,86 @@ mod tests {
         // Results should be joined with \n\n
         assert!(result.contains("builtin context"));
         assert!(result.contains("external context"));
+    }
+
+    /// A provider whose `system_prompt_block` always panics.
+    struct PanickingProvider;
+
+    #[async_trait]
+    impl MemoryProvider for PanickingProvider {
+        fn name(&self) -> &str {
+            "panicking"
+        }
+
+        async fn system_prompt_block(&self, _session_id: &str) -> Option<String> {
+            panic!("simulated panic in system_prompt_block");
+        }
+
+        async fn prefetch(&self, _query: &str, _session_id: &str) -> Result<String, MemoryError> {
+            Ok(String::new())
+        }
+
+        async fn on_turn_complete(
+            &self,
+            _session_id: &str,
+            _turn_summary: &str,
+        ) -> Result<(), MemoryError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_system_blocks_panic_is_isolated() {
+        // A panicking external provider must not crash the calling task; the
+        // panic is caught by the spawned sub-task and logged, and the builtin
+        // provider's (empty) result is returned normally.
+        let mgr = MemoryManager::new(null_builtin());
+        mgr.register_external(Arc::new(PanickingProvider)).unwrap();
+        // This must complete without panicking.
+        let blocks = mgr.collect_system_blocks("session-1").await;
+        // Null builtin contributes nothing; panicking provider contributes nothing.
+        assert!(blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_system_blocks_panic_does_not_drop_good_provider_output() {
+        // When the *builtin* provider panics, the external provider's output
+        // should still be collected (and vice versa).  Use a custom builtin
+        // that panics and an external that returns content.
+        struct PanickingBuiltin;
+
+        #[async_trait]
+        impl MemoryProvider for PanickingBuiltin {
+            fn name(&self) -> &str {
+                "panicking-builtin"
+            }
+            fn is_builtin(&self) -> bool {
+                true
+            }
+            async fn system_prompt_block(&self, _session_id: &str) -> Option<String> {
+                panic!("builtin panicked");
+            }
+            async fn prefetch(
+                &self,
+                _query: &str,
+                _session_id: &str,
+            ) -> Result<String, MemoryError> {
+                Ok(String::new())
+            }
+            async fn on_turn_complete(
+                &self,
+                _session_id: &str,
+                _turn_summary: &str,
+            ) -> Result<(), MemoryError> {
+                Ok(())
+            }
+        }
+
+        let mgr = MemoryManager::new(Arc::new(PanickingBuiltin));
+        mgr.register_external(Arc::new(SystemBlockProvider::new("ext content")))
+            .unwrap();
+        let blocks = mgr.collect_system_blocks("session-1").await;
+        // The external provider's block must still be present despite builtin panic.
+        assert_eq!(blocks, vec!["ext content"]);
     }
 }

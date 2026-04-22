@@ -1011,6 +1011,8 @@ pub async fn mcp_http(
             None, // channel
             None, // checkpoint_manager (network bridge doesn't run agent tools)
             None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
+            None, // session_id (MCP HTTP is not tied to a live session)
+            None, // dangerous_command_checker (no session-scoped checker here)
         )
         .await;
 
