@@ -963,8 +963,6 @@ function CollapsibleSection({
     >
       <summary
         className="flex items-center justify-between p-3 cursor-pointer list-none select-none"
-        role="button"
-        tabIndex={0}
       >
         <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
           {title}

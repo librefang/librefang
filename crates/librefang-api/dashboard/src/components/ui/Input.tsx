@@ -1,22 +1,16 @@
-import { useId, type InputHTMLAttributes, type ReactNode, type Ref } from "react";
+import { forwardRef, useId, type InputHTMLAttributes, type ReactNode } from "react";
 
 interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   leftIcon?: ReactNode;
   rightIcon?: ReactNode;
-  ref?: Ref<HTMLInputElement>;
 }
 
-export function Input({
-  className = "",
-  label,
-  error,
-  leftIcon,
-  rightIcon,
+export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
+  { className = "", label, error, leftIcon, rightIcon, ...props },
   ref,
-  ...props
-}: InputProps) {
+) {
   const id = useId();
   const errorId = error ? `${id}-error` : undefined;
 
@@ -68,4 +62,4 @@ export function Input({
       )}
     </div>
   );
-}
+});

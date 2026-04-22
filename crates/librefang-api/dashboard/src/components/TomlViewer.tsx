@@ -126,9 +126,11 @@ export function TomlViewer({
             {t("toml_viewer.loading")}
           </div>
         ) : (
-          <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text overflow-auto max-h-[65vh] whitespace-pre-wrap">
-            {body}
-          </pre>
+          <div className="max-h-[65vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main">
+            <pre className="min-w-full px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">
+              {body}
+            </pre>
+          </div>
         )}
       </div>
     </Modal>

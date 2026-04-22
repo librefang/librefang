@@ -40,6 +40,12 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   useFocusTrap(isOpen, dialogRef, true);
 
   useEffect(() => {
+    if (isOpen) {
+      isConfirming.current = false;
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCloseRef.current();

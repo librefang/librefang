@@ -53,7 +53,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
         </div>
       </header>
 
-      <Modal isOpen={showHelp} onClose={() => setShowHelp(false)} title={title} size="md">
+      <Modal isOpen={showHelp && Boolean(helpText)} onClose={() => setShowHelp(false)} title={title} size="md">
         <div className="p-5">
           <p className="text-sm text-text-dim leading-relaxed whitespace-pre-line">{helpText}</p>
         </div>

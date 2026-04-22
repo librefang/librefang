@@ -5,6 +5,7 @@ import { Button } from "./Button";
 type ScheduleType = "interval_min" | "interval_hour" | "daily" | "weekday" | "weekly" | "monthly" | "custom";
 
 interface ScheduleModalProps {
+  isOpen: boolean;
   title: string;
   subtitle?: string;
   initialCron?: string;
@@ -93,7 +94,7 @@ function buildCronFrom(
   }
 }
 
-export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
+export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
   const { t } = useTranslation();
 
   const parsed = parseCronType(initialCron || "0 9 * * *");
@@ -198,9 +199,11 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
   );
 
   useEffect(() => {
+    if (!isOpen) return;
+
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [handleKeyDown]);
+  }, [handleKeyDown, isOpen]);
 
   return (
     <div
