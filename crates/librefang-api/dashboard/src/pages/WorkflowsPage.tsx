@@ -3,7 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  type ApiActionResponse,
   type DryRunResult,
+  type ScheduleItem,
+  type WorkflowItem,
+  type WorkflowRunItem,
+  type WorkflowStep,
+  type WorkflowStepResult,
   type WorkflowTemplate,
 } from "../api";
 import { Card } from "../components/ui/Card";
@@ -38,6 +44,85 @@ const categoryIconMap: Record<string, React.ComponentType<{ className?: string }
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
 };
 
+type CanvasTemplate = {
+  nodes: Array<{
+    id: string;
+    type: string;
+    position: { x: number; y: number };
+    data: { label: string; prompt: string; nodeType: string };
+  }>;
+  edges: Array<{ id: string; source: string; target: string }>;
+  name: string;
+  description: string;
+};
+
+type StepResultLike = {
+  id?: string;
+  step_id?: string;
+  step_name?: string;
+  name?: string;
+  agent_name?: string;
+  duration_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+};
+
+type TemplateInstantiationResponse = ApiActionResponse & {
+  workflow_id?: unknown;
+  id?: unknown;
+};
+
+type WorkflowRunResponse = ApiActionResponse & {
+  output?: unknown;
+  message?: unknown;
+  step_results?: unknown;
+};
+
+type WorkflowListItem = WorkflowItem & {
+  run_count?: unknown;
+  schedule?: Pick<ScheduleItem, "cron" | "tz" | "enabled"> | null;
+};
+
+const isWorkflowStepArray = (steps: WorkflowTemplate["steps"]): steps is WorkflowStep[] =>
+  Array.isArray(steps);
+
+const getTemplateSteps = (tmpl: WorkflowTemplate): WorkflowStep[] =>
+  isWorkflowStepArray(tmpl.steps) ? tmpl.steps : [];
+
+const getWorkflowSchedule = (wf: WorkflowItem): WorkflowListItem["schedule"] =>
+  (wf as WorkflowListItem).schedule;
+
+const getWorkflowRunCount = (wf: WorkflowItem): number => {
+  const value = (wf as WorkflowListItem).run_count;
+  return typeof value === "number" ? value : 0;
+};
+
+const getWorkflowIdFromResponse = (resp: TemplateInstantiationResponse): string | undefined => {
+  const workflowId = resp.workflow_id;
+  if (typeof workflowId === "string" && workflowId) return workflowId;
+  return typeof resp.id === "string" && resp.id ? resp.id : undefined;
+};
+
+const getRunMutationData = (data: ApiActionResponse | undefined): WorkflowRunResponse | undefined =>
+  data as WorkflowRunResponse | undefined;
+
+const getRunOutputText = (data: ApiActionResponse | undefined): string => {
+  const response = getRunMutationData(data);
+  if (typeof response?.output === "string" && response.output) return response.output;
+  if (typeof response?.message === "string" && response.message) return response.message;
+  return JSON.stringify(data);
+};
+
+const getRunStepResults = (data: ApiActionResponse | undefined): WorkflowStepResult[] => {
+  const stepResults = getRunMutationData(data)?.step_results;
+  return Array.isArray(stepResults) ? (stepResults as WorkflowStepResult[]) : [];
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
+
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -63,11 +148,15 @@ export function WorkflowsPage() {
 
   const workflows = useMemo(() =>
     [...(workflowsQuery.data ?? [])]
-      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-      .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase())),
+      .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase()))
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")),
     [workflowsQuery.data, searchQuery]
   );
   const allWorkflows = workflowsQuery.data ?? [];
+  const scheduledWf = useMemo(
+    () => allWorkflows.find(w => w.id === scheduleWorkflowId),
+    [allWorkflows, scheduleWorkflowId]
+  );
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;
@@ -133,31 +222,38 @@ export function WorkflowsPage() {
     }
   };
 
-  const handleNewWorkflow = () => {
+  const navigateToCanvas = (wfId?: string, template?: CanvasTemplate) => {
     sessionStorage.removeItem("canvasNodes");
     sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+    if (template) {
+      sessionStorage.setItem("workflowTemplate", JSON.stringify(template));
+    }
+    navigate({ to: "/canvas", search: { t: wfId ? undefined : Date.now(), wf: wfId } });
+  };
+
+  const handleNewWorkflow = () => {
+    navigateToCanvas();
   };
   useCreateShortcut(handleNewWorkflow);
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
-    const steps: any[] = (tmpl as any).steps ?? [];
-    const nameToIdx = new Map(steps.map((s: any, i: number) => [s.name, i]));
-    const nodes = steps.map((s: any, idx: number) => ({
+    const steps = getTemplateSteps(tmpl);
+    const nameToIdx = new Map(steps.map((s, i) => [s.name, i]));
+    const nodes = steps.map((s, idx) => ({
       id: `node-${idx}`,
       type: "custom",
       position: { x: 50, y: idx * 160 },
       data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent" },
     }));
-    const edges: any[] = [];
-    steps.forEach((s: any, idx: number) => {
+    const edges: CanvasTemplate["edges"] = [];
+    steps.forEach((s, idx) => {
       (s.depends_on ?? []).forEach((dep: string) => {
         const src = nameToIdx.get(dep);
         if (src !== undefined) edges.push({ id: `e-${src}-${idx}`, source: `node-${src}`, target: `node-${idx}` });
       });
     });
     if (edges.length === 0 && nodes.length > 1) {
-      nodes.slice(0, -1).forEach((_: any, i: number) =>
+      nodes.slice(0, -1).forEach((_, i) =>
         edges.push({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` })
       );
     }
@@ -166,39 +262,25 @@ export function WorkflowsPage() {
     if (hasRequiredParams) {
       // Template has required params — open canvas pre-populated with nodes so
       // the user can see the workflow structure and fill in parameter values.
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({
-        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-      }));
-      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
       return;
     }
     try {
       const resp = await instantiateMutation.mutateAsync({ id: tmpl.id, params: {} });
-      const workflowId = (resp as any).workflow_id || (resp as any).id;
+      const workflowId = getWorkflowIdFromResponse(resp as TemplateInstantiationResponse);
       if (workflowId) {
         openWorkflow(workflowId);
       } else {
         // Instantiation succeeded but no ID returned — fall back to pre-populated canvas
-        sessionStorage.removeItem("canvasNodes");
-        sessionStorage.setItem("workflowTemplate", JSON.stringify({
-          nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-        }));
-        navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+        navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
       }
     } catch {
-      sessionStorage.removeItem("canvasNodes");
-      sessionStorage.setItem("workflowTemplate", JSON.stringify({
-        nodes, edges, name: tmpl.name, description: tmpl.description ?? "",
-      }));
-      navigate({ to: "/canvas", search: { t: Date.now(), wf: undefined } });
+      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
     }
   };
 
   const openWorkflow = (wfId: string) => {
-    sessionStorage.removeItem("canvasNodes");
-    sessionStorage.removeItem("workflowTemplate");
-    navigate({ to: "/canvas", search: { t: undefined, wf: wfId } });
+    navigateToCanvas(wfId);
   };
 
   const templatesQuery = useWorkflowTemplates();
@@ -208,6 +290,8 @@ export function WorkflowsPage() {
   const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;
 
   const hasWorkflows = workflows.length > 0;
+  const getStepResultKey = (step: StepResultLike, index: number) =>
+    step.id ?? step.step_id ?? step.step_name ?? step.name ?? ([step.agent_name, step.duration_ms, step.input_tokens, step.output_tokens].filter(Boolean).join(":") || index);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -330,28 +414,36 @@ export function WorkflowsPage() {
                 </div>
                 {/* Info */}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-bold truncate">{wf.name}</h3>
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
-                      {t("workflows.steps_count", { count: Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0) })}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
-                  <div className="flex items-center gap-3 mt-1.5 text-[9px] text-text-dim/50">
-                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(wf.created_at)}</span>
-                    <span className="flex items-center gap-1"><Play className="w-3 h-3" />{(wf as any).run_count ?? 0} {t("workflows.runs_label", { defaultValue: "runs" })}</span>
-                    {(wf as any).schedule && (
-                      <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${(wf as any).schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
-                        <Calendar className="w-3 h-3" />
-                        {(wf as any).schedule.cron}
-                      </span>
-                    )}
-                  </div>
+                  {(() => {
+                    const schedule = getWorkflowSchedule(wf);
+                    const runCount = getWorkflowRunCount(wf);
+                    return (
+                      <>
+                   <div className="flex items-center gap-2">
+                     <h3 className="text-sm font-bold truncate">{wf.name}</h3>
+                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
+                       {t("workflows.steps_count", { count: Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0) })}
+                     </span>
+                   </div>
+                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
+                   <div className="flex items-center gap-3 mt-1.5 text-[9px] text-text-dim/50">
+                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(wf.created_at)}</span>
+                     <span className="flex items-center gap-1"><Play className="w-3 h-3" />{runCount} {t("workflows.runs_label", { defaultValue: "runs" })}</span>
+                     {schedule && (
+                       <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
+                         <Calendar className="w-3 h-3" />
+                         {schedule.cron}
+                       </span>
+                     )}
+                   </div>
+                      </>
+                    );
+                  })()}
                 </div>
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                   <button onClick={() => { setScheduleWorkflowId(wf.id); }}
-                    className={`p-2 rounded-lg transition-colors ${(wf as any).schedule ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                    className={`p-2 rounded-lg transition-colors ${getWorkflowSchedule(wf) ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
                     title={t("nav.scheduler")}>
                     <Calendar className="w-3.5 h-3.5" />
                   </button>
@@ -410,7 +502,7 @@ export function WorkflowsPage() {
                     </div>
                     <div className="space-y-2">
                       {dryRunResult.steps.map((step, i) => (
-                        <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                        <div key={getStepResultKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                           <button
                             className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                             onClick={() => setExpandedStepIdx(expandedStepIdx === i ? null : i)}>
@@ -424,19 +516,19 @@ export function WorkflowsPage() {
                               <span className="text-[9px] text-text-dim/50 shrink-0">{step.agent_name}</span>
                             )}
                             {step.skipped && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">skip</span>
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">{t("workflows.skip", { defaultValue: "skip" })}</span>
                             )}
                             <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i ? "rotate-180" : ""}`} />
                           </button>
                           {expandedStepIdx === i && (
                             <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
                               {!step.agent_found && (
-                                <p className="text-[10px] text-warning mt-2">Agent not found</p>
+                                <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
                               )}
                               {step.skip_reason && (
                                 <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
                               )}
-                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">Resolved prompt:</p>
+                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
                               <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
                                 {step.resolved_prompt || "(empty)"}
                               </pre>
@@ -453,14 +545,14 @@ export function WorkflowsPage() {
                   <div className="p-3 rounded-xl bg-success/5 border border-success/20 space-y-2">
                     <p className="text-[10px] font-bold text-success">{t("canvas.run_result")}</p>
                     <pre className="text-xs text-text whitespace-pre-wrap max-h-32 overflow-y-auto">
-                      {(runMutation.data as any).output || (runMutation.data as any).message || JSON.stringify(runMutation.data)}
+                      {getRunOutputText(runMutation.data)}
                     </pre>
                     {/* Step-level I/O */}
-                    {((runMutation.data as any).step_results as any[])?.length > 0 && (
+                    {getRunStepResults(runMutation.data).length > 0 && (
                       <div className="space-y-1.5 border-t border-success/20 pt-2">
-                        <p className="text-[9px] font-bold text-text-dim/50">Step details</p>
-                        {((runMutation.data as any).step_results as any[]).map((s: any, i: number) => (
-                          <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.step_details", { defaultValue: "Step details" })}</p>
+                        {getRunStepResults(runMutation.data).map((s, i) => (
+                          <div key={getStepResultKey(s, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                             <button
                               className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                               onClick={() => setExpandedStepIdx(expandedStepIdx === i + 1000 ? null : i + 1000)}>
@@ -472,13 +564,13 @@ export function WorkflowsPage() {
                             {expandedStepIdx === i + 1000 && (
                               <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
                                 <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">Prompt sent:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
                                   <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                     {s.prompt || "(empty)"}
                                   </pre>
                                 </div>
                                 <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50">Output:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
                                   <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                     {s.output || "(empty)"}
                                   </pre>
@@ -498,17 +590,17 @@ export function WorkflowsPage() {
                   <div className="p-3 rounded-xl bg-error/5 border border-error/20">
                     <div className="flex items-center gap-1.5 mb-1">
                       <AlertCircle className="w-3.5 h-3.5 text-error shrink-0" />
-                      <p className="text-[10px] font-bold text-error">Run failed</p>
+                      <p className="text-[10px] font-bold text-error">{t("workflows.run_failed", { defaultValue: "Run failed" })}</p>
                     </div>
                     <p className="text-xs text-error/80">
-                      {(runMutation.error as any)?.message || String(runMutation.error)}
+                      {getErrorMessage(runMutation.error)}
                     </p>
                   </div>
                 )}
                 {dryRunMutation.error && (
                   <div className="p-3 rounded-xl bg-error/5 border border-error/20">
                     <p className="text-xs text-error">
-                      {(dryRunMutation.error as any)?.message || String(dryRunMutation.error)}
+                      {getErrorMessage(dryRunMutation.error)}
                     </p>
                   </div>
                 )}
@@ -517,11 +609,11 @@ export function WorkflowsPage() {
               {/* Run History */}
               {runsQuery.data && runsQuery.data.length > 0 && (
                 <Card padding="lg" className="space-y-3">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">Run History</h3>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_history", { defaultValue: "Run History" })}</h3>
                   <div className="space-y-1.5">
                     {runsQuery.data.slice(0, 10).map((run) => {
-                      const runId = (run as any).id as string | undefined;
-                      const state = (run as any).state as string | undefined;
+                      const runId = run.id;
+                      const state = isRunState(run.state) ? run.state : undefined;
                       const isSelected = selectedRunId === runId;
                       return (
                         <div key={runId}>
@@ -560,7 +652,7 @@ export function WorkflowsPage() {
                                 </div>
                               )}
                               {runDetailQuery.data.step_results.map((step, si) => (
-                                <div key={si} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                                <div key={getStepResultKey(step, si)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                                   <button
                                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                                     onClick={() => setExpandedStepIdx(expandedStepIdx === si + 2000 ? null : si + 2000)}>
@@ -572,13 +664,13 @@ export function WorkflowsPage() {
                                   {expandedStepIdx === si + 2000 && (
                                     <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
                                       <div>
-                                        <p className="text-[9px] font-bold text-text-dim/50 mt-2">Prompt sent:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
                                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                           {step.prompt || "(empty)"}
                                         </pre>
                                       </div>
                                       <div>
-                                        <p className="text-[9px] font-bold text-text-dim/50">Output:</p>
+                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
                                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                           {step.output || "(empty)"}
                                         </pre>
@@ -594,7 +686,7 @@ export function WorkflowsPage() {
                           )}
                           {isSelected && runDetailQuery.isLoading && (
                             <div className="ml-5 mt-1 p-2 text-[10px] text-text-dim/50 flex items-center gap-1.5">
-                              <Loader2 className="w-3 h-3 animate-spin" /> Loading details…
+                              <Loader2 className="w-3 h-3 animate-spin" /> {t("workflows.loading_details", { defaultValue: "Loading details…" })}
                             </div>
                           )}
                         </div>
@@ -634,13 +726,13 @@ export function WorkflowsPage() {
       )}
       {/* Schedule Modal */}
       {scheduleWorkflowId && (
-        <ScheduleModal
-          title={t("nav.scheduler")}
-          subtitle={workflows.find(w => w.id === scheduleWorkflowId)?.name}
-          initialCron={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.cron || "0 9 * * *"}
-          initialTz={(workflows.find(w => w.id === scheduleWorkflowId) as any)?.schedule?.tz}
-          onSave={async (cron, tz) => {
-            const wf = workflows.find(w => w.id === scheduleWorkflowId);
+          <ScheduleModal
+            title={t("nav.scheduler")}
+            subtitle={scheduledWf?.name}
+            initialCron={getWorkflowSchedule(scheduledWf ?? { id: "", name: "" })?.cron || "0 9 * * *"}
+            initialTz={getWorkflowSchedule(scheduledWf ?? { id: "", name: "" })?.tz ?? undefined}
+            onSave={async (cron, tz) => {
+            const wf = scheduledWf;
             try {
               await createScheduleMutation.mutateAsync({
                 name: `${wf?.name || "workflow"} schedule`,
