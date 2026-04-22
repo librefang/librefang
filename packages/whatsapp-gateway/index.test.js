@@ -849,10 +849,15 @@ describe('EB-02 forward_dispatch log + dispatch_self_test', () => {
     // const derived from env, and no unguarded emission exists.
     const srcFs = require('node:fs');
     const src = srcFs.readFileSync(__dirname + '/index.js', 'utf8');
-    // Exactly 2 emission sites (one per forward function), each guarded.
-    const matches = src.match(/DISPATCH_LOG_VERBOSE[\s\S]{0,200}forward_dispatch/g) || [];
-    assert.equal(matches.length, 2, `expected exactly 2 guarded forward_dispatch emissions, got ${matches.length}`);
-    // And the flag itself is parsed from env with default 'verbose'.
+    // Exactly 2 `if (DISPATCH_LOG_VERBOSE)` guard blocks must exist — one per
+    // forward function. Count the guard itself (not a span to the emission),
+    // so this stays green if the body of the if-block is reformatted.
+    const guardCount = (src.match(/if\s*\(DISPATCH_LOG_VERBOSE\)/g) || []).length;
+    assert.equal(guardCount, 2, `expected exactly 2 if(DISPATCH_LOG_VERBOSE) guards, got ${guardCount}`);
+    // And there must be exactly 2 forward_dispatch emission sites total.
+    const emitCount = (src.match(/"event"\s*:\s*'forward_dispatch'/g) || []).length;
+    assert.equal(emitCount, 2, `expected exactly 2 forward_dispatch emission sites, got ${emitCount}`);
+    // The flag is parsed from env with default 'verbose'.
     assert.match(src, /LIBREFANG_DISPATCH_LOG[\s\S]{0,80}verbose/);
   });
 
