@@ -2241,11 +2241,13 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![tool_result_a]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::Assistant,
@@ -2256,11 +2258,13 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![tool_result_b]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -2284,11 +2288,13 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text("hello ".to_string()),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
                 content: MessageContent::Text("world".to_string()),
                 pinned: false,
+                timestamp: None,
             },
         ];
         let (repaired, stats) = validate_and_repair_with_stats(&messages);
@@ -2337,12 +2343,14 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
                 pinned: false,
+                timestamp: None,
             },
             // msg 1: user answers with the real ToolResult — already adjacent
             Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![tool_result_block("memory_store:6", "first")]),
                 pinned: false,
+                timestamp: None,
             },
             // msg 2: assistant sends plain text
             Message::assistant("ack"),
@@ -2353,6 +2361,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
                 pinned: false,
+                timestamp: None,
             },
             // msg 5: user plain text — no ToolResult present (orphan trigger)
             Message::user("no result yet"),
@@ -2470,6 +2479,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![tool_use_block("call_1")]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("plain text, no tool result"),
         ];

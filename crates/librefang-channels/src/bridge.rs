@@ -5208,6 +5208,18 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ChannelBridgeHandle for CapturingHandle {
+            async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                Err("not used in test".into())
+            }
+            async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                Err("not used in test".into())
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Err("not used in test".into())
+            }
+            async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                Err("not used in test".into())
+            }
             async fn classify_reply_intent(
                 &self,
                 _message_text: &str,
@@ -5224,7 +5236,20 @@ mod tests {
         async fn default_impl_returns_true_with_bot_name() {
             struct AlwaysTrue;
             #[async_trait::async_trait]
-            impl ChannelBridgeHandle for AlwaysTrue {}
+            impl ChannelBridgeHandle for AlwaysTrue {
+                async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                    Err("not used in test".into())
+                }
+                async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                    Err("not used in test".into())
+                }
+                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                    Err("not used in test".into())
+                }
+                async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                    Err("not used in test".into())
+                }
+            }
 
             let h = AlwaysTrue;
             assert!(
