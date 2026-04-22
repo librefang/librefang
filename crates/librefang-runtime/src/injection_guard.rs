@@ -184,8 +184,8 @@ mod tests {
 
     #[test]
     fn detects_rtl_override() {
-        let msg = format!("Hello\u{202E}World");
-        let w = scan_message(&msg);
+        let msg = "Hello\u{202E}World";
+        let w = scan_message(msg);
         assert!(w.is_some());
     }
 

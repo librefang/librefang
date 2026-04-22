@@ -2614,7 +2614,8 @@ pub async fn run_agent_loop(
             });
             (injection_prefix_storage.as_str(), prefixed_blocks)
         } else {
-            injection_prefix_storage = user_message.to_string();
+            // No injection detected — pass the original message through; the
+            // storage binding is left unused on this branch.
             (user_message, user_content_blocks)
         };
 
@@ -3840,7 +3841,8 @@ pub async fn run_agent_loop_streaming(
             });
             (injection_prefix_storage.as_str(), prefixed_blocks)
         } else {
-            injection_prefix_storage = user_message.to_string();
+            // No injection detected — pass the original message through; the
+            // storage binding is left unused on this branch.
             (user_message, user_content_blocks)
         };
 

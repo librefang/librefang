@@ -409,22 +409,20 @@ mod tests {
     #[test]
     fn session_allowlist() {
         let mut checker = DangerousCommandChecker::new(ApprovalMode::Manual);
+        // Use a relative path so only the "recursive delete" pattern fires;
+        // an absolute-path form would also match "delete in root path" which
+        // this test does not allowlist.
+        let cmd = "rm -rf ./deleteme";
         // Initially flagged.
-        assert!(matches!(
-            checker.check("rm -rf /tmp/deleteme"),
-            CheckResult::Dangerous { .. }
-        ));
+        assert!(matches!(checker.check(cmd), CheckResult::Dangerous { .. }));
         // Allowlist the pattern.
         checker.allow_for_session("recursive delete");
         // Now safe.
-        assert_eq!(checker.check("rm -rf /tmp/deleteme"), CheckResult::Safe);
+        assert_eq!(checker.check(cmd), CheckResult::Safe);
         // Revoke.
         checker.revoke_session_allowlist("recursive delete");
         // Flagged again.
-        assert!(matches!(
-            checker.check("rm -rf /tmp/deleteme"),
-            CheckResult::Dangerous { .. }
-        ));
+        assert!(matches!(checker.check(cmd), CheckResult::Dangerous { .. }));
     }
 
     #[test]
