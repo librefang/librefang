@@ -175,7 +175,7 @@ impl CredentialPool {
             .map(|(k, p)| PooledCredential::new(k, p))
             .collect();
         // Sort descending: highest priority first.
-        credentials.sort_unstable_by(|a, b| b.priority.cmp(&a.priority));
+        credentials.sort_unstable_by_key(|c| std::cmp::Reverse(c.priority));
 
         Self {
             inner: Mutex::new(CredentialPoolInner {
