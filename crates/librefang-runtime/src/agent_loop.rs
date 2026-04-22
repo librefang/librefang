@@ -585,6 +585,10 @@ struct ToolExecutionContext<'a> {
     streaming: bool,
     agent_id_str: &'a str,
     opts: &'a LoopOptions,
+    /// Per-session interrupt handle propagated into tool execution so that
+    /// long-running tools (shell_exec, agent_send, …) can observe a /stop
+    /// signal without polling a global flag.
+    interrupt: Option<crate::interrupt::SessionInterrupt>,
 }
 
 async fn execute_single_tool_call(
@@ -749,7 +753,7 @@ async fn execute_single_tool_call(
             ctx.sender_user_id,
             ctx.sender_channel,
             ctx.checkpoint_manager,
-            Some(ctx.session.id.to_string()).as_deref(),
+            ctx.interrupt.clone(),
         ),
     )
     .await
@@ -1227,6 +1231,14 @@ pub struct LoopOptions {
     /// the `tool_use` block) but cannot actually invoke it — same
     /// defense-in-depth as libre-code's `createAutoMemCanUseTool`.
     pub allowed_tools: Option<Vec<String>>,
+    /// Per-session interrupt handle.  When `Some`, long-running tools
+    /// (shell_exec, sub-process tools) poll this flag and abort promptly
+    /// when it is set.  When `None`, no interrupt checking is performed.
+    ///
+    /// The handle is created once per session/turn and cloned into each
+    /// `ToolExecutionContext` so that cancelling the parent session
+    /// interrupts all its in-flight tools without affecting other sessions.
+    pub interrupt: Option<crate::interrupt::SessionInterrupt>,
 }
 
 /// Result of an agent loop execution.
@@ -2674,10 +2686,36 @@ pub async fn run_agent_loop(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
-    let mut last_prompt_tokens: usize = 0;
+    // Seed with a pre-loop estimate so that should_compress fires on the very
+    // first iteration even for single-turn conversations.  Without this, the
+    // check is always `0 < threshold`, which is always false.
+    let mut last_prompt_tokens: usize = crate::compactor::estimate_token_count(
+        &messages,
+        Some(&system_prompt),
+        Some(available_tools),
+    );
+
+    // Inform the context engine of the active model and context window before
+    // the loop starts so threshold calculations use the correct parameters.
+    if let Some(engine) = context_engine {
+        let initial_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+        engine.update_model(&initial_model, ctx_window);
+    }
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
+
+        // Check for session-scoped interrupt at each iteration boundary.
+        // This allows a /stop signal to abort the loop between LLM calls
+        // without affecting other concurrent sessions.
+        if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+            debug!(iteration, "Agent loop interrupted by session cancel signal");
+            return Ok(AgentLoopResult {
+                silent: true,
+                new_messages_start,
+                ..Default::default()
+            });
+        }
 
         // Fire agent:step external hook (fire-and-forget).
         if let Some(ref k) = kernel {
@@ -2703,12 +2741,18 @@ pub async fn run_agent_loop(
                     iteration,
                     last_prompt_tokens, ctx_window, "Context engine requested compaction"
                 );
+                // Normalize the model ID before passing to the engine — raw
+                // manifest values may carry a provider prefix (e.g.
+                // "openrouter/google/gemini-2.5-flash") that drivers don't
+                // understand when used as a summarisation model.
+                let compact_model =
+                    strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
                 match engine
                     .compact(
                         session.agent_id,
                         &messages,
                         driver.clone(),
-                        &manifest.model.model,
+                        &compact_model,
                         ctx_window,
                     )
                     .await
@@ -2737,11 +2781,10 @@ pub async fn run_agent_loop(
                         }
                         compacted.extend(result.kept_messages);
                         messages = compacted;
-                        // Reset last_prompt_tokens so should_compress does not
-                        // re-fire on the next iteration before the LLM has run.
-                        // Do NOT touch total_usage — it is the cross-turn budget
-                        // accumulator and must never be zeroed here.
-                        last_prompt_tokens = 0;
+                        // `last_prompt_tokens` is intentionally NOT reset here.
+                        // A second compaction should only fire after the next
+                        // LLM call raises it above threshold again.  Resetting
+                        // to 0 would cause premature re-trigger.
                     }
                     Err(e) => {
                         warn!("Context engine compaction failed (continuing): {e}");
@@ -2840,7 +2883,19 @@ pub async fn run_agent_loop(
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // This is the per-turn input cost, NOT a running sum — we deliberately
         // do NOT accumulate into last_prompt_tokens.
-        last_prompt_tokens = response.usage.input_tokens as usize;
+        //
+        // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
+        // back to a local estimate so should_compress is not permanently
+        // suppressed for those providers.
+        last_prompt_tokens = if response.usage.input_tokens > 0 {
+            response.usage.input_tokens as usize
+        } else {
+            crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            )
+        };
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -3069,6 +3124,7 @@ pub async fn run_agent_loop(
                         streaming: false,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
+                        interrupt: opts.interrupt.clone(),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
@@ -3801,10 +3857,37 @@ pub async fn run_agent_loop_streaming(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
-    let mut last_prompt_tokens: usize = 0;
+    // Seed with a pre-loop estimate so that should_compress fires on the very
+    // first iteration even for single-turn conversations.  Without this, the
+    // check is always `0 < threshold`, which is always false.
+    let mut last_prompt_tokens: usize = crate::compactor::estimate_token_count(
+        &messages,
+        Some(&system_prompt),
+        Some(available_tools),
+    );
+
+    // Inform the context engine of the active model and context window before
+    // the loop starts so threshold calculations use the correct parameters.
+    if let Some(engine) = context_engine {
+        let initial_model = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+        engine.update_model(&initial_model, ctx_window);
+    }
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
+
+        // Check for session-scoped interrupt at each iteration boundary.
+        if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+            debug!(
+                iteration,
+                "Streaming agent loop interrupted by session cancel signal"
+            );
+            return Ok(AgentLoopResult {
+                silent: true,
+                new_messages_start,
+                ..Default::default()
+            });
+        }
 
         // Pluggable context engine: threshold-gated compaction (same as the
         // non-streaming loop). `last_prompt_tokens` carries only the previous
@@ -3818,12 +3901,18 @@ pub async fn run_agent_loop_streaming(
                     ctx_window,
                     "Context engine requested compaction (streaming path)"
                 );
+                // Normalize the model ID before passing to the engine — raw
+                // manifest values may carry a provider prefix (e.g.
+                // "openrouter/google/gemini-2.5-flash") that drivers don't
+                // understand when used as a summarisation model.
+                let compact_model =
+                    strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
                 match engine
                     .compact(
                         session.agent_id,
                         &messages,
                         driver.clone(),
-                        &manifest.model.model,
+                        &compact_model,
                         ctx_window,
                     )
                     .await
@@ -3852,11 +3941,8 @@ pub async fn run_agent_loop_streaming(
                         }
                         compacted.extend(result.kept_messages);
                         messages = compacted;
-                        // Reset last_prompt_tokens so should_compress does not
-                        // re-fire on the next iteration before the LLM has run.
-                        // Do NOT touch total_usage — it is the cross-turn budget
-                        // accumulator and must never be zeroed here.
-                        last_prompt_tokens = 0;
+                        // `last_prompt_tokens` is NOT reset — see non-streaming
+                        // comment for rationale.
                     }
                     Err(e) => {
                         warn!("Context engine compaction failed (continuing, streaming): {e}");
@@ -4017,9 +4103,18 @@ pub async fn run_agent_loop_streaming(
         accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
-        // This is the per-turn input cost, NOT a running sum — we deliberately
-        // do NOT accumulate into last_prompt_tokens.
-        last_prompt_tokens = response.usage.input_tokens as usize;
+        // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
+        // back to a local estimate so should_compress is not permanently
+        // suppressed for those providers.
+        last_prompt_tokens = if response.usage.input_tokens > 0 {
+            response.usage.input_tokens as usize
+        } else {
+            crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            )
+        };
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -4241,6 +4336,7 @@ pub async fn run_agent_loop_streaming(
                         streaming: true,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
+                        interrupt: opts.interrupt.clone(),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 

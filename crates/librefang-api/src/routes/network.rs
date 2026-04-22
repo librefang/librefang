@@ -1010,7 +1010,7 @@ pub async fn mcp_http(
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel
             None, // checkpoint_manager (network bridge doesn't run agent tools)
-            None, // session_id (MCP HTTP has no session context)
+            None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
         )
         .await;
 

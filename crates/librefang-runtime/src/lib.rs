@@ -29,6 +29,7 @@ pub mod embedding;
 pub mod graceful_shutdown;
 pub mod hooks;
 pub use librefang_http as http_client;
+pub mod interrupt;
 pub use librefang_runtime_wasm::host_functions;
 pub mod image_gen;
 pub mod injection_guard;
