@@ -29,29 +29,43 @@ export const commsQueries = {
       staleTime: STALE_MS,
       refetchInterval: TOPOLOGY_REFRESH_MS,
     }),
-  events: (limit = 200, refetchInterval = REFRESH_MS) =>
+  events: (limit = 200) =>
     queryOptions({
       queryKey: commsKeys.events(limit),
       queryFn: () => listCommsEvents(limit),
       staleTime: EVENTS_STALE_MS,
-      refetchInterval,
     }),
 };
 
-export function useChannels() {
-  return useQuery(channelQueries.list());
+type UseChannelsOptions = { enabled?: boolean; staleTime?: number; refetchInterval?: number | false };
+
+export function useChannels(options: UseChannelsOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...channelQueries.list(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useCommsTopology() {
-  return useQuery(commsQueries.topology());
+export function useCommsTopology(options: UseChannelsOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...commsQueries.topology(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
 export function useCommsEvents(
   limit = 200,
-  options: { enabled?: boolean; refetchInterval?: number } = {},
+  options: { enabled?: boolean; refetchInterval?: number | false } = {},
 ) {
   return useQuery({
-    ...commsQueries.events(limit, options.refetchInterval),
+    ...commsQueries.events(limit),
     enabled: options.enabled,
+    refetchInterval: options.refetchInterval ?? REFRESH_MS,
   });
 }

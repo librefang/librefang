@@ -12,7 +12,7 @@ const STALE_APPROVALS = 10_000;
 const REFETCH_APPROVALS = 15_000;
 const STALE_COUNT = 10_000;
 const REFETCH_COUNT = 15_000;
-const STALE_PENDING = 5_000;
+const STALE_PENDING = 3_000;
 const REFETCH_PENDING = 5_000;
 const STALE_TOTP = 60_000;
 
@@ -47,6 +47,7 @@ export const approvalQueries = {
     queryOptions({
       queryKey: approvalKeys.audit(params),
       queryFn: () => queryApprovalAudit(params),
+      staleTime: 30_000,
     }),
   totpStatus: () =>
     queryOptions({
@@ -63,7 +64,7 @@ export function useApprovals(options: { enabled?: boolean } = {}) {
 export function useApprovalCount(options: { refetchInterval?: number } = {}) {
   return useQuery({
     ...approvalQueries.count(),
-    refetchInterval: options.refetchInterval ?? REFETCH_COUNT,
+    refetchInterval: options.refetchInterval,
   });
 }
 
@@ -74,17 +75,24 @@ export function usePendingApprovals(
   return useQuery({
     ...approvalQueries.pending(agentId),
     enabled: options.enabled ?? Boolean(agentId),
-    ...(options.refetchInterval != null ? { refetchInterval: options.refetchInterval } : {}),
+    refetchInterval: options.refetchInterval,
   });
 }
 
-export function useApprovalAudit(params: {
-  limit?: number;
-  offset?: number;
-  agent_id?: string;
-  tool_name?: string;
-} = {}) {
-  return useQuery(approvalQueries.audit(params));
+export function useApprovalAudit(
+  params: {
+    limit?: number;
+    offset?: number;
+    agent_id?: string;
+    tool_name?: string;
+  } = {},
+  options: { enabled?: boolean; staleTime?: number } = {},
+) {
+  return useQuery({
+    ...approvalQueries.audit(params),
+    enabled: options.enabled,
+    staleTime: options.staleTime,
+  });
 }
 
 export function useTotpStatus() {

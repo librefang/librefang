@@ -20,12 +20,7 @@ type UseMemoryHealthOptions = {
 };
 
 export const memoryQueries = {
-  list: (params?: { agentId?: string; offset?: number; limit?: number; category?: string }) =>
-    queryOptions({
-      queryKey: memoryKeys.list(params),
-      queryFn: () => listMemories(params),
-      staleTime: STALE_MS,
-    }),
+
   stats: (agentId?: string) =>
     queryOptions({
       queryKey: memoryKeys.stats(agentId),
@@ -41,13 +36,11 @@ export const memoryQueries = {
     }),
 };
 
-export function useMemories(params?: { agentId?: string; offset?: number; limit?: number; category?: string }) {
-  return useQuery(memoryQueries.list(params));
-}
+
 
 export const memorySearchOrListQueryOptions = (search: string) =>
   queryOptions<{ memories: MemoryItem[]; total: number }>({
-    queryKey: [...memoryKeys.lists(), "searchOrList", search] as const,
+    queryKey: memoryKeys.searchOrList(search),
     queryFn: async () => {
       if (search.trim()) {
         const items = await searchMemories({ query: search.trim(), limit: 50 });

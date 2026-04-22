@@ -66,6 +66,7 @@ export const skillQueries = {
       queryKey: clawhubKeys.detail(slug),
       queryFn: () => clawhubGetSkill(slug),
       enabled: !!slug,
+      staleTime: BROWSE_STALE_MS,
     }),
   clawhubCnBrowse: (sort?: string, limit?: number, cursor?: string) =>
     queryOptions({
@@ -104,6 +105,7 @@ export const skillQueries = {
       queryKey: skillhubKeys.detail(slug),
       queryFn: () => skillhubGetSkill(slug),
       enabled: !!slug,
+      staleTime: BROWSE_STALE_MS,
     }),
   fanghubList: () =>
     queryOptions({
@@ -113,8 +115,14 @@ export const skillQueries = {
     }),
 };
 
-export function useSkills() {
-  return useQuery(skillQueries.list());
+export function useSkills(options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.list(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
 export function useSkillDetail(name: string, options: UseSkillOptions = {}) {
@@ -141,30 +149,72 @@ export function useSupportingFile(
   });
 }
 
-export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string) {
-  return useQuery(skillQueries.clawhubBrowse(sort, limit, cursor));
+export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.clawhubBrowse(sort, limit, cursor),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useClawHubSearch(query: string) {
-  return useQuery(skillQueries.clawhubSearch(query));
+export function useClawHubSearch(query: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.clawhubSearch(query),
+    enabled: enabled ?? !!query,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useClawHubSkill(slug: string) {
-  return useQuery(skillQueries.clawhubSkill(slug));
+export function useClawHubSkill(slug: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.clawhubSkill(slug),
+    enabled: enabled ?? !!slug,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useSkillHubBrowse(sort?: string) {
-  return useQuery(skillQueries.skillhubBrowse(sort));
+export function useSkillHubBrowse(sort?: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.skillhubBrowse(sort),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useSkillHubSearch(query: string) {
-  return useQuery(skillQueries.skillhubSearch(query));
+export function useSkillHubSearch(query: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.skillhubSearch(query),
+    enabled: enabled ?? !!query,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useSkillHubSkill(slug: string) {
-  return useQuery(skillQueries.skillhubSkill(slug));
+export function useSkillHubSkill(slug: string, options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.skillhubSkill(slug),
+    enabled: enabled ?? !!slug,
+    staleTime,
+    refetchInterval,
+  });
 }
 
-export function useFangHubSkills() {
-  return useQuery(skillQueries.fanghubList());
+export function useFangHubSkills(options: UseSkillOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...skillQueries.fanghubList(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }

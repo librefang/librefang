@@ -33,7 +33,7 @@ import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
-import { useDashboardSnapshot } from "../lib/queries/runtime";
+import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { AgentManifestForm } from "../components/AgentManifestForm";

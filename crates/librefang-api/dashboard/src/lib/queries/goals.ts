@@ -2,17 +2,21 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listGoals, listGoalTemplates } from "../http/client";
 import { goalKeys } from "./keys";
 
-const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 const TEMPLATE_STALE_MS = 300_000;
+
+type UseGoalOptions = {
+  enabled?: boolean;
+  staleTime?: number;
+  refetchInterval?: number | false;
+};
 
 export const goalQueries = {
   list: () =>
     queryOptions({
-      queryKey: goalKeys.list(),
+      queryKey: goalKeys.lists(),
       queryFn: listGoals,
       staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
     }),
   templates: () =>
     queryOptions({
@@ -22,10 +26,22 @@ export const goalQueries = {
     }),
 };
 
-export function useGoals() {
-  return useQuery(goalQueries.list());
+export function useGoals(options: UseGoalOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...goalQueries.list(),
+    enabled,
+    staleTime,
+    refetchInterval: refetchInterval ?? STALE_MS,
+  });
 }
 
-export function useGoalTemplates() {
-  return useQuery(goalQueries.templates());
+export function useGoalTemplates(options: UseGoalOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...goalQueries.templates(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }

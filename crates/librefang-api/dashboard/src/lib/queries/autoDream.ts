@@ -18,6 +18,18 @@ export const autoDreamQueries = {
     }),
 };
 
-export function useAutoDreamStatus() {
-  return useQuery(autoDreamQueries.status());
+type UseAutoDreamStatusOptions = {
+  enabled?: boolean;
+  staleTime?: number;
+  refetchInterval?: number | false;
+};
+
+export function useAutoDreamStatus(options: UseAutoDreamStatusOptions = {}) {
+  const { enabled, staleTime, refetchInterval } = options;
+  return useQuery({
+    ...autoDreamQueries.status(),
+    enabled,
+    staleTime,
+    refetchInterval,
+  });
 }
