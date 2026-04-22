@@ -1842,10 +1842,9 @@ fn build_sender_context(
     // with a single member.
     let group_members: Vec<GroupMember> = if message.is_group {
         if let Some(ref cid) = chat_id {
-            let current = GroupMember {
-                user_id: sender_user_id(message).to_string(),
+            let current = ParticipantRef {
+                jid: sender_user_id(message).to_string(),
                 display_name: message.sender.display_name.clone(),
-                username: sender_username.clone(),
             };
             let store = group_roster();
             store.upsert(&channel, cid, current);
@@ -5516,7 +5515,12 @@ mod tests {
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
-                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+                assert!(!should_process_group_message(
+                    "whatsapp",
+                    &overrides,
+                    &msg,
+                    &[]
+                ));
             });
         }
 
@@ -5530,7 +5534,12 @@ mod tests {
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
-                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+                assert!(should_process_group_message(
+                    "whatsapp",
+                    &overrides,
+                    &msg,
+                    &[]
+                ));
             });
         }
 
@@ -5547,7 +5556,12 @@ mod tests {
                     group_trigger_patterns: vec!["Signore".to_string()],
                     ..Default::default()
                 };
-                assert!(!should_process_group_message("whatsapp", &overrides, &msg));
+                assert!(!should_process_group_message(
+                    "whatsapp",
+                    &overrides,
+                    &msg,
+                    &[]
+                ));
             });
         }
 
@@ -5562,7 +5576,12 @@ mod tests {
                     group_policy: GroupPolicy::MentionOnly,
                     ..Default::default()
                 };
-                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+                assert!(should_process_group_message(
+                    "whatsapp",
+                    &overrides,
+                    &msg,
+                    &[]
+                ));
             });
         }
 
@@ -5578,7 +5597,12 @@ mod tests {
                     ..Default::default()
                 };
                 // Legacy behavior: substring matches → returns true.
-                assert!(should_process_group_message("whatsapp", &overrides, &msg));
+                assert!(should_process_group_message(
+                    "whatsapp",
+                    &overrides,
+                    &msg,
+                    &[]
+                ));
             });
         }
     }

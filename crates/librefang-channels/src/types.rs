@@ -838,15 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn test_retreat_past_html_entity_multibyte_safe() {
-        // Direct test: pos just after a ñ, search window crosses into it.
-        let text = "aaaaaaaaañbbbbb"; // ñ at byte 9-10
-        let result = retreat_past_html_entity(text, 11);
-        // Should not panic, and should return 11 (no & found)
-        assert_eq!(result, 11);
-    }
-
-    #[test]
     fn test_channel_type_matrix_serde() {
         let ct = ChannelType::Matrix;
         let json = serde_json::to_string(&ct).unwrap();

@@ -269,15 +269,15 @@
       "type": "directory"
     },
     {
-      "path": "crates/librefang-runtime/src/session_repair.rs",
-      "accessCount": 67,
-      "lastAccessed": 1776246198861,
+      "path": "crates/librefang-channels/src/bridge.rs",
+      "accessCount": 69,
+      "lastAccessed": 1776842450084,
       "type": "file"
     },
     {
-      "path": "crates/librefang-channels/src/bridge.rs",
-      "accessCount": 57,
-      "lastAccessed": 1776246918041,
+      "path": "crates/librefang-runtime/src/session_repair.rs",
+      "accessCount": 67,
+      "lastAccessed": 1776246198861,
       "type": "file"
     },
     {
@@ -293,6 +293,12 @@
       "type": "file"
     },
     {
+      "path": "crates/librefang-channels/src/types.rs",
+      "accessCount": 21,
+      "lastAccessed": 1776842413657,
+      "type": "directory"
+    },
+    {
       "path": "crates/librefang-api/src/channel_bridge.rs",
       "accessCount": 18,
       "lastAccessed": 1776269900489,
@@ -300,15 +306,9 @@
     },
     {
       "path": "crates/librefang-channels/src/roster.rs",
-      "accessCount": 16,
-      "lastAccessed": 1776245582694,
+      "accessCount": 18,
+      "lastAccessed": 1776842455675,
       "type": "file"
-    },
-    {
-      "path": "crates/librefang-channels/src/types.rs",
-      "accessCount": 15,
-      "lastAccessed": 1776245851066,
-      "type": "directory"
     },
     {
       "path": "crates/librefang-runtime/src",
@@ -324,8 +324,8 @@
     },
     {
       "path": "crates/librefang-types/src/scheduler.rs",
-      "accessCount": 5,
-      "lastAccessed": 1776269593684,
+      "accessCount": 7,
+      "lastAccessed": 1776842233621,
       "type": "directory"
     },
     {
@@ -398,6 +398,12 @@
       "path": "crates/librefang-types/src/config",
       "accessCount": 2,
       "lastAccessed": 1776281949053,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-channels/src",
+      "accessCount": 2,
+      "lastAccessed": 1776842397848,
       "type": "directory"
     },
     {
