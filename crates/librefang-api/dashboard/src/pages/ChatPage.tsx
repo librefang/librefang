@@ -116,7 +116,7 @@ function makeMessageId(prefix: string): string {
 
 
 // WebSocket hook with auto-reconnect
-function useWebSocket(agentId: string | null) {
+function useWebSocket(agentId: string | null, sessionId: string | null = null) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -130,7 +130,15 @@ function useWebSocket(agentId: string | null) {
       return;
     }
 
-    const url = buildAuthenticatedWebSocketUrl(`/api/agents/${encodeURIComponent(agentId)}/ws`);
+    // Issue #2959: per-connection session_id override. When the active
+    // session is set (usually from the `?sessionId=` URL), append it to the
+    // WS URL so every send on this socket targets that session regardless of
+    // the agent's registry-canonical session — enabling multi-tab isolation.
+    const base = `/api/agents/${encodeURIComponent(agentId)}/ws`;
+    const wsPath = sessionId
+      ? `${base}?session_id=${encodeURIComponent(sessionId)}`
+      : base;
+    const url = buildAuthenticatedWebSocketUrl(wsPath);
 
     function connect() {
       try {
@@ -183,7 +191,7 @@ function useWebSocket(agentId: string | null) {
         wsRef.current = null;
       }
     };
-  }, [agentId]);
+  }, [agentId, sessionId]);
 
   return { ws: wsRef, wsConnected, onDropRef };
 }
@@ -193,7 +201,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -250,7 +258,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
+  const { ws, wsConnected, onDropRef } = useWebSocket(agentId, sessionId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -491,6 +499,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
         const response = await sendAgentMessage(sendAgentId, trimmed, {
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          session_id: sessionId,
         });
         const fullContent = response.response || "";
         updateAgentMessages(sendAgentId, prev => prev.map(m =>
