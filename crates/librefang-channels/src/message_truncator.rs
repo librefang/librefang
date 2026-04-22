@@ -190,25 +190,24 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
                 remaining = &remaining[next_char_len..];
             } else {
                 // The entity guard shrank `chunk` all the way to empty, which
-                // means the entity starts at byte 0 of the current window.
-                // Apply the guard to `safe_prefix` too before emitting it —
-                // otherwise we would push the broken-entity tail that was
-                // trimmed from `chunk` back out via `safe_prefix`.
-                let safe_prefix = adjust_html_entity_boundary(safe_prefix);
-                if safe_prefix.is_empty() {
-                    // Even safe_prefix starts with a broken entity; force
-                    // progress by one char to avoid an infinite loop.
-                    let next_char_len = remaining
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(remaining.len());
-                    chunks.push(&remaining[..next_char_len]);
-                    remaining = &remaining[next_char_len..];
+                // means an entity starts at byte 0 of the current window *and*
+                // the entity itself is longer than fits in `limit`. Emitting
+                // the guarded `safe_prefix` would push a broken entity
+                // (e.g. `&lt` or `&#x1F60`) into the output — Telegram rejects
+                // that with "can't parse entities". Correctness trumps the
+                // UTF-16 limit here: find the closing ';' in `remaining` and
+                // emit the full entity as one oversized chunk.
+                if let Some(semi_offset) = remaining.find(';') {
+                    let end = semi_offset + 1; // include the ';'
+                    chunks.push(&remaining[..end]);
+                    remaining = &remaining[end..];
                 } else {
-                    // Force progress: emit the guarded safe prefix and continue.
-                    chunks.push(safe_prefix);
-                    remaining = &remaining[safe_prefix.len()..];
+                    // No ';' in the rest of the input — the '&' is not actually
+                    // closing an entity. Emit the remainder as one final chunk;
+                    // we've already done everything the entity guard can do,
+                    // and this guarantees forward progress.
+                    chunks.push(remaining);
+                    remaining = "";
                 }
             }
             continue;
