@@ -1645,8 +1645,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
         let sanitized = sanitize(message_text, 500);
         let safe_sender = sanitize(sender_name, 64);
+        let safe_bot_name = bot_name.map(|n| sanitize(n, 64));
 
-        let bot_identity_section = match bot_name {
+        let bot_identity_section = match safe_bot_name.as_deref() {
             Some(name) if !name.is_empty() => format!(
                 "Bot identity: The bot's name is \"{name}\". \
                  A message that addresses the bot by name (e.g. \"{name}, do X\" or \

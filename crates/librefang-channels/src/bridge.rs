@@ -5185,4 +5185,79 @@ mod tests {
             assert!(ctx.group_participants.is_empty());
         }
     }
+
+    mod classify_reply_intent_tests {
+        use super::super::*;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingHandle {
+            captured_bot_name: Arc<Mutex<Option<Option<String>>>>,
+        }
+
+        impl CapturingHandle {
+            fn new() -> (Self, Arc<Mutex<Option<Option<String>>>>) {
+                let slot = Arc::new(Mutex::new(None));
+                (
+                    Self {
+                        captured_bot_name: Arc::clone(&slot),
+                    },
+                    slot,
+                )
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ChannelBridgeHandle for CapturingHandle {
+            async fn classify_reply_intent(
+                &self,
+                _message_text: &str,
+                _sender_name: &str,
+                _model: Option<&str>,
+                bot_name: Option<&str>,
+            ) -> bool {
+                *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
+                true
+            }
+        }
+
+        #[tokio::test]
+        async fn default_impl_returns_true_with_bot_name() {
+            struct AlwaysTrue;
+            #[async_trait::async_trait]
+            impl ChannelBridgeHandle for AlwaysTrue {}
+
+            let h = AlwaysTrue;
+            assert!(
+                h.classify_reply_intent("hello", "user", None, Some("rodelo"))
+                    .await
+            );
+            assert!(h.classify_reply_intent("hello", "user", None, None).await);
+        }
+
+        #[tokio::test]
+        async fn bot_name_is_forwarded_to_implementation() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("rodelo qué hora es?", "Alice", None, Some("rodelo"))
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(Some("rodelo".to_string())),
+                "bot_name must be forwarded to the classify_reply_intent implementation"
+            );
+        }
+
+        #[tokio::test]
+        async fn none_bot_name_is_forwarded() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("hey there", "Bob", None, None)
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(None),
+                "None bot_name must be forwarded as None"
+            );
+        }
+    }
 }
