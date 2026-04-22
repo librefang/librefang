@@ -3273,15 +3273,6 @@ async fn call_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
 ) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
-    // Acquire global concurrency permit before touching the network.
-    // This bounds the number of simultaneous in-flight LLM requests and
-    // prevents memory spikes when many agents fire at the same time.
-    // The permit is released automatically when this function returns.
-    let _permit = LLM_CONCURRENCY
-        .acquire()
-        .await
-        .expect("LLM_CONCURRENCY semaphore closed");
-
     check_retry_cooldown(
         provider,
         cooldown,
@@ -3291,6 +3282,14 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Acquire the permit inside the retry loop so it is held only during
+        // the actual HTTP round-trip and released before any backoff sleep.
+        // Holding it across retries would block a slot for the full backoff
+        // duration (up to minutes on rate-limit), starving other agents.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3347,12 +3346,6 @@ async fn stream_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
 ) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
-    // Same global concurrency guard as call_with_retry.
-    let _permit = LLM_CONCURRENCY
-        .acquire()
-        .await
-        .expect("LLM_CONCURRENCY semaphore closed");
-
     check_retry_cooldown(
         provider,
         cooldown,
@@ -3362,6 +3355,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Same rationale as call_with_retry: acquire inside the loop so
+        // the permit is not held during backoff sleeps between retries.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
