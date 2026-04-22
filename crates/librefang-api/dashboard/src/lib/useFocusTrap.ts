@@ -19,7 +19,7 @@ const FOCUSABLE_SELECTOR = [
 ///
 /// Usage:
 ///   const ref = useRef<HTMLDivElement>(null);
-///   useFocusTrap(isOpen, ref, { setAriaModal: true });
+///   useFocusTrap(isOpen, ref, true);
 ///   return <div ref={ref}>...</div>;
 ///
 /// Keyboard a11y: ensures users navigating by keyboard can't Tab out of
@@ -28,9 +28,11 @@ const FOCUSABLE_SELECTOR = [
 export function useFocusTrap(
   isOpen: boolean,
   containerRef: React.RefObject<HTMLElement | null>,
-  options?: { setAriaModal?: boolean },
+  setAriaModal = false,
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const appliedAriaModalRef = useRef(false);
+  const appliedRoleRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -52,9 +54,17 @@ export function useFocusTrap(
       } else if (container.tabIndex >= -1) {
         container.focus();
       }
-      if (options?.setAriaModal) {
-        container.setAttribute("aria-modal", "true");
-        container.setAttribute("role", "dialog");
+      if (setAriaModal) {
+        appliedAriaModalRef.current = false;
+        appliedRoleRef.current = false;
+        if (!container.hasAttribute("aria-modal")) {
+          container.setAttribute("aria-modal", "true");
+          appliedAriaModalRef.current = true;
+        }
+        if (!container.hasAttribute("role")) {
+          container.setAttribute("role", "dialog");
+          appliedRoleRef.current = true;
+        }
       }
     }
 
@@ -82,10 +92,16 @@ export function useFocusTrap(
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
-      if (container && options?.setAriaModal) {
-        container.removeAttribute("aria-modal");
-        container.removeAttribute("role");
+      if (container && setAriaModal) {
+        if (appliedAriaModalRef.current) {
+          container.removeAttribute("aria-modal");
+        }
+        if (appliedRoleRef.current) {
+          container.removeAttribute("role");
+        }
       }
+      appliedAriaModalRef.current = false;
+      appliedRoleRef.current = false;
       // Restore focus to the element that opened the modal. Null-guard
       // because the element may have been removed from the DOM (e.g.
       // the page unmounted while the modal was open).
@@ -95,5 +111,5 @@ export function useFocusTrap(
       }
       previouslyFocused.current = null;
     };
-  }, [isOpen, containerRef, options?.setAriaModal]);
+  }, [isOpen, containerRef, setAriaModal]);
 }

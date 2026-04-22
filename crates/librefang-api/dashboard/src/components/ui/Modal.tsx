@@ -56,7 +56,7 @@ export function Modal({
 }: ModalProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef, { setAriaModal: true });
+  useFocusTrap(isOpen, dialogRef, true);
 
   useEffect(() => {
     if (!isOpen) return;

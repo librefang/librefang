@@ -39,7 +39,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef, { setAriaModal: true });
+  useFocusTrap(isOpen, dialogRef, true);
 
   const commands = useMemo<CommandItem[]>(() => [
     { id: "overview", labelKey: "nav.overview", categoryKey: "nav.core", icon: Home, action: () => navigate({ to: "/overview" }) },
