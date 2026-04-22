@@ -544,7 +544,7 @@ export function SchemaForm({
   const defaultValues = useMemo(() => {
     if (!schema) return {};
     return buildDefaults(schema, initialValues);
-  }, [schema]);
+  }, [schema, initialValues]);
 
   const [values, setValues] = useState<Record<string, unknown>>({});
 
