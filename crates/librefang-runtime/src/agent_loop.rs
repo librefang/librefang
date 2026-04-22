@@ -5702,6 +5702,8 @@ mod tests {
             "ws.rs",                   // librefang-api ws: doc comment only
             "purge_sentinels.rs", // CLI binary that *removes* the literal — delegates to canonical detector
             "purge_sentinels_test.rs", // fixtures for the CLI
+            "lib.rs",             // librefang-types: legacy is_no_reply_sentinel compat shim
+            "mod.rs",             // librefang-kernel: inline comment only
         ];
         let offenders: Vec<&str> = stdout
             .lines()
