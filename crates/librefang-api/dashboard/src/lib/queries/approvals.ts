@@ -7,6 +7,7 @@ import {
   totpStatus,
 } from "../../api";
 import { approvalKeys, totpKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_APPROVALS = 10_000;
 const REFETCH_APPROVALS = 15_000;
@@ -61,21 +62,17 @@ export function useApprovals(options: { enabled?: boolean } = {}) {
   return useQuery({ ...approvalQueries.list(), enabled: options.enabled });
 }
 
-export function useApprovalCount(options: { refetchInterval?: number } = {}) {
-  return useQuery({
-    ...approvalQueries.count(),
-    refetchInterval: options.refetchInterval,
-  });
+export function useApprovalCount(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(approvalQueries.count(), options));
 }
 
 export function usePendingApprovals(
   agentId?: string,
-  options: { enabled?: boolean; refetchInterval?: number } = {},
+  options: QueryOverrides = {},
 ) {
   return useQuery({
-    ...approvalQueries.pending(agentId),
+    ...withOverrides(approvalQueries.pending(agentId), options),
     enabled: options.enabled ?? Boolean(agentId),
-    refetchInterval: options.refetchInterval,
   });
 }
 

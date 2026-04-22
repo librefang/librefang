@@ -6,6 +6,7 @@ import {
   listWorkflowTemplates,
 } from "../http/client";
 import { workflowKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 /** Stale/refetch timing constants.
  *  STALE_MS / REFRESH_MS — workflow list: 30 s stale, 30 s poll.
@@ -51,48 +52,18 @@ export const workflowQueries = {
     }),
 };
 
-export type UseWorkflowOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
-
-export function useWorkflows(options: UseWorkflowOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...workflowQueries.list(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useWorkflows(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(workflowQueries.list(), options));
 }
 
-export function useWorkflowRuns(workflowId: string, options: UseWorkflowOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...workflowQueries.runs(workflowId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useWorkflowRuns(workflowId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(workflowQueries.runs(workflowId), options));
 }
 
-export function useWorkflowRunDetail(runId: string, options: UseWorkflowOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...workflowQueries.runDetail(runId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useWorkflowRunDetail(runId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(workflowQueries.runDetail(runId), options));
 }
 
-export function useWorkflowTemplates(q?: string, category?: string, options: UseWorkflowOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...workflowQueries.templates(q, category),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useWorkflowTemplates(q?: string, category?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(workflowQueries.templates(q, category), options));
 }

@@ -9,6 +9,7 @@ import {
   getExperimentMetrics,
 } from "../http/client";
 import { agentKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
@@ -60,81 +61,33 @@ export const agentQueries = {
     }),
 };
 
-type UseAgentOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
-
 export function useAgents(
   opts: { includeHands?: boolean } = {},
-  options: UseAgentOptions = {},
+  options: QueryOverrides = {},
 ) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.list(opts),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+  return useQuery(withOverrides(agentQueries.list(opts), options));
 }
 
-export function useAgentDetail(agentId: string, options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.detail(agentId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useAgentDetail(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.detail(agentId), options));
 }
 
-export function useAgentSessions(agentId: string, options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.sessions(agentId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useAgentSessions(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.sessions(agentId), options));
 }
 
-export function useAgentTemplates(options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.templates(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useAgentTemplates(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.templates(), options));
 }
 
-export function usePromptVersions(agentId: string, options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.promptVersions(agentId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function usePromptVersions(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.promptVersions(agentId), options));
 }
 
-export function useExperiments(agentId: string, options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.experiments(agentId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useExperiments(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.experiments(agentId), options));
 }
 
-export function useExperimentMetrics(experimentId: string, options: UseAgentOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...agentQueries.experimentMetrics(experimentId),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useExperimentMetrics(experimentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.experimentMetrics(experimentId), options));
 }

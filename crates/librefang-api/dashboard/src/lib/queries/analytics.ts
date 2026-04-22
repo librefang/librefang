@@ -8,12 +8,7 @@ import {
   getBudgetStatus,
 } from "../http/client";
 import { usageKeys, budgetKeys } from "./keys";
-
-type UseAnalyticsOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
+import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 30_000;
 const STALE_MS = 20_000;
@@ -66,62 +61,26 @@ export const budgetQueries = {
     }),
 };
 
-export function useUsageSummary(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...usageQueries.summary(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useUsageSummary(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.summary(), options));
 }
 
-export function useUsageByAgent(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...usageQueries.byAgent(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useUsageByAgent(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.byAgent(), options));
 }
 
-export function useUsageByModel(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...usageQueries.byModel(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useUsageByModel(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.byModel(), options));
 }
 
-export function useUsageDaily(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...usageQueries.daily(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useUsageDaily(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.daily(), options));
 }
 
-export function useModelPerformance(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...usageQueries.modelPerformance(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useModelPerformance(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.modelPerformance(), options));
 }
 
-export function useBudgetStatus(options: UseAnalyticsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...budgetQueries.status(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useBudgetStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(budgetQueries.status(), options));
 }

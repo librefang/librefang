@@ -1,4 +1,4 @@
-import { queryOptions, skipToken, useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listMediaProviders,
   pollVideo,
@@ -43,6 +43,13 @@ function shouldPollVideoTask(status?: MediaVideoStatus) {
   return status.status !== "completed" && status.status !== "failed" && !status.error;
 }
 
-export function useVideoTask(taskId: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(mediaQueries.videoTask(taskId), options));
+export function useVideoTask(params: VideoTaskParams | null, options: QueryOverrides = {}) {
+  return useQuery({
+    ...withOverrides(mediaQueries.videoTask(params ?? { taskId: "", provider: "" }), options),
+    enabled: Boolean(params) && options.enabled !== false,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return shouldPollVideoTask(data) ? VIDEO_TASK_REFETCH_MS : false;
+    },
+  });
 }
