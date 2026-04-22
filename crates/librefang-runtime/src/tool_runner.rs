@@ -8150,5 +8150,4 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
     .await
     .expect_err("write_file must reject under freeze");
     assert!(err.contains("frozen") || err.contains("Stable"));
-
 }

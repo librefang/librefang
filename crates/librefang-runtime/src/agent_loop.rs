@@ -9611,6 +9611,9 @@ mod tests {
         assert_eq!(
             manifest.web_search_augmentation,
             librefang_types::agent::WebSearchAugmentationMode::Auto,
+        );
+    }
+
     // -----------------------------------------------------------------------
     // AgentLoopResult.owner_notice (§A — owner-notify channel)
     // -----------------------------------------------------------------------

@@ -19,7 +19,6 @@ use librefang_types::config::{
 };
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
-use regex::RegexSet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -5224,6 +5223,8 @@ mod tests {
             let ctx: SenderContext = serde_json::from_str(json).expect("BC-02 parse");
             assert!(ctx.group_participants.is_empty());
         }
+    }
+
     // -----------------------------------------------------------------------
     // ReplyEnvelope (§A — owner-notify channel)
     // -----------------------------------------------------------------------
