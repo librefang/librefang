@@ -40,6 +40,24 @@ import "katex/dist/katex.min.css";
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
 
+/**
+ * Format a chat message's timestamp for the message footer.
+ *
+ * Shows time only when the message is from today, otherwise prepends a
+ * short locale date so resumed sessions don't misleadingly show every
+ * message as if it arrived at "today, 3:45 PM" (#2934).
+ */
+function formatMessageTimestamp(ts: Date): string {
+  const now = new Date();
+  const sameDay =
+    ts.getFullYear() === now.getFullYear() &&
+    ts.getMonth() === now.getMonth() &&
+    ts.getDate() === now.getDate();
+  const time = ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  return `${ts.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
 interface ChatToolCall extends AgentTool {
   _call_id?: string;
 }
@@ -327,7 +345,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                   ? "system"
                   : "assistant",
               content,
-              timestamp: new Date(),
+              // Use the real server-side timestamp when available so
+              // resumed sessions render the original send time instead of
+              // the page-load time. Fall back to `now` only for messages
+              // persisted before the backend started stamping (#2934).
+              timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
               tools: msg.tools,
             }];
           });
@@ -874,7 +896,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
         {/* Meta info + action buttons */}
         <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
           <div className="flex items-center gap-2 text-[10px] text-text-dim/50">
-            <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            <span>{formatMessageTimestamp(message.timestamp)}</span>
             {!message.isStreaming && usageFooter !== "off" && (() => {
               const showTokens = usageFooter === "full" || usageFooter === "tokens";
               const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;

@@ -60,8 +60,8 @@ export const securityStatusQueryOptions = () =>
     refetchInterval: 120_000,
   });
 
-export function useSecurityStatus() {
-  return useQuery(securityStatusQueryOptions());
+export function useSecurityStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(securityStatusQueryOptions(), options));
 }
 
 export const auditRecentQueryOptions = (limit: number) =>
@@ -84,8 +84,8 @@ export const auditVerifyQueryOptions = () =>
     refetchInterval: 120_000,
   });
 
-export function useAuditVerify() {
-  return useQuery(auditVerifyQueryOptions());
+export function useAuditVerify(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(auditVerifyQueryOptions(), options));
 }
 
 export const backupsQueryOptions = () =>
@@ -96,8 +96,8 @@ export const backupsQueryOptions = () =>
     refetchInterval: 60_000,
   });
 
-export function useBackups() {
-  return useQuery(backupsQueryOptions());
+export function useBackups(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(backupsQueryOptions(), options));
 }
 
 export const taskQueueStatusQueryOptions = () =>

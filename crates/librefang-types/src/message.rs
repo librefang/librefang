@@ -1,5 +1,6 @@
 //! LLM conversation message types.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::tool::ToolExecutionStatus;
@@ -18,6 +19,14 @@ pub struct Message {
     /// important context) are not lost when trimming.
     #[serde(default)]
     pub pinned: bool,
+    /// When this message was created.
+    ///
+    /// Stamped at construction time via [`Message::user`], [`Message::assistant`],
+    /// [`Message::system`], and [`Message::user_with_blocks`]. Optional so that
+    /// sessions persisted before the field was introduced still deserialize
+    /// cleanly (falls back to `None` via `#[serde(default)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// The role of a message sender in an LLM conversation.
@@ -248,6 +257,7 @@ impl Message {
             role: Role::System,
             content: MessageContent::Text(content.into()),
             pinned: false,
+            timestamp: Some(Utc::now()),
         }
     }
 
@@ -257,6 +267,7 @@ impl Message {
             role: Role::User,
             content: MessageContent::Text(content.into()),
             pinned: false,
+            timestamp: Some(Utc::now()),
         }
     }
 
@@ -266,6 +277,7 @@ impl Message {
             role: Role::User,
             content: MessageContent::Blocks(blocks),
             pinned: false,
+            timestamp: Some(Utc::now()),
         }
     }
 
@@ -275,6 +287,7 @@ impl Message {
             role: Role::Assistant,
             content: MessageContent::Text(content.into()),
             pinned: false,
+            timestamp: Some(Utc::now()),
         }
     }
 }

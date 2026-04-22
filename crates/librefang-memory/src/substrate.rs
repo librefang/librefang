@@ -735,10 +735,12 @@ impl MemorySubstrate {
 
             match result {
                 Ok((id, title, description, _assigned, created_by, created_at)) => {
-                    // Update status to in_progress
+                    // Update status to in_progress and stamp `claimed_at` so the
+                    // stuck-task sweeper can TTL-reset workers that never complete.
+                    let claimed_at = chrono::Utc::now().to_rfc3339();
                     db.execute(
-                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2 WHERE id = ?1",
-                        rusqlite::params![id, agent_id],
+                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1",
+                        rusqlite::params![id, agent_id, claimed_at],
                     ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                     Ok(Some(serde_json::json!({
@@ -749,6 +751,7 @@ impl MemorySubstrate {
                         "assigned_to": agent_id,
                         "created_by": created_by,
                         "created_at": created_at,
+                        "claimed_at": claimed_at,
                     })))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -769,7 +772,7 @@ impl MemorySubstrate {
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3 WHERE id = ?1",
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, claimed_at = NULL WHERE id = ?1",
                 rusqlite::params![task_id, result, now],
             ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if rows == 0 {
@@ -816,7 +819,7 @@ impl MemorySubstrate {
             let rows = db
                 .execute(
                     "UPDATE task_queue \
-                     SET status = 'pending', result = NULL, completed_at = NULL \
+                     SET status = 'pending', result = NULL, completed_at = NULL, claimed_at = NULL \
                      WHERE id = ?1 AND status IN ('completed', 'failed')",
                     rusqlite::params![task_id],
                 )
@@ -836,11 +839,11 @@ impl MemorySubstrate {
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
                 Some(s) => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
                     vec![Box::new(s.clone())],
                 ),
                 None => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue ORDER BY created_at DESC",
                     vec![],
                 ),
             };
@@ -858,6 +861,7 @@ impl MemorySubstrate {
                     "created_at": row.get::<_, String>(6).unwrap_or_default(),
                     "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
                     "result": row.get::<_, Option<String>>(8).unwrap_or(None),
+                    "claimed_at": row.get::<_, Option<String>>(9).unwrap_or(None),
                 }))
             }).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -866,6 +870,68 @@ impl MemorySubstrate {
                 tasks.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
             }
             Ok(tasks)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Reset `in_progress` tasks whose worker stalled without calling
+    /// `task_complete` — fixes issue #2923. A task is considered stuck when
+    /// `claimed_at` is older than `ttl_secs` seconds from now. Matching tasks
+    /// are flipped back to `pending` and their `assigned_to` / `claimed_at`
+    /// are cleared so that any worker can re-claim them.
+    ///
+    /// Returns the list of reset task IDs so the caller can log / emit events.
+    /// Rows still on the pre-migration schema (`claimed_at` NULL) are skipped
+    /// so long-running legacy tasks don't get nuked on first boot.
+    pub async fn task_reset_stuck(&self, ttl_secs: u64) -> LibreFangResult<Vec<String>> {
+        let conn = Arc::clone(&self.conn);
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+            // Compute the cutoff timestamp in Rust (lexicographic RFC 3339 compare
+            // matches chronological order for UTC `Z`-suffixed strings written by
+            // `chrono::Utc::now().to_rfc3339()`).
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::from_std(std::time::Duration::from_secs(ttl_secs))
+                    .unwrap_or_else(|_| chrono::Duration::seconds(0));
+            let cutoff_str = cutoff.to_rfc3339();
+
+            let mut stmt = db
+                .prepare(
+                    "SELECT id FROM task_queue \
+                     WHERE status = 'in_progress' \
+                       AND claimed_at IS NOT NULL \
+                       AND claimed_at < ?1",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            let stuck_ids: Vec<String> = stmt
+                .query_map(rusqlite::params![cutoff_str], |row| row.get::<_, String>(0))
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if stuck_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // Flip them all back to pending. Clear assigned_to so the original
+            // worker doesn't immediately re-claim, and clear claimed_at so the
+            // sweeper doesn't keep logging the same task on every tick.
+            for id in &stuck_ids {
+                db.execute(
+                    "UPDATE task_queue \
+                     SET status = 'pending', assigned_to = '', claimed_at = NULL \
+                     WHERE id = ?1 AND status = 'in_progress'",
+                    rusqlite::params![id],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            }
+            Ok(stuck_ids)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1119,6 +1185,66 @@ mod tests {
         assert_eq!(claimed["status"], "in_progress");
         // assigned_to should be normalised to the claimer's UUID after claim
         assert_eq!(claimed["assigned_to"], fake_uuid);
+    }
+
+    /// Stuck `in_progress` tasks (worker LLM stalled, no `task_complete` call)
+    /// must be automatically reset to `pending` once `claimed_at` is older than
+    /// the configured TTL (issue #2923 / #2926).
+    #[tokio::test]
+    async fn test_task_reset_stuck_expires_in_progress() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("Long task", "Takes forever", Some("worker"), None)
+            .await
+            .unwrap();
+
+        // Worker claims the task.
+        let claimed = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+        assert!(claimed.is_some());
+        assert_eq!(claimed.as_ref().unwrap()["status"], "in_progress");
+
+        // Simulate the worker stalling: back-date `claimed_at` to 5 minutes ago
+        // so a TTL of 60 s trips and a TTL of 3600 s does not.
+        {
+            let conn = substrate.conn.lock().unwrap();
+            let five_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            conn.execute(
+                "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+                rusqlite::params![five_min_ago, task_id],
+            )
+            .unwrap();
+        }
+
+        // With a 1 hour TTL, nothing should be reset (not stuck yet).
+        let reset = substrate.task_reset_stuck(3600).await.unwrap();
+        assert!(
+            reset.is_empty(),
+            "TTL larger than stall should not reset any task"
+        );
+        let still_in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert_eq!(still_in_progress.len(), 1);
+
+        // With a 60 s TTL, the stuck task should be flipped back to pending.
+        let reset = substrate.task_reset_stuck(60).await.unwrap();
+        assert_eq!(reset, vec![task_id.clone()]);
+
+        let pending = substrate.task_list(Some("pending")).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["id"], task_id);
+        assert_eq!(pending[0]["assigned_to"], "");
+        assert!(
+            pending[0]["claimed_at"].is_null(),
+            "claimed_at must be cleared on auto-reset"
+        );
+        let in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert!(in_progress.is_empty());
+
+        // Second sweep is a no-op — stuck task is already pending.
+        let reset_again = substrate.task_reset_stuck(60).await.unwrap();
+        assert!(reset_again.is_empty());
     }
 
     #[tokio::test]

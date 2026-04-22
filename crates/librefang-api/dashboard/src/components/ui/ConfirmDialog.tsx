@@ -32,7 +32,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef);
+  useFocusTrap(isOpen, dialogRef, true);
 
   useEffect(() => {
     if (!isOpen) return;
