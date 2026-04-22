@@ -95,6 +95,7 @@ struct CachedWorkspaceMetadata {
     bootstrap_md: Option<String>,
     identity_md: Option<String>,
     heartbeat_md: Option<String>,
+    tools_md: Option<String>,
     created_at: std::time::Instant,
 }
 
@@ -468,6 +469,8 @@ pub struct LibreFangKernel {
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
     approval_sweep_started: AtomicBool,
+    /// Idempotency guard for the task-board stuck-task sweeper (issue #2923).
+    task_board_sweep_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -994,6 +997,80 @@ impl LibreFangKernel {
                 .approval_sweep_started
                 .store(false, Ordering::Release);
             tracing::debug!("Approval expiry sweep task stopped");
+        });
+    }
+
+    /// Spawn the task-board stuck-task sweep loop (issue #2923 / #2926).
+    ///
+    /// Periodically scans the `task_queue` for `in_progress` rows whose
+    /// `claimed_at` is older than `config.task_board.claim_ttl_secs`. Stuck
+    /// tasks are flipped back to `pending` and their `assigned_to` is cleared
+    /// so another worker (or the same one on the next trigger fire) can pick
+    /// them up.
+    ///
+    /// Idempotent: re-calling while the loop is already running is a no-op.
+    /// The interval and TTL are read *live* from the kernel config on every
+    /// tick, so hot-reloading `[task_board]` does not require a kernel
+    /// restart. `claim_ttl_secs = 0` disables the sweeper (tick is a no-op)
+    /// for deployments that legitimately hold tasks `in_progress` for hours
+    /// (human-in-the-loop workflows).
+    pub fn spawn_task_board_sweep_task(self: Arc<Self>) {
+        let handle = tokio::runtime::Handle::current();
+        if self.task_board_sweep_started.swap(true, Ordering::AcqRel) {
+            debug!("Task board sweep task already running");
+            return;
+        }
+
+        let kernel = Arc::clone(&self);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        handle.spawn(async move {
+            loop {
+                // Read sweeper knobs live — hot reload takes effect on next tick.
+                let (interval_secs, ttl_secs) = {
+                    let cfg = kernel.config.load();
+                    (
+                        cfg.task_board.sweep_interval_secs.max(1),
+                        cfg.task_board.claim_ttl_secs,
+                    )
+                };
+
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                if ttl_secs == 0 {
+                    // Sweeper disabled by operator — keep the loop alive so a
+                    // later hot-reload can flip it back on without restart.
+                    continue;
+                }
+
+                match kernel.memory.task_reset_stuck(ttl_secs).await {
+                    Ok(reset) if !reset.is_empty() => {
+                        warn!(
+                            count = reset.len(),
+                            ttl_secs,
+                            task_ids = ?reset,
+                            "Auto-reset stuck in_progress tasks past claim TTL (issue #2923)"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "Task board sweep failed");
+                    }
+                }
+            }
+
+            kernel
+                .task_board_sweep_started
+                .store(false, Ordering::Release);
+            tracing::debug!("Task board sweep task stopped");
         });
     }
 
@@ -2571,6 +2648,7 @@ impl LibreFangKernel {
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
+            task_board_sweep_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir
@@ -3230,8 +3308,11 @@ system_prompt = "You are a helpful assistant."
             agent_id,
         )?;
         ensure_workspace(&workspace_dir)?;
+        migrate_identity_files(&workspace_dir);
+        let resolved_workspaces =
+            ensure_named_workspaces(&cfg.effective_workspaces_dir(), &manifest.workspaces);
         if manifest.generate_identity_files {
-            generate_identity_files(&workspace_dir, &manifest);
+            generate_identity_files(&workspace_dir, &manifest, &resolved_workspaces);
         }
         manifest.workspace = Some(workspace_dir);
 
@@ -3336,7 +3417,9 @@ system_prompt = "You are a helpful assistant."
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
-        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self
+            .triggers
+            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
@@ -3580,6 +3663,13 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
     /// without changing the public `send_message` signature.
+    ///
+    /// When the target agent has a configured **home channel** (a channel whose
+    /// `default_agent` matches this agent), a synthetic `SenderContext` is
+    /// attached so that downstream channel routing (prompt hints, the
+    /// `channel_send` tool account-id fallback, the `delivery.last_channel`
+    /// memory key, …) targets that home channel instead of the first channel
+    /// in the config array. See issue #2872.
     async fn send_message_with_session_mode(
         &self,
         agent_id: AgentId,
@@ -3591,16 +3681,113 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
+        let home_channel = self.resolve_agent_home_channel(agent_id);
         self.send_message_full(
             agent_id,
             message,
             handle,
             None,
-            None,
+            home_channel.as_ref(),
             session_mode_override,
             None,
         )
         .await
+    }
+
+    /// Resolve the **home channel** for an agent, if any.
+    ///
+    /// An agent's home channel is the channel instance in `config.toml` whose
+    /// `default_agent` field names this agent. It represents the natural
+    /// return path for proactive / trigger-fired messages that don't carry
+    /// an inbound `SenderContext`.
+    ///
+    /// Returns a synthetic `SenderContext` populated with:
+    /// - `channel` — the channel type (e.g. `"telegram"`, `"discord"`)
+    /// - `account_id` — the specific bot instance's `account_id` (when set)
+    /// - `use_canonical_session = true` — preserves the trigger's existing
+    ///   `session_mode` semantics; without this the kernel would switch to a
+    ///   channel-scoped `SessionId::for_channel(agent, channel)` which would
+    ///   break the "persistent vs new" contract triggers rely on.
+    ///
+    /// Returns `None` when no channel's `default_agent` matches this agent —
+    /// in that case callers should fall back to sender-context-less dispatch
+    /// (the pre-#2872 behavior).
+    pub(crate) fn resolve_agent_home_channel(&self, agent_id: AgentId) -> Option<SenderContext> {
+        let entry = self.registry.get(agent_id)?;
+        let agent_name = entry.name.clone();
+        let cfg = self.config.load_full();
+        let channels = &cfg.channels;
+
+        // Scan each channel type for the first instance whose default_agent
+        // names this agent. The `first` semantics match `channel_overrides`
+        // in channel_bridge.rs when multiple instances share a default_agent.
+        //
+        // The macro keeps this compact across 40+ channel types without
+        // forgetting any; the `channel_name` str is used as the SenderContext
+        // `channel` field (matches `channel_adapters` map keys).
+        macro_rules! check {
+            ($field:ident, $channel_name:literal) => {{
+                if let Some(entry) = channels
+                    .$field
+                    .iter()
+                    .find(|c| c.default_agent.as_deref() == Some(agent_name.as_str()))
+                {
+                    return Some(SenderContext {
+                        channel: $channel_name.to_string(),
+                        account_id: entry.account_id.clone(),
+                        use_canonical_session: true,
+                        ..Default::default()
+                    });
+                }
+            }};
+        }
+
+        check!(telegram, "telegram");
+        check!(discord, "discord");
+        check!(slack, "slack");
+        check!(whatsapp, "whatsapp");
+        check!(signal, "signal");
+        check!(matrix, "matrix");
+        check!(email, "email");
+        check!(teams, "teams");
+        check!(mattermost, "mattermost");
+        check!(irc, "irc");
+        check!(google_chat, "google_chat");
+        check!(twitch, "twitch");
+        check!(rocketchat, "rocketchat");
+        check!(zulip, "zulip");
+        check!(xmpp, "xmpp");
+        check!(line, "line");
+        check!(viber, "viber");
+        check!(messenger, "messenger");
+        check!(reddit, "reddit");
+        check!(mastodon, "mastodon");
+        check!(bluesky, "bluesky");
+        check!(feishu, "feishu");
+        check!(revolt, "revolt");
+        check!(nextcloud, "nextcloud");
+        check!(guilded, "guilded");
+        check!(keybase, "keybase");
+        check!(threema, "threema");
+        check!(nostr, "nostr");
+        check!(webex, "webex");
+        check!(pumble, "pumble");
+        check!(flock, "flock");
+        check!(twist, "twist");
+        check!(mumble, "mumble");
+        check!(dingtalk, "dingtalk");
+        check!(qq, "qq");
+        check!(discourse, "discourse");
+        check!(gitter, "gitter");
+        check!(ntfy, "ntfy");
+        check!(gotify, "gotify");
+        check!(webhook, "webhook");
+        check!(voice, "voice");
+        check!(linkedin, "linkedin");
+        check!(wechat, "wechat");
+        check!(wecom, "wecom");
+
+        None
     }
 
     /// Send an ephemeral "side question" to an agent (`/btw` command).
@@ -3687,6 +3874,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -4633,6 +4821,7 @@ system_prompt = "You are a helpful assistant."
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace (streaming): {e}");
             } else {
+                migrate_identity_files(&workspace_dir);
                 manifest.workspace = Some(workspace_dir);
                 let _ = self
                     .registry
@@ -4733,6 +4922,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -5978,6 +6168,7 @@ system_prompt = "You are a helpful assistant."
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
             } else {
+                migrate_identity_files(&workspace_dir);
                 manifest.workspace = Some(workspace_dir);
                 // Persist updated workspace in registry
                 let _ = self
@@ -6079,6 +6270,7 @@ system_prompt = "You are a helpful assistant."
                 workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
                 identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
                 heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -8854,7 +9046,9 @@ system_prompt = "You are a helpful assistant."
         let _guard = DepthGuard;
 
         // Evaluate triggers before publishing (so describe_event works on the event)
-        let (triggered, trigger_state_mutated) = self.triggers.evaluate(&event);
+        let (triggered, trigger_state_mutated) = self
+            .triggers
+            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after fire: {e}");
@@ -9241,7 +9435,12 @@ system_prompt = "You are a helpful assistant."
                             warn!(hand = %def.id, role = %role, error = %e, "Failed to scaffold hand workspace");
                             continue;
                         }
-                        generate_identity_files(&workspace, &agent.manifest);
+                        migrate_identity_files(&workspace);
+                        let resolved_ws = ensure_named_workspaces(
+                            &cfg.effective_workspaces_dir(),
+                            &agent.manifest.workspaces,
+                        );
+                        generate_identity_files(&workspace, &agent.manifest, &resolved_ws);
                     }
                 }
                 // Write an empty state file so subsequent boots skip this block.
@@ -9829,14 +10028,16 @@ system_prompt = "You are a helpful assistant."
                                     Ok(Ok(result)) => {
                                         tracing::info!(job = %job_name, "Cron job completed successfully");
                                         kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel
-                                        cron_deliver_response(
-                                            &kernel,
-                                            agent_id,
-                                            &result.response,
-                                            &delivery,
-                                        )
-                                        .await;
+                                        // Deliver response to configured channel (skip NO_REPLY/silent)
+                                        if !result.silent {
+                                            cron_deliver_response(
+                                                &kernel,
+                                                agent_id,
+                                                &result.response,
+                                                &delivery,
+                                            )
+                                            .await;
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         let err_msg = format!("{e}");
@@ -12078,6 +12279,7 @@ system_prompt = "You are a helpful assistant."
             } else {
                 None
             },
+            tools_md: read_identity_file(workspace, "TOOLS.md"),
             created_at: std::time::Instant::now(),
         };
 
@@ -14444,6 +14646,31 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Failed to save goals: {e}"))?;
 
         Ok(result)
+    }
+
+    fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
+        let Ok(aid) = agent_id.parse::<AgentId>() else {
+            return vec![];
+        };
+        let Some(entry) = self.registry.get(aid) else {
+            return vec![];
+        };
+        if entry.manifest.workspaces.is_empty() {
+            return vec![];
+        }
+        let workspaces_root = self.config.load().effective_workspaces_dir();
+        entry
+            .manifest
+            .workspaces
+            .iter()
+            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
+            .filter_map(|(_, decl)| {
+                if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
+                    return None;
+                }
+                workspaces_root.join(&decl.path).canonicalize().ok()
+            })
+            .collect()
     }
 }
 

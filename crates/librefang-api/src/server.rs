@@ -1071,6 +1071,11 @@ pub async fn run_daemon(
     // every 10 seconds and handles their resolution.
     kernel.clone().spawn_approval_sweep_task();
 
+    // Task-board stuck-task sweep — auto-resets in_progress tasks whose worker
+    // stalled without calling `task_complete` (issue #2923 / #2926). Runs on
+    // `task_board.sweep_interval_secs` (default 30s).
+    kernel.clone().spawn_task_board_sweep_task();
+
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {

@@ -204,6 +204,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _message_text: &str,
         _sender_name: &str,
         _model: Option<&str>,
+        _bot_name: Option<&str>,
     ) -> bool {
         true
     }
@@ -2079,7 +2080,16 @@ async fn dispatch_message(
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
-                if !handle.classify_reply_intent(text, sender, model).await {
+                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                let channel_key_for_name = match account_id {
+                    Some(aid) => format!("{}:{}", ct_str, aid),
+                    None => ct_str.to_string(),
+                };
+                let bot_name = router.channel_default_name(&channel_key_for_name);
+                if !handle
+                    .classify_reply_intent(text, sender, model, bot_name.as_deref())
+                    .await
+                {
                     debug!(
                         channel = ct_str,
                         sender = %sender,
@@ -2728,7 +2738,7 @@ async fn dispatch_message(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -3378,7 +3388,7 @@ async fn dispatch_with_blocks(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
     if let Err(denied) = handle
@@ -5173,6 +5183,106 @@ mod tests {
             }"#;
             let ctx: SenderContext = serde_json::from_str(json).expect("BC-02 parse");
             assert!(ctx.group_participants.is_empty());
+        }
+    }
+
+    mod classify_reply_intent_tests {
+        use super::super::*;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingHandle {
+            captured_bot_name: Arc<Mutex<Option<Option<String>>>>,
+        }
+
+        impl CapturingHandle {
+            fn new() -> (Self, Arc<Mutex<Option<Option<String>>>>) {
+                let slot = Arc::new(Mutex::new(None));
+                (
+                    Self {
+                        captured_bot_name: Arc::clone(&slot),
+                    },
+                    slot,
+                )
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ChannelBridgeHandle for CapturingHandle {
+            async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                Err("not used in test".into())
+            }
+            async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                Err("not used in test".into())
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Err("not used in test".into())
+            }
+            async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                Err("not used in test".into())
+            }
+            async fn classify_reply_intent(
+                &self,
+                _message_text: &str,
+                _sender_name: &str,
+                _model: Option<&str>,
+                bot_name: Option<&str>,
+            ) -> bool {
+                *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
+                true
+            }
+        }
+
+        #[tokio::test]
+        async fn default_impl_returns_true_with_bot_name() {
+            struct AlwaysTrue;
+            #[async_trait::async_trait]
+            impl ChannelBridgeHandle for AlwaysTrue {
+                async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                    Err("not used in test".into())
+                }
+                async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                    Err("not used in test".into())
+                }
+                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                    Err("not used in test".into())
+                }
+                async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                    Err("not used in test".into())
+                }
+            }
+
+            let h = AlwaysTrue;
+            assert!(
+                h.classify_reply_intent("hello", "user", None, Some("rodelo"))
+                    .await
+            );
+            assert!(h.classify_reply_intent("hello", "user", None, None).await);
+        }
+
+        #[tokio::test]
+        async fn bot_name_is_forwarded_to_implementation() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("rodelo qué hora es?", "Alice", None, Some("rodelo"))
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(Some("rodelo".to_string())),
+                "bot_name must be forwarded to the classify_reply_intent implementation"
+            );
+        }
+
+        #[tokio::test]
+        async fn none_bot_name_is_forwarded() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("hey there", "Bob", None, None)
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(None),
+                "None bot_name must be forwarded as None"
+            );
         }
     }
 }

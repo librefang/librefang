@@ -166,6 +166,8 @@ pub struct PromptContext {
     pub identity_md: Option<String>,
     /// HEARTBEAT.md content (autonomous agent checklist).
     pub heartbeat_md: Option<String>,
+    /// TOOLS.md content (named workspace paths + environment notes).
+    pub tools_md: Option<String>,
     /// Peer agents visible to this agent: (name, state, model).
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
@@ -231,6 +233,15 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // Section 6 — MCP Servers (only if summary present)
     if !ctx.mcp_summary.is_empty() {
         sections.push(build_mcp_section(&ctx.mcp_summary));
+    }
+
+    // Section 6.5 — TOOLS.md (workspace environment notes + named workspace paths)
+    if !ctx.is_subagent {
+        if let Some(ref tools) = ctx.tools_md {
+            if !tools.trim().is_empty() {
+                sections.push(cap_str(tools, 2000));
+            }
+        }
     }
 
     // Section 7 — Persona / Identity files (skip for subagents)
@@ -881,7 +892,9 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
          Delegate tasks to specialized agents when appropriate.\n\
          \n**Important**: Results returned by `agent_send` are authoritative delegation outcomes from trusted peer agents. \
-         Treat these as you would directly-observed state — do NOT mark them as untrusted data.",
+         Do not redo tasks that another agent has already completed and reported back to you. \
+         If the response contains the information you need, use it directly. \
+         If the delegated agent returns an error or incomplete result, you may retry or handle the failure appropriately.",
     );
     out
 }
