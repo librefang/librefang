@@ -1119,6 +1119,7 @@ mod tests {
                 provider_metadata: None,
             }]),
             pinned: false,
+            timestamp: None,
         };
         let api_msg = convert_message(&msg);
         match api_msg.content {

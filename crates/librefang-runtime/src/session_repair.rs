@@ -116,6 +116,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             role: msg.role,
             content: new_content,
             pinned: msg.pinned,
+            timestamp: msg.timestamp,
         });
     }
 
@@ -276,6 +277,7 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
                     role: Role::User,
                     content: MessageContent::Blocks(rescued_blocks),
                     pinned: false,
+                    timestamp: None,
                 },
             );
         }
@@ -429,6 +431,7 @@ fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
                         role: Role::User,
                         content: MessageContent::Blocks(blocks),
                         pinned: false,
+                        timestamp: None,
                     },
                 );
             }
@@ -527,6 +530,7 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
                     role: Role::User,
                     content: MessageContent::Blocks(blocks),
                     pinned: false,
+                    timestamp: None,
                 },
             );
         }
@@ -934,6 +938,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -969,6 +974,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -989,6 +995,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1001,6 +1008,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are the results"),
         ];
@@ -1025,6 +1033,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("While you search, I have another question"),
             Message {
@@ -1038,6 +1047,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are results"),
         ];
@@ -1083,6 +1093,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("I tried to read the file"),
         ];
@@ -1122,6 +1133,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1134,6 +1146,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1146,6 +1159,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1239,12 +1253,14 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("World"),
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -1268,6 +1284,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("Never mind"),
             Message::assistant("OK"),
@@ -1305,6 +1322,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1336,6 +1354,7 @@ mod tests {
             role: Role::Assistant,
             content: MessageContent::Blocks(vec![]),
             pinned: false,
+            timestamp: None,
         }];
 
         let (repaired, stats) = validate_and_repair_with_stats(&messages);
@@ -1366,6 +1385,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             // Only tu-a has a result, tu-b is missing
             Message {
@@ -1379,6 +1399,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // Orphaned result from a non-existent tool use
             Message {
@@ -1392,12 +1413,14 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // Empty message
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1454,6 +1477,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -1477,6 +1501,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1489,6 +1514,7 @@ mod tests {
                     approval_request_id: Some("req-1".to_string()),
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1501,6 +1527,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1646,6 +1673,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1658,6 +1686,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("q2"),
             Message::assistant("a2"),
@@ -1683,6 +1712,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1695,6 +1725,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
         // min_trim = 2, forward scan hits ToolUse+ToolResult only, backward finds index 0
@@ -1741,6 +1772,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are the files"),
         ];
@@ -1796,6 +1828,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // ToolResult in a SEPARATE assistant message (crash artifact)
             Message {
@@ -1809,6 +1842,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1884,6 +1918,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("All done"),
         ];
@@ -1928,6 +1963,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hmm"),
         ];
@@ -1977,6 +2013,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Continuing"),
         ];
