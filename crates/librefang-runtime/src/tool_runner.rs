@@ -590,6 +590,7 @@ pub async fn execute_tool_raw(
         "memory_store" => tool_memory_store(input, *kernel, *sender_id),
         "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
         "memory_list" => tool_memory_list(*kernel, *sender_id),
+        "memory_search" => tool_memory_search(input, *kernel, *sender_id),
 
         // Group roster tool
         "group_members" => tool_group_members(input, *kernel),
@@ -1292,6 +1293,17 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+            }),
+        },
+        ToolDefinition {
+            name: "memory_search".to_string(),
+            description: "Search shared memory for entries whose key or value contains the query (case-insensitive substring match). Use this when you need to find a memory but don't remember the exact key.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search term to look for in keys and values" }
+                },
+                "required": ["query"]
             }),
         },
         // --- Group roster tool ---
@@ -2754,6 +2766,24 @@ fn tool_memory_list(
         return Ok("No entries found in shared memory.".to_string());
     }
     Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
+}
+
+fn tool_memory_search(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    peer_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
+    let results = kh.memory_search(query, peer_id)?;
+    if results.is_empty() {
+        return Ok(format!("No memory entries found matching '{query}'."));
+    }
+    let display: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
+        .collect();
+    Ok(serde_json::to_string_pretty(&display).unwrap_or_else(|_| format!("{:?}", display)))
 }
 
 // ---------------------------------------------------------------------------
@@ -5964,6 +5994,7 @@ mod tests {
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"memory_list"));
+        assert!(names.contains(&"memory_search"));
         // 6 collaboration tools
         assert!(names.contains(&"agent_find"));
         assert!(names.contains(&"task_post"));

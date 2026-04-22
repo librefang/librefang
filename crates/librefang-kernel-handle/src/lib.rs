@@ -64,6 +64,16 @@ pub trait KernelHandle: Send + Sync {
     /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
     fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
 
+    /// Search shared memory entries whose key or value contains `query` (case-insensitive).
+    fn memory_search(
+        &self,
+        query: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<(String, serde_json::Value)>, String> {
+        let _ = (query, peer_id);
+        Ok(Vec::new())
+    }
+
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
 

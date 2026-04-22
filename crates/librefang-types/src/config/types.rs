@@ -168,11 +168,6 @@ pub struct ChannelOverrides {
     /// re-classification in `sticky_heuristic` mode.
     #[serde(default = "default_auto_route_divergence")]
     pub auto_route_divergence_count: u32,
-    /// When `true`, run a lightweight LLM precheck before the full agent loop
-    /// to decide whether the agent should reply at all.  Only active for group
-    /// messages; DMs always reply.  Default: `false` (opt-in).
-    #[serde(default)]
-    pub reply_precheck: bool,
 }
 
 impl Default for ChannelOverrides {
@@ -203,7 +198,6 @@ impl Default for ChannelOverrides {
             auto_route_confidence_threshold: default_auto_route_confidence(),
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
-            reply_precheck: false,
         }
     }
 }

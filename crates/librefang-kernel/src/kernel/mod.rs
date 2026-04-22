@@ -3642,6 +3642,7 @@ system_prompt = "You are a helpful assistant."
             response_format: None,
             prompt_caching: false,
             timeout_secs: Some(10),
+            agent_id: Some(agent_id.to_string()),
         };
         let response = driver.complete(request).await.map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
@@ -13097,6 +13098,58 @@ impl KernelHandle for LibreFangKernel {
                     .collect())
             }
         }
+    }
+
+    fn memory_search(
+        &self,
+        query: &str,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<(String, serde_json::Value)>, String> {
+        let agent_id = shared_memory_agent_id();
+        let all_kv = self
+            .memory
+            .list_kv(agent_id)
+            .map_err(|e| format!("Memory search failed: {e}"))?;
+        let query_lower = query.to_lowercase();
+        let results: Vec<(String, serde_json::Value)> = all_kv
+            .into_iter()
+            .filter(|(k, v)| {
+                let scoped = match peer_id {
+                    Some(pid) => {
+                        let prefix = format!("peer:{pid}:");
+                        if let Some(stripped) = k.strip_prefix(&prefix) {
+                            stripped.to_string()
+                        } else {
+                            return false;
+                        }
+                    }
+                    None => {
+                        if k.starts_with("peer:") {
+                            return false;
+                        }
+                        k.clone()
+                    }
+                };
+                let val_str = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                scoped.to_lowercase().contains(&query_lower)
+                    || val_str.to_lowercase().contains(&query_lower)
+            })
+            .map(|(k, v)| {
+                // Strip peer prefix from key for display
+                let display_key = match peer_id {
+                    Some(pid) => {
+                        let prefix = format!("peer:{pid}:");
+                        k.strip_prefix(&prefix).unwrap_or(&k).to_string()
+                    }
+                    None => k,
+                };
+                (display_key, v)
+            })
+            .collect();
+        Ok(results)
     }
 
     fn roster_upsert(

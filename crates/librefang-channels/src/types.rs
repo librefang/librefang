@@ -332,11 +332,6 @@ pub struct SenderContext {
     /// roster has accumulated any entries.
     #[serde(default)]
     pub group_members: Vec<GroupMember>,
-    /// Platform chat/conversation ID. For Telegram this is the group chat_id
-    /// (negative for groups) or user_id for DMs. Used by the roster store as
-    /// part of the key.
-    #[serde(default)]
-    pub chat_id: Option<String>,
     /// Group participant roster (Phase 2 §C OB-04/OB-05/GS-01).
     ///
     /// Populated by the WhatsApp gateway via `sock.groupMetadata(groupJid)`

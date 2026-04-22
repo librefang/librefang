@@ -205,19 +205,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
-    /// Lightweight LLM classification: should the bot reply to this group message?
-    ///
-    /// Returns `true` if the bot should reply, `false` to stay silent.
-    /// Default implementation always returns `true` (fail-open).
-    async fn classify_reply_intent(
-        &self,
-        _message_text: &str,
-        _sender_name: &str,
-        _model: Option<&str>,
-    ) -> bool {
-        true
-    }
-
     /// Record a delivery result for tracking (optional — default no-op).
     ///
     /// `thread_id` preserves Telegram forum-topic context so cron/workflow
@@ -1895,7 +1882,6 @@ fn build_sender_context(
         bot_username,
         sender_username,
         group_members,
-        chat_id,
         // §C: forward roster from inbound payload (gateway populates via
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
@@ -2255,22 +2241,9 @@ async fn dispatch_message(
             if !should_process_group_message(ct_str, ov, message, &[]) {
                 return;
             }
-            // Reply-intent precheck: lightweight LLM classification for group
-            // messages when group_policy is "all" and precheck is enabled.
-            // Skipped for mentions and commands (already filtered above).
-            if ov.reply_precheck && matches!(ov.group_policy, GroupPolicy::All) {
-                let text = text_content(message).unwrap_or("");
-                let sender = &message.sender.display_name;
-                let model = ov.reply_precheck_model.as_deref();
-                if !handle.classify_reply_intent(text, sender, model).await {
-                    debug!(
-                        channel = ct_str,
-                        sender = %sender,
-                        "Reply precheck declined — staying silent"
-                    );
-                    return;
-                }
-            }
+            // Reply-intent precheck runs post-resolution (after agent_id is
+            // known) so it can use per-agent PRECHECK.md prompts and reply
+            // context.  See the "Post-resolution group filters" block below.
         } else {
             // DM
             match ov.dm_policy {
