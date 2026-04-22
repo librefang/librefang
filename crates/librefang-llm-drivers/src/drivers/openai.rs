@@ -894,19 +894,18 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value =
-                        match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
-                            Ok(v) => ensure_object(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %call.function.name,
-                                    raw_args_len = call.function.arguments.len(),
-                                    error = %e,
-                                    "Malformed tool call arguments from LLM"
-                                );
-                                malformed_tool_input(&e, call.function.arguments.len())
-                            }
-                        };
+                    let input: serde_json::Value = match parse_tool_args(&call.function.arguments) {
+                        Ok(v) => ensure_object(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = %call.function.name,
+                                raw_args_len = call.function.arguments.len(),
+                                error = %e,
+                                "Malformed tool call arguments from LLM"
+                            );
+                            malformed_tool_input(&e, call.function.arguments.len())
+                        }
+                    };
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -1457,19 +1456,18 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
-                let input: serde_json::Value =
-                    match serde_json::from_str::<serde_json::Value>(arguments) {
-                        Ok(v) => ensure_object(v),
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %name,
-                                raw_args_len = arguments.len(),
-                                error = %e,
-                                "Malformed tool call arguments from LLM stream"
-                            );
-                            malformed_tool_input(&e, arguments.len())
-                        }
-                    };
+                let input: serde_json::Value = match parse_tool_args(arguments) {
+                    Ok(v) => ensure_object(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %name,
+                            raw_args_len = arguments.len(),
+                            error = %e,
+                            "Malformed tool call arguments from LLM stream"
+                        );
+                        malformed_tool_input(&e, arguments.len())
+                    }
+                };
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1681,7 +1679,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         };
 
         // Parse args as JSON Value
-        let args_value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(args) {
+        let args_value: serde_json::Value = match parse_tool_args(args) {
             Ok(v) => ensure_object(v),
             Err(e) => {
                 tracing::warn!(
@@ -1766,6 +1764,69 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
             serde_json::json!({"raw_input": other})
         }
     }
+}
+
+/// Parse tool call arguments tolerantly: if strict parsing fails due to trailing
+/// characters (common with thinking models via Ollama that append reasoning
+/// tokens after the JSON arguments), extract just the first complete JSON value.
+pub(crate) fn parse_tool_args(arguments: &str) -> Result<serde_json::Value, serde_json::Error> {
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(v) => Ok(v),
+        Err(strict_err) => {
+            // "trailing characters" means valid JSON followed by extra data (common
+            // with thinking models that append reasoning tokens after the JSON).
+            // Find the end of the first top-level JSON object and parse just that.
+            if let Some(end) = find_json_object_end(arguments) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&arguments[..end]) {
+                    tracing::debug!(
+                        total_len = arguments.len(),
+                        json_len = end,
+                        trailing = arguments.len() - end,
+                        "Recovered tool args by trimming trailing characters"
+                    );
+                    return Ok(v);
+                }
+            }
+            Err(strict_err)
+        }
+    }
+}
+
+/// Find the byte offset where the first top-level JSON object ends (closing `}`).
+/// Tracks brace depth and skips string literals.
+fn find_json_object_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Marker key embedded in tool input when the LLM's streamed JSON was truncated.

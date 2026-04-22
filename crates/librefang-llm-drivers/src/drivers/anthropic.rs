@@ -623,10 +623,8 @@ impl LlmDriver for AnthropicDriver {
                                 input_json,
                             }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value = match serde_json::from_str::<
-                                    serde_json::Value,
-                                >(
-                                    input_json
+                                let input: serde_json::Value = match super::openai::parse_tool_args(
+                                    input_json,
                                 ) {
                                     Ok(v) => ensure_object(v),
                                     Err(e) => {
@@ -690,7 +688,7 @@ impl LlmDriver for AnthropicDriver {
                         input_json,
                     } => {
                         let input: serde_json::Value =
-                            match serde_json::from_str::<serde_json::Value>(&input_json) {
+                            match super::openai::parse_tool_args(&input_json) {
                                 Ok(v) => ensure_object(v),
                                 Err(e) => {
                                     tracing::warn!(
