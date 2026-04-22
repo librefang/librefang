@@ -14,9 +14,12 @@ const FOCUSABLE_SELECTOR = [
 /// close, and autofocuses the first focusable element inside the
 /// container on open.
 ///
+/// Use `setAriaModal` for actual dialog/modal surfaces so the hook can stay
+/// generic for other focus-contained UIs.
+///
 /// Usage:
 ///   const ref = useRef<HTMLDivElement>(null);
-///   useFocusTrap(isOpen, ref);
+///   useFocusTrap(isOpen, ref, true);
 ///   return <div ref={ref}>...</div>;
 ///
 /// Keyboard a11y: ensures users navigating by keyboard can't Tab out of
@@ -25,8 +28,11 @@ const FOCUSABLE_SELECTOR = [
 export function useFocusTrap(
   isOpen: boolean,
   containerRef: React.RefObject<HTMLElement | null>,
+  setAriaModal = false,
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const appliedAriaModalRef = useRef(false);
+  const appliedRoleRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -40,11 +46,25 @@ export function useFocusTrap(
     // programmatically without joining the tab order).
     const container = containerRef.current;
     if (container) {
-      const focusable = container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      );
       if (focusable.length > 0) {
         focusable[0].focus();
       } else if (container.tabIndex >= -1) {
         container.focus();
+      }
+      if (setAriaModal) {
+        appliedAriaModalRef.current = false;
+        appliedRoleRef.current = false;
+        if (!container.hasAttribute("aria-modal")) {
+          container.setAttribute("aria-modal", "true");
+          appliedAriaModalRef.current = true;
+        }
+        if (!container.hasAttribute("role")) {
+          container.setAttribute("role", "dialog");
+          appliedRoleRef.current = true;
+        }
       }
     }
 
@@ -52,7 +72,9 @@ export function useFocusTrap(
       if (e.key !== "Tab" || !container) return;
       const focusable = Array.from(
         container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-      ).filter((el) => !el.hasAttribute("disabled") && el.offsetParent !== null);
+      ).filter(
+        (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
+      );
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -70,6 +92,16 @@ export function useFocusTrap(
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      if (container && setAriaModal) {
+        if (appliedAriaModalRef.current) {
+          container.removeAttribute("aria-modal");
+        }
+        if (appliedRoleRef.current) {
+          container.removeAttribute("role");
+        }
+      }
+      appliedAriaModalRef.current = false;
+      appliedRoleRef.current = false;
       // Restore focus to the element that opened the modal. Null-guard
       // because the element may have been removed from the DOM (e.g.
       // the page unmounted while the modal was open).
@@ -79,5 +111,5 @@ export function useFocusTrap(
       }
       previouslyFocused.current = null;
     };
-  }, [isOpen, containerRef]);
+  }, [isOpen, containerRef, setAriaModal]);
 }
