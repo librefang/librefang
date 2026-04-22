@@ -1129,7 +1129,8 @@ pub async fn update_trigger(
 
     // Parse pattern if provided
     let pattern = if req.get("pattern").is_some() && !req["pattern"].is_null() {
-        match serde_json::from_value::<TriggerPattern>(req["pattern"].clone()) {
+        let normalized = normalize_pattern_json(req["pattern"].clone());
+        match serde_json::from_value::<TriggerPattern>(normalized) {
             Ok(p) => Some(p),
             Err(e) => {
                 return ApiErrorResponse::bad_request(format!("Invalid pattern: {e}"))
@@ -1231,6 +1232,9 @@ pub async fn update_trigger(
 /// `{"task_posted": {...}}` (the new struct form). Rewrite bare strings of
 /// variants that carry optional data into empty-object form so serde
 /// deserialises the `#[serde(default)]` fields cleanly.
+///
+/// Currently `task_posted` is the only struct variant with optional fields;
+/// extend this match when other variants gain optional fields.
 fn normalize_pattern_json(value: serde_json::Value) -> serde_json::Value {
     match value.as_str() {
         Some(tag @ "task_posted") => {

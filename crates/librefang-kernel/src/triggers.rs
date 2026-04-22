@@ -231,7 +231,22 @@ impl TriggerEngine {
         }
         let data = std::fs::read_to_string(path)
             .map_err(|e| LibreFangError::Internal(format!("Failed to read trigger jobs: {e}")))?;
-        let triggers: Vec<Trigger> = serde_json::from_str(&data)
+        let mut raw: Vec<serde_json::Value> = serde_json::from_str(&data)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
+        // Migrate legacy unit-variant patterns to struct form so old persisted
+        // files survive enum additions. Currently covers `"task_posted"` which
+        // gained `assignee_match` (the only struct variant with optional fields).
+        for entry in &mut raw {
+            if let Some(pattern) = entry.get_mut("pattern") {
+                if matches!(pattern.as_str(), Some("task_posted")) {
+                    *pattern = serde_json::json!({ "task_posted": {} });
+                }
+            }
+        }
+        let triggers: Vec<Trigger> = raw
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
             .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
         let count = triggers.len();
         for trigger in triggers {
