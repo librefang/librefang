@@ -163,9 +163,11 @@ pub static DANGEROUS_PATTERNS: &[DangerousPattern] = &[
         r"\bgit\s+clean\s+-[^\s]*f"
     ),
     dp!(
-        "git branch force delete",
-        r"\bgit\s+branch\s+(-[^\s]*D|--delete --force|-D)\b"
+        "git branch delete",
+        r"\bgit\s+branch\s+(-[^\s]*d|--delete)\b"
     ),
+    // ── Container privilege escalation ───────────────────────────────────
+    dp!("docker exec into container", r"\bdocker[\s_]exec\b"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -369,6 +371,30 @@ mod tests {
     fn git_clean_force() {
         assert!(dangerous("git clean -fd"));
         assert!(dangerous("git clean -f"));
+    }
+
+    #[test]
+    fn git_branch_delete() {
+        // Both -d (merged-only delete) and -D (force delete) must be caught.
+        assert!(dangerous("git branch -d my-branch"));
+        assert!(dangerous("git branch -D my-branch"));
+        // Combined flag form.
+        assert!(dangerous("git branch -fd my-branch"));
+        // Long form.
+        assert!(dangerous("git branch --delete my-branch"));
+        // Safe read-only git branch operations.
+        assert!(safe("git branch"));
+        assert!(safe("git branch -a"));
+        assert!(safe("git branch -v"));
+        assert!(safe("git branch --list"));
+    }
+
+    #[test]
+    fn docker_exec_detection() {
+        // Space-separated form.
+        assert!(dangerous("docker exec -it mycontainer bash"));
+        // Underscore variant used in some tool names.
+        assert!(dangerous("docker_exec mycontainer ls"));
     }
 
     #[test]
