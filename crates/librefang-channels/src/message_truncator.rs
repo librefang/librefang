@@ -190,23 +190,39 @@ pub fn split_to_utf16_chunks(s: &str, limit: usize) -> Vec<&str> {
                 remaining = &remaining[next_char_len..];
             } else {
                 // The entity guard shrank `chunk` all the way to empty, which
-                // means the entity starts at byte 0 of the current window.
-                // Apply the guard to `safe_prefix` too before emitting it —
-                // otherwise we would push the broken-entity tail that was
-                // trimmed from `chunk` back out via `safe_prefix`.
-                let safe_prefix = adjust_html_entity_boundary(safe_prefix);
-                if safe_prefix.is_empty() {
-                    // Even safe_prefix starts with a broken entity; force
-                    // progress by one char to avoid an infinite loop.
-                    let next_char_len = remaining
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(remaining.len());
-                    chunks.push(&remaining[..next_char_len]);
-                    remaining = &remaining[next_char_len..];
+                // means an entity-like prefix starts at byte 0 of the window
+                // *and* the entity itself is longer than fits in `limit`.
+                // Emitting `safe_prefix` verbatim would push a broken entity
+                // (e.g. `&lt` or `&#x1F60`) into the output — Telegram rejects
+                // that with "can't parse entities".
+                //
+                // If the closing ';' exists within a short lookahead window,
+                // emit the full entity as one (slightly) oversized chunk —
+                // correctness trumps the UTF-16 limit here. The lookahead cap
+                // prevents pathological inputs (e.g. a bare `&lt` followed by
+                // megabytes of other text with no ';' anywhere) from
+                // collapsing back into one huge chunk and bypassing the size
+                // guarantee that callers like Discord rely on.
+                //
+                // The longest Telegram-supported entity is `&#x0010FFFF;` at
+                // 12 chars; 16 covers everything real with a little slack.
+                const MAX_ENTITY_LOOKAHEAD: usize = 16;
+                let lookahead = remaining
+                    .as_bytes()
+                    .iter()
+                    .take(MAX_ENTITY_LOOKAHEAD)
+                    .position(|&b| b == b';');
+                if let Some(semi_offset) = lookahead {
+                    let end = semi_offset + 1; // include the ';'
+                    chunks.push(&remaining[..end]);
+                    remaining = &remaining[end..];
                 } else {
-                    // Force progress: emit the guarded safe prefix and continue.
+                    // No ';' close by — the `&` is a literal ampersand (or the
+                    // input is malformed). Respect the size limit: emit the
+                    // normal safe prefix and continue. This may leak the
+                    // entity-like suffix (`&lt` etc.) as-is, but that's the
+                    // least-bad option when the input has no closing ';' at
+                    // all — anything larger would bypass the size cap.
                     chunks.push(safe_prefix);
                     remaining = &remaining[safe_prefix.len()..];
                 }
@@ -670,6 +686,36 @@ mod tests {
             joined.len(),
             s.len(),
             "no content should be dropped; joined={joined:?}"
+        );
+    }
+
+    #[test]
+    fn split_entity_prefix_without_close_respects_limit() {
+        // Pathological input: an entity-like prefix (`&lt`) followed by lots
+        // of text with no closing `;` anywhere. The force-progress fallback
+        // must NOT emit the whole tail as one chunk — callers like Discord
+        // rely on the size cap. A bounded entity-lookahead kicks in so the
+        // `&` is treated as literal and the normal UTF-16 limit is honoured.
+        let s = format!("&lt{}", "a".repeat(200));
+        let limit = 16;
+        let chunks = split_to_utf16_chunks(&s, limit);
+        // Entity-close lookahead is 16 chars; no chunk should exceed that
+        // plus a small slack. Certainly none should balloon to ~200.
+        for chunk in &chunks {
+            assert!(
+                utf16_len(chunk) <= limit + 16,
+                "chunk exceeds bounded limit: utf16_len={} chunk={:?}",
+                utf16_len(chunk),
+                chunk,
+            );
+        }
+        // All content must still be covered.
+        let joined = chunks.concat();
+        assert_eq!(
+            joined.len(),
+            s.len(),
+            "no content should be dropped; joined.len={}",
+            joined.len()
         );
     }
 }
