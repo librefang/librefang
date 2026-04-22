@@ -12,6 +12,7 @@
 - [API 参考](#api-reference)
 - [恢复码](#recovery-codes)
 - [加固清单](#hardening-checklist)
+- [会话级批量审批](#会话级批量审批)
 
 ---
 
@@ -148,3 +149,52 @@ curl -X POST "http://127.0.0.1:4545/api/approvals/${ID}/approve" \
 
 另请参考：[安全运维](/zh/security/operations) 了解循环守卫与会话修复等运行时防护，
 以及 [通信 API](/zh/integrations/api/communication) 中完整的审批请求 / 响应结构。
+
+---
+
+## 会话级批量审批
+
+**源码：** `librefang-api/src/routes/approvals.rs`
+
+多个 Agent 并发运行时，每个会话可能同时积累多条待审批请求。全局 `/api/approvals` 端点跨所有待审批请求操作，不区分会话。会话级端点将范围缩小到**单个会话**，使你可以审查并解决某个 Agent 的全部待审批队列，而不会误操作其他会话的请求。
+
+### 新增端点
+
+| 端点 | 方法 | 用途 |
+|------|------|------|
+| `/api/approvals/session/:session_id` | GET | 列出属于该 `session_id` 的所有待审批请求 |
+| `/api/approvals/session/:session_id/approve_all` | POST | 批准该会话的所有待审批请求（TOTP 启用时需传 `{ "totp_code": "…" }`） |
+| `/api/approvals/session/:session_id/reject_all` | POST | 拒绝该会话的所有待审批请求，可附带 `{ "reason": "…" }` |
+
+批准某会话所有请求示例：
+
+```bash
+SESSION_ID="01J3WXYZ..."
+
+curl -X POST \
+  "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}/approve_all" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+列出某会话待审批请求示例：
+
+```bash
+curl "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}"
+```
+
+### 与 `/api/approvals` 的区别
+
+现有的 `GET /api/approvals` 端点（无额外路径段）返回所有活跃会话和 Agent 的全部待审批请求。批量审批时，可能会操作属于完全不同 Agent 的请求。
+
+会话级端点**仅**操作 `session_id` 字段与路径参数匹配的请求，在多个并发 Agent 同时等待人工输入时提供精细控制。
+
+### 审批请求中的 `session_id` 字段
+
+`session_id` 是 `ApprovalRequest` 上的**可选**字段。在会话级功能引入之前创建的代码路径生成的审批请求不携带 `session_id`，不会出现在会话过滤列表中。这些旧请求仍可通过现有的按 UUID 端点访问：
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```

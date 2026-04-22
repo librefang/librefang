@@ -752,6 +752,48 @@ pub fn is_html_error_page(body: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// FailoverReason — provider-switching taxonomy
+// ---------------------------------------------------------------------------
+
+/// Why an LLM API call failed, used to decide the provider-switching strategy.
+///
+/// Mirrors the `FailoverReason` taxonomy from Hermes-Agent's `error_classifier.py`
+/// but simplified to the eight variants that drive distinct recovery actions in
+/// `librefang_llm_drivers::FallbackChain`:
+///
+/// | Variant           | HTTP hint            | Recovery                            |
+/// |-------------------|----------------------|-------------------------------------|
+/// | `RateLimit`       | 429 / "rate limit"   | sleep (optional hint ms), retry      |
+/// | `CreditExhausted` | 402 / "credit"       | skip to next provider               |
+/// | `ModelUnavailable`| 503 / 404            | skip to next provider               |
+/// | `ContextTooLong`  | 413 / "context"      | propagate (caller must compress)   |
+/// | `Timeout`         | network timeout      | skip to next provider               |
+/// | `HttpError`       | other 4xx/5xx        | skip to next provider               |
+/// | `AuthError`       | 401 / bad API key    | skip to next provider               |
+/// | `Unknown`         | anything else        | propagate immediately               |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum FailoverReason {
+    /// 429 or quota-based throttling — back off then retry same provider.
+    /// Carries an optional retry delay hint (milliseconds).
+    RateLimit(Option<u64>),
+    /// 402 or confirmed credit exhaustion — rotate to next provider immediately.
+    CreditExhausted,
+    /// 413 or context window overflow — caller must compress, not retried here.
+    ContextTooLong,
+    /// 503 / 404 — provider or model temporarily unavailable, try next provider.
+    ModelUnavailable,
+    /// Connection or read timeout — try next provider.
+    Timeout,
+    /// Other HTTP 4xx/5xx error — skip to next provider.
+    HttpError,
+    /// 401 or invalid API key — skip to next provider (another slot may have a
+    /// valid key).
+    AuthError,
+    /// Unclassifiable error — propagate to caller.
+    Unknown,
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

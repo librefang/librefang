@@ -10,8 +10,7 @@ import { CREATE_EVENT } from "./useKeyboardShortcuts";
 /// re-wires `n` to whatever the next page registers.
 export function useCreateShortcut(handler: () => void) {
   useEffect(() => {
-    const listener = () => handler();
-    window.addEventListener(CREATE_EVENT, listener);
-    return () => window.removeEventListener(CREATE_EVENT, listener);
+    window.addEventListener(CREATE_EVENT, handler);
+    return () => window.removeEventListener(CREATE_EVENT, handler);
   }, [handler]);
 }

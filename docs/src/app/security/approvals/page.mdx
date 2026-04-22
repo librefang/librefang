@@ -11,6 +11,7 @@ alone is not enough to cause damage.
 - [Enabling TOTP](#enabling-totp)
 - [Dashboard Flow](#dashboard-flow)
 - [API Reference](#api-reference)
+- [Session-Scoped Batch Resolution](#session-scoped-batch-resolution)
 - [Recovery Codes](#recovery-codes)
 - [Hardening Checklist](#hardening-checklist)
 
@@ -130,6 +131,69 @@ curl -X POST "http://127.0.0.1:4545/api/approvals/${ID}/approve" \
 A successful verification starts a `totp_grace_period_secs` window during which
 subsequent approvals on the same session skip the TOTP check. This balances
 safety with usability during rapid iteration.
+
+---
+
+## Session-Scoped Batch Resolution
+
+**Source:** `librefang-api/src/routes/approvals.rs`
+
+When multiple agents run concurrently, each session may accumulate several
+pending approval requests at once.  The global `/api/approvals` endpoint
+operates across all pending requests regardless of which session created them.
+The session-scoped endpoints let you narrow the scope to a **single session**,
+making it practical to review and resolve an entire agent's pending queue
+without accidentally approving requests from unrelated sessions.
+
+### New Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/approvals/session/:session_id` | GET | List all pending approval requests belonging to `session_id` |
+| `/api/approvals/session/:session_id/approve_all` | POST | Approve every pending request in the session (body: `{ "totp_code": "…" }` when TOTP is enforced) |
+| `/api/approvals/session/:session_id/reject_all` | POST | Reject every pending request in the session with an optional `{ "reason": "…" }` |
+
+Example — approve everything queued for a session:
+
+```bash
+SESSION_ID="01J3WXYZ..."
+
+curl -X POST \
+  "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}/approve_all" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+Example — list pending requests for a session:
+
+```bash
+curl "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}"
+```
+
+### Difference from `/api/approvals/all`
+
+The existing `GET /api/approvals` endpoint (with no additional path segments)
+returns all pending requests across every active session and agent.  If you
+batch-approve using that list, you act on requests that may belong to entirely
+different agents running different tasks.
+
+The session-scoped endpoints operate **only** on requests whose
+`session_id` field matches the path parameter, giving you fine-grained control
+when multiple concurrent agents are all waiting for human input simultaneously.
+
+### `session_id` Field on Approval Requests
+
+`session_id` is an **optional** field on `ApprovalRequest`.  Approval requests
+created by code paths that predate the session-scoped feature do not carry a
+`session_id` and will never appear in the session-filtered list.  Those older
+requests remain fully accessible through the existing per-UUID endpoints:
+
+```bash
+# Still works for any approval regardless of session_id
+curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
 
 ---
 

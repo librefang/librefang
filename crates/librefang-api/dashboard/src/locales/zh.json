@@ -1177,7 +1177,15 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "schedule_failed": "创建计划失败"
+    "schedule_failed": "创建计划失败",
+    "skip": "跳过",
+    "agent_not_found": "未找到 Agent",
+    "resolved_prompt": "解析后的提示词：",
+    "step_details": "步骤详情",
+    "run_history": "运行历史",
+    "prompt_sent": "发送的提示词：",
+    "output": "输出：",
+    "loading_details": "正在加载详情…"
   },
   "scheduler": {
     "title": "调度器",
@@ -1311,6 +1319,8 @@
     "shutdown_confirm": "确认关闭",
     "shutdown_error": "关闭服务器失败",
     "help": "查看引擎状态、系统健康、任务队列和资源使用情况。可重载配置或关闭服务器。",
+    "load_error": "加载运行时概览失败",
+    "load_error_desc": "核心运行时数据暂时无法加载。请在守护进程和 API 健康检查恢复后重试。",
     "panics": "Panic 次数",
     "restarts": "重启次数",
     "database": "数据库",
@@ -1334,6 +1344,9 @@
     "audit_valid": "链完整",
     "audit_invalid": "链损坏",
     "audit_entries": "{{count}} 条记录",
+    "audit_not_verified": "审计链尚未验证",
+    "audit_verified_ok": "审计链验证通过（{{count}} 条记录）",
+    "audit_verified_invalid": "审计链无效 - 检测到篡改",
     "no_audit": "暂无审计事件",
     "backups": "备份管理",
     "create_backup": "创建备份",
@@ -1343,6 +1356,11 @@
     "backup_error": "备份失败",
     "restore_success": "恢复完成，请重启守护进程。",
     "restore_error": "恢复失败",
+    "restore_confirm_title": "恢复备份",
+    "restore_confirm_desc": "当前运行时状态将被此备份中的数据替换。",
+    "restore_confirm": "恢复备份",
+    "delete_backup_confirm_title": "删除备份",
+    "delete_backup_confirm_desc": "该备份文件将被永久删除。",
     "delete_backup_confirm": "确认删除此备份？",
     "task_queue": "任务队列",
     "total_tasks": "总计",
@@ -2004,7 +2022,9 @@
     },
     "loadError": "加载审批列表失败，请检查网络连接。",
     "batch_disabled_totp": "TOTP 强制启用时不可批量审批",
-    "goToAgent": "跳转到 Agent"
+    "goToAgent": "跳转到 Agent",
+    "totpPlaceholder": "000000 / 0000-0000",
+    "totpLabel": "TOTP"
   },
   "wizard": {
     "welcome": "欢迎使用 LibreFang",
