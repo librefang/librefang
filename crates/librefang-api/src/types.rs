@@ -218,6 +218,16 @@ pub struct MessageRequest {
     /// `None` defaults to `true` when thinking content is available.
     #[serde(default)]
     pub show_thinking: Option<bool>,
+    /// Optional explicit session ID (UUID string) to use for this message.
+    ///
+    /// When set, overrides the default session resolution (channel-derived or
+    /// registry canonical). Enables multi-tab / multi-session UIs where the
+    /// caller tracks which session each conversation belongs to.
+    ///
+    /// Safety: the server rejects a `session_id` that belongs to a different
+    /// agent with 400 Bad Request.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Response from sending a message.
