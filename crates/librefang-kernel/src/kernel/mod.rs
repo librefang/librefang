@@ -5447,6 +5447,7 @@ system_prompt = "You are a helpful assistant."
             // WASM agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
+            owner_notice: None,
         })
     }
 
@@ -5518,6 +5519,7 @@ system_prompt = "You are a helpful assistant."
             // Python agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
+            owner_notice: None,
         })
     }
 

@@ -72,6 +72,13 @@ pub struct ToolResult {
     /// Tool name, set when status is WaitingApproval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Side-channel notice destined for the agent's owner DM.
+    /// Populated by the `notify_owner` tool; consumed by the agent loop
+    /// which accumulates it into `AgentLoopResult.owner_notice`. The
+    /// agent loop strips this from the model-visible `content`, so the
+    /// LLM cannot see (or echo) the private text it just sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_notice: Option<String>,
 }
 
 impl ToolResult {
@@ -106,6 +113,7 @@ impl ToolResult {
             status: ToolExecutionStatus::WaitingApproval,
             approval_request_id: Some(request_id),
             tool_name: Some(tool_name),
+            owner_notice: None,
         }
     }
 

@@ -7412,6 +7412,13 @@
             "format": "int64",
             "minimum": 0
           },
+          "owner_notice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional private notice destined for the agent's owner DM,\nproduced when the model invoked the `notify_owner` tool during the\nturn. Channel adapters (e.g. whatsapp-gateway) MUST route this to\nthe owner's address (e.g. OWNER_JID) and NOT to the source chat.\nAdapters that don't support owner-side delivery should ignore it\n(Telegram/Discord/Slack continue to function unchanged)."
+          },
           "response": {
             "type": "string"
           },

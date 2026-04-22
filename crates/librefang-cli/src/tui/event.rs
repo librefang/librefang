@@ -457,6 +457,7 @@ pub fn spawn_daemon_stream(
             // TUI doesn't use the session-slice index; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
+            owner_notice: None,
         })));
     });
 }
@@ -504,6 +505,7 @@ fn daemon_fallback(
             // TUI doesn't use the session-slice index; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
+            owner_notice: None,
         })
     } else {
         Err(body["error"]
