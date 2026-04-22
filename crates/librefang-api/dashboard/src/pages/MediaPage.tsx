@@ -32,12 +32,20 @@ import {
 } from "lucide-react";
 
 type MediaTab = "image" | "speech" | "video" | "music";
+type OnToast = (msg: string, kind?: "success" | "error") => void;
 
 const CAPABILITY_TAB: Record<string, MediaTab> = {
   image_generation: "image",
   text_to_speech: "speech",
   video_generation: "video",
   music_generation: "music",
+};
+
+const TAB_ICONS: Record<MediaTab, React.ReactNode> = {
+  image: <ImageIcon className="w-3.5 h-3.5" />,
+  speech: <Mic className="w-3.5 h-3.5" />,
+  video: <Film className="w-3.5 h-3.5" />,
+  music: <Music className="w-3.5 h-3.5" />,
 };
 
 const inputClass =
@@ -55,8 +63,22 @@ export function MediaPage() {
   const providers = providersQuery.data ?? [];
   const configuredProviders = useMemo(() => providers.filter((p) => p.configured), [providers]);
 
-  const providersWithCapability = (cap: string) =>
-    configuredProviders.filter((p) => p.capabilities.includes(cap));
+  const imageProviders = useMemo(
+    () => configuredProviders.filter((p) => p.capabilities.includes("image_generation")),
+    [configuredProviders],
+  );
+  const speechProviders = useMemo(
+    () => configuredProviders.filter((p) => p.capabilities.includes("text_to_speech")),
+    [configuredProviders],
+  );
+  const videoProviders = useMemo(
+    () => configuredProviders.filter((p) => p.capabilities.includes("video_generation")),
+    [configuredProviders],
+  );
+  const musicProviders = useMemo(
+    () => configuredProviders.filter((p) => p.capabilities.includes("music_generation")),
+    [configuredProviders],
+  );
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -82,16 +104,16 @@ export function MediaPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1 flex-wrap">
-        <TabButton tab="image" active={activeTab} onClick={setActiveTab} icon={<ImageIcon className="w-3.5 h-3.5" />}>
+        <TabButton tab="image" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.image}>
           {t("media.tab_image")}
         </TabButton>
-        <TabButton tab="speech" active={activeTab} onClick={setActiveTab} icon={<Mic className="w-3.5 h-3.5" />}>
+        <TabButton tab="speech" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.speech}>
           {t("media.tab_speech")}
         </TabButton>
-        <TabButton tab="video" active={activeTab} onClick={setActiveTab} icon={<Film className="w-3.5 h-3.5" />}>
+        <TabButton tab="video" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.video}>
           {t("media.tab_video")}
         </TabButton>
-        <TabButton tab="music" active={activeTab} onClick={setActiveTab} icon={<Music className="w-3.5 h-3.5" />}>
+        <TabButton tab="music" active={activeTab} onClick={setActiveTab} icon={TAB_ICONS.music}>
           {t("media.tab_music")}
         </TabButton>
       </div>
@@ -99,16 +121,16 @@ export function MediaPage() {
       {/* Active panel */}
       <div className="rounded-2xl border border-border-subtle bg-surface p-5">
         {activeTab === "image" && (
-          <ImagePanel providers={providersWithCapability("image_generation")} onToast={addToast} />
+          <ImagePanel providers={imageProviders} onToast={addToast} />
         )}
         {activeTab === "speech" && (
-          <SpeechPanel providers={providersWithCapability("text_to_speech")} onToast={addToast} />
+          <SpeechPanel providers={speechProviders} onToast={addToast} />
         )}
         {activeTab === "video" && (
-          <VideoPanel providers={providersWithCapability("video_generation")} onToast={addToast} />
+          <VideoPanel providers={videoProviders} onToast={addToast} />
         )}
         {activeTab === "music" && (
-          <MusicPanel providers={providersWithCapability("music_generation")} onToast={addToast} />
+          <MusicPanel providers={musicProviders} onToast={addToast} />
         )}
       </div>
     </div>
@@ -233,7 +255,7 @@ function ImagePanel({
   onToast,
 }: {
   providers: MediaProvider[];
-  onToast: (msg: string, kind?: "success" | "error") => void;
+  onToast: OnToast;
 }) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
@@ -297,7 +319,7 @@ function ImagePanel({
           />
         </FormField>
         <FormField label={t("media.aspect_ratio")}>
-          <Input value={aspect} onChange={(e) => setAspect(e.target.value)} placeholder="1:1" />
+          <Input value={aspect} onChange={(e) => setAspect(e.target.value)} placeholder={t("media.aspect_ratio_placeholder", { defaultValue: "1:1" })} />
         </FormField>
       </div>
       <div className="flex items-center gap-3">
@@ -322,9 +344,9 @@ function ImagePanel({
                 className="block rounded-xl overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors"
               >
                 {img.url ? (
-                  <img src={img.url} alt={`generated ${i + 1}`} className="w-full h-auto" />
+                  <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
                 ) : (
-                  <img src={`data:image/png;base64,${img.data_base64}`} alt={`generated ${i + 1}`} className="w-full h-auto" />
+                  <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
                 )}
               </a>
             ))}
@@ -342,7 +364,7 @@ function SpeechPanel({
   onToast,
 }: {
   providers: MediaProvider[];
-  onToast: (msg: string, kind?: "success" | "error") => void;
+  onToast: OnToast;
 }) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
@@ -402,12 +424,12 @@ function SpeechPanel({
         </FormField>
         <FormField label={t("media.format")}>
           <select value={format} onChange={(e) => setFormat(e.target.value)} className={inputClass}>
-            <option value="mp3">mp3</option>
-            <option value="wav">wav</option>
-            <option value="flac">flac</option>
-            <option value="ogg">ogg</option>
-            <option value="opus">opus</option>
-            <option value="aac">aac</option>
+            <option value="mp3">{t("media.format_mp3", { defaultValue: "mp3" })}</option>
+            <option value="wav">{t("media.format_wav", { defaultValue: "wav" })}</option>
+            <option value="flac">{t("media.format_flac", { defaultValue: "flac" })}</option>
+            <option value="ogg">{t("media.format_ogg", { defaultValue: "ogg" })}</option>
+            <option value="opus">{t("media.format_opus", { defaultValue: "opus" })}</option>
+            <option value="aac">{t("media.format_aac", { defaultValue: "aac" })}</option>
           </select>
         </FormField>
         <FormField label={t("media.speed")}>
@@ -448,7 +470,7 @@ function VideoPanel({
   onToast,
 }: {
   providers: MediaProvider[];
-  onToast: (msg: string, kind?: "success" | "error") => void;
+  onToast: OnToast;
 }) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
@@ -474,6 +496,9 @@ function VideoPanel({
   );
 
   const status: MediaVideoStatus | null = videoTaskQuery.data ?? submittedDraft;
+  const statusState = status?.status;
+  const statusError = status?.error;
+  const statusResult = status?.result;
 
   useEffect(() => {
     if (!videoTaskQuery.isError) return;
@@ -484,25 +509,25 @@ function VideoPanel({
   }, [videoTaskQuery.error, videoTaskQuery.isError, onToast, t]);
 
   useEffect(() => {
-    if (!status) return;
-    if (status.status === "completed") {
+    if (!statusState) return;
+    if (statusState === "completed") {
       if (completionToastShown.current === taskId) return;
       completionToastShown.current = taskId;
       onToast(t("media.video_done"), "success");
       return;
     }
-    if (status.error) {
-      if (errorToastShown.current === status.error) return;
-      errorToastShown.current = status.error;
-      onToast(status.error, "error");
+    if (statusError) {
+      if (errorToastShown.current === statusError) return;
+      errorToastShown.current = statusError;
+      onToast(statusError, "error");
     }
-  }, [onToast, status, t, taskId]);
+  }, [onToast, statusError, statusState, t, taskId]);
 
   const isPolling = !!(taskId && taskProvider)
-    && !!status
-    && status.status !== "completed"
-    && status.status !== "failed"
-    && !status.error;
+    && !!statusState
+    && statusState !== "completed"
+    && statusState !== "failed"
+    && !statusError;
 
   return (
     <form
@@ -563,34 +588,34 @@ function VideoPanel({
 
       {status && (
         <ResultBlock
-          provider={status.result?.provider ?? taskProvider ?? ""}
-          model={status.result?.model ?? ""}
+          provider={statusResult?.provider ?? taskProvider ?? ""}
+          model={statusResult?.model ?? ""}
         >
           <div className="flex items-center gap-2 mb-3">
             <span className="text-xs font-bold text-text-dim">{t("media.status")}:</span>
-            <StatusBadge status={status.status} />
+            <StatusBadge status={statusState ?? "submitted"} />
           </div>
-          {status.status === "completed" && status.result && (
+          {statusState === "completed" && statusResult && (
             <div className="flex flex-col gap-2">
-              <video controls src={status.result.file_url} className="w-full rounded-xl border border-border-subtle" />
+              <video controls src={statusResult.file_url} className="w-full rounded-xl border border-border-subtle" />
               <div className="text-xs text-text-dim flex flex-wrap gap-3">
-                {status.result.width && status.result.height && (
-                  <span>{status.result.width}×{status.result.height}</span>
+                {statusResult.width && statusResult.height && (
+                  <span>{statusResult.width}×{statusResult.height}</span>
                 )}
-                {status.result.duration_secs != null && <span>{status.result.duration_secs.toFixed(1)}s</span>}
-                <a href={status.result.file_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
+                {statusResult.duration_secs != null && <span>{statusResult.duration_secs.toFixed(1)}s</span>}
+                <a href={statusResult.file_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
                   {t("media.download")}
                 </a>
               </div>
             </div>
           )}
-          {status.status !== "completed" && status.status !== "failed" && !status.error && (
+          {statusState !== "completed" && statusState !== "failed" && !statusError && (
             <div className="flex items-center gap-2 text-xs text-text-dim">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>{t("media.video_polling")}</span>
             </div>
           )}
-          {status.error && <p className="text-xs text-error">{status.error}</p>}
+          {statusError && <p className="text-xs text-error">{statusError}</p>}
         </ResultBlock>
       )}
     </form>
@@ -604,7 +629,7 @@ function MusicPanel({
   onToast,
 }: {
   providers: MediaProvider[];
-  onToast: (msg: string, kind?: "success" | "error") => void;
+  onToast: OnToast;
 }) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
@@ -741,13 +766,14 @@ function ResultBlock({
 }
 
 function StatusBadge({ status }: { status: string }) {
+  const { t } = useTranslation();
   const variant: "success" | "error" | "default" =
     status === "completed"
       ? "success"
       : status === "failed"
         ? "error"
         : "default";
-  return <Badge variant={variant}>{status}</Badge>;
+  return <Badge variant={variant}>{t(`media.status_${status}`, { defaultValue: status })}</Badge>;
 }
 
 function NoProviderHint({ tab }: { tab: MediaTab }) {

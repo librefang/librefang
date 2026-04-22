@@ -5,6 +5,10 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.22] - 2026-04-22
+
+_No notable changes._
+
 ## [2026.4.21] - 2026-04-21
 
 ### Added
