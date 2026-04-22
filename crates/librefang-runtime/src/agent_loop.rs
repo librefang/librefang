@@ -2568,13 +2568,47 @@ pub async fn run_agent_loop(
         None => user_message.to_string(),
     };
 
+    // Prompt injection guard: scan user message for injection attempts before
+    // it reaches the LLM. Threats are logged and a warning prefix is prepended
+    // to the message — the message itself is never silently dropped so users
+    // are not confused by missing replies.
+    let injection_prefix_storage;
+    let (guarded_user_message, guarded_user_content_blocks) =
+        if let Some(warning) = crate::injection_guard::scan_message(user_message) {
+            warn!(
+                event = "injection_guard",
+                threats = ?warning.threat_ids,
+                summary = %warning.summary,
+                agent = %manifest.name,
+                "Prompt injection indicators detected in user message"
+            );
+            let prefix = crate::injection_guard::warning_prefix(&warning);
+            injection_prefix_storage = format!("{prefix}{user_message}");
+            // For multimodal messages prepend the warning as an extra text block.
+            let prefixed_blocks = user_content_blocks.map(|blocks| {
+                let mut out = blocks;
+                out.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: prefix,
+                        provider_metadata: None,
+                    },
+                );
+                out
+            });
+            (injection_prefix_storage.as_str(), prefixed_blocks)
+        } else {
+            injection_prefix_storage = user_message.to_string();
+            (user_message, user_content_blocks)
+        };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     push_filtered_user_message(
         session,
-        user_message,
-        user_content_blocks,
+        guarded_user_message,
+        guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
         sender_prefix.as_deref(),
@@ -3661,13 +3695,47 @@ pub async fn run_agent_loop_streaming(
         None => user_message.to_string(),
     };
 
+    // Prompt injection guard: scan user message for injection attempts before
+    // it reaches the LLM. Threats are logged and a warning prefix is prepended
+    // to the message — the message itself is never silently dropped so users
+    // are not confused by missing replies.
+    let injection_prefix_storage;
+    let (guarded_user_message, guarded_user_content_blocks) =
+        if let Some(warning) = crate::injection_guard::scan_message(user_message) {
+            warn!(
+                event = "injection_guard",
+                threats = ?warning.threat_ids,
+                summary = %warning.summary,
+                agent = %manifest.name,
+                "Prompt injection indicators detected in user message"
+            );
+            let prefix = crate::injection_guard::warning_prefix(&warning);
+            injection_prefix_storage = format!("{prefix}{user_message}");
+            // For multimodal messages prepend the warning as an extra text block.
+            let prefixed_blocks = user_content_blocks.map(|blocks| {
+                let mut out = blocks;
+                out.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: prefix,
+                        provider_metadata: None,
+                    },
+                );
+                out
+            });
+            (injection_prefix_storage.as_str(), prefixed_blocks)
+        } else {
+            injection_prefix_storage = user_message.to_string();
+            (user_message, user_content_blocks)
+        };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     push_filtered_user_message(
         session,
-        user_message,
-        user_content_blocks,
+        guarded_user_message,
+        guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
         sender_prefix.as_deref(),
