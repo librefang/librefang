@@ -55,6 +55,18 @@ const TOOL_TIMEOUT_SECS: u64 = 600;
 /// Raised from 3 to 5 to allow longer-form generation.
 const MAX_CONTINUATIONS: u32 = 5;
 
+/// Maximum number of concurrent LLM calls across all agents.
+///
+/// Each in-flight LLM call holds the full request + response body in RAM.
+/// On a 256 MB deployment with many hand-agents firing simultaneously this
+/// is the dominant memory spike.  Callers queue (`.await`) rather than
+/// fail when the limit is reached; the existing per-call timeout still fires.
+const MAX_CONCURRENT_LLM_CALLS: usize = 5;
+
+/// Process-global semaphore that caps simultaneous LLM HTTP calls.
+static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
+
 /// Maximum message history size before auto-trimming to prevent context overflow.
 /// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
 /// 7-10 real conversation turns instead of the previous 3-5.
@@ -558,6 +570,7 @@ struct ToolExecutionContext<'a> {
     docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     hooks: Option<&'a crate::hooks::HookRegistry>,
     process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     sender_user_id: Option<&'a str>,
     sender_channel: Option<&'a str>,
     checkpoint_manager: Option<&'a Arc<CheckpointManager>>,
@@ -732,9 +745,11 @@ async fn execute_single_tool_call(
             ctx.tts_engine,
             ctx.docker_config,
             ctx.process_manager,
+            ctx.process_registry,
             ctx.sender_user_id,
             ctx.sender_channel,
             ctx.checkpoint_manager,
+            Some(ctx.session.id.to_string()).as_deref(),
         ),
     )
     .await
@@ -2432,6 +2447,7 @@ pub async fn run_agent_loop(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -2552,13 +2568,47 @@ pub async fn run_agent_loop(
         None => user_message.to_string(),
     };
 
+    // Prompt injection guard: scan user message for injection attempts before
+    // it reaches the LLM. Threats are logged and a warning prefix is prepended
+    // to the message — the message itself is never silently dropped so users
+    // are not confused by missing replies.
+    let injection_prefix_storage;
+    let (guarded_user_message, guarded_user_content_blocks) =
+        if let Some(warning) = crate::injection_guard::scan_message(user_message) {
+            warn!(
+                event = "injection_guard",
+                threats = ?warning.threat_ids,
+                summary = %warning.summary,
+                agent = %manifest.name,
+                "Prompt injection indicators detected in user message"
+            );
+            let prefix = crate::injection_guard::warning_prefix(&warning);
+            injection_prefix_storage = format!("{prefix}{user_message}");
+            // For multimodal messages prepend the warning as an extra text block.
+            let prefixed_blocks = user_content_blocks.map(|blocks| {
+                let mut out = blocks;
+                out.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: prefix,
+                        provider_metadata: None,
+                    },
+                );
+                out
+            });
+            (injection_prefix_storage.as_str(), prefixed_blocks)
+        } else {
+            injection_prefix_storage = user_message.to_string();
+            (user_message, user_content_blocks)
+        };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     push_filtered_user_message(
         session,
-        user_message,
-        user_content_blocks,
+        guarded_user_message,
+        guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
         sender_prefix.as_deref(),
@@ -2624,9 +2674,81 @@ pub async fn run_agent_loop(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
+    let mut last_prompt_tokens: usize = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
+
+        // Fire agent:step external hook (fire-and-forget).
+        if let Some(ref k) = kernel {
+            k.fire_agent_step(&agent_id_str, iteration);
+        }
+
+        // Pluggable context engine: threshold-gated compaction. When the
+        // engine signals that the current token count has crossed its
+        // compression threshold, run a compaction pass *before* assemble so
+        // the assembled context is already trimmed.
+        //
+        // `last_prompt_tokens` carries the prompt-token count from the
+        // previous LLM call — never a running sum.  This correctly gates
+        // `should_compress` on each turn's own input cost.  On the first
+        // iteration `last_prompt_tokens` is 0, so compaction can only fire
+        // when the model's context window itself (via `ctx_window`) is
+        // below threshold.  `total_usage` (accumulated across iterations) is
+        // never read here, so it remains a clean snapshot for the kernel
+        // budget tracker and is never mutated by the compaction path.
+        if let Some(engine) = context_engine {
+            if engine.should_compress(last_prompt_tokens, ctx_window) {
+                debug!(
+                    iteration,
+                    last_prompt_tokens, ctx_window, "Context engine requested compaction"
+                );
+                match engine
+                    .compact(
+                        session.agent_id,
+                        &messages,
+                        driver.clone(),
+                        &manifest.model.model,
+                        ctx_window,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        debug!(
+                            kept = result.kept_messages.len(),
+                            "Context engine compaction complete"
+                        );
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
+                    }
+                    Err(e) => {
+                        warn!("Context engine compaction failed (continuing): {e}");
+                    }
+                }
+            }
+        }
 
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
@@ -2714,6 +2836,11 @@ pub async fn run_agent_loop(
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+
+        // Snapshot prompt tokens for the next iteration's should_compress check.
+        // This is the per-turn input cost, NOT a running sum — we deliberately
+        // do NOT accumulate into last_prompt_tokens.
+        last_prompt_tokens = response.usage.input_tokens as usize;
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -2927,6 +3054,7 @@ pub async fn run_agent_loop(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
@@ -3270,6 +3398,14 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Acquire the permit inside the retry loop so it is held only during
+        // the actual HTTP round-trip and released before any backoff sleep.
+        // Holding it across retries would block a slot for the full backoff
+        // duration (up to minutes on rate-limit), starving other agents.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3335,6 +3471,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Same rationale as call_with_retry: acquire inside the loop so
+        // the permit is not held during backoff sleeps between retries.
+        let _permit = LLM_CONCURRENCY
+            .acquire()
+            .await
+            .expect("LLM_CONCURRENCY semaphore closed");
         match driver.stream(request.clone(), tx.clone()).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
@@ -3433,6 +3575,7 @@ pub async fn run_agent_loop_streaming(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     checkpoint_manager: Option<Arc<CheckpointManager>>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     user_content_blocks: Option<Vec<ContentBlock>>,
     proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
@@ -3552,13 +3695,47 @@ pub async fn run_agent_loop_streaming(
         None => user_message.to_string(),
     };
 
+    // Prompt injection guard: scan user message for injection attempts before
+    // it reaches the LLM. Threats are logged and a warning prefix is prepended
+    // to the message — the message itself is never silently dropped so users
+    // are not confused by missing replies.
+    let injection_prefix_storage;
+    let (guarded_user_message, guarded_user_content_blocks) =
+        if let Some(warning) = crate::injection_guard::scan_message(user_message) {
+            warn!(
+                event = "injection_guard",
+                threats = ?warning.threat_ids,
+                summary = %warning.summary,
+                agent = %manifest.name,
+                "Prompt injection indicators detected in user message"
+            );
+            let prefix = crate::injection_guard::warning_prefix(&warning);
+            injection_prefix_storage = format!("{prefix}{user_message}");
+            // For multimodal messages prepend the warning as an extra text block.
+            let prefixed_blocks = user_content_blocks.map(|blocks| {
+                let mut out = blocks;
+                out.insert(
+                    0,
+                    ContentBlock::Text {
+                        text: prefix,
+                        provider_metadata: None,
+                    },
+                );
+                out
+            });
+            (injection_prefix_storage.as_str(), prefixed_blocks)
+        } else {
+            injection_prefix_storage = user_message.to_string();
+            (user_message, user_content_blocks)
+        };
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
     push_filtered_user_message(
         session,
-        user_message,
-        user_content_blocks,
+        guarded_user_message,
+        guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
         sender_prefix.as_deref(),
@@ -3624,9 +3801,69 @@ pub async fn run_agent_loop_streaming(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
+    let mut last_prompt_tokens: usize = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
+
+        // Pluggable context engine: threshold-gated compaction (same as the
+        // non-streaming loop). `last_prompt_tokens` carries only the previous
+        // turn's prompt cost — never the cumulative total.  `total_usage`
+        // (accumulated) is never read or written here.
+        if let Some(engine) = context_engine {
+            if engine.should_compress(last_prompt_tokens, ctx_window) {
+                debug!(
+                    iteration,
+                    last_prompt_tokens,
+                    ctx_window,
+                    "Context engine requested compaction (streaming path)"
+                );
+                match engine
+                    .compact(
+                        session.agent_id,
+                        &messages,
+                        driver.clone(),
+                        &manifest.model.model,
+                        ctx_window,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        debug!(
+                            kept = result.kept_messages.len(),
+                            "Context engine compaction complete (streaming)"
+                        );
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
+                    }
+                    Err(e) => {
+                        warn!("Context engine compaction failed (continuing, streaming): {e}");
+                    }
+                }
+            }
+        }
 
         // Context assembly — use context engine if available, else inline logic
         let recovery = if let Some(engine) = context_engine {
@@ -3778,6 +4015,11 @@ pub async fn run_agent_loop_streaming(
         };
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+
+        // Snapshot prompt tokens for the next iteration's should_compress check.
+        // This is the per-turn input cost, NOT a running sum — we deliberately
+        // do NOT accumulate into last_prompt_tokens.
+        last_prompt_tokens = response.usage.input_tokens as usize;
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -3984,6 +4226,7 @@ pub async fn run_agent_loop_streaming(
                         docker_config,
                         hooks,
                         process_manager,
+                        process_registry,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_channel: sender_channel.as_deref(),
                         checkpoint_manager: checkpoint_manager.as_ref(),
@@ -6346,6 +6589,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6406,6 +6650,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6465,6 +6710,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6518,6 +6764,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6573,6 +6820,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6629,6 +6877,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6691,6 +6940,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None,
             None,
             None,
@@ -6747,6 +6997,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6881,6 +7132,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6934,6 +7186,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -6995,6 +7248,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7778,6 +8032,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7851,6 +8106,7 @@ mod tests {
             None,
             None,
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -7920,6 +8176,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8219,6 +8476,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8277,6 +8535,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8336,6 +8595,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine
@@ -8396,6 +8656,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // checkpoint_manager
+            None, // process_registry
             None, // user_content_blocks
             None, // proactive_memory
             None, // context_engine

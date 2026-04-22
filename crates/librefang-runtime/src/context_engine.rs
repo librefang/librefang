@@ -357,6 +357,22 @@ pub trait ContextEngine: Send + Sync {
     fn per_agent_metrics(&self) -> std::collections::HashMap<String, HookStats> {
         std::collections::HashMap::new()
     }
+
+    /// Return `true` when the context engine believes compaction should run
+    /// before the next LLM call.
+    ///
+    /// `last_prompt_tokens` is the input-token count reported by the previous
+    /// LLM response (0 on the first iteration).  `ctx_window` is the model's
+    /// full context-window size.
+    ///
+    /// The default implementation fires when `last_prompt_tokens` exceeds 70 %
+    /// of `ctx_window`, matching the built-in `CompactionConfig::token_threshold_ratio`
+    /// default.  Override this to implement a custom threshold policy.
+    fn should_compress(&self, last_prompt_tokens: usize, ctx_window: usize) -> bool {
+        const DEFAULT_TOKEN_THRESHOLD_RATIO: f64 = 0.7;
+        let threshold = (ctx_window as f64 * DEFAULT_TOKEN_THRESHOLD_RATIO) as usize;
+        last_prompt_tokens > threshold
+    }
 }
 
 // ---------------------------------------------------------------------------
