@@ -33,7 +33,6 @@ import {
   usePatchAgentConfig,
   useResolveApproval,
   useStopAgent,
-  useSwitchAgentSession,
 } from "../lib/mutations/agents";
 import "katex/dist/katex.min.css";
 
@@ -1762,7 +1761,9 @@ export function ChatPage() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
-  const switchSessionMutation = useSwitchAgentSession();
+  // NOTE: switch_agent_session is no longer called from ChatPage — see issue
+  // #2959. Sessions are URL-driven per tab; other callers (CLI, cron) still
+  // use the endpoint for registry-canonical switching.
   const deleteSessionMutation = useDeleteAgentSession();
   const patchAgentConfigMutation = usePatchAgentConfig();
 
@@ -1878,12 +1879,17 @@ export function ChatPage() {
   );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
+  // URL-driven session selection (issue #2959). When a `sessionId` query
+  // param is present, it wins over the server's canonical active session so
+  // two browser tabs on the same agent can hold independent sessions.
+  const urlSessionId = search?.sessionId || null;
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
     () => void agentsQuery.refetch(),
     (message) => addToast(message, "error"),
+    urlSessionId,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -1934,29 +1940,51 @@ export function ChatPage() {
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
-  // Per-agent session list
+  // Per-agent session list. `activeSessionId` is derived from the URL first
+  // (multi-tab safety, issue #2959); if absent, fall back to the server's
+  // canonical active session so initial navigation still highlights correctly.
   const sessionsQuery = useAgentSessions(selectedAgentId);
-  const activeSessionId = useMemo(() => {
+  const serverActiveSessionId = useMemo(() => {
     const active = sessionsQuery.data?.find((s: SessionListItem) => s.active);
     return active?.session_id;
   }, [sessionsQuery.data]);
+  const activeSessionId = urlSessionId ?? serverActiveSessionId;
 
+  // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
+  // URL carries its own sessionId, and the send path forwards it per-request.
   const handleSwitchSession = useCallback(async (sessionId: string) => {
     if (!selectedAgentId) return;
-    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId });
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId },
+      replace: false,
+    });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, switchSessionMutation]);
+  }, [selectedAgentId, navigate]);
 
   const handleNewSession = useCallback(async () => {
     if (!selectedAgentId) return;
     const result = await createSessionMutation.mutateAsync({ agentId: selectedAgentId });
-    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId: result.session_id });
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId: result.session_id },
+      replace: false,
+    });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, createSessionMutation, switchSessionMutation]);
+  }, [selectedAgentId, createSessionMutation, navigate]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     await deleteSessionMutation.mutateAsync({ sessionId, agentId: selectedAgentId });
-  }, [deleteSessionMutation, selectedAgentId]);
+    // If the deleted session is the one pinned in the URL, drop the param
+    // so the next render falls back to server-active (if any).
+    if (urlSessionId && urlSessionId === sessionId) {
+      navigate({
+        to: "/chat",
+        search: { agentId: selectedAgentId },
+        replace: true,
+      });
+    }
+  }, [deleteSessionMutation, selectedAgentId, urlSessionId, navigate]);
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select
