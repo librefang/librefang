@@ -457,6 +457,14 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
 /// skill descriptions are inlined. Matches Hermes-Agent's design.
 pub const SKILL_INLINE_THRESHOLD: usize = 10;
 
+/// Maximum number of skill names listed in summary mode.
+///
+/// At `SKILL_NAME_DISPLAY_CAP` (80) chars per name plus a 2-char separator,
+/// 200 names ≈ 16 400 chars — well within a typical context window budget.
+/// Names beyond this cap are silently omitted; the agent is told the total
+/// count so it knows there are more skills it can discover via `skill_list`.
+pub const SKILL_SUMMARY_NAME_CAP: usize = 200;
+
 /// Build the skills index block for inclusion in a system prompt.
 ///
 /// Implements progressive disclosure:
@@ -466,6 +474,9 @@ pub const SKILL_INLINE_THRESHOLD: usize = 10;
 ///   the agent is told to call `skill_read_file` to load each skill before
 ///   applying it. This prevents the system prompt from bloating when many
 ///   skills are installed.
+///
+/// In summary mode the name list is capped at `SKILL_SUMMARY_NAME_CAP` entries
+/// to bound context consumption regardless of how many skills are installed.
 ///
 /// `skill_summary` is the pre-built summary string from the kernel (either
 /// full descriptions or the plain name list — the caller always passes the
@@ -497,7 +508,7 @@ pub fn build_skill_section(
         // preserved intact.  The format emitted by `build_skill_summary_from_skills`
         // always separates name from description with `: `, so this delimiter
         // is unambiguous for names that don't themselves contain ": ".
-        let names: Vec<&str> = skill_summary
+        let all_names: Vec<&str> = skill_summary
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
@@ -519,8 +530,23 @@ pub fn build_skill_section(
             .filter(|n| !n.is_empty())
             .collect();
 
+        // Cap the number of names emitted to bound context consumption.
+        // With SKILL_NAME_DISPLAY_CAP (80) chars per name and a 2-char
+        // separator, SKILL_SUMMARY_NAME_CAP names ≈ 16 KB — well within
+        // a normal context window budget.  When truncated, append a count
+        // hint so the agent knows more skills exist.
+        let truncated = all_names.len() > SKILL_SUMMARY_NAME_CAP;
+        let names = &all_names[..all_names.len().min(SKILL_SUMMARY_NAME_CAP)];
+
         out.push_str("Available skills: ");
         out.push_str(&names.join(", "));
+        if truncated {
+            out.push_str(&format!(
+                " … ({} more — use `skill_list` to browse all {})",
+                all_names.len().saturating_sub(SKILL_SUMMARY_NAME_CAP),
+                all_names.len(),
+            ));
+        }
         out.push('\n');
         out.push_str("Use `skill_read_file` to load a skill by name before applying it. ");
         out.push_str("Load any skill that seems relevant before proceeding.\n");
@@ -1320,6 +1346,40 @@ mod tests {
         assert!(
             !result.contains("fetches URLs"),
             "Description should be omitted in summary mode, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_caps_name_list() {
+        // When skill_count > SKILL_SUMMARY_NAME_CAP the emitted name list must
+        // be bounded to prevent flooding the context window.
+        let count = SKILL_SUMMARY_NAME_CAP + 5;
+        let mut summary = String::new();
+        for i in 1..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        // The first capped name must appear
+        assert!(result.contains("skill-1"), "first name missing: {result}");
+        // Name at the cap boundary must appear
+        assert!(
+            result.contains(&format!("skill-{SKILL_SUMMARY_NAME_CAP}")),
+            "name at cap boundary missing: {result}"
+        );
+        // Names beyond the cap must not appear
+        assert!(
+            !result.contains(&format!("skill-{}", SKILL_SUMMARY_NAME_CAP + 1)),
+            "name past cap should be omitted: {result}"
+        );
+        // A truncation hint indicating the overflow count must be present
+        assert!(
+            result.contains("5 more"),
+            "truncation hint missing: {result}"
+        );
+        // The hint must also reference skill_list for browsing
+        assert!(
+            result.contains("skill_list"),
+            "skill_list hint missing: {result}"
         );
     }
 
