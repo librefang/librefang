@@ -1177,7 +1177,15 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "schedule_failed": "创建计划失败"
+    "schedule_failed": "创建计划失败",
+    "skip": "跳过",
+    "agent_not_found": "未找到 Agent",
+    "resolved_prompt": "解析后的提示词：",
+    "step_details": "步骤详情",
+    "run_history": "运行历史",
+    "prompt_sent": "发送的提示词：",
+    "output": "输出：",
+    "loading_details": "正在加载详情…"
   },
   "scheduler": {
     "title": "调度器",
@@ -2004,7 +2012,9 @@
     },
     "loadError": "加载审批列表失败，请检查网络连接。",
     "batch_disabled_totp": "TOTP 强制启用时不可批量审批",
-    "goToAgent": "跳转到 Agent"
+    "goToAgent": "跳转到 Agent",
+    "totpPlaceholder": "000000 / 0000-0000",
+    "totpLabel": "TOTP"
   },
   "wizard": {
     "welcome": "欢迎使用 LibreFang",

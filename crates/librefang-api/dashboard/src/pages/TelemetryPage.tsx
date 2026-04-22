@@ -77,6 +77,8 @@ function parseMetrics(text: string): ParsedMetrics {
   let version = "";
 
   for (const line of lines) {
+    if (line.startsWith("#")) continue;
+
     const spaceIdx = line.indexOf(" ");
     if (spaceIdx > 0) {
       const namePart = line.slice(0, spaceIdx);
@@ -151,7 +153,12 @@ function parseMetrics(text: string): ParsedMetrics {
     version,
   };
 
-  return { requests, agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")), system };
+  return {
+    requests,
+    // Skip rollup rows emitted for namespace-like aggregate metrics.
+    agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")),
+    system,
+  };
 }
 
 // ── Component ────────────────────────────────────────────────────────

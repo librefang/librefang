@@ -1178,7 +1178,15 @@
     "run_failed": "Run failed",
     "run_started": "Run started",
     "runs_label": "runs",
-    "schedule_failed": "Schedule creation failed"
+    "schedule_failed": "Schedule creation failed",
+    "skip": "skip",
+    "agent_not_found": "Agent not found",
+    "resolved_prompt": "Resolved prompt:",
+    "step_details": "Step details",
+    "run_history": "Run History",
+    "prompt_sent": "Prompt sent:",
+    "output": "Output:",
+    "loading_details": "Loading details…"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -2034,7 +2042,9 @@
     },
     "loadError": "Failed to load approvals. Check your connection.",
     "batch_disabled_totp": "Batch approve disabled when TOTP is enforced",
-    "goToAgent": "Go to Agent"
+    "goToAgent": "Go to Agent",
+    "totpPlaceholder": "000000 / 0000-0000",
+    "totpLabel": "TOTP"
   },
   "wizard": {
     "welcome": "Welcome to LibreFang",
