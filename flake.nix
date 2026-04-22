@@ -25,7 +25,7 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Common build inputs needed by native dependencies
+        # Common build inputs needed by every workspace crate.
         nativeBuildInputs = with pkgs; [
           pkg-config
           rustToolchain
@@ -38,6 +38,22 @@
           pkgs.libiconv
         ];
 
+        # `librefang-desktop` pulls in Tauri / wry, which require the GTK
+        # webview stack at link time. Split these out so the CLI build (the
+        # common case) doesn't pay for the heavy native graphics deps just to
+        # produce a server binary — this is what breaks `nix build
+        # .#librefang-cli` on stock NixOS today (#2937).
+        desktopBuildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+          glib
+          gtk3
+          libsoup_3
+          webkitgtk_4_1
+          atkmm
+          cairo
+          gdk-pixbuf
+          pango
+        ]);
+
         # Filter source to only include Rust-relevant files
         src = craneLib.cleanCargoSource ./.;
 
@@ -47,23 +63,51 @@
           strictDeps = true;
         };
 
-        # Build workspace dependencies first (for caching)
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-
-        # Build the full workspace
-        librefang = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-          # The default package is the CLI binary
+        # CLI build scope — do NOT compile the desktop crate's native
+        # dependencies just to produce the CLI binary. Scoping the
+        # deps-only build to `--package librefang-cli` keeps
+        # `nix build .#librefang-cli` green on machines that don't have
+        # the GTK / webview stack installed.
+        cliArgs = commonArgs // {
+          pname = "librefang-cli";
           cargoExtraArgs = "--package librefang-cli";
-          doCheck = false; # Tests require network/runtime setup
+        };
+
+        cliCargoArtifacts = craneLib.buildDepsOnly cliArgs;
+
+        librefang-cli = craneLib.buildPackage (cliArgs // {
+          cargoArtifacts = cliCargoArtifacts;
+          doCheck = false; # Tests require network/runtime setup.
         });
+
+        # Desktop build scope — adds the GTK / webview deps on Linux.
+        desktopArgs = commonArgs // {
+          pname = "librefang-desktop";
+          cargoExtraArgs = "--package librefang-desktop";
+          buildInputs = buildInputs ++ desktopBuildInputs;
+        };
+
+        desktopCargoArtifacts = craneLib.buildDepsOnly desktopArgs;
+
+        librefang-desktop = craneLib.buildPackage (desktopArgs // {
+          cargoArtifacts = desktopCargoArtifacts;
+          doCheck = false;
+        });
+
+        # Full-workspace args for checks (clippy runs across the whole tree
+        # including librefang-desktop, so it needs the GTK inputs too).
+        workspaceArgs = commonArgs // {
+          buildInputs = buildInputs ++ desktopBuildInputs;
+        };
+
+        workspaceCargoArtifacts = craneLib.buildDepsOnly workspaceArgs;
       in
       {
         checks = {
-          inherit librefang;
+          inherit librefang-cli;
 
-          librefang-clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
+          librefang-clippy = craneLib.cargoClippy (workspaceArgs // {
+            cargoArtifacts = workspaceCargoArtifacts;
             cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
           });
 
@@ -74,12 +118,12 @@
         };
 
         packages = {
-          default = librefang;
-          librefang-cli = librefang;
+          default = librefang-cli;
+          inherit librefang-cli librefang-desktop;
         };
 
         apps.default = flake-utils.lib.mkApp {
-          drv = librefang;
+          drv = librefang-cli;
         };
 
         devShells.default = craneLib.devShell {
@@ -97,9 +141,9 @@
             git
             nodejs
             python3
-          ];
+          ] ++ desktopBuildInputs;
 
-          inputsFrom = [ librefang ];
+          inputsFrom = [ librefang-cli ];
 
           shellHook = ''
             echo "LibreFang development environment loaded"
