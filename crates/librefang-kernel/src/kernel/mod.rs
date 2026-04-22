@@ -112,6 +112,9 @@ struct CachedSkillMetadata {
     /// Total number of enabled skills represented in this summary.
     /// Used by the prompt builder for progressive disclosure (inline vs summary mode).
     skill_count: usize,
+    /// Pre-formatted skill config variable section for the system prompt.
+    /// Empty when no skills declare config variables or none have resolvable values.
+    skill_config_section: String,
     created_at: std::time::Instant,
 }
 
@@ -3654,6 +3657,7 @@ system_prompt = "You are a helpful assistant."
                 skill_summary: String::new(),
                 skill_count: 0,
                 skill_prompt_context: String::new(),
+                skill_config_section: String::new(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -4655,6 +4659,10 @@ system_prompt = "You are a helpful assistant."
                 skill_prompt_context: skill_meta
                     .as_ref()
                     .map(|s| s.skill_prompt_context.clone())
+                    .unwrap_or_default(),
+                skill_config_section: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_config_section.clone())
                     .unwrap_or_default(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
@@ -5981,6 +5989,10 @@ system_prompt = "You are a helpful assistant."
                 skill_prompt_context: skill_meta
                     .as_ref()
                     .map(|s| s.skill_prompt_context.clone())
+                    .unwrap_or_default(),
+                skill_config_section: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_config_section.clone())
                     .unwrap_or_default(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
@@ -11917,10 +11929,27 @@ system_prompt = "You are a helpful assistant."
 
         let skills = self.sorted_enabled_skills(skill_allowlist);
         let skill_count = skills.len();
+        let skill_config_section = {
+            let config_path = self.home_dir_boot.join("config.toml");
+            let config_toml: toml::Value = if config_path.exists() {
+                std::fs::read_to_string(&config_path)
+                    .ok()
+                    .and_then(|s| toml::from_str(&s).ok())
+                    .unwrap_or(toml::Value::Table(toml::map::Map::new()))
+            } else {
+                toml::Value::Table(toml::map::Map::new())
+            };
+            let declared = librefang_skills::config_injection::collect_config_vars(&skills);
+            let resolved =
+                librefang_skills::config_injection::resolve_config_vars(&declared, &config_toml);
+            librefang_skills::config_injection::format_config_section(&resolved)
+        };
+
         let metadata = CachedSkillMetadata {
             skill_summary: self.build_skill_summary_from_skills(&skills),
             skill_prompt_context: self.collect_prompt_context(skill_allowlist),
             skill_count,
+            skill_config_section,
             created_at: std::time::Instant::now(),
         };
 
