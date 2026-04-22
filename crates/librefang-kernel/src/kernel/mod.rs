@@ -23,7 +23,6 @@ use librefang_runtime::agent_loop::{
 };
 use librefang_runtime::audit::AuditLog;
 use librefang_runtime::drivers;
-use librefang_runtime::interrupt::SessionInterrupt;
 use librefang_runtime::kernel_handle::{self, KernelHandle};
 use librefang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
@@ -14592,6 +14591,10 @@ impl LibreFangKernel {
             // available.  We set None here; if a session interrupt is needed for
             // deferred tools in the future, wire it through DeferredToolExecution.
             interrupt: None,
+            // Deferred executions have already passed the approval gate, and the
+            // originating session's checker is no longer live — skip the
+            // session-scoped dangerous-command check here.
+            dangerous_command_checker: None,
         }
     }
 

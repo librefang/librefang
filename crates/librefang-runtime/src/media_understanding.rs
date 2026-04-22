@@ -725,11 +725,15 @@ mod tests {
             eprintln!("ffmpeg not on PATH — skipping");
             return;
         }
-        // With zero bytes ffmpeg produces no output on stdout and we reject it.
+        // Zero-byte input must be rejected, but ffmpeg's failure mode varies
+        // across versions/platforms: newer builds exit non-zero before writing
+        // any stdout ("ffmpeg exited ..."), older ones exit 0 with an empty
+        // stream ("empty output"). Either is an acceptable rejection here —
+        // what matters is that we don't accept the zero-byte input.
         let err = transcode_oga_to_ogg_opus(&[]).await.unwrap_err();
         assert!(
-            err.contains("empty output"),
-            "expected empty-output rejection, got: {err}"
+            err.contains("empty output") || err.contains("ffmpeg exited"),
+            "expected ffmpeg to reject zero-byte input, got: {err}"
         );
     }
 
