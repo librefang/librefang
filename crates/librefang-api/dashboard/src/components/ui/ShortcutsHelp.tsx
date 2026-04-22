@@ -20,7 +20,7 @@ const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef);
+  useFocusTrap(isOpen, dialogRef, { setAriaModal: true });
 
   useEffect(() => {
     if (!isOpen) return;

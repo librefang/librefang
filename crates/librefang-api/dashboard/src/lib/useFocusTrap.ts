@@ -14,9 +14,12 @@ const FOCUSABLE_SELECTOR = [
 /// close, and autofocuses the first focusable element inside the
 /// container on open.
 ///
+/// Use `setAriaModal` for actual dialog/modal surfaces so the hook can stay
+/// generic for other focus-contained UIs.
+///
 /// Usage:
 ///   const ref = useRef<HTMLDivElement>(null);
-///   useFocusTrap(isOpen, ref);
+///   useFocusTrap(isOpen, ref, { setAriaModal: true });
 ///   return <div ref={ref}>...</div>;
 ///
 /// Keyboard a11y: ensures users navigating by keyboard can't Tab out of
@@ -25,6 +28,7 @@ const FOCUSABLE_SELECTOR = [
 export function useFocusTrap(
   isOpen: boolean,
   containerRef: React.RefObject<HTMLElement | null>,
+  options?: { setAriaModal?: boolean },
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
@@ -48,8 +52,10 @@ export function useFocusTrap(
       } else if (container.tabIndex >= -1) {
         container.focus();
       }
-      container.setAttribute("aria-modal", "true");
-      container.setAttribute("role", "dialog");
+      if (options?.setAriaModal) {
+        container.setAttribute("aria-modal", "true");
+        container.setAttribute("role", "dialog");
+      }
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -76,7 +82,7 @@ export function useFocusTrap(
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
-      if (container) {
+      if (container && options?.setAriaModal) {
         container.removeAttribute("aria-modal");
         container.removeAttribute("role");
       }
@@ -89,5 +95,5 @@ export function useFocusTrap(
       }
       previouslyFocused.current = null;
     };
-  }, [isOpen, containerRef]);
+  }, [isOpen, containerRef, options?.setAriaModal]);
 }

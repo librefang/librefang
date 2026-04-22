@@ -20,17 +20,15 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 export function formatTriggerPattern(pattern: unknown): string | undefined {
   if (pattern == null) return undefined;
   if (typeof pattern === "string") return pattern;
-  if (typeof pattern !== "object") return undefined;
   if (!isRecord(pattern)) return undefined;
 
   const entries = Object.entries(pattern);
   if (entries.length === 0) return undefined;
   const [variant, payload] = entries[0];
 
-  if (payload == null || typeof payload !== "object") {
+  if (!isRecord(payload)) {
     return variant;
   }
-  if (!isRecord(payload)) return variant;
 
   const values: string[] = [];
   for (const v of Object.values(payload)) {
