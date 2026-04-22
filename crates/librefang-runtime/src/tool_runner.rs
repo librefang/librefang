@@ -331,6 +331,10 @@ pub struct ToolExecContext<'a> {
     /// `None` means no interrupt support was wired up for this call site (legacy
     /// paths) — tools must treat `None` the same as "not cancelled".
     pub interrupt: Option<crate::interrupt::SessionInterrupt>,
+    /// Session-scoped dangerous command checker. When `Some`, the session allowlist
+    /// is preserved across tool calls so previously-approved patterns are not re-blocked.
+    pub dangerous_command_checker:
+        Option<&'a Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -368,6 +372,7 @@ pub async fn execute_tool_raw(
         channel: _,
         checkpoint_manager,
         interrupt,
+        dangerous_command_checker,
     } = ctx;
 
     let result = match tool_name {
@@ -515,6 +520,45 @@ pub async fn execute_tool_raw(
                     };
                 }
             }
+
+            // Dangerous command detection gate.
+            //
+            // Runs in Manual mode for all exec policies (including Full) because
+            // even explicitly-trusted agents should not silently execute commands
+            // like `rm -rf /` or fork bombs.
+            //
+            // In Manual mode a Dangerous result causes an immediate block with a
+            // descriptive error. The agent can route approval via the existing
+            // `submit_tool_approval` path by catching the error message and
+            // re-submitting after the user has explicitly allowed the pattern.
+            {
+                use crate::dangerous_command::{
+                    ApprovalMode, CheckResult, DangerousCommandChecker,
+                };
+                let check_result = if let Some(checker_arc) = dangerous_command_checker {
+                    checker_arc.read().await.check(command)
+                } else {
+                    DangerousCommandChecker::new(ApprovalMode::Manual).check(command)
+                };
+                if let CheckResult::Dangerous { description } = check_result {
+                    warn!(
+                        command = crate::str_utils::safe_truncate_str(command, 120),
+                        description, "Dangerous command detected — blocking execution"
+                    );
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "shell_exec blocked: dangerous command detected ({description}). \
+                             The command matches a known-dangerous pattern and has been blocked \
+                             for safety. If you need to run this command, request explicit user \
+                             approval first."
+                        ),
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
+
             let effective_allowed_env_vars = allowed_env_vars.or_else(|| {
                 exec_policy.and_then(|policy| {
                     if policy.allowed_env_vars.is_empty() {
@@ -896,6 +940,10 @@ pub async fn execute_tool(
     channel: Option<&str>,
     checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
     interrupt: Option<crate::interrupt::SessionInterrupt>,
+    session_id: Option<&str>,
+    dangerous_command_checker: Option<
+        &Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
+    >,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1042,6 +1090,7 @@ pub async fn execute_tool(
         channel,
         checkpoint_manager,
         interrupt,
+        dangerous_command_checker,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
@@ -5908,6 +5957,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -5945,6 +5995,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -5979,6 +6030,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6013,6 +6065,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6046,6 +6099,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -6079,6 +6133,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6112,6 +6167,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6146,6 +6202,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6181,6 +6238,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -6242,6 +6300,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -6281,6 +6340,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6327,6 +6387,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
 
@@ -6374,6 +6435,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
 
@@ -6432,6 +6494,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
 
@@ -6626,6 +6689,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6682,6 +6746,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -6897,6 +6962,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -6938,6 +7004,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -6979,6 +7046,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -7029,6 +7097,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -7083,6 +7152,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -7180,6 +7250,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -7220,6 +7291,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -7269,6 +7341,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         // Should NOT be a permission-denied error
@@ -7308,6 +7381,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(result.is_error);
@@ -7347,6 +7421,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -7385,6 +7460,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         assert!(
@@ -7423,6 +7499,7 @@ mod tests {
             None, // channel
             None, // checkpoint_manager
             None, // session_id
+            None, // dangerous_command_checker
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"

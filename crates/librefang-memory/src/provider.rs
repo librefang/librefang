@@ -57,6 +57,13 @@ pub enum MemoryError {
         /// Human-readable description of the failure.
         reason: String,
     },
+
+    /// Attempted to register a builtin provider via [`register_external`].
+    #[error("Builtin provider '{name}' may not be registered via register_external")]
+    CannotRegisterBuiltin {
+        /// Name of the builtin provider that was rejected.
+        name: String,
+    },
 }
 
 impl MemoryError {
@@ -160,15 +167,15 @@ impl MemoryManager {
 
     /// Register an external (non-builtin) provider.
     ///
-    /// Returns `Err` if an external provider is already registered.
+    /// Returns `Err` if an external provider is already registered, or if the
+    /// passed provider has `is_builtin() == true`.
     ///
     /// This method takes `&self` so it can be called through `Arc<MemoryManager>`.
     pub fn register_external(&self, provider: Arc<dyn MemoryProvider>) -> Result<(), MemoryError> {
         if provider.is_builtin() {
-            return Err(MemoryError::provider(
-                provider.name(),
-                "builtin providers cannot be registered as external",
-            ));
+            return Err(MemoryError::CannotRegisterBuiltin {
+                name: provider.name().to_owned(),
+            });
         }
         let mut slot = self
             .external
@@ -374,9 +381,8 @@ mod tests {
         let builtin_as_external = Arc::new(NullMemoryProvider::new("builtin-2", true));
         let err = mgr.register_external(builtin_as_external).unwrap_err();
         match err {
-            MemoryError::ProviderError { provider, reason } => {
-                assert_eq!(provider, "builtin-2");
-                assert!(reason.contains("builtin providers cannot be registered as external"));
+            MemoryError::CannotRegisterBuiltin { name } => {
+                assert_eq!(name, "builtin-2");
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -391,6 +397,21 @@ mod tests {
             MemoryError::ExternalProviderAlreadyRegistered { existing, rejected } => {
                 assert_eq!(existing, "ext1");
                 assert_eq!(rejected, "ext2");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn register_builtin_via_external_is_rejected() {
+        let mgr = MemoryManager::new(null_builtin());
+        // A provider with is_builtin() == true must be rejected
+        let builtin_provider = null_builtin();
+        assert!(builtin_provider.is_builtin());
+        let err = mgr.register_external(builtin_provider).unwrap_err();
+        match err {
+            MemoryError::CannotRegisterBuiltin { name } => {
+                assert_eq!(name, "builtin");
             }
             other => panic!("unexpected error: {other}"),
         }
