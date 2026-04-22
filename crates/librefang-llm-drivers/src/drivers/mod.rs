@@ -12,6 +12,7 @@ pub mod claude_code;
 pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
+pub mod fallback_chain;
 pub mod gemini;
 pub mod gemini_cli;
 pub mod openai;

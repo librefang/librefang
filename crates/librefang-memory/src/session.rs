@@ -162,13 +162,29 @@ impl SessionStore {
         }
     }
 
+    /// Maximum number of messages persisted per session.  Older messages beyond
+    /// this limit are trimmed before the blob is written to SQLite.  The
+    /// in-memory limit (agent_loop::MAX_HISTORY_MESSAGES = 40) is much lower,
+    /// so this cap only affects sessions that were built up over many turns
+    /// that were individually trimmed in memory but accumulated on disk.
+    const MAX_PERSISTED_MESSAGES: usize = 200;
+
     /// Save a session to the database and update the FTS5 index.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let messages_blob = rmp_serde::to_vec_named(&session.messages)
+        // Trim the tail of the message history before serialising so the
+        // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
+        // *most recent* messages (slice from the end) so context is preserved.
+        let messages_to_persist: &[Message] =
+            if session.messages.len() > Self::MAX_PERSISTED_MESSAGES {
+                &session.messages[session.messages.len() - Self::MAX_PERSISTED_MESSAGES..]
+            } else {
+                &session.messages
+            };
+        let messages_blob = rmp_serde::to_vec_named(messages_to_persist)
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -186,8 +202,8 @@ impl SessionStore {
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-        // Update FTS5 index — extract text from all messages.
-        let content = Self::extract_text_content(&session.messages);
+        // Update FTS5 index — extract text from persisted messages only.
+        let content = Self::extract_text_content(messages_to_persist);
         let session_id_str = session.id.0.to_string();
         let agent_id_str = session.agent_id.0.to_string();
 

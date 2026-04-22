@@ -209,6 +209,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         channel: None,
         route_to: vec![explicit_target],
         escalation_count: 1,
+        session_id: None,
     };
 
     kernel.notify_escalated_approval(&req, req.id).await;
@@ -284,6 +285,7 @@ fn test_send_to_agent_by_name_resolution() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(entry).unwrap();
 
@@ -323,6 +325,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e1).unwrap();
 
@@ -348,6 +351,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e2).unwrap();
 

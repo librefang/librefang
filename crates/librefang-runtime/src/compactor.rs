@@ -11,13 +11,14 @@
 //! 3. Minimal fallback without LLM (when summarization is unavailable)
 
 use crate::llm_driver::{CompletionRequest, LlmDriver};
+use crate::session_repair::{message_has_tool_use, message_is_only_tool_results};
 use crate::str_utils::safe_truncate_str;
 use librefang_memory::session::Session;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use librefang_types::tool::ToolDefinition;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Configuration for session compaction.
 #[derive(Debug, Clone)]
@@ -418,6 +419,151 @@ fn is_oversized(message: &Message, config: &CompactionConfig) -> bool {
     message.content.text_length() > config.max_chunk_chars / 2
 }
 
+/// Find the last consecutive message index (from the head) that ends with an
+/// unresolved ToolUse -- i.e., an assistant message that has a ToolUse block
+/// but is NOT followed by a matching ToolResult user message.
+///
+/// Returns the index in `[0, messages.len())`, or `None` if no unresolved pair
+/// spans the head/middle boundary.
+fn find_head_unresolved_tool_use(messages: &[Message]) -> Option<(usize, String)> {
+    let len = messages.len();
+    // Must have at least 2 messages for a ToolUse/ToolResult pair to exist
+    if len < 2 {
+        return None;
+    }
+
+    // Look at the last message of the "to_compact" head and the first message
+    // of the "kept" tail.  If the tail starts with a ToolResult whose id matches
+    // a ToolUse at the end of the head, the pair spans the boundary.
+    let head_last = &messages[len - 1];
+    let tail_first = &messages[len - 1]; // same message -- we're inspecting the split
+
+    // Only assistant messages can contain unresolved ToolUse
+    let assistant_with_tool_use =
+        if head_last.role == Role::Assistant && message_has_tool_use(head_last) {
+            head_last
+        } else {
+            return None;
+        };
+
+    // Extract the first trailing ToolUse id from the assistant message
+    let tool_use_id = extract_first_tool_use_id(assistant_with_tool_use)?;
+
+    Some((len - 1, tool_use_id))
+}
+
+/// Extract the first `tool_use_id` from a message's ToolUse blocks.
+fn extract_first_tool_use_id(msg: &Message) -> Option<String> {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .next(),
+        _ => None,
+    }
+}
+
+/// Check if a message is a tool-result delivery: it is a User message
+/// containing only ToolResult blocks.
+fn is_tool_result_delivery(msg: &Message) -> bool {
+    msg.role == Role::User && message_is_only_tool_results(msg)
+}
+
+/// Scan the tail messages and look for a ToolResult whose `tool_use_id`
+/// matches the given `tool_use_id`.  Returns `true` if one is found.
+fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: &str) -> bool {
+    messages[from_idx..].iter().any(|msg| {
+        if !is_tool_result_delivery(msg) {
+            return false;
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            blocks.iter().any(|b| {
+                if let ContentBlock::ToolResult {
+                    tool_use_id: id, ..
+                } = b
+                {
+                    id == tool_use_id
+                } else {
+                    false
+                }
+            })
+        } else {
+            false
+        }
+    })
+}
+
+/// Adjust the head/tail split point to avoid splitting a ToolUse/ToolResult
+/// pair that spans the boundary.
+///
+/// If the head ends with an assistant ToolUse and the tail begins with the
+/// matching ToolResult delivery, the pair would be incorrectly separated by
+/// summarization.  We detect this and shift the split so the ToolResult
+/// delivery is included in the head instead.
+///
+/// Returns the adjusted split index (or the original `split_at` if no
+/// adjustment is needed).
+fn adjust_split_for_tool_pair(messages: &[Message], split_at: usize, keep_recent: usize) -> usize {
+    if split_at == 0 {
+        return split_at;
+    }
+
+    // The head is [0, split_at), the tail is [split_at, len)
+    let head_end_idx = split_at - 1;
+    let head_end = &messages[head_end_idx];
+
+    // Only consider the case where the head ends with an unresolved ToolUse
+    if head_end.role != Role::Assistant || !message_has_tool_use(head_end) {
+        return split_at;
+    }
+
+    let Some(tool_use_id) = extract_first_tool_use_id(head_end) else {
+        return split_at;
+    };
+
+    // Check if any message in the tail (within the kept region) is a matching
+    // ToolResult delivery
+    if !tail_has_matching_result(messages, split_at, &tool_use_id) {
+        return split_at;
+    }
+
+    // The tail starts with the matching ToolResult -- shift split_at to include
+    // that result delivery message in the head so the pair stays together.
+    // Walk forward from split_at to find the ToolResult delivery.
+    for i in split_at..(split_at + keep_recent) {
+        if i >= messages.len() {
+            break;
+        }
+        if is_tool_result_delivery(&messages[i]) {
+            if let MessageContent::Blocks(blocks) = &messages[i].content {
+                let has_match = blocks.iter().any(|b| {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id: id, ..
+                    } = b
+                    {
+                        id == &tool_use_id
+                    } else {
+                        false
+                    }
+                });
+                if has_match {
+                    debug!(
+                        split_at,
+                        new_split = i + 1,
+                        "Head boundary would split ToolUse/ToolResult pair -- extending head"
+                    );
+                    return i + 1;
+                }
+            }
+        }
+    }
+
+    split_at
+}
+
 /// Build conversation text from a slice of messages (block-aware).
 ///
 /// Handles all content block types: text, tool use, tool result, image, unknown.
@@ -746,6 +892,13 @@ pub async fn compact_session(
     }
 
     let split_at = msg_count.saturating_sub(config.keep_recent);
+
+    // P1 fix: guard the head boundary against splitting a ToolUse/ToolResult pair.
+    // If the head ends with an unresolved ToolUse and the tail starts with the
+    // matching ToolResult delivery, extend the head to include that result so the
+    // pair is not separated by summarization.
+    let split_at = adjust_split_for_tool_pair(&session.messages, split_at, config.keep_recent);
+
     let to_compact = &session.messages[..split_at];
     let kept = &session.messages[split_at..];
 

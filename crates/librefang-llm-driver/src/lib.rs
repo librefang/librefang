@@ -62,6 +62,151 @@ pub enum LlmError {
     },
 }
 
+impl LlmError {
+    /// Classify this error into a [`crate::llm_errors::FailoverReason`] that
+    /// drives provider-switching decisions in `FallbackChain`.
+    ///
+    /// Classification is purely structural (variant + embedded status/message)
+    /// and therefore allocation-free and infallible.
+    pub fn failover_reason(&self) -> crate::llm_errors::FailoverReason {
+        use crate::llm_errors::FailoverReason;
+        match self {
+            // Rate-limited: retry the same provider after a backoff.
+            LlmError::RateLimited { retry_after_ms, .. } => {
+                FailoverReason::RateLimit(if *retry_after_ms > 0 {
+                    Some(*retry_after_ms)
+                } else {
+                    None
+                })
+            }
+
+            // HTTP-level API error: inspect status + message.
+            LlmError::Api { status, message } => {
+                let msg = message.to_lowercase();
+                match status {
+                    429 => FailoverReason::RateLimit(None),
+                    // 401 Unauthorized is always an auth failure.
+                    401 => FailoverReason::AuthError,
+                    // 402 Payment Required is always a billing/credit issue.
+                    402 => FailoverReason::CreditExhausted,
+                    // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
+                    // others use it for billing blocks.  Check rate-limit keywords first.
+                    403 => {
+                        if msg.contains("rate limit")
+                            || msg.contains("rate_limit")
+                            || msg.contains("too many requests")
+                        {
+                            FailoverReason::RateLimit(None)
+                        } else if msg.contains("credit")
+                            || msg.contains("balance")
+                            || msg.contains("billing")
+                            || msg.contains("payment")
+                            || (msg.contains("quota")
+                                && (msg.contains("exceeded") || msg.contains("limit")))
+                        {
+                            FailoverReason::CreditExhausted
+                        } else if msg.contains("model")
+                            || msg.contains("permission")
+                            || msg.contains("not found")
+                            || msg.contains("does not exist")
+                        {
+                            FailoverReason::ModelUnavailable
+                        } else {
+                            FailoverReason::HttpError
+                        }
+                    }
+                    413 => FailoverReason::ContextTooLong,
+                    503 => FailoverReason::ModelUnavailable,
+                    // 404 is only a model error when the message explicitly references
+                    // the model — generic endpoint/base-URL 404s also contain "not found"
+                    // but are not recoverable by switching models.
+                    404 => {
+                        if msg.contains("model not found")
+                            || msg.contains("model does not exist")
+                            || msg.contains("unknown model")
+                            || (msg.contains("model") && msg.contains("not found"))
+                            || (msg.contains("model") && msg.contains("does not exist"))
+                        {
+                            FailoverReason::ModelUnavailable
+                        } else {
+                            FailoverReason::HttpError
+                        }
+                    }
+                    400 => {
+                        // Some providers return context errors as 400.
+                        if msg.contains("context")
+                            || msg.contains("token limit")
+                            || msg.contains("too long")
+                            || msg.contains("context_length")
+                        {
+                            FailoverReason::ContextTooLong
+                        } else {
+                            FailoverReason::HttpError
+                        }
+                    }
+                    _ => {
+                        // Message-level disambiguation for other/unknown status codes.
+                        if msg.contains("rate limit")
+                            || msg.contains("rate_limit")
+                            || msg.contains("too many requests")
+                        {
+                            FailoverReason::RateLimit(None)
+                        } else if msg.contains("credit")
+                            || msg.contains("balance")
+                            || msg.contains("billing")
+                            || msg.contains("insufficient")
+                        {
+                            FailoverReason::CreditExhausted
+                        } else if msg.contains("context")
+                            || msg.contains("token limit")
+                            || msg.contains("context_length")
+                        {
+                            FailoverReason::ContextTooLong
+                        } else if msg.contains("unavailable")
+                            || msg.contains("not found")
+                            || msg.contains("overloaded")
+                        {
+                            FailoverReason::ModelUnavailable
+                        } else {
+                            FailoverReason::HttpError
+                        }
+                    }
+                }
+            }
+
+            // Inactivity / subprocess timeout maps to Timeout.
+            LlmError::TimedOut { .. } => FailoverReason::Timeout,
+
+            // Overloaded — transient capacity error, retry same provider with back-off.
+            LlmError::Overloaded { retry_after_ms } => {
+                FailoverReason::RateLimit(if *retry_after_ms > 0 {
+                    Some(*retry_after_ms)
+                } else {
+                    None
+                })
+            }
+
+            // ModelNotFound → ModelUnavailable (skip to next provider).
+            LlmError::ModelNotFound(_) => FailoverReason::ModelUnavailable,
+
+            // Auth failures and missing keys indicate a misconfigured provider
+            // slot.  Classify as AuthError so FallbackChain can skip to the
+            // next slot, which may have a valid key.
+            LlmError::AuthenticationFailed(_) | LlmError::MissingApiKey(_) => {
+                FailoverReason::AuthError
+            }
+
+            // Parse errors are opaque and not recoverable by switching providers.
+            LlmError::Parse(_) => FailoverReason::Unknown,
+
+            // HTTP transport errors (connection refused, TLS failure, etc.).
+            // Distinct from Timeout (inactivity/subprocess) — these are network
+            // layer failures before the API even responded.
+            LlmError::Http(_) => FailoverReason::HttpError,
+        }
+    }
+}
+
 /// A request to an LLM for completion.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -455,3 +600,4 @@ mod tests {
 }
 
 pub mod llm_errors;
+pub use llm_errors::FailoverReason;

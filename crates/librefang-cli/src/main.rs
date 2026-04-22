@@ -3,6 +3,10 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod desktop_install;
 mod http_client;
 pub mod i18n;
@@ -3108,7 +3112,11 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
     println!("  {}", i18n::t("daemon-starting"));
     ui::blank();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let kernel = match LibreFangKernel::boot(config.as_deref()) {
             Ok(k) => k,

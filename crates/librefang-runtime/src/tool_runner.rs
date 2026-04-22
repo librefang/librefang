@@ -317,12 +317,20 @@ pub struct ToolExecContext<'a> {
     pub tts_engine: Option<&'a crate::tts::TtsEngine>,
     pub docker_config: Option<&'a librefang_types::config::DockerSandboxConfig>,
     pub process_manager: Option<&'a crate::process_manager::ProcessManager>,
+    /// Background process registry — tracks fire-and-forget processes spawned by
+    /// `shell_exec` with a rolling 200 KB output buffer.
+    pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
     /// Optional checkpoint manager.  When `Some`, a snapshot is taken
     /// automatically before every `file_write` and `apply_patch` call.
     /// Snapshot failures are non-fatal (logged as warnings only).
     pub checkpoint_manager: Option<&'a Arc<crate::checkpoint_manager::CheckpointManager>>,
+    /// Per-session interrupt handle.  Tools MAY poll `interrupt.is_cancelled()`
+    /// at natural checkpoints to exit early when the user stops the session.
+    /// `None` means no interrupt support was wired up for this call site (legacy
+    /// paths) — tools must treat `None` the same as "not cancelled".
+    pub interrupt: Option<crate::interrupt::SessionInterrupt>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -355,21 +363,23 @@ pub async fn execute_tool_raw(
         tts_engine,
         docker_config,
         process_manager,
+        process_registry,
         sender_id,
         channel: _,
         checkpoint_manager,
+        interrupt,
     } = ctx;
 
     let result = match tool_name {
         // Filesystem tools
         "file_read" => tool_file_read(input, *workspace_root).await,
         "file_write" => {
-            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write");
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             tool_file_write(input, *workspace_root).await
         }
         "file_list" => tool_file_list(input, *workspace_root).await,
         "apply_patch" => {
-            maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch");
+            maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch").await;
             tool_apply_patch(input, *workspace_root).await
         }
 
@@ -519,6 +529,7 @@ pub async fn execute_tool_raw(
                 effective_allowed_env_vars.unwrap_or(&[]),
                 *workspace_root,
                 *exec_policy,
+                interrupt.clone(),
             )
             .await
         }
@@ -880,9 +891,11 @@ pub async fn execute_tool(
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    process_registry: Option<&crate::process_registry::ProcessRegistry>,
     sender_id: Option<&str>,
     channel: Option<&str>,
     checkpoint_manager: Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
+    interrupt: Option<crate::interrupt::SessionInterrupt>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -958,7 +971,7 @@ pub async fn execute_tool(
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
             };
             match kh
-                .submit_tool_approval(agent_id_str, tool_name, &summary, deferred)
+                .submit_tool_approval(agent_id_str, tool_name, &summary, deferred, session_id)
                 .await
             {
                 Ok(librefang_types::tool::ToolApprovalSubmission::Pending { request_id }) => {
@@ -1024,9 +1037,11 @@ pub async fn execute_tool(
         tts_engine,
         docker_config,
         process_manager,
+        process_registry,
         sender_id,
         channel,
         checkpoint_manager,
+        interrupt,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }
@@ -1993,12 +2008,20 @@ fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<Pa
 /// Take a snapshot of `workspace_root` before a file-mutating operation.
 ///
 /// If an explicit `CheckpointManager` is provided (injected from the kernel),
-/// it is used.  Otherwise, a transient manager is derived from the standard
-/// home directory (`~/.librefang/checkpoints/`).
+/// it is used.  When `mgr` is `None` no snapshot is taken — callers that
+/// pass `None` are test or ephemeral contexts that do not need filesystem
+/// rollback coverage.
 ///
 /// Failures are **non-fatal**: they are logged as warnings and the calling
 /// tool proceeds normally.
-fn maybe_snapshot(
+///
+/// ## Async safety
+///
+/// `CheckpointManager::snapshot` spawns `git` subprocesses and calls
+/// blocking I/O.  This wrapper offloads the work to a dedicated thread pool
+/// via `tokio::task::spawn_blocking` so that tokio worker threads are never
+/// blocked by slow git operations.
+async fn maybe_snapshot(
     mgr: &Option<&Arc<crate::checkpoint_manager::CheckpointManager>>,
     workspace_root: Option<&Path>,
     reason: &str,
@@ -2006,24 +2029,27 @@ fn maybe_snapshot(
     let Some(root) = workspace_root else {
         return;
     };
-
-    let snapshot_result = if let Some(m) = mgr {
-        m.snapshot(root, reason)
-    } else {
-        // No injected manager — derive the checkpoint directory from the
-        // standard home layout so file_write always has snapshot coverage.
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let base = home
-            .join(".librefang")
-            .join(crate::checkpoint_manager::CHECKPOINT_BASE);
-        let transient_mgr = crate::checkpoint_manager::CheckpointManager::new(base);
-        transient_mgr.snapshot(root, reason)
+    let Some(m) = mgr else {
+        // No manager injected — skip snapshot entirely.
+        // (Test call sites pass None deliberately; production code always
+        // passes Some via the kernel.)
+        return;
     };
 
-    if let Err(e) = snapshot_result {
-        warn!(reason, root = %root.display(), "checkpoint snapshot failed (non-fatal): {e}");
+    let mgr_arc = Arc::clone(m);
+    let root_owned = root.to_path_buf();
+    let reason_owned = reason.to_string();
+
+    // Offload blocking git I/O to the blocking thread pool.
+    let result =
+        tokio::task::spawn_blocking(move || mgr_arc.snapshot(&root_owned, &reason_owned)).await;
+
+    match result {
+        Ok(Err(e)) => {
+            warn!(reason, root = %root.display(), "checkpoint snapshot failed (non-fatal): {e}")
+        }
+        Err(e) => warn!(reason, root = %root.display(), "checkpoint spawn_blocking panicked: {e}"),
+        Ok(Ok(_)) => {}
     }
 }
 
@@ -2213,6 +2239,7 @@ async fn tool_shell_exec(
     allowed_env: &[String],
     workspace_root: Option<&Path>,
     exec_policy: Option<&librefang_types::config::ExecPolicy>,
+    interrupt: Option<crate::interrupt::SessionInterrupt>,
 ) -> Result<String, String> {
     let command = input["command"]
         .as_str()
@@ -2298,11 +2325,62 @@ async fn tool_shell_exec(
     // Prevent child from inheriting stdin (avoids blocking on Windows)
     cmd.stdin(std::process::Stdio::null());
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+    // Check for interrupt before we even launch the subprocess — the user may
+    // have hit /stop while approval was pending or while a prior tool was running.
+    if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+        return Err("[interrupted before execution]".to_string());
+    }
 
-    match result {
-        Ok(Ok(output)) => {
+    // Capture piped output so we can collect it after the process exits.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    // Spawn the child process so we hold a handle that can be killed if the
+    // session interrupt fires while the command is running.  Using `output()`
+    // instead would block until the process *completes*, meaning cancel() would
+    // never be observed mid-execution — the whole point of this feature.
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("Failed to execute command: {e}")),
+    };
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    // Poll for completion, interrupt, or timeout.  We use a short sleep so we
+    // don't burn CPU in a tight loop; 50 ms is imperceptible to users but still
+    // gives responsive cancellation.
+    let output = loop {
+        // Has the process already finished?
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Process exited; collect its output.
+                match child.wait_with_output().await {
+                    Ok(o) => break Ok(o),
+                    Err(e) => break Err(format!("Failed to collect output: {e}")),
+                }
+            }
+            Ok(None) => {} // still running
+            Err(e) => break Err(format!("Failed to wait on child: {e}")),
+        }
+
+        // Did the session get cancelled while the command was running?
+        if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
+            // Best-effort kill; ignore errors (process may have already exited).
+            let _ = child.kill().await;
+            return Err("[interrupted]".to_string());
+        }
+
+        // Timed out?
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill().await;
+            return Err(format!("Command timed out after {timeout_secs}s"));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    match output {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
@@ -2332,8 +2410,7 @@ async fn tool_shell_exec(
                 "Exit code: {exit_code}\n\nSTDOUT:\n{stdout_str}\nSTDERR:\n{stderr_str}"
             ))
         }
-        Ok(Err(e)) => Err(format!("Failed to execute command: {e}")),
-        Err(_) => Err(format!("Command timed out after {timeout_secs}s")),
+        Err(e) => Err(e),
     }
 }
 
@@ -5677,6 +5754,7 @@ mod tests {
             _agent_id: &str,
             _tool_name: &str,
             _action_summary: &str,
+            _session_id: Option<&str>,
         ) -> Result<librefang_types::approval::ApprovalDecision, String> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::approval::ApprovalDecision::Denied)
@@ -5688,6 +5766,7 @@ mod tests {
             _tool_name: &str,
             _action_summary: &str,
             _deferred: librefang_types::tool::DeferredToolExecution,
+            _session_id: Option<&str>,
         ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
@@ -5824,9 +5903,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -5859,9 +5940,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -5891,9 +5974,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -5923,9 +6008,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -5954,9 +6041,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -5985,9 +6074,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6016,9 +6107,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6048,9 +6141,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6081,9 +6176,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -6140,9 +6237,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -6177,9 +6276,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6221,9 +6322,11 @@ mod tests {
             None,
             None,
             None,
+            None,
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
 
@@ -6266,9 +6369,11 @@ mod tests {
             None,
             None,
             None,
+            None,
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
 
@@ -6322,9 +6427,11 @@ mod tests {
             None,
             None,
             None,
+            None,
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
 
@@ -6514,9 +6621,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6568,9 +6677,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -6781,9 +6892,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -6820,9 +6933,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -6859,9 +6974,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -6907,9 +7024,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -6959,9 +7078,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -7054,9 +7175,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -7092,9 +7215,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -7139,9 +7264,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         // Should NOT be a permission-denied error
@@ -7176,9 +7303,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(result.is_error);
@@ -7213,9 +7342,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -7249,9 +7380,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         assert!(
@@ -7285,9 +7418,11 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // process_registry
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // session_id
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
