@@ -743,10 +743,10 @@ pub struct AgentManifest {
 pub enum WorkspaceMode {
     /// Full read-write access (default).
     #[default]
-    #[serde(alias = "rw")]
+    #[serde(alias = "rw", alias = "read-write")]
     ReadWrite,
     /// Read-only access — write tool calls are rejected by the kernel.
-    #[serde(alias = "r", alias = "read")]
+    #[serde(alias = "r", alias = "read", alias = "read-only")]
     ReadOnly,
 }
 

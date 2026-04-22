@@ -14,13 +14,9 @@ use tracing::debug;
 const MAX_FILE_SIZE: u64 = 32_768;
 
 /// Known context file names scanned in the workspace root.
-const CONTEXT_FILES: &[&str] = &[
-    "AGENTS.md",
-    "SOUL.md",
-    "TOOLS.md",
-    "IDENTITY.md",
-    "HEARTBEAT.md",
-];
+/// TOOLS.md is intentionally excluded — it is injected via the dedicated
+/// `tools_md` field in PromptContext (Section 6.5) to avoid truncation.
+const CONTEXT_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "IDENTITY.md", "HEARTBEAT.md"];
 
 /// Detected project type based on marker files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
