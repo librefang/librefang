@@ -69,3 +69,9 @@ result
 *.swo
 *~
 .gitnexus
+
+# rodela/ private deployment — never commit real secret values
+rodela/k8s/secrets.env
+# Allow template/placeholder files that are intentionally tracked
+!rodela/k8s/secrets.env.example
+!rodela/k8s/config/config.toml

@@ -1,0 +1,582 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775767021927,
+  "projectRoot": "/home/blitz/development/agents/librefang",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": "1.75",
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "axum",
+        "version": null,
+        "category": "backend"
+      }
+    ],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build",
+    "testCommand": "cargo test",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "examples",
+      "public",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "api-docs": {
+      "path": "api-docs",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775767021922,
+      "keyFiles": [
+        "index.html",
+        "openapi.json"
+      ]
+    },
+    "articles": {
+      "path": "articles",
+      "purpose": null,
+      "fileCount": 16,
+      "lastAccessed": 1775767021922,
+      "keyFiles": [
+        "hello-librefang.md",
+        "new-website-launch.md",
+        "release-0.5.6.md",
+        "release-0.5.7.md",
+        "release-0.6.0.md"
+      ]
+    },
+    "contrib": {
+      "path": "contrib",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775767021923,
+      "keyFiles": []
+    },
+    "crates": {
+      "path": "crates",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775767021924,
+      "keyFiles": []
+    },
+    "deploy": {
+      "path": "deploy",
+      "purpose": null,
+      "fileCount": 7,
+      "lastAccessed": 1775767021924,
+      "keyFiles": [
+        "Dockerfile",
+        "OBSERVABILITY.md",
+        "docker-compose.observability.yml",
+        "docker-compose.yml",
+        "docker-entrypoint.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 10,
+      "lastAccessed": 1775767021924,
+      "keyFiles": [
+        "README.md",
+        "mdx-components.tsx",
+        "next.config.mjs",
+        "package.json",
+        "pnpm-lock.yaml"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 0,
+      "lastAccessed": 1775767021924,
+      "keyFiles": []
+    },
+    "i18n": {
+      "path": "i18n",
+      "purpose": null,
+      "fileCount": 11,
+      "lastAccessed": 1775767021924,
+      "keyFiles": [
+        "README.de.md",
+        "README.es.md",
+        "README.ja.md",
+        "README.ko.md",
+        "README.md"
+      ]
+    },
+    "k8s": {
+      "path": "k8s",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775767021924,
+      "keyFiles": [
+        "configmap.yaml",
+        "deployment.yaml",
+        "secret.yaml"
+      ]
+    },
+    "packages": {
+      "path": "packages",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775767021924,
+      "keyFiles": []
+    },
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 0,
+      "lastAccessed": 1775767021924,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1775767021924,
+      "keyFiles": [
+        "read_email.py"
+      ]
+    },
+    "sdk": {
+      "path": "sdk",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775767021925,
+      "keyFiles": []
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775767021925,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "web": {
+      "path": "web",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1775767021925,
+      "keyFiles": [
+        "README.md",
+        "eslint.config.js",
+        "index.html",
+        "package.json",
+        "pnpm-lock.yaml"
+      ]
+    },
+    "xtask": {
+      "path": "xtask",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1775767021925,
+      "keyFiles": [
+        "Cargo.toml",
+        "README.md"
+      ]
+    },
+    "docs/public": {
+      "path": "docs/public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1775767021925,
+      "keyFiles": [
+        "_redirects"
+      ]
+    },
+    "docs/src": {
+      "path": "docs/src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1775767021926,
+      "keyFiles": []
+    },
+    "public/assets": {
+      "path": "public/assets",
+      "purpose": "Static assets",
+      "fileCount": 8,
+      "lastAccessed": 1775767021926,
+      "keyFiles": [
+        "contributors.svg",
+        "cute-d.svg",
+        "dashboard.png"
+      ]
+    },
+    "scripts/tests": {
+      "path": "scripts/tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1775767021926,
+      "keyFiles": [
+        "install_sh_test.sh"
+      ]
+    },
+    "web/public": {
+      "path": "web/public",
+      "purpose": "Public files",
+      "fileCount": 15,
+      "lastAccessed": 1775767021926,
+      "keyFiles": [
+        "404.html",
+        "_worker.js",
+        "favicon.svg"
+      ]
+    },
+    "web/scripts": {
+      "path": "web/scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1775767021926,
+      "keyFiles": [
+        "fetch-registry.ts"
+      ]
+    },
+    "xtask/src": {
+      "path": "xtask/src",
+      "purpose": "Source code",
+      "fileCount": 32,
+      "lastAccessed": 1775767021927,
+      "keyFiles": [
+        "api_docs.rs",
+        "bench.rs",
+        "build_web.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "crates/librefang-api/src/routes/agents.rs",
+      "accessCount": 39,
+      "lastAccessed": 1775772466918,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-kernel/src/kernel.rs",
+      "accessCount": 38,
+      "lastAccessed": 1775813187733,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 26,
+      "lastAccessed": 1775816186902,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/api.ts",
+      "accessCount": 24,
+      "lastAccessed": 1775755512713,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/ChannelsPage.tsx",
+      "accessCount": 19,
+      "lastAccessed": 1775751723397,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/AgentsPage.tsx",
+      "accessCount": 19,
+      "lastAccessed": 1775753082893,
+      "type": "file"
+    },
+    {
+      "path": "crates",
+      "accessCount": 19,
+      "lastAccessed": 1775812052825,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/routes/skills.rs",
+      "accessCount": 12,
+      "lastAccessed": 1775686753619,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-types/src/agent.rs",
+      "accessCount": 12,
+      "lastAccessed": 1775812140274,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-skills/src/clawhub.rs",
+      "accessCount": 9,
+      "lastAccessed": 1775686748434,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/src/routes/channels.rs",
+      "accessCount": 9,
+      "lastAccessed": 1775752386377,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-kernel/src",
+      "accessCount": 8,
+      "lastAccessed": 1775774842824,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-runtime/src",
+      "accessCount": 8,
+      "lastAccessed": 1775776050440,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src",
+      "accessCount": 6,
+      "lastAccessed": 1775774888169,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/SkillsPage.tsx",
+      "accessCount": 5,
+      "lastAccessed": 1775752401042,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-kernel/src/registry.rs",
+      "accessCount": 5,
+      "lastAccessed": 1775774818401,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src",
+      "accessCount": 4,
+      "lastAccessed": 1775679232614,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/routes",
+      "accessCount": 4,
+      "lastAccessed": 1775686051081,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-runtime/src/embedding.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775686071579,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/src/routes/config.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775735171885,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-skills/src/registry.rs",
+      "accessCount": 4,
+      "lastAccessed": 1775812362622,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/src/types.rs",
+      "accessCount": 3,
+      "lastAccessed": 1775755480133,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/middleware.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775675819462,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-skills/src/skillhub.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775686724110,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-kernel",
+      "accessCount": 2,
+      "lastAccessed": 1775687730301,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/server.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775755502378,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/src/routes/system.rs",
+      "accessCount": 2,
+      "lastAccessed": 1775755507379,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673251506,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/commands.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673251644,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/tray.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673251700,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/main.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673251756,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/shortcuts.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673255579,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/updater.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673255628,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard",
+      "accessCount": 1,
+      "lastAccessed": 1775673259192,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/App.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1775673263102,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/SettingsPage.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1775673273382,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/src/server.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775673287302,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/tauri.conf.json",
+      "accessCount": 1,
+      "lastAccessed": 1775673290142,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-desktop/Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1775673290202,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/ModelsPage.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1775673799803,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages/ProvidersPage.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1775673800258,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/drivers/mod.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775674094876,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-types/src/config",
+      "accessCount": 1,
+      "lastAccessed": 1775674135385,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/components/ui/Button.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1775675704317,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/lib/status.ts",
+      "accessCount": 1,
+      "lastAccessed": 1775685772893,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-api/dashboard/src/pages",
+      "accessCount": 1,
+      "lastAccessed": 1775685954010,
+      "type": "directory"
+    },
+    {
+      "path": "crates/librefang-skills/src/marketplace.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775685967657,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/python_runtime.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775685968827,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/lib.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775686055443,
+      "type": "file"
+    },
+    {
+      "path": "crates/librefang-runtime/src/plugin_runtime.rs",
+      "accessCount": 1,
+      "lastAccessed": 1775686090077,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

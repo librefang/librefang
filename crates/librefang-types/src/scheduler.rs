@@ -200,6 +200,7 @@ pub struct CronJob {
     ///   history from previous fires cannot influence the current run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<SessionMode>,
+
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).
@@ -444,6 +445,7 @@ mod tests {
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
+            session_mode: None,
         }
     }
 

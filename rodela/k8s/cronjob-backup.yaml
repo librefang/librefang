@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: librefang-backup
+  namespace: librefang
+  labels:
+    app: librefang
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: librefang
+        spec:
+          serviceAccountName: librefang-backup
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  TS=$(date -u +%Y%m%dT%H%M%SZ)
+                  DEST=/backups/librefang-${TS}.tar.gz
+
+                  kubectl exec -n librefang librefang-0 -- bash -c "
+                    set -euo pipefail
+                    TMP=\$(mktemp -d)
+                    trap 'rm -rf \$TMP' EXIT
+                    mkdir -p \$TMP/data
+                    for db in /data/data/*.db; do
+                      [ -f \"\$db\" ] || continue
+                      sqlite3 \"\$db\" \".backup '\$TMP/data/\$(basename \$db)'\"
+                    done
+                    rsync -a \
+                      --exclude='data/*.db' --exclude='data/*.db-wal' --exclude='data/*.db-shm' \
+                      --exclude='cache/' --exclude='logs/' --exclude='bin/' \
+                      --exclude='venv/' --exclude='.git/' \
+                      /data/ \$TMP/
+                    tar -C \$TMP -czf - .
+                  " > \$DEST
+
+                  find /backups -maxdepth 1 -name 'librefang-*.tar.gz' -mtime +7 -delete
+                  echo "Backup complete: \$DEST (\$(du -sh \$DEST | cut -f1))"
+              volumeMounts:
+                - name: librefang-backups
+                  mountPath: /backups
+          volumes:
+            - name: librefang-backups
+              persistentVolumeClaim:
+                claimName: librefang-backups

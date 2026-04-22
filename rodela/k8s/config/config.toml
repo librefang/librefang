@@ -1,0 +1,15 @@
+# This file is managed as a Kubernetes ConfigMap (kustomize configMapGenerator).
+# Edit here, commit, then: kubectl apply -k deploy/k8s
+#
+# Secret fields (api_key, dashboard_pass, *_token, *_key) are intentionally
+# left empty here. They live in secrets.env (gitignored) and are injected as
+# env vars by the librefang-secrets Secret.
+#
+# After running scripts/k8s-migrate-from-rpi.sh, this file is replaced with
+# the sanitized version extracted from the RPi.
+
+[api]
+listen = "0.0.0.0:4545"
+
+[logging]
+level = "info"

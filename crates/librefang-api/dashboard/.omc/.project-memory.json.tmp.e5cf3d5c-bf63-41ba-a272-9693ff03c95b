@@ -1,0 +1,169 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775597587232,
+  "projectRoot": "/home/blitz/development/agents/librefang/crates/librefang-api/dashboard",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "react",
+        "version": "19.1.1",
+        "category": "frontend"
+      },
+      {
+        "name": "react-dom",
+        "version": "19.1.1",
+        "category": "frontend"
+      },
+      {
+        "name": "@playwright/test",
+        "version": "1.58.2",
+        "category": "testing"
+      },
+      {
+        "name": "vite",
+        "version": "7.1.3",
+        "category": "build"
+      },
+      {
+        "name": "vitest",
+        "version": "4.1.0",
+        "category": "testing"
+      }
+    ],
+    "packageManager": "pnpm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "pnpm build",
+    "testCommand": "pnpm test",
+    "lintCommand": null,
+    "devCommand": "pnpm dev",
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "preview": "vite preview",
+      "typecheck": "tsc --noEmit",
+      "openapi:types": "openapi-typescript http://127.0.0.1:4545/api/openapi.json -o openapi/generated.ts",
+      "test": "vitest run",
+      "test:watch": "vitest",
+      "e2e": "playwright test"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase/PascalCase",
+    "importStyle": "ES modules",
+    "testPattern": null,
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "public",
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "e2e": {
+      "path": "e2e",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775597587217,
+      "keyFiles": [
+        "dashboard.spec.ts"
+      ]
+    },
+    "openapi": {
+      "path": "openapi",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775597587218,
+      "keyFiles": [
+        "generated.ts"
+      ]
+    },
+    "public": {
+      "path": "public",
+      "purpose": "Public files",
+      "fileCount": 4,
+      "lastAccessed": 1775597587223,
+      "keyFiles": [
+        "icon-192.png",
+        "icon-512.png",
+        "manifest.json",
+        "sw.js"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 7,
+      "lastAccessed": 1775597587226,
+      "keyFiles": [
+        "App.tsx",
+        "api.test.ts",
+        "api.ts",
+        "index.css",
+        "main.tsx"
+      ]
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 5,
+      "lastAccessed": 1775597587228,
+      "keyFiles": [
+        "NodeEditor.tsx",
+        "NotificationCenter.tsx",
+        "SchemaForm.tsx"
+      ]
+    },
+    "src/lib": {
+      "path": "src/lib",
+      "purpose": "Library code",
+      "fileCount": 13,
+      "lastAccessed": 1775597587228,
+      "keyFiles": [
+        "chat.test.ts",
+        "chat.ts",
+        "datetime.ts"
+      ]
+    },
+    "src/pages": {
+      "path": "src/pages",
+      "purpose": "Page components",
+      "fileCount": 26,
+      "lastAccessed": 1775597587229,
+      "keyFiles": [
+        "A2APage.tsx",
+        "AgentsPage.tsx",
+        "AnalyticsPage.tsx"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

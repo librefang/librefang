@@ -423,6 +423,7 @@ fn start_stream_text_bridge_with_status(
                     // 2. The text looks like a raw tool call emitted as text by
                     //    providers that don't use the tool_use API properly
                     //    (e.g. agent_send JSON leaked as visible text).
+                    // 3. The text is NO_REPLY or [no reply needed] (agent chose silence)
                     if !iter_buf.is_empty() {
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
@@ -888,69 +889,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let _ = self
             .kernel
             .roster_upsert(channel, chat_id, user_id, display_name, username);
-    }
-
-    async fn classify_reply_intent(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        context: Option<&str>,
-    ) -> Result<bool, String> {
-        // Use the agent's custom PRECHECK.md prompt if it exists, otherwise a
-        // sensible default.  This lets operators tune sensitivity per-agent
-        // without recompiling.
-        let custom_prompt = self.get_precheck_prompt(agent_id).await;
-
-        const DEFAULT_SYSTEM: &str = "\
-            Decide whether the assistant should reply to this group chat message.\n\
-            Return exactly one word: REPLY or NO_REPLY.\n\n\
-            Rules:\n\
-            - If the message is addressed to the assistant, asks a question, or \
-              continues a conversation the assistant is part of → REPLY\n\
-            - If the message is casual chat between humans that doesn't concern \
-              the assistant → NO_REPLY\n\
-            - When in doubt, prefer NO_REPLY to avoid being noisy.";
-
-        let system = custom_prompt.as_deref().unwrap_or(DEFAULT_SYSTEM);
-
-        // Build the user message, optionally prepending conversation context
-        // so the classifier can detect replies/continuations.
-        let user_msg = match context {
-            Some(ctx) => format!("{ctx}\n\n{message}"),
-            None => message.to_string(),
-        };
-
-        match self
-            .kernel
-            .classify_text(agent_id, system, &user_msg, 10)
-            .await
-        {
-            Ok(response) => {
-                let trimmed = response.trim().to_uppercase();
-                Ok(!trimmed.contains("NO_REPLY"))
-            }
-            Err(e) => {
-                // Fail-open: if LLM fails, fall back to heuristic
-                tracing::warn!(
-                    error = %e,
-                    "LLM reply-intent classification failed — falling back to heuristic"
-                );
-                // If replying to the bot, always respond
-                if context.is_some() {
-                    return Ok(true);
-                }
-                let trimmed = message.trim();
-                if trimmed.len() < 5 {
-                    return Ok(false);
-                }
-                if trimmed.contains('?') {
-                    return Ok(true);
-                }
-                let lower = trimmed.to_lowercase();
-                let greetings = ["hola", "buenas", "hey", "hi", "hello", "oye", "ayuda"];
-                Ok(greetings.iter().any(|g| lower.starts_with(g)))
-            }
-        }
     }
 
     async fn get_precheck_prompt(&self, agent_id: AgentId) -> Option<String> {
@@ -1931,7 +1869,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .should_reply(message, channel_type, agent_id)?;
         // Fire auto-reply synchronously (bridge already runs in background task)
         match self.kernel.send_message(agent_id, message).await {
-            Ok(result) => Some(result.response),
+            Ok(result) => {
+                // If the agent chose NO_REPLY (silent), don't send the literal text
+                if result.silent {
+                    None
+                } else {
+                    Some(result.response)
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Auto-reply failed");
                 None

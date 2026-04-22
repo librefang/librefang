@@ -1,0 +1,2 @@
+# Agent aliases — managed via ConfigMap.
+# Populated by scripts/k8s-migrate-from-rpi.sh.

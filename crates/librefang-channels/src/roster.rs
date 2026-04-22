@@ -10,7 +10,7 @@
 //! naturally as members send messages. A persistent backend can be added later
 //! without changing the public API.
 
-use crate::types::GroupMember;
+use crate::types::ParticipantRef;
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ type RosterKey = (String, String);
 /// Thread-safe in-memory store of known group members per chat.
 #[derive(Debug, Default, Clone)]
 pub struct GroupRosterStore {
-    rosters: Arc<DashMap<RosterKey, DashMap<String, GroupMember>>>,
+    rosters: Arc<DashMap<RosterKey, DashMap<String, ParticipantRef>>>,
 }
 
 impl GroupRosterStore {
@@ -36,23 +36,23 @@ impl GroupRosterStore {
     ///
     /// Idempotent: subsequent calls with the same `user_id` simply refresh the
     /// display name and username.
-    pub fn upsert(&self, channel: &str, chat_id: &str, member: GroupMember) {
-        if chat_id.is_empty() || member.user_id.is_empty() {
+    pub fn upsert(&self, channel: &str, chat_id: &str, member: ParticipantRef) {
+        if chat_id.is_empty() || member.jid.is_empty() {
             return;
         }
         let key = (channel.to_string(), chat_id.to_string());
         let members = self.rosters.entry(key).or_default();
-        members.insert(member.user_id.clone(), member);
+        members.insert(member.jid.clone(), member);
     }
 
     /// Return all known members for a chat, sorted by display name for stable
     /// rendering. Returns an empty vector if the chat is unknown.
-    pub fn members(&self, channel: &str, chat_id: &str) -> Vec<GroupMember> {
+    pub fn members(&self, channel: &str, chat_id: &str) -> Vec<ParticipantRef> {
         let key = (channel.to_string(), chat_id.to_string());
         let Some(entry) = self.rosters.get(&key) else {
             return Vec::new();
         };
-        let mut out: Vec<GroupMember> = entry.iter().map(|e| e.value().clone()).collect();
+        let mut out: Vec<ParticipantRef> = entry.iter().map(|e| e.value().clone()).collect();
         out.sort_by(|a, b| a.display_name.cmp(&b.display_name));
         out
     }
@@ -73,28 +73,19 @@ impl GroupRosterStore {
 mod tests {
     use super::*;
 
-    fn mk_member(user_id: &str, display: &str, username: Option<&str>) -> GroupMember {
-        GroupMember {
-            user_id: user_id.to_string(),
+    fn mk_member(jid: &str, display: &str) -> ParticipantRef {
+        ParticipantRef {
+            jid: jid.to_string(),
             display_name: display.to_string(),
-            username: username.map(String::from),
         }
     }
 
     #[test]
     fn upsert_and_list_sorted() {
         let store = GroupRosterStore::new();
-        store.upsert(
-            "telegram",
-            "-100123",
-            mk_member("1", "Jorge", Some("jorge")),
-        );
-        store.upsert(
-            "telegram",
-            "-100123",
-            mk_member("2", "Pakman", Some("pakman")),
-        );
-        store.upsert("telegram", "-100123", mk_member("3", "Ana", Some("ana")));
+        store.upsert("telegram", "-100123", mk_member("1", "Jorge"));
+        store.upsert("telegram", "-100123", mk_member("2", "Pakman"));
+        store.upsert("telegram", "-100123", mk_member("3", "Ana"));
 
         let members = store.members("telegram", "-100123");
         assert_eq!(members.len(), 3);
@@ -106,16 +97,12 @@ mod tests {
     #[test]
     fn upsert_idempotent_and_updates() {
         let store = GroupRosterStore::new();
-        store.upsert("telegram", "-100123", mk_member("1", "Jorge", None));
-        store.upsert(
-            "telegram",
-            "-100123",
-            mk_member("1", "Jorge Pablo", Some("jorgepablo")),
-        );
+        store.upsert("telegram", "-100123", mk_member("1", "Jorge"));
+        store.upsert("telegram", "-100123", mk_member("1", "Jorge Pablo"));
         let members = store.members("telegram", "-100123");
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].display_name, "Jorge Pablo");
-        assert_eq!(members[0].username.as_deref(), Some("jorgepablo"));
+        assert_eq!(members[0].jid, "1");
     }
 
     #[test]
@@ -128,16 +115,16 @@ mod tests {
     #[test]
     fn ignores_empty_ids() {
         let store = GroupRosterStore::new();
-        store.upsert("telegram", "", mk_member("1", "Nobody", None));
-        store.upsert("telegram", "-100", mk_member("", "Nameless", None));
+        store.upsert("telegram", "", mk_member("1", "Nobody"));
+        store.upsert("telegram", "-100", mk_member("", "Nameless"));
         assert_eq!(store.chat_count(), 0);
     }
 
     #[test]
     fn separate_chats_are_isolated() {
         let store = GroupRosterStore::new();
-        store.upsert("telegram", "-100", mk_member("1", "Alice", None));
-        store.upsert("telegram", "-200", mk_member("2", "Bob", None));
+        store.upsert("telegram", "-100", mk_member("1", "Alice"));
+        store.upsert("telegram", "-200", mk_member("2", "Bob"));
         assert_eq!(store.members("telegram", "-100").len(), 1);
         assert_eq!(store.members("telegram", "-200").len(), 1);
         assert_eq!(store.chat_count(), 2);
@@ -146,8 +133,8 @@ mod tests {
     #[test]
     fn separate_channels_are_isolated() {
         let store = GroupRosterStore::new();
-        store.upsert("telegram", "123", mk_member("1", "Alice", None));
-        store.upsert("discord", "123", mk_member("2", "Bob", None));
+        store.upsert("telegram", "123", mk_member("1", "Alice"));
+        store.upsert("discord", "123", mk_member("2", "Bob"));
         assert_eq!(store.members("telegram", "123").len(), 1);
         assert_eq!(store.members("discord", "123").len(), 1);
     }
