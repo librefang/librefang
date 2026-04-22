@@ -390,6 +390,17 @@ enum Commands {
         long_about = "Security tools: view status, audit trail, and verify integrity.\n\nExamples:\n  librefang security status          # Security summary\n  librefang security audit           # Show recent audit entries\n  librefang security audit --limit 50  # Show more entries\n  librefang security verify          # Verify Merkle chain integrity"
     )]
     Security(SecurityCommands),
+    /// Inspect storage and migrate between backends [*].
+    ///
+    /// Phase 7 of `surrealdb-storage-swap`. Surfaces the SurrealDB
+    /// db-explorer and the SQLite → SurrealDB migrator. Available only
+    /// when the binary is built with `surreal-backend` (default).
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        subcommand,
+        long_about = "Inspect the embedded SurrealDB store and migrate legacy SQLite\ndata into it.\n\nExamples:\n  librefang storage explore --limit 50          # peek at audit_entries\n  librefang storage migrate --from sqlite --to surreal --dry-run\n  librefang storage migrate --from sqlite --to surreal"
+    )]
+    Storage(StorageCommands),
     /// Search and manage agent memory (KV store) [*].
     #[command(
         subcommand,
@@ -1445,11 +1456,112 @@ enum SecurityCommands {
     #[command(
         long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
     )]
+    #[cfg(feature = "sqlite-backend")]
     AuditReset {
         /// Required. Without this flag the command prints what it would do and exits non-zero.
         #[arg(long)]
         confirm: bool,
     },
+}
+
+/// Phase 7 of `surrealdb-storage-swap`: storage administration commands.
+///
+/// Surfaces the SurrealDB-backed db-explorer and the one-shot
+/// SQLite → SurrealDB migrator. Gated on `surreal-backend`; the
+/// `migrate` subcommand additionally requires `sqlite-backend`.
+#[cfg(feature = "surreal-backend")]
+#[derive(Subcommand)]
+enum StorageCommands {
+    /// Read-only inspection of the embedded SurrealDB store.
+    #[command(
+        long_about = "Read-only inspection of the embedded SurrealDB store.\n\nRefuses to run while the daemon is up (RocksDB holds an exclusive\nfile lock). Currently surfaces the `audit_entries` table; future\nrevisions will add hook traces, circuit breaker states, and the\nagent registry.\n\nExamples:\n  librefang storage explore\n  librefang storage explore --limit 100 --json"
+    )]
+    Explore {
+        /// Maximum number of rows to print.
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        /// Emit JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// One-shot migration between storage backends.
+    #[cfg(feature = "sqlite-backend")]
+    #[command(
+        long_about = "Stream the legacy SQLite tables (audit_entries, hook_traces,\ncircuit_breaker_states, totp_lockout, agents) into the configured\nSurrealDB instance.\n\nIdempotent: re-running converges via SurrealDB upserts. Refuses to\nrun while the daemon holds the SQLite writer lock. Writes a receipt\nJSON to `<data_dir>/migrations/` on success.\n\nExamples:\n  librefang storage migrate --from sqlite --to surreal --dry-run\n  librefang storage migrate --from sqlite --to surreal"
+    )]
+    Migrate {
+        /// Source backend.
+        #[arg(long, value_enum)]
+        from: StorageMigrateSource,
+        /// Target backend.
+        #[arg(long, value_enum)]
+        to: StorageMigrateTarget,
+        /// Print row counts only; do not write to the target.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Provision a UAR namespace and application user on a shared remote SurrealDB.
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "Connect to a remote SurrealDB instance using root credentials and:\n  1. Create the UAR namespace (default: `uar`) and database (default: `main`).\n  2. Create a least-privilege EDITOR user scoped to that namespace.\n  3. Write the [uar.remote] block to config.toml so the next daemon restart\n     uses the shared instance.\n\nRoot credentials are only used once for provisioning and are never\npersisted.  The application password must be supplied via environment\nvariable (see --app-pass-env).\n\nExamples:\n  SURREAL_ROOT_PASS=s3cr3t SURREAL_APP_PASS=apppass \\\n    librefang storage link-uar \\\n      --remote-url ws://surreal:8000 \\\n      --root-user root \\\n      --root-pass-env SURREAL_ROOT_PASS \\\n      --app-user uar_app \\\n      --app-pass-env SURREAL_APP_PASS\n\n  # Also link memory (sets share_librefang_storage = true)\n  librefang storage link-uar ... --also-link-memory"
+    )]
+    LinkUar {
+        /// Remote SurrealDB URL (ws://, wss://, http://, https://).
+        #[arg(long)]
+        remote_url: String,
+        /// SurrealDB root (or admin-level) username.
+        #[arg(long, default_value = "root")]
+        root_user: String,
+        /// Name of the env var that holds the root password.
+        #[arg(long)]
+        root_pass_env: String,
+        /// Namespace to create for UAR (default: uar).
+        #[arg(long, default_value = "uar")]
+        namespace: String,
+        /// Database to create inside the UAR namespace (default: main).
+        #[arg(long, default_value = "main")]
+        database: String,
+        /// Application username for the UAR daemon (default: uar_app).
+        #[arg(long, default_value = "uar_app")]
+        app_user: String,
+        /// Name of the env var that holds the application user's password.
+        #[arg(long)]
+        app_pass_env: String,
+        /// Also set share_librefang_storage = true in config.toml so the
+        /// UAR memory layer shares the librefang storage namespace.
+        #[arg(long)]
+        also_link_memory: bool,
+    },
+
+    /// Remove the UAR remote SurrealDB link written by `link-uar`.
+    #[cfg(feature = "surreal-backend")]
+    #[command(
+        long_about = "Remove the [uar.remote] block and share_librefang_storage flag from\nconfig.toml.  Optionally drops the application user from the remote\nSurrealDB instance (requires root credentials).\n\nExamples:\n  librefang storage unlink-uar\n  SURREAL_ROOT_PASS=s3cr3t librefang storage unlink-uar \\\n    --purge-user --root-user root --root-pass-env SURREAL_ROOT_PASS"
+    )]
+    UnlinkUar {
+        /// Also drop the application user from the remote SurrealDB.
+        #[arg(long)]
+        purge_user: bool,
+        /// Root username (required only with --purge-user).
+        #[arg(long, default_value = "root")]
+        root_user: String,
+        /// Name of the env var holding the root password (required only with --purge-user).
+        #[arg(long)]
+        root_pass_env: Option<String>,
+    },
+}
+
+#[cfg(all(feature = "surreal-backend", feature = "sqlite-backend"))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum StorageMigrateSource {
+    Sqlite,
+}
+
+#[cfg(all(feature = "surreal-backend", feature = "sqlite-backend"))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum StorageMigrateTarget {
+    Surreal,
 }
 
 #[derive(Subcommand)]
@@ -2060,7 +2172,48 @@ fn main() {
             SecurityCommands::Status { json } => cmd_security_status(json),
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
+            #[cfg(feature = "sqlite-backend")]
             SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
+        },
+        #[cfg(feature = "surreal-backend")]
+        Some(Commands::Storage(sub)) => match sub {
+            StorageCommands::Explore { limit, json } => {
+                cmd_audit_explore_surreal(cli.config, limit, json)
+            }
+            #[cfg(feature = "sqlite-backend")]
+            StorageCommands::Migrate { from, to, dry_run } => {
+                if from != StorageMigrateSource::Sqlite || to != StorageMigrateTarget::Surreal {
+                    ui::error("only `--from sqlite --to surreal` is currently supported");
+                    std::process::exit(2);
+                }
+                cmd_storage_migrate(cli.config, dry_run);
+            }
+            #[cfg(feature = "surreal-backend")]
+            StorageCommands::LinkUar {
+                remote_url,
+                root_user,
+                root_pass_env,
+                namespace,
+                database,
+                app_user,
+                app_pass_env,
+                also_link_memory,
+            } => cmd_storage_link_uar(
+                remote_url,
+                root_user,
+                root_pass_env,
+                namespace,
+                database,
+                app_user,
+                app_pass_env,
+                also_link_memory,
+            ),
+            #[cfg(feature = "surreal-backend")]
+            StorageCommands::UnlinkUar {
+                purge_user,
+                root_user,
+                root_pass_env,
+            } => cmd_storage_unlink_uar(purge_user, root_user, root_pass_env),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
@@ -9988,6 +10141,11 @@ fn cmd_security_verify() {
 /// next daemon boot seeds a fresh Merkle chain. Refuses to run while the
 /// daemon holds the DB (SQLite WAL mode + writer lock) and without
 /// `--confirm`.
+///
+/// Phase 7 of `surrealdb-storage-swap`: gated behind `sqlite-backend`
+/// since it talks to `rusqlite` directly. The Surreal-backed counterpart
+/// lives in [`cmd_audit_reset_surreal`].
+#[cfg(feature = "sqlite-backend")]
 fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     let daemon = daemon_config_context(config.as_deref());
     let kernel_config = load_config(config.as_deref());
@@ -10082,6 +10240,513 @@ fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
         }
     ));
     ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
+}
+
+/// Read-only inspection of the SurrealDB-backed audit trail.
+///
+/// This is the Phase 7 sibling to [`cmd_audit_reset`]: rather than
+/// touching SQLite, it opens the configured embedded SurrealDB
+/// (`storage.backend = embedded`) read-only, runs `SELECT * FROM
+/// audit_entries ORDER BY seq ASC LIMIT $limit`, and prints the rows.
+///
+/// We deliberately do NOT expose a destructive Surreal "reset" path
+/// from the CLI — the Surreal-backed audit log is rebuilt automatically
+/// from the migration runner on next daemon boot, and a manual wipe is
+/// not part of the documented operator workflow.
+#[cfg(feature = "surreal-backend")]
+fn cmd_audit_explore_surreal(config: Option<PathBuf>, limit: u32, json: bool) {
+    use librefang_storage::{StorageConfig, SurrealConnectionPool};
+
+    let kernel_config = load_config(config.as_deref());
+    let storage_cfg: StorageConfig = kernel_config.storage.clone();
+
+    // Mirror the SQLite reset's daemon-running guard so we never race
+    // the writer (RocksDB will refuse the lock anyway, but a clear
+    // message is friendlier than the lock error).
+    let daemon = daemon_config_context(config.as_deref());
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to open the embedded SurrealDB store"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            ui::error(&format!("failed to start tokio runtime: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    let result: Result<Vec<serde_json::Value>, String> = rt.block_on(async move {
+        let pool = SurrealConnectionPool::new();
+        let session = pool
+            .open(&storage_cfg)
+            .await
+            .map_err(|e| format!("open surreal: {e}"))?;
+        // Apply schema migrations so a freshly-created store has the
+        // `audit_entries` table even if the daemon never booted there.
+        librefang_storage::migrations::apply_pending(
+            session.client(),
+            librefang_storage::migrations::OPERATIONAL_MIGRATIONS,
+        )
+        .await
+        .map_err(|e| format!("apply schema migrations: {e}"))?;
+        session
+            .client()
+            .query(
+                "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash \
+                    FROM audit_entries ORDER BY seq ASC LIMIT $limit",
+            )
+            .bind(("limit", i64::from(limit)))
+            .await
+            .map_err(|e| format!("query audit_entries: {e}"))?
+            .take::<Vec<serde_json::Value>>(0)
+            .map_err(|e| format!("decode audit_entries: {e}"))
+    });
+
+    let rows = match result {
+        Ok(r) => r,
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    };
+
+    if json {
+        match serde_json::to_string_pretty(&rows) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                ui::error(&format!("serialise rows: {e}"));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if rows.is_empty() {
+        ui::hint("No audit entries in the embedded SurrealDB store.");
+        return;
+    }
+    println!("{:<6} {:<25} {:<24} ACTION", "SEQ", "TIMESTAMP", "AGENT");
+    println!("{}", "-".repeat(80));
+    for row in &rows {
+        let seq = row.get("seq").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let ts = row.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let agent = row.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+        let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        println!("{seq:<6} {ts:<25} {agent:<24} {action}");
+    }
+}
+
+/// `librefang storage migrate --from sqlite --to surreal [--dry-run]`.
+///
+/// Phase 7 deliverable. Streams the legacy SQLite tables (audit, hook
+/// traces, circuit-breaker states, TOTP lockout, agent registry) into
+/// the configured embedded or remote SurrealDB instance. Writes a
+/// receipt JSON to `<data_dir>/migrations/` on success.
+#[cfg(all(feature = "sqlite-backend", feature = "surreal-backend"))]
+fn cmd_storage_migrate(config: Option<PathBuf>, dry_run: bool) {
+    use librefang_storage::migrate::{migrate_sqlite_to_surreal, plan_sqlite, MigrationOptions};
+    use librefang_storage::SurrealConnectionPool;
+
+    let kernel_config = load_config(config.as_deref());
+    let sqlite_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    let daemon = daemon_config_context(config.as_deref());
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to migrate while the writer holds the database"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    if dry_run {
+        match plan_sqlite(&sqlite_path) {
+            Ok(plan) => {
+                println!("Dry run — sqlite source: {}", sqlite_path.display());
+                println!("{:<28} ROWS", "TABLE");
+                println!("{}", "-".repeat(40));
+                for (table, rows) in &plan.source_rows {
+                    println!("{table:<28} {rows}");
+                }
+                println!("{}", "-".repeat(40));
+                println!("{:<28} {}", "TOTAL", plan.total_rows());
+            }
+            Err(e) => {
+                ui::error(&format!("plan failed: {e}"));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let receipts_dir = kernel_config.data_dir.join("migrations");
+    let storage_cfg = kernel_config.storage.clone();
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            ui::error(&format!("failed to start tokio runtime: {e}"));
+            std::process::exit(1);
+        }
+    };
+
+    // Open the Surreal session inside the runtime; the migrator itself
+    // is sync (it bridges via `block_in_place`) and must run on a
+    // multi-thread runtime.
+    let outcome = rt.block_on(async {
+        let pool = SurrealConnectionPool::new();
+        let session = pool
+            .open(&storage_cfg)
+            .await
+            .map_err(|e| format!("open surreal target: {e}"))?;
+        librefang_storage::migrations::apply_pending(
+            session.client(),
+            librefang_storage::migrations::OPERATIONAL_MIGRATIONS,
+        )
+        .await
+        .map_err(|e| format!("apply schema migrations: {e}"))?;
+        let opts = MigrationOptions {
+            dry_run: false,
+            receipt_dir: Some(receipts_dir.clone()),
+        };
+        // The migrator drives sync rusqlite calls through
+        // `block_in_place`, so `spawn_blocking` keeps the runtime
+        // healthy.
+        let session_for_blocking = session.clone();
+        let sqlite_path_for_blocking = sqlite_path.clone();
+        tokio::task::spawn_blocking(move || {
+            migrate_sqlite_to_surreal(&sqlite_path_for_blocking, &session_for_blocking, &opts)
+        })
+        .await
+        .map_err(|e| format!("join migration task: {e}"))?
+        .map_err(|e| format!("migrate: {e}"))
+    });
+
+    match outcome {
+        Ok(receipt) => {
+            ui::success(&format!(
+                "Migrated {} row(s) from {} to {}.",
+                receipt.copied.values().sum::<u64>(),
+                receipt.source,
+                receipt.target,
+            ));
+            for (table, rows) in &receipt.copied {
+                println!("  {table:<28} {rows}");
+            }
+            if !receipt.errors.is_empty() {
+                ui::hint("Some tables reported errors:");
+                for (table, err) in &receipt.errors {
+                    println!("  {table:<28} {err}");
+                }
+            }
+            ui::hint(&format!(
+                "Receipt written under {}/",
+                receipts_dir.display()
+            ));
+        }
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Provision a UAR namespace + least-privilege user on a shared remote SurrealDB,
+/// then write `[uar.remote]` (and optionally `share_librefang_storage`) to config.toml.
+#[cfg(feature = "surreal-backend")]
+#[allow(clippy::too_many_arguments)]
+fn cmd_storage_link_uar(
+    remote_url: String,
+    root_user: String,
+    root_pass_env: String,
+    namespace: String,
+    database: String,
+    app_user: String,
+    app_pass_env: String,
+    also_link_memory: bool,
+) {
+    use librefang_storage::{RemoteSurrealConfig, StorageBackendKind, StorageConfig};
+
+    // --- resolve credentials from env vars -----------------------------------
+    let root_pass = std::env::var(&root_pass_env).unwrap_or_else(|_| {
+        ui::error(&format!(
+            "env var `{root_pass_env}` not set (required for root credentials)"
+        ));
+        std::process::exit(1);
+    });
+    let app_pass = std::env::var(&app_pass_env).unwrap_or_else(|_| {
+        ui::error(&format!(
+            "env var `{app_pass_env}` not set (required for app user password)"
+        ));
+        std::process::exit(1);
+    });
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            ui::error(&format!("tokio runtime: {e}"));
+            std::process::exit(1);
+        });
+
+    let outcome: Result<(), String> = rt.block_on(async {
+        // Open with root credentials using a temporary StorageConfig
+        let root_cfg = StorageConfig {
+            backend: StorageBackendKind::Remote(RemoteSurrealConfig {
+                url: remote_url.clone(),
+                namespace: namespace.clone(),
+                database: database.clone(),
+                username: root_user.clone(),
+                password_env: root_pass_env.clone(),
+                tls_skip_verify: false,
+            }),
+            namespace: namespace.clone(),
+            database: database.clone(),
+            legacy_sqlite_path: None,
+        };
+
+        // Set the env var so the pool's credential resolver can find the password.
+        // SAFETY: single-threaded current_thread runtime; no concurrent env readers.
+        #[allow(unused_unsafe)]
+        unsafe { std::env::set_var(&root_pass_env, &root_pass) };
+
+        let pool = librefang_storage::SurrealConnectionPool::new();
+        let session = pool
+            .open(&root_cfg)
+            .await
+            .map_err(|e| format!("connect to {remote_url}: {e}"))?;
+        let db = session.client();
+
+        ui::step(&format!(
+            "Provisioning UAR namespace `{namespace}` on {remote_url} ..."
+        ));
+
+        // 1. Namespace
+        db.query(format!("DEFINE NAMESPACE IF NOT EXISTS `{namespace}`;"))
+            .await
+            .map_err(|e| format!("DEFINE NAMESPACE: {e}"))?;
+
+        // 2. Database
+        db.query(format!(
+            "USE NAMESPACE `{namespace}`; DEFINE DATABASE IF NOT EXISTS `{database}` ON NAMESPACE `{namespace}`;"
+        ))
+        .await
+        .map_err(|e| format!("DEFINE DATABASE: {e}"))?;
+
+        // 3. Application user scoped to the namespace
+        let escaped_pass = app_pass.replace('\'', "\\'");
+        db.query(format!(
+            "USE NAMESPACE `{namespace}`; \
+             DEFINE USER IF NOT EXISTS `{app_user}` ON NAMESPACE `{namespace}` \
+             PASSWORD '{escaped_pass}' ROLES EDITOR;"
+        ))
+        .await
+        .map_err(|e| format!("DEFINE USER: {e}"))?;
+
+        Ok(())
+    });
+
+    if let Err(e) = outcome {
+        ui::error(&e);
+        std::process::exit(1);
+    }
+
+    ui::check_ok(&format!(
+        "Provisioned namespace `{namespace}`, database `{database}`, user `{app_user}`"
+    ));
+
+    // --- write [uar.remote] to config.toml ----------------------------------
+    let home = librefang_home();
+    let config_path = home.join("config.toml");
+
+    if !config_path.exists() {
+        ui::error_with_fix(
+            "config.toml not found",
+            "run `librefang init` to initialise",
+        );
+        std::process::exit(1);
+    }
+
+    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = raw
+        .parse()
+        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+
+    // Ensure [uar] table exists
+    if !doc.contains_table("uar") {
+        doc.insert("uar", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let uar_tbl = doc["uar"].as_table_mut().expect("uar is a table");
+
+    if also_link_memory {
+        uar_tbl.insert("share_librefang_storage", toml_edit::value(true));
+    }
+
+    // Build [uar.remote] inline table
+    let mut remote_tbl = toml_edit::Table::new();
+    remote_tbl.insert("url", toml_edit::value(&remote_url));
+    remote_tbl.insert("namespace", toml_edit::value(&namespace));
+    remote_tbl.insert("database", toml_edit::value(&database));
+    remote_tbl.insert("username", toml_edit::value(&app_user));
+    remote_tbl.insert("password_env", toml_edit::value(&app_pass_env));
+
+    uar_tbl.insert("remote", toml_edit::Item::Table(remote_tbl));
+
+    if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+        ui::error(&format!("write config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    ui::check_ok("Updated config.toml with [uar.remote]");
+
+    if find_daemon().is_some() {
+        ui::check_warn("Daemon is running — restart to activate: `librefang restart`");
+    } else {
+        ui::hint("Start the daemon to activate: `librefang start`");
+    }
+}
+
+/// Remove `[uar.remote]` and `share_librefang_storage` from config.toml.
+/// Optionally drops the application user from the remote instance.
+#[cfg(feature = "surreal-backend")]
+fn cmd_storage_unlink_uar(purge_user: bool, root_user: String, root_pass_env: Option<String>) {
+    use librefang_storage::{RemoteSurrealConfig, StorageBackendKind, StorageConfig};
+
+    // Read current config to find remote URL + app user so we can REMOVE USER if requested
+    let home = librefang_home();
+    let config_path = home.join("config.toml");
+
+    if !config_path.exists() {
+        ui::error_with_fix(
+            "config.toml not found",
+            "run `librefang init` to initialise",
+        );
+        std::process::exit(1);
+    }
+
+    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = raw
+        .parse()
+        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+
+    // Extract current remote config before stripping it
+    let maybe_remote: Option<(String, String, String, String)> =
+        doc.get("uar").and_then(|u| u.get("remote")).and_then(|r| {
+            let url = r.get("url")?.as_str()?.to_string();
+            let ns = r.get("namespace")?.as_str()?.to_string();
+            let user = r.get("username")?.as_str()?.to_string();
+            let pass_env = r.get("password_env")?.as_str()?.to_string();
+            Some((url, ns, user, pass_env))
+        });
+
+    if purge_user {
+        let Some((url, ns, app_user, _pass_env)) = maybe_remote.as_ref() else {
+            ui::error("no [uar.remote] found in config.toml; cannot purge user");
+            std::process::exit(1);
+        };
+        let Some(ref root_pass_env_name) = root_pass_env else {
+            ui::error("--root-pass-env is required when --purge-user is set");
+            std::process::exit(1);
+        };
+        let root_pass = std::env::var(root_pass_env_name).unwrap_or_else(|_| {
+            ui::error(&format!("env var `{root_pass_env_name}` not set"));
+            std::process::exit(1);
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| {
+                ui::error(&format!("tokio runtime: {e}"));
+                std::process::exit(1);
+            });
+
+        let (url, ns, app_user, root_pass_env_name) = (
+            url.clone(),
+            ns.clone(),
+            app_user.clone(),
+            root_pass_env_name.clone(),
+        );
+        // SAFETY: single-threaded current_thread runtime; no concurrent env readers.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(&root_pass_env_name, &root_pass)
+        };
+
+        let outcome: Result<(), String> = rt.block_on(async {
+            let root_cfg = StorageConfig {
+                backend: StorageBackendKind::Remote(RemoteSurrealConfig {
+                    url: url.clone(),
+                    namespace: ns.clone(),
+                    database: "main".to_string(),
+                    username: root_user.clone(),
+                    password_env: root_pass_env_name.clone(),
+                    tls_skip_verify: false,
+                }),
+                namespace: ns.clone(),
+                database: "main".to_string(),
+                legacy_sqlite_path: None,
+            };
+            let pool = librefang_storage::SurrealConnectionPool::new();
+            let session = pool
+                .open(&root_cfg)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+
+            session
+                .client()
+                .query(format!(
+                    "USE NAMESPACE `{ns}`; REMOVE USER IF EXISTS `{app_user}` ON NAMESPACE `{ns}`;"
+                ))
+                .await
+                .map_err(|e| format!("REMOVE USER: {e}"))?;
+            Ok(())
+        });
+
+        match outcome {
+            Ok(()) => ui::check_ok(&format!("Removed user `{app_user}` from namespace `{ns}`")),
+            Err(e) => {
+                ui::check_warn(&format!(
+                    "Could not drop user (config will still be cleared): {e}"
+                ));
+            }
+        }
+    }
+
+    // Strip [uar.remote] and share_librefang_storage
+    if let Some(uar_tbl) = doc.get_mut("uar").and_then(|u| u.as_table_mut()) {
+        uar_tbl.remove("remote");
+        uar_tbl.remove("share_librefang_storage");
+        // If the [uar] table is now empty except for well-known scalar keys, leave it alone.
+    }
+
+    if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+        ui::error(&format!("write config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    ui::check_ok("Removed [uar.remote] from config.toml");
+
+    if find_daemon().is_some() {
+        ui::check_warn("Daemon is running — restart to activate: `librefang restart`");
+    } else {
+        ui::hint("Changes take effect on next daemon start.");
+    }
 }
 
 fn cmd_memory_list(agent: &str, json: bool) {

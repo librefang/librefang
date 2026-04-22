@@ -7,16 +7,18 @@ description = "Core kernel for the LibreFang Agent OS"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-uar-spec = { path = "../librefang-uar-spec" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-kernel-router = { path = "../librefang-kernel-router" }
 librefang-kernel-metering = { path = "../librefang-kernel-metering" }
-librefang-runtime = { path = "../librefang-runtime" }
+librefang-runtime = { path = "../librefang-runtime", features = ["uar-driver"] }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-wire = { path = "../librefang-wire" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
+librefang-storage = { path = "../librefang-storage", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -44,9 +46,30 @@ regex = { workspace = true }
 cron = "0.16"
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
+surrealdb = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[features]
+default = ["surreal-backend"]
+## Storage backend selection (Phase 4 of `surrealdb-storage-swap`).
+## The Surreal-backed implementations of `MemoryBackend`, `AuditStore`,
+## `TraceBackend` and the TOTP lockout store land in Phases 5–6; until
+## then both features simply forward to the lower-level crates so the
+## workspace compiles cleanly under `--no-default-features --features
+## sqlite-backend`, `--features surreal-backend`, and the default set.
+surreal-backend = [
+    "librefang-storage/surreal-backend",
+    "librefang-runtime/surreal-backend",
+    "librefang-memory/surreal-backend",
+    "dep:surrealdb",
+]
+sqlite-backend = [
+    "librefang-storage/sqlite-backend",
+    "librefang-runtime/sqlite-backend",
+    "librefang-memory/sqlite-backend",
+]
 
 [[bin]]
 name = "purge_sentinels"

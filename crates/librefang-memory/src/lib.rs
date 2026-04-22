@@ -27,7 +27,12 @@ pub mod session;
 pub mod structured;
 pub mod usage;
 
+mod backend;
+pub mod backends;
 mod substrate;
+pub use backend::MemoryBackend;
+#[cfg(feature = "surreal-backend")]
+pub use backends::SurrealMemoryBackend;
 pub use substrate::MemorySubstrate;
 
 // Re-export types for convenience

@@ -6,10 +6,27 @@ license.workspace = true
 description = "CLI tool for the LibreFang Agent OS"
 
 [features]
-default = ["librefang-api/all-channels", "telemetry"]
+default = ["librefang-api/all-channels", "telemetry", "surreal-backend"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+
+# Phase 7 of `surrealdb-storage-swap`: db-explorer and storage-migrate
+# subcommands are gated on the storage backend they target.
+# `surreal-backend` is on by default so the live deployment path stays
+# zero-config; `sqlite-backend` is opt-in for the legacy stack and the
+# SQLite → Surreal migrator.
+surreal-backend = [
+    "dep:librefang-storage",
+    "librefang-storage/surreal-backend",
+    "librefang-api/surreal-backend",
+]
+sqlite-backend = [
+    "dep:librefang-storage",
+    "dep:rusqlite",
+    "librefang-storage/sqlite-backend",
+    "librefang-api/sqlite-backend",
+]
 
 [[bin]]
 name = "librefang"
@@ -36,7 +53,8 @@ reqwest = { workspace = true, features = ["blocking"] }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
-rusqlite = { workspace = true }
+librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
+rusqlite = { workspace = true, optional = true }
 uuid = { workspace = true }
 ratatui = { workspace = true }
 colored = { workspace = true }

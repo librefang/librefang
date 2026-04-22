@@ -6,6 +6,7 @@ import {
   usePatchAgent,
   usePatchAgentConfig,
   useSpawnAgent,
+  useSpawnUarAgent,
   useCloneAgent,
   useSuspendAgent,
   useDeleteAgent,
@@ -22,6 +23,7 @@ vi.mock("../http/client", () => ({
   patchAgent: vi.fn().mockResolvedValue({}),
   patchAgentConfig: vi.fn().mockResolvedValue({}),
   spawnAgent: vi.fn().mockResolvedValue({}),
+  spawnUarAgent: vi.fn().mockResolvedValue({}),
   cloneAgent: vi.fn().mockResolvedValue({}),
   suspendAgent: vi.fn().mockResolvedValue({}),
   resumeAgent: vi.fn().mockResolvedValue({}),
@@ -162,6 +164,23 @@ describe.each([
     await result.current.mutateAsync(arg);
 
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
+  });
+});
+
+describe("useSpawnUarAgent", () => {
+  it("invalidates agentKeys.lists and overviewKeys.snapshot", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useSpawnUarAgent(), { wrapper });
+
+    await result.current.mutateAsync({
+      content: "# Agent: test\n\n## Metadata\nversion: 1.0.0\n## Identity\nrole: assistant",
+      format: "markdown",
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });

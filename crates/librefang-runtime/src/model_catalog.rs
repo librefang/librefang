@@ -130,6 +130,36 @@ impl ModelCatalog {
             }
         }
 
+        // Synthetic UAR (Universal Agent Runtime) provider.
+        //
+        // UAR is a meta-provider: it forwards to liter-llm's `provider/model`
+        // client, which speaks ~142 backend providers. There is no `uar.toml`
+        // in the registry — we register it in code so agents can opt in via
+        // `provider = "uar"` in their manifests when the daemon was built
+        // with the `uar-driver` feature.
+        //
+        // `key_required = false` because the actual API key resolution
+        // happens inside `UarDriver::create` against `UAR_LLM__API_KEY` →
+        // `LLM_API_KEY` and only matters when an agent actually invokes it.
+        #[cfg(feature = "uar-driver")]
+        if !providers.iter().any(|p| p.id == "uar") {
+            providers.push(ProviderInfo {
+                id: "uar".to_string(),
+                display_name: "Universal Agent Runtime".to_string(),
+                api_key_env: "UAR_LLM__API_KEY".to_string(),
+                base_url: String::new(),
+                key_required: false,
+                auth_status: AuthStatus::Missing,
+                model_count: 0,
+                signup_url: None,
+                regions: HashMap::new(),
+                media_capabilities: Vec::new(),
+                available_models: Vec::new(),
+                is_custom: false,
+                proxy_url: None,
+            });
+        }
+
         let mut aliases: HashMap<String, String> = aliases_source
             .and_then(|s| toml::from_str::<AliasesCatalogFile>(s).ok())
             .map(|f| {
@@ -168,6 +198,23 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
+            // UAR: key is optional (NotRequired) but show Configured when an
+            // API key resolution chain is satisfied. Mirrors the resolution
+            // order inside `librefang-llm-drivers/src/drivers/uar.rs`:
+            // `UAR_LLM__API_KEY` then `LLM_API_KEY`.
+            #[cfg(feature = "uar-driver")]
+            if provider.id == "uar" {
+                let has_uar_key = std::env::var("UAR_LLM__API_KEY")
+                    .is_ok_and(|v| !v.trim().is_empty())
+                    || std::env::var("LLM_API_KEY").is_ok_and(|v| !v.trim().is_empty());
+                provider.auth_status = if has_uar_key {
+                    AuthStatus::Configured
+                } else {
+                    AuthStatus::NotRequired
+                };
+                continue;
+            }
+
             // CLI-based providers: no API key needed, but we probe for CLI
             // installation so the dashboard shows "Configured" vs "Not Installed".
             if crate::drivers::is_cli_provider(&provider.id) {

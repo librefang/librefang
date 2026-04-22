@@ -62,6 +62,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::media::router())
         .merge(routes::prompts::routes())
         .merge(routes::terminal::router())
+        .merge(routes::uar::router())
+        .merge(routes::storage::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -937,6 +939,9 @@ pub async fn build_router(
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
         // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned)
         .merge(routes::network::protocol_router())
+        // UAR / A2A RC v1.0 root endpoints — `/.well-known/agent.json` and `/a2a`
+        // must live at the root per the spec, NOT under `/api`.
+        .merge(routes::uar::root_router())
         // MCP HTTP endpoint (protocol-level, not versioned)
         .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API (follows OpenAI versioning, not ours)

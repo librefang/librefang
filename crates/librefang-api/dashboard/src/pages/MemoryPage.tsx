@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { type MemoryStatsResponse } from "../api";
 import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList } from "../lib/queries/memory";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
+import { useStorageStatus } from "../lib/queries/storage";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -323,6 +324,7 @@ export function MemoryPage() {
   const memoryQuery = useMemorySearchOrList(search);
 
   const statsQuery = useMemoryStats();
+  const storageStatusQuery = useStorageStatus();
   const deleteMutation = useDeleteMemory();
   const cleanupMutation = useCleanupMemories();
 
@@ -375,6 +377,35 @@ export function MemoryPage() {
 
       {/* Stats */}
       <MemoryStats stats={statsQuery.data ?? null} />
+
+      {/* Storage Backend Status */}
+      {storageStatusQuery.data && (
+        <Card padding="md">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+            <div className="flex items-center gap-1.5">
+              <Database className="h-3 w-3 text-text-dim" />
+              <span className="text-text-dim">{t("memory.storage_backend", { defaultValue: "Storage" })}:</span>
+              <Badge variant="brand">{storageStatusQuery.data.backend_kind}</Badge>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.storage_ns", { defaultValue: "NS/DB" })}:</span>
+              <span className="font-mono text-text-main">{storageStatusQuery.data.namespace}/{storageStatusQuery.data.database}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("memory.storage_connected", { defaultValue: "Connected" })}:</span>
+              <Badge variant={storageStatusQuery.data.connected ? "success" : "error"}>
+                {storageStatusQuery.data.connected ? t("common.yes", "Yes") : t("common.no", "No")}
+              </Badge>
+            </div>
+            {storageStatusQuery.data.uar_linked && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-text-dim">UAR:</span>
+                <Badge variant="success">{t("memory.storage_uar_linked", { defaultValue: "linked" })}</Badge>
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
 
       {/* Memory Config */}
       {memoryConfig && (

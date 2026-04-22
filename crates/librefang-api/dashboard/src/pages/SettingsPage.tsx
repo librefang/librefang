@@ -3,13 +3,16 @@ import { useState } from "react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { Input } from "../components/ui/Input";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
   Shield, CheckCircle, XCircle, Download, Play, Square,
+  Database, ArrowRight, Loader2, Link, Unlink,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
 import { useTotpStatus } from "../lib/queries/approvals";
+import { useStorageConfig, useStorageStatus } from "../lib/queries/storage";
 import {
   useTriggerAutoDream,
   useAbortAutoDream,
@@ -20,6 +23,11 @@ import {
   useTotpConfirm,
   useTotpRevoke,
 } from "../lib/mutations/approvals";
+import {
+  useMigrateStorage,
+  useLinkUarStorage,
+  useUnlinkUarStorage,
+} from "../lib/mutations/storage";
 import type { AutoDreamAgentStatus } from "../api";
 
 interface SegmentOption<T extends string> {
@@ -168,6 +176,9 @@ export function SettingsPage() {
 
       {/* Auto-Dream (background memory consolidation) */}
       <AutoDreamSection />
+
+      {/* Storage Administration */}
+      <StorageSection />
     </div>
   );
 }
@@ -836,6 +847,356 @@ function AutoDreamSection() {
             <XCircle className="w-3 h-3 inline mr-1" />
             {error}
           </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Storage Administration Section                                     */
+/* ------------------------------------------------------------------ */
+
+function StorageSection() {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+
+  const configQuery = useStorageConfig();
+  const statusQuery = useStorageStatus();
+  const migrate = useMigrateStorage();
+  const linkUarMutation = useLinkUarStorage();
+  const unlinkUar = useUnlinkUarStorage();
+
+  const [dryRunResult, setDryRunResult] = useState<Record<string, number> | null>(null);
+
+  // Link UAR form state (remote only)
+  const [showLinkForm, setShowLinkForm] = useState(false);
+  const [lkRemoteUrl, setLkRemoteUrl] = useState("");
+  const [lkRootUser, setLkRootUser] = useState("root");
+  const [lkRootPassEnv, setLkRootPassEnv] = useState("SURREAL_ROOT_PASS");
+  const [lkNamespace, setLkNamespace] = useState("uar");
+  const [lkAppUser, setLkAppUser] = useState("uar_app");
+  const [lkAppPassEnv, setLkAppPassEnv] = useState("SURREAL_UAR_APP_PASS");
+  const [lkAlsoMemory, setLkAlsoMemory] = useState(true);
+
+  const cfg = configQuery.data;
+  const status = statusQuery.data;
+
+  const handleDryRun = () => {
+    setDryRunResult(null);
+    migrate.mutate(
+      { from: "sqlite", dry_run: true },
+      {
+        onSuccess: (res) => setDryRunResult(res.copied),
+        onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+      },
+    );
+  };
+
+  const handleMigrate = () => {
+    migrate.mutate(
+      { from: "sqlite", dry_run: false },
+      {
+        onSuccess: () =>
+          addToast(t("settings.storage_migrate_success", { defaultValue: "Migration complete" }), "success"),
+        onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+      },
+    );
+  };
+
+  const handleUnlinkUar = () => {
+    unlinkUar.mutate(undefined, {
+      onSuccess: () =>
+        addToast(t("settings.storage_unlink_success", { defaultValue: "UAR unlinked" }), "success"),
+      onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+    });
+  };
+
+  const handleLinkUar = () => {
+    const remoteUrl = lkRemoteUrl.trim() || cfg?.remote_url || "";
+    if (!remoteUrl) {
+      addToast(t("settings.storage_link_uar_no_url", { defaultValue: "Provide the remote SurrealDB URL" }), "error");
+      return;
+    }
+    linkUarMutation.mutate(
+      {
+        remote_url: remoteUrl,
+        root_user: lkRootUser.trim(),
+        root_pass_ref: lkRootPassEnv.trim(),
+        namespace: lkNamespace.trim() || "uar",
+        app_user: lkAppUser.trim() || "uar_app",
+        app_pass_ref: lkAppPassEnv.trim(),
+        also_link_memory: lkAlsoMemory,
+      },
+      {
+        onSuccess: () => {
+          setShowLinkForm(false);
+          addToast(t("settings.storage_link_success", { defaultValue: "UAR linked to SurrealDB" }), "success");
+        },
+        onError: (err) =>
+          addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+      },
+    );
+  };
+
+  return (
+    <div className="rounded-2xl border border-border-subtle bg-surface">
+      {/* Header */}
+      <div className="px-5 py-3 border-b border-border-subtle/50 flex items-center gap-2">
+        <Database className="h-3.5 w-3.5 text-text-dim" />
+        <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+          {t("settings.storage", "Storage")}
+        </p>
+      </div>
+
+      <div className="px-5 py-4 space-y-5">
+        {/* Status row */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="text-text-dim">{t("settings.storage_backend", { defaultValue: "Backend" })}:</span>
+            <Badge variant="brand">{cfg?.backend_kind ?? "…"}</Badge>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-text-dim">{t("settings.storage_location", { defaultValue: "Location" })}:</span>
+            <span className="font-mono text-text-main truncate max-w-48">{status?.backend_location ?? cfg?.embedded_path ?? cfg?.remote_url ?? "…"}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-text-dim">{t("settings.storage_connection", { defaultValue: "Connected" })}:</span>
+            {statusQuery.isLoading ? (
+              <Loader2 className="h-3 w-3 animate-spin text-brand" />
+            ) : (
+              <Badge variant={status?.connected ? "success" : "error"}>
+                {status?.connected ? t("common.yes", "Yes") : t("common.no", "No")}
+              </Badge>
+            )}
+          </div>
+          {status?.uar_linked && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-text-dim">{t("settings.storage_uar", { defaultValue: "UAR" })}:</span>
+              <Badge variant="success">{t("settings.storage_uar_linked", { defaultValue: "linked" })}</Badge>
+            </div>
+          )}
+        </div>
+
+        {/* Table counts */}
+        {status?.table_counts && (
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {Object.entries(status.table_counts).map(([table, count]) => (
+              <div key={table} className="rounded-lg bg-main/40 border border-border-subtle/60 px-3 py-2 text-center">
+                <p className="text-lg font-black text-text-main">{count}</p>
+                <p className="text-[10px] text-text-dim truncate">{table.replace(/_/g, " ")}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Namespace / database */}
+        {cfg && (
+          <div className="flex flex-wrap gap-3">
+            <div className="flex-1 min-w-32">
+              <label className="block text-[10px] font-bold text-text-dim uppercase tracking-wider mb-1">
+                {t("settings.storage_namespace", { defaultValue: "Namespace" })}
+              </label>
+              <Input
+                value={cfg.namespace}
+                readOnly
+                className="text-xs font-mono"
+                onChange={() => {}}
+              />
+            </div>
+            <div className="flex-1 min-w-32">
+              <label className="block text-[10px] font-bold text-text-dim uppercase tracking-wider mb-1">
+                {t("settings.storage_database", { defaultValue: "Database" })}
+              </label>
+              <Input
+                value={cfg.database}
+                readOnly
+                className="text-xs font-mono"
+                onChange={() => {}}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Migrate actions (only shown when migration is available) */}
+        {status?.migration_available && (
+          <div className="rounded-xl border border-warning/30 bg-warning/5 p-4 space-y-3">
+            <div className="flex items-start gap-2">
+              <ArrowRight className="h-4 w-4 text-warning shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-bold text-text-main">
+                  {t("settings.storage_migrate_title", { defaultValue: "SQLite → SurrealDB Migration Available" })}
+                </p>
+                <p className="text-xs text-text-dim mt-0.5">
+                  {t("settings.storage_migrate_desc", { defaultValue: "Run a dry-run first to preview row counts, then perform the live migration." })}
+                </p>
+              </div>
+            </div>
+
+            {dryRunResult && (
+              <div className="rounded-lg bg-surface border border-border-subtle text-xs p-3 font-mono space-y-1">
+                {Object.entries(dryRunResult).map(([table, count]) => (
+                  <div key={table} className="flex justify-between">
+                    <span className="text-text-dim">{table}</span>
+                    <span className="font-bold text-text-main">{count} rows</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                isLoading={migrate.isPending && !dryRunResult}
+                onClick={handleDryRun}
+              >
+                {t("settings.storage_dry_run", { defaultValue: "Dry Run" })}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                isLoading={migrate.isPending && !!dryRunResult}
+                onClick={handleMigrate}
+              >
+                {t("settings.storage_migrate_btn", { defaultValue: "Migrate Now" })}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* UAR link / unlink actions */}
+        {status?.uar_linked ? (
+          <div className="flex items-center gap-3 rounded-xl border border-success/30 bg-success/5 px-4 py-3">
+            <CheckCircle className="h-4 w-4 text-success shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-text-main">
+                {t("settings.storage_uar_linked_title", { defaultValue: "UAR is sharing this SurrealDB instance" })}
+              </p>
+              {status.uar_namespace && (
+                <p className="text-xs text-text-dim font-mono mt-0.5">{status.uar_namespace}/main</p>
+              )}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={<Unlink className="h-3.5 w-3.5" />}
+              isLoading={unlinkUar.isPending}
+              onClick={handleUnlinkUar}
+            >
+              {t("settings.storage_unlink_uar", { defaultValue: "Unlink" })}
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-border-subtle bg-surface">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between px-4 py-3 text-left"
+              onClick={() => setShowLinkForm((v) => !v)}
+            >
+              <div className="flex items-center gap-2">
+                <Link className="h-4 w-4 text-text-dim" />
+                <span className="text-sm font-bold text-text-main">
+                  {t("settings.storage_link_uar", { defaultValue: "Link UAR to this SurrealDB" })}
+                </span>
+              </div>
+              <ArrowRight className={`h-4 w-4 text-text-dim transition-transform ${showLinkForm ? "rotate-90" : ""}`} />
+            </button>
+
+            {showLinkForm && (
+              <div className="px-4 pb-4 space-y-3 border-t border-border-subtle/50 pt-4">
+                <p className="text-xs text-text-dim">
+                  {t("settings.storage_link_uar_form_desc", {
+                    defaultValue:
+                      "Provisions a `uar` namespace + least-privilege app user on the remote instance. Root credentials are never persisted.",
+                  })}
+                </p>
+
+                {cfg?.backend_kind === "embedded" && (
+                  <div className="rounded-lg bg-warning/5 border border-warning/30 px-3 py-2 text-xs text-warning">
+                    {t("settings.storage_embedded_uar_warning", {
+                      defaultValue:
+                        "The embedded engine is single-writer. UAR co-location requires a remote SurrealDB instance.",
+                    })}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-2">
+                  <Input
+                    label={t("settings.storage_remote_url", { defaultValue: "Remote SurrealDB URL" })}
+                    placeholder={cfg?.remote_url || "ws://surreal:8000"}
+                    value={lkRemoteUrl}
+                    onChange={(e) => setLkRemoteUrl(e.target.value)}
+                    disabled={cfg?.backend_kind === "embedded"}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label={t("settings.storage_uar_ns", { defaultValue: "UAR Namespace" })}
+                    placeholder="uar"
+                    value={lkNamespace}
+                    onChange={(e) => setLkNamespace(e.target.value)}
+                  />
+                  <Input
+                    label={t("settings.storage_uar_app_user", { defaultValue: "App User" })}
+                    placeholder="uar_app"
+                    value={lkAppUser}
+                    onChange={(e) => setLkAppUser(e.target.value)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label={t("settings.storage_root_user", { defaultValue: "Root Username" })}
+                    placeholder="root"
+                    value={lkRootUser}
+                    onChange={(e) => setLkRootUser(e.target.value)}
+                  />
+                  <Input
+                    label={t("settings.storage_root_pass_env", { defaultValue: "Root Pass Env Var" })}
+                    placeholder="SURREAL_ROOT_PASS"
+                    value={lkRootPassEnv}
+                    onChange={(e) => setLkRootPassEnv(e.target.value)}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    label={t("settings.storage_app_pass_env", { defaultValue: "App Pass Env Var" })}
+                    placeholder="SURREAL_UAR_APP_PASS"
+                    value={lkAppPassEnv}
+                    onChange={(e) => setLkAppPassEnv(e.target.value)}
+                  />
+                </div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 rounded border-border-subtle accent-brand"
+                    checked={lkAlsoMemory}
+                    onChange={(e) => setLkAlsoMemory(e.target.checked)}
+                  />
+                  <div>
+                    <p className="text-xs font-bold text-text-main">
+                      {t("settings.storage_also_link_memory", { defaultValue: "Also share storage for UAR memory (share_librefang_storage)" })}
+                    </p>
+                    <p className="text-[10px] text-text-dim">
+                      {t("settings.storage_also_link_memory_desc", {
+                        defaultValue: "Sets share_librefang_storage = true in config.toml so UAR reuses the same remote config.",
+                      })}
+                    </p>
+                  </div>
+                </label>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  leftIcon={<Link className="h-3.5 w-3.5" />}
+                  isLoading={linkUarMutation.isPending}
+                  disabled={cfg?.backend_kind === "embedded"}
+                  onClick={handleLinkUar}
+                >
+                  {t("settings.storage_provision_link", { defaultValue: "Provision & Link" })}
+                </Button>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

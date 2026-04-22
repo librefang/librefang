@@ -1,0 +1,37 @@
+[package]
+name = "librefang-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage backend abstractions for librefang (SurrealDB 3.0 + optional SQLite)."
+
+[features]
+default = ["surreal-backend"]
+
+# Embedded or remote SurrealDB 3.0 backend (default).
+surreal-backend = ["dep:surrealdb"]
+
+# Legacy SQLite backend (opt-in, mirrors the pre-3.0 storage layout).
+sqlite-backend = ["dep:rusqlite"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+surrealdb = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml = { workspace = true }

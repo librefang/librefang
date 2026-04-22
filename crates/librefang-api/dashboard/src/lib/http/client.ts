@@ -117,6 +117,7 @@ export {
 export {
   // agents
   spawnAgent,
+  spawnUarAgent,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -232,6 +233,13 @@ export {
   triggerAutoDream,
   abortAutoDream,
   setAutoDreamEnabled,
+  // storage administration
+  getStorageConfig,
+  updateStorageConfig,
+  getStorageStatus,
+  migrateStorage,
+  linkUarStorage,
+  unlinkUarStorage,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -262,4 +270,11 @@ export type {
   SpeechResult,
   TerminalHealth,
   TerminalWindow,
+  // storage
+  StorageConfig,
+  StorageStatus,
+  StorageTableCounts,
+  StorageMigrateResult,
+  LinkUarBody,
+  LinkUarResult,
 } from "../../api";

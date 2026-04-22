@@ -8,6 +8,7 @@ description = "HTTP/WebSocket API server for the LibreFang Agent OS daemon"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
+librefang-uar-spec = { path = "../librefang-uar-spec" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
@@ -16,6 +17,7 @@ librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-migrate = { path = "../librefang-migrate" }
+librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
 librefang-telemetry = { path = "../librefang-telemetry" }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
@@ -63,7 +65,19 @@ metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 [features]
-default = ["all-channels", "telemetry"]
+default = ["all-channels", "telemetry", "surreal-backend"]
+
+# Storage backend feature gates (mirrors librefang-storage).
+# `surreal-backend` is the default; `sqlite-backend` is opt-in for
+# the SQLite dry-run path in POST /api/storage/migrate.
+surreal-backend = [
+    "dep:librefang-storage",
+    "librefang-storage/surreal-backend",
+]
+sqlite-backend = [
+    "dep:librefang-storage",
+    "librefang-storage/sqlite-backend",
+]
 
 # OpenTelemetry tracing export + Prometheus metrics
 telemetry = [

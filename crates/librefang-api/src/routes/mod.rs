@@ -28,8 +28,10 @@ pub mod plugins;
 pub mod prompts;
 pub mod providers;
 pub mod skills;
+pub mod storage;
 pub mod system;
 pub mod terminal;
+pub mod uar;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -56,6 +58,7 @@ pub use network::*;
 pub use plugins::*;
 pub use providers::*;
 pub use skills::*;
+pub use storage::*;
 pub use system::*;
 pub use terminal::*;
 pub use workflows::*;

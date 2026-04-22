@@ -276,6 +276,59 @@ pub(super) fn toml_enabled_false(content: &str) -> bool {
         == Some(false)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UAR-AGENT-MD / agent.json loader
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Attempt to load an agent from a UAR-AGENT-MD (`.uar.md`) or pre-compiled
+/// descriptor (`.agent.json`) file.
+#[expect(
+    dead_code,
+    reason = "called from agent loader and /api/agents/uar handler"
+)]
+///
+/// Returns `Ok(Some(manifest))` when the path has a recognised UAR extension
+/// and parsing succeeds, `Ok(None)` when the extension does not match (so the
+/// caller can fall through to the standard TOML loader), and `Err(message)`
+/// on I/O or parse failures.
+pub(super) fn try_load_uar_manifest(
+    path: &std::path::Path,
+) -> Result<Option<AgentManifest>, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    // Accept *.uar.md and *.agent.json
+    let is_uar = (ext == "json" && file_name.ends_with(".agent.json"))
+        || (ext == "md" && file_name.ends_with(".uar.md"));
+
+    if !is_uar {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read UAR artifact at {}: {e}", path.display()))?;
+
+    let artifact = if ext == "md" {
+        librefang_uar_spec::parser::parse(&content)
+            .map_err(|e| format!("UAR-AGENT-MD parse error in {}: {e}", path.display()))?
+    } else {
+        librefang_uar_spec::parser::parse_json(&content)
+            .map_err(|e| format!("agent.json parse error in {}: {e}", path.display()))?
+    };
+
+    let manifest = librefang_uar_spec::translator::artifact_to_manifest(&artifact)
+        .map_err(|e| format!("UAR→AgentManifest translation error: {e}"))?;
+
+    tracing::info!(
+        path = %path.display(),
+        agent_name = %manifest.name,
+        agent_version = %manifest.version,
+        "loaded agent from UAR artifact"
+    );
+
+    Ok(Some(manifest))
+}
+
 pub fn shared_memory_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

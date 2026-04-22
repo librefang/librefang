@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   spawnAgent,
+  spawnUarAgent,
   cloneAgent,
   stopAgent,
   suspendAgent,
@@ -28,6 +29,18 @@ export function useSpawnAgent() {
     mutationFn: spawnAgent,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+/** Spawn a librefang agent from a UAR-AGENT-MD Markdown or agent.json descriptor. */
+export function useSpawnUarAgent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: spawnUarAgent,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });

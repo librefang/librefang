@@ -5,8 +5,24 @@ edition.workspace = true
 license.workspace = true
 description = "Memory substrate for the LibreFang Agent OS"
 
+[features]
+# Default: SurrealDB-backed memory via the surreal-memory library.
+# Phase 5 of `surrealdb-storage-swap` provides the actual implementation; for
+# now this feature only enables the storage abstractions in
+# `librefang-storage` and the trait surface in this crate. The legacy
+# rusqlite-based `MemorySubstrate` remains compiled regardless until the
+# Surreal backend reaches feature parity.
+default = ["surreal-backend"]
+surreal-backend = [
+    "librefang-storage/surreal-backend",
+    "dep:surrealdb",
+    "dep:surreal-memory",
+]
+sqlite-backend = ["librefang-storage/sqlite-backend"]
+
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+librefang-storage = { path = "../librefang-storage", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +36,10 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
 
+surrealdb = { workspace = true, optional = true }
+surreal-memory = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

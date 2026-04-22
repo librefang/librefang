@@ -7,6 +7,12 @@ use std::path::PathBuf;
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
+pub use librefang_storage::{
+    RemoteSurrealConfig, StorageBackendKind, StorageConfig,
+    DEFAULT_DATABASE_NAME as STORAGE_DEFAULT_DATABASE_NAME,
+    DEFAULT_NAMESPACE_NAME as STORAGE_DEFAULT_NAMESPACE_NAME,
+};
+
 /// DM (direct message) policy for a channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1771,6 +1777,59 @@ impl Default for TriggersConfig {
     }
 }
 
+/// Configuration for the Universal Agent Runtime (UAR) integration.
+///
+/// All fields are optional; unset values fall back to the corresponding
+/// `UAR_LLM__*` / `LLM_*` environment variables that the UAR driver already
+/// consults at runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UarConfig {
+    /// LLM API key forwarded to the UAR `LiterLlmDriver`.
+    ///
+    /// Takes precedence over `UAR_LLM__API_KEY` and `LLM_API_KEY` env vars.
+    /// Use `vault:KEY` syntax to store securely:
+    /// `api_key = "vault:uar_api_key"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+
+    /// Default model in `provider/model` format (e.g. `"openai/gpt-4o"`).
+    ///
+    /// Takes precedence over `UAR_LLM__MODEL` and `LLM_MODEL` env vars.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+
+    /// Filesystem path for the embedded SurrealDB (RocksDB) data store.
+    ///
+    /// Defaults to `<kernel.data_dir>/uar-surreal`.  Set an explicit path
+    /// when you want to place the UAR database on a separate volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surreal_data_dir: Option<PathBuf>,
+
+    /// Optional base URL override for the UAR LLM backend.
+    ///
+    /// Useful for pointing at a local proxy (e.g. `"http://localhost:4000"`)
+    /// without changing the model string.  Takes precedence over
+    /// `UAR_LLM__BASE_URL` and `LLM_BASE_URL` env vars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// When set, UAR connects to this remote SurrealDB instance instead of
+    /// the embedded path in [`Self::surreal_data_dir`].
+    ///
+    /// If both fields are set, [`Self::remote`] wins. This is the second
+    /// half of the shared-remote-instance design from Phase 4b of the
+    /// `surrealdb-storage-swap` plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteSurrealConfig>,
+
+    /// When `true`, UAR reuses the same `RemoteSurrealConfig` as
+    /// `KernelConfig.storage` (with `namespace = "uar"` so isolation is
+    /// preserved). Defaults to `false`.
+    #[serde(default)]
+    pub share_librefang_storage: bool,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -2132,6 +2191,37 @@ pub struct KernelConfig {
     /// Terminal / CLI access control configuration.
     #[serde(default)]
     pub terminal: TerminalConfig,
+    /// Universal Agent Runtime (UAR) integration configuration.
+    ///
+    /// When `None` (the default) the UAR driver is not active; agents use the
+    /// provider configured in `default_model`.  Set `[uar]` in `config.toml`
+    /// to route requests through the UAR's unified `provider/model` addressing
+    /// (142+ providers via liter-llm), enable the embedded SurrealDB memory
+    /// layer, and unlock cross-framework A2A discovery.
+    ///
+    /// ```toml
+    /// [uar]
+    /// # API key for the UAR LLM backend (overrides UAR_LLM__API_KEY env var).
+    /// # api_key = "sk-..."
+    ///
+    /// # Model in `provider/model` format.  Defaults to UAR_LLM__MODEL env var.
+    /// # model = "openai/gpt-4o"
+    ///
+    /// # Path for the embedded SurrealDB data directory.
+    /// # Defaults to `<data_dir>/uar-surreal`.
+    /// # surreal_data_dir = "/var/lib/librefang/uar-surreal"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uar: Option<UarConfig>,
+
+    /// Storage backend configuration (Phase 4 of `surrealdb-storage-swap`).
+    ///
+    /// Defaults to embedded SurrealDB at `<data_dir>/librefang.surreal`. When
+    /// the user promotes to a remote SurrealDB through the wizard or
+    /// `librefang storage link-uar`, this struct holds the connection
+    /// parameters and credential references.
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3700,6 +3790,8 @@ impl Default for KernelConfig {
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
             terminal: TerminalConfig::default(),
+            uar: None,
+            storage: StorageConfig::default(),
         }
     }
 }

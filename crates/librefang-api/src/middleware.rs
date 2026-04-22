@@ -363,6 +363,8 @@ pub async fn auth(
             | "/api/auth/callback"
             | "/api/auth/dashboard-login"
             | "/api/auth/dashboard-check"
+            // A2A RC v1.0 JSON-RPC endpoint — unauthenticated per spec §5
+            | "/a2a"
     ) || path.starts_with("/api/providers/github-copilot/oauth/");
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
@@ -403,7 +405,9 @@ pub async fn auth(
         ) || dashboard_shell_public
             || path.starts_with("/a2a/")
             || path.starts_with("/api/uploads/")
-            || path.starts_with("/api/auth/login"));
+            || path.starts_with("/api/auth/login")
+            // UAR discovery endpoints — unauthenticated so external clients can enumerate
+            || path.starts_with("/api/uar/discovery/"));
     let always_public =
         always_public_method_free || always_public_get_only || is_mcp_oauth_callback;
 

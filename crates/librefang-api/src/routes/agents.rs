@@ -154,6 +154,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/push",
             axum::routing::post(push_message),
         )
+        // UAR artifact spawn — accepts UAR-AGENT-MD Markdown or agent.json body
+        .route(
+            "/agents/uar",
+            axum::routing::post(spawn_uar_agent),
+        )
 }
 use crate::middleware::RequestLanguage;
 use crate::stream_dedup::StreamDedup;
@@ -4590,6 +4595,97 @@ pub async fn push_message(
                 "agent_id": agent_id.to_string(),
             })),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agents/uar — Spawn a UAR-AGENT-MD or agent.json agent
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/agents/uar`.
+///
+/// The body may be either:
+/// - A raw UAR-AGENT-MD Markdown document (Content-Type: text/plain or text/markdown).
+/// - A pre-compiled `.agent.json` descriptor (Content-Type: application/json).
+///
+/// For JSON payloads the body must be a JSON object with a `"content"` string
+/// field carrying the raw Markdown or the embedded descriptor JSON, to keep
+/// the endpoint conveniently callable from JSON-only clients:
+/// `{"content": "# Agent: ...", "format": "markdown"}`.
+#[derive(serde::Deserialize)]
+struct UarSpawnRequest {
+    /// Raw UAR-AGENT-MD Markdown or pre-compiled JSON descriptor.
+    content: String,
+    /// `"markdown"` (default) or `"json"`.
+    #[serde(default)]
+    format: UarFormat,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum UarFormat {
+    #[default]
+    Markdown,
+    Json,
+}
+
+/// `POST /api/agents/uar` — spawn an agent from a UAR-AGENT-MD artifact.
+///
+/// # Request
+/// ```json
+/// { "content": "# Agent: MyBot\n\n## Metadata\n...", "format": "markdown" }
+/// ```
+///
+/// # Response
+/// Same shape as `POST /api/agents`: `{ "agent_id": "...", "name": "..." }`.
+async fn spawn_uar_agent(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UarSpawnRequest>,
+) -> impl IntoResponse {
+    let artifact = match req.format {
+        UarFormat::Markdown => librefang_uar_spec::parser::parse(&req.content),
+        UarFormat::Json => librefang_uar_spec::parser::parse_json(&req.content),
+    };
+
+    let artifact = match artifact {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("UAR parse error: {e}")})),
+            );
+        }
+    };
+
+    let manifest = match librefang_uar_spec::translator::artifact_to_manifest(&artifact) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("translation error: {e}")})),
+            );
+        }
+    };
+
+    let agent_name = manifest.name.clone();
+    match state.kernel.spawn_agent(manifest) {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "agent_id": id.to_string(),
+                "name": agent_name,
+            })),
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "UAR agent spawn failed");
+            let status = match &e {
+                librefang_kernel::error::KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::AgentAlreadyExists(_),
+                ) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()})))
+        }
     }
 }
 

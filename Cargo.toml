@@ -26,6 +26,8 @@ members = [
     "crates/librefang-telemetry",
     "xtask",
     "crates/librefang-testing",
+    "crates/librefang-uar-spec",
+    "crates/librefang-storage",
 ]
 
 [workspace.package]
@@ -79,6 +81,10 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
+# SurrealDB — pinned to =3.0.5 so librefang, surreal-memory, and UAR all link the
+# same client crate (see Phase 4b of plan surrealdb-storage-swap).
+surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }
+surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server", branch = "main", default-features = false, features = ["embedded"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -225,3 +231,10 @@ opt-level = "s"
 inherits = "release"
 lto = "thin"
 codegen-units = 4
+
+# Local development override: build against the in-tree UAR checkout so that
+# changes made under ../../prometheus/universal-agent-runtime are picked up
+# without going through GitHub. Comment this out to use the upstream git rev
+# pinned in crates/librefang-llm-drivers/Cargo.toml.
+[patch."https://github.com/Prometheus-AGS/universal-agent-runtime.git"]
+universal-agent-runtime = { path = "../../prometheus/universal-agent-runtime" }

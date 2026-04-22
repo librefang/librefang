@@ -323,3 +323,9 @@ export const terminalKeys = {
   health: () => [...terminalKeys.all, "health"] as const,
   windows: () => [...terminalKeys.all, "windows"] as const,
 };
+
+export const storageKeys = {
+  all: ["storage"] as const,
+  config: () => [...storageKeys.all, "config"] as const,
+  status: () => [...storageKeys.all, "status"] as const,
+};

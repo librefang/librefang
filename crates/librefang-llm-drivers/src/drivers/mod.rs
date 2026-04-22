@@ -17,6 +17,8 @@ pub mod gemini_cli;
 pub mod openai;
 pub mod qwen_code;
 pub mod token_rotation;
+#[cfg(feature = "uar-driver")]
+pub mod uar;
 pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
@@ -791,6 +793,14 @@ fn create_driver_from_entry(
 /// - Any custom provider with `base_url` set uses OpenAI-compatible format
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
+
+    // UAR driver — feature-gated. Wraps liter-llm's `provider/model` client so
+    // a single agent manifest can target 142+ providers via UAR. The model
+    // string must use `provider/model` form (e.g. `openai/gpt-4o`).
+    #[cfg(feature = "uar-driver")]
+    if provider == "uar" {
+        return uar::UarDriver::create(config);
+    }
 
     // Look up in the registry first
     if let Some(entry) = find_provider(provider) {

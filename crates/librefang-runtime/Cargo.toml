@@ -17,6 +17,7 @@ librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-channels = { path = "../librefang-channels" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-skills = { path = "../librefang-skills" }
+librefang-storage = { path = "../librefang-storage", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -56,6 +57,7 @@ toml = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
+surrealdb = { workspace = true, optional = true }
 landlock = { version = "0.4", optional = true }
 seccompiler = { version = "0.4", optional = true }
 
@@ -63,9 +65,21 @@ seccompiler = { version = "0.4", optional = true }
 libc = "0.2"
 
 [features]
+default = ["surreal-backend"]
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
 wasm-hooks = []
+## Forward to `librefang-llm-drivers/uar-driver` so the runtime exposes the
+## UAR (Universal Agent Runtime) LLM driver and registers a synthetic
+## "uar" provider in the model catalog.
+uar-driver = ["librefang-llm-drivers/uar-driver"]
+## Storage backend selection (Phase 4 of `surrealdb-storage-swap`).
+## `surreal-backend` is the new default; the existing rusqlite-based
+## `AuditStore`/`TraceStore` impls remain compiled until Phase 6 lands the
+## SurrealDB equivalents and we can fully gate them behind
+## `sqlite-backend`.
+surreal-backend = ["librefang-storage/surreal-backend", "librefang-memory/surreal-backend", "dep:surrealdb"]
+sqlite-backend = ["librefang-storage/sqlite-backend", "librefang-memory/sqlite-backend"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

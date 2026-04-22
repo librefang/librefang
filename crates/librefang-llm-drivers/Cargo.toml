@@ -5,7 +5,25 @@ edition.workspace = true
 license.workspace = true
 description = "Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing the librefang-llm-driver trait"
 
+[features]
+default = []
+## Enables the UAR (Universal Agent Runtime) driver which wraps liter-llm's
+## unified `provider/model` client for 142+ providers. Off-by-default to keep
+## the dependency tree small for builds that do not need it.
+uar-driver = ["dep:universal-agent-runtime"]
+
 [dependencies]
+# UAR — optional; only compiled when the `uar-driver` feature is enabled.
+#
+# Notes:
+# * `default-features = false` keeps Postgres (`postgres-backend` → `sqlx` →
+#   `libsqlite3-sys`) and the MemPalace knowledge graph (`memory-palace` →
+#   `mempalace-core` → bundled `rusqlite`) out of the build, both of which
+#   conflict with librefang's own `rusqlite`/`libsqlite3-sys` versions.
+# * `surreal-backend` is enabled explicitly so UAR uses embedded SurrealDB
+#   (RocksDB) for persistence — fully self-contained, no external services.
+universal-agent-runtime = { git = "https://github.com/Prometheus-AGS/universal-agent-runtime.git", branch = "main", optional = true, default-features = false, features = ["surreal-backend"] }
+
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-http = { path = "../librefang-http" }

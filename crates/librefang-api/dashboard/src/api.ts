@@ -2119,6 +2119,16 @@ export async function spawnAgent(req: {
   return post<ApiActionResponse>("/api/agents", req);
 }
 
+/** Spawn an agent from a UAR-AGENT-MD Markdown or agent.json descriptor. */
+export async function spawnUarAgent(req: {
+  /** Raw UAR-AGENT-MD Markdown document or serialised agent.json object. */
+  content: string;
+  /** `"markdown"` (default) or `"json"`. */
+  format?: "markdown" | "json";
+}): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/agents/uar", req);
+}
+
 export async function getCommsTopology(): Promise<CommsTopology> {
   return get<CommsTopology>("/api/comms/topology");
 }
@@ -3090,4 +3100,98 @@ export async function setAutoDreamEnabled(
     `/api/auto-dream/agents/${encodeURIComponent(agentId)}/enabled`,
     { enabled },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Storage Administration (Phase 8 of surrealdb-storage-swap)
+// ---------------------------------------------------------------------------
+
+export interface StorageConfig {
+  backend_kind: "embedded" | "remote";
+  embedded_path?: string;
+  remote_url?: string;
+  namespace: string;
+  database: string;
+  legacy_sqlite_path?: string;
+  uar_linked: boolean;
+}
+
+export interface StorageTableCounts {
+  audit_entries: number;
+  hook_traces: number;
+  circuit_breaker_states: number;
+  totp_lockout: number;
+  agents: number;
+}
+
+export interface StorageStatus {
+  backend_kind: "embedded" | "remote";
+  backend_location: string;
+  namespace: string;
+  database: string;
+  connected: boolean;
+  table_counts: StorageTableCounts;
+  migration_available: boolean;
+  last_migration_receipt?: string;
+  uar_linked: boolean;
+  uar_namespace?: string;
+}
+
+export interface StorageMigrateResult {
+  dry_run: boolean;
+  source: string;
+  target: string;
+  copied: Record<string, number>;
+  errors: Record<string, string>;
+  started_at: string;
+  finished_at: string;
+  receipt_path?: string;
+}
+
+export interface LinkUarBody {
+  remote_url: string;
+  root_user: string;
+  root_pass_ref: string;
+  namespace?: string;
+  app_user?: string;
+  app_pass_ref: string;
+  also_link_memory?: boolean;
+}
+
+export interface LinkUarResult {
+  ok: boolean;
+  namespace: string;
+  app_user: string;
+  memory_linked: boolean;
+}
+
+export async function getStorageConfig(): Promise<StorageConfig> {
+  return get<StorageConfig>("/api/storage/config");
+}
+
+export async function updateStorageConfig(
+  config: Partial<Omit<StorageConfig, "uar_linked">>,
+): Promise<{ ok: boolean }> {
+  return put<{ ok: boolean }>("/api/storage/config", config);
+}
+
+export async function getStorageStatus(): Promise<StorageStatus> {
+  return get<StorageStatus>("/api/storage/status");
+}
+
+export async function migrateStorage(body: {
+  from: "sqlite";
+  dry_run?: boolean;
+}): Promise<StorageMigrateResult> {
+  return post<StorageMigrateResult>("/api/storage/migrate", body);
+}
+
+export async function linkUarStorage(body: LinkUarBody): Promise<LinkUarResult> {
+  return post<LinkUarResult>("/api/storage/link-uar", body);
+}
+
+export async function unlinkUarStorage(body?: {
+  purge_user?: boolean;
+}): Promise<{ ok: boolean }> {
+  return post<{ ok: boolean }>("/api/storage/unlink-uar", body ?? {});
 }
