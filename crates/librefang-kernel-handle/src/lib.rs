@@ -553,4 +553,11 @@ pub trait KernelHandle: Send + Sync {
     /// Fire an `agent:step` external hook event.
     /// Called by the runtime at the start of each agent loop iteration.
     fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}
+
+    /// Return the canonicalized absolute paths of named workspaces declared as `read-only`
+    /// for the given agent. Used by file-write tools to enforce workspace access modes.
+    /// Default: no read-only prefixes (all writes allowed by the sandbox).
+    fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
 }

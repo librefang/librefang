@@ -351,7 +351,10 @@ pub(super) fn backfill_workspace_dir(
 /// Generate workspace identity files for an agent (SOUL.md, USER.md, TOOLS.md, MEMORY.md).
 /// Files are written to `{workspace}/.identity/` to keep the workspace root clean and
 /// allow multiple agents to share the same workspace without collisions.
-/// Uses `create_new` to never overwrite existing files (preserves user edits).
+///
+/// User-editable files (SOUL, USER, MEMORY, AGENTS, BOOTSTRAP, IDENTITY) use `create_new`
+/// to preserve manual edits. TOOLS.md is always rewritten so named workspace paths stay
+/// current after the agent manifest is updated.
 pub(super) fn generate_identity_files(
     workspace: &Path,
     manifest: &AgentManifest,
@@ -381,7 +384,7 @@ pub(super) fn generate_identity_files(
          - Timezone:\n\
          - Preferences:\n";
 
-    let tools_content = build_tools_content(workspace, resolved_workspaces);
+    let tools_content = build_tools_content(resolved_workspaces);
 
     let memory_content = "# Long-Term Memory\n\
          <!-- Curated knowledge the agent preserves across sessions -->\n";
@@ -431,10 +434,10 @@ pub(super) fn generate_identity_files(
         name = manifest.name
     );
 
-    let files: &[(&str, &str)] = &[
+    // User-editable files — never overwrite (preserve manual edits)
+    let editable_files: &[(&str, &str)] = &[
         ("SOUL.md", &soul_content),
         ("USER.md", user_content),
-        ("TOOLS.md", &tools_content),
         ("MEMORY.md", memory_content),
         ("AGENTS.md", agents_content),
         ("BOOTSTRAP.md", &bootstrap_content),
@@ -459,7 +462,7 @@ pub(super) fn generate_identity_files(
         None
     };
 
-    for (filename, content) in files {
+    for (filename, content) in editable_files {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -471,6 +474,21 @@ pub(super) fn generate_identity_files(
             Err(_) => {
                 // File already exists — preserve user edits
             }
+        }
+    }
+
+    // TOOLS.md is auto-generated config — always rewrite so named workspace paths stay current
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(identity_dir.join("TOOLS.md"))
+    {
+        Ok(mut f) => {
+            let _ = f.write_all(tools_content.as_bytes());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to write TOOLS.md for {}: {e}", workspace.display());
         }
     }
 
@@ -492,10 +510,7 @@ pub(super) fn generate_identity_files(
 }
 
 /// Build the TOOLS.md content, injecting named workspace paths and modes.
-fn build_tools_content(
-    workspace: &Path,
-    resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>,
-) -> String {
+fn build_tools_content(resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>) -> String {
     let mut content = "# Tools & Environment\n\
         <!-- Agent-specific environment notes (not synced) -->\n"
         .to_string();
@@ -520,7 +535,6 @@ fn build_tools_content(
         );
     }
 
-    let _ = workspace; // workspace path reserved for future use (e.g. injecting private workspace path)
     content
 }
 
@@ -626,15 +640,15 @@ pub(super) fn read_identity_file(workspace: &Path, filename: &str) -> Option<Str
     let ws_canonical = workspace.canonicalize().ok();
 
     for path in &candidates {
-        // Security: ensure path stays inside workspace
+        // Security: ensure path stays inside workspace.
+        // When ws_canonical is None the workspace doesn't exist yet — skip rather than
+        // allowing the check to be bypassed.
         match path.canonicalize() {
-            Ok(canonical) => {
-                if let Some(ref wsc) = ws_canonical {
-                    if !canonical.starts_with(wsc) {
-                        continue; // path traversal attempt
-                    }
-                }
-            }
+            Ok(canonical) => match &ws_canonical {
+                Some(wsc) if !canonical.starts_with(wsc) => continue,
+                None => continue,
+                _ => {}
+            },
             Err(_) => continue, // file doesn't exist at this location
         }
         let content = match std::fs::read_to_string(path) {

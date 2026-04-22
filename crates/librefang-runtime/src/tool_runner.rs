@@ -379,6 +379,26 @@ pub async fn execute_tool_raw(
         // Filesystem tools
         "file_read" => tool_file_read(input, *workspace_root).await,
         "file_write" => {
+            // Enforce named workspace read-only restrictions before the sandbox resolves the path.
+            // Agents learn absolute workspace paths from TOOLS.md; an absolute path that falls
+            // inside a read-only named workspace must be rejected here.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let raw = input["path"].as_str().unwrap_or("");
+                if Path::new(raw).is_absolute() {
+                    let ro = k.readonly_workspace_prefixes(agent_id);
+                    if ro.iter().any(|prefix| Path::new(raw).starts_with(prefix)) {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Write denied: '{}' is in a read-only named workspace",
+                                raw
+                            ),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             tool_file_write(input, *workspace_root).await
         }

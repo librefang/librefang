@@ -80,7 +80,13 @@ impl WorkspaceContext {
 
         let mut cache = HashMap::new();
         for &name in CONTEXT_FILES {
-            let file_path = root.join(name);
+            // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
+            let identity_path = root.join(".identity").join(name);
+            let file_path = if identity_path.exists() {
+                identity_path
+            } else {
+                root.join(name)
+            };
             if let Some(cached) = read_cached_file(&file_path) {
                 debug!(file = name, "Loaded workspace context file");
                 cache.insert(name.to_string(), cached);
@@ -98,7 +104,13 @@ impl WorkspaceContext {
 
     /// Get the content of a cached context file, refreshing if mtime changed.
     pub fn get_file(&mut self, name: &str) -> Option<&str> {
-        let file_path = self.workspace_root.join(name);
+        // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
+        let identity_path = self.workspace_root.join(".identity").join(name);
+        let file_path = if identity_path.exists() {
+            identity_path
+        } else {
+            self.workspace_root.join(name)
+        };
 
         // Check if we have a cached version
         if let Some(cached) = self.cache.get(name) {
