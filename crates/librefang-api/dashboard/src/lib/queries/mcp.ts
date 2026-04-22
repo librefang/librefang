@@ -8,12 +8,7 @@ import {
   getMcpAuthStatus,
 } from "../http/client";
 import { mcpKeys } from "./keys";
-
-type UseMcpOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
+import { QueryOverrides, withOverrides } from "./options";
 
 const SERVERS_STALE_MS = 30_000;
 const SERVERS_REFRESH_MS = 30_000;
@@ -35,7 +30,7 @@ export const mcpQueries = {
       staleTime: SERVERS_STALE_MS,
       enabled: Boolean(id),
     }),
-  catalog: (opts: UseMcpOptions = {}) =>
+  catalog: (opts: QueryOverrides = {}) =>
     queryOptions({
       queryKey: mcpKeys.catalog(),
       queryFn: listMcpCatalog,
@@ -55,71 +50,36 @@ export const mcpQueries = {
       queryFn: getMcpHealth,
       staleTime: HEALTH_STALE_MS,
     }),
-  authStatus: (id: string, opts: UseMcpOptions = {}) =>
+  authStatus: (id: string, opts: QueryOverrides = {}) =>
     queryOptions({
       queryKey: mcpKeys.authStatus(id),
       queryFn: () => getMcpAuthStatus(id),
-      // Auth polling needs a fresh read on each fetchQuery call.
+      // 2s staleTime balances OAuth polling freshness with request deduplication during rapid refetch cycles.
       staleTime: 2_000,
       enabled: opts.enabled ?? Boolean(id),
     }),
 };
 
-export function useMcpServers(options: UseMcpOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.servers(),
-    enabled,
-    staleTime: staleTime ?? SERVERS_STALE_MS,
-    refetchInterval: refetchInterval ?? SERVERS_REFRESH_MS,
-  });
+export function useMcpServers(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.servers(), options));
 }
 
-export function useMcpServer(id: string, options: UseMcpOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.server(id),
-    enabled: enabled ?? Boolean(id),
-    staleTime: staleTime ?? SERVERS_STALE_MS,
-    refetchInterval,
-  });
+export function useMcpServer(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.server(id), options));
 }
 
-export function useMcpCatalog(options: UseMcpOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.catalog(options),
-    enabled,
-    staleTime: staleTime ?? CATALOG_STALE_MS,
-    refetchInterval,
-  });
+export function useMcpCatalog(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.catalog(), options));
 }
 
-export function useMcpCatalogEntry(id: string, options: UseMcpOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.catalogEntry(id),
-    enabled: enabled ?? Boolean(id),
-    staleTime: staleTime ?? CATALOG_STALE_MS,
-    refetchInterval,
-  });
+export function useMcpCatalogEntry(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.catalogEntry(id), options));
 }
 
-export function useMcpHealth(options: UseMcpOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.health(),
-    enabled,
-    staleTime: staleTime ?? HEALTH_STALE_MS,
-    refetchInterval,
-  });
+export function useMcpHealth(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.health(), options));
 }
 
-export function useMcpAuthStatus(id: string, options: UseMcpOptions = {}) {
-  const { staleTime, refetchInterval } = options;
-  return useQuery({
-    ...mcpQueries.authStatus(id, options),
-    staleTime: staleTime ?? 2_000,
-    refetchInterval,
-  });
+export function useMcpAuthStatus(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.authStatus(id), options));
 }

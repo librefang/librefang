@@ -1,15 +1,10 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listGoals, listGoalTemplates } from "../http/client";
 import { goalKeys } from "./keys";
+import { withOverrides, QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
 const TEMPLATE_STALE_MS = 300_000;
-
-type UseGoalOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
 export const goalQueries = {
   list: () =>
@@ -17,6 +12,7 @@ export const goalQueries = {
       queryKey: goalKeys.lists(),
       queryFn: listGoals,
       staleTime: STALE_MS,
+      refetchInterval: STALE_MS,
     }),
   templates: () =>
     queryOptions({
@@ -26,22 +22,10 @@ export const goalQueries = {
     }),
 };
 
-export function useGoals(options: UseGoalOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...goalQueries.list(),
-    enabled,
-    staleTime,
-    refetchInterval: refetchInterval ?? STALE_MS,
-  });
+export function useGoals(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(goalQueries.list(), options));
 }
 
-export function useGoalTemplates(options: UseGoalOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...goalQueries.templates(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useGoalTemplates(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(goalQueries.templates(), options));
 }

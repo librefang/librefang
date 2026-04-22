@@ -5,6 +5,7 @@ import {
   listCommsEvents,
 } from "../http/client";
 import { channelKeys, commsKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
@@ -37,26 +38,12 @@ export const commsQueries = {
     }),
 };
 
-type UseChannelsOptions = { enabled?: boolean; staleTime?: number; refetchInterval?: number | false };
-
-export function useChannels(options: UseChannelsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...channelQueries.list(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useChannels(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(channelQueries.list(), options));
 }
 
-export function useCommsTopology(options: UseChannelsOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...commsQueries.topology(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useCommsTopology(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(commsQueries.topology(), options));
 }
 
 export function useCommsEvents(

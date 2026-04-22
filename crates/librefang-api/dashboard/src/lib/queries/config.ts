@@ -6,6 +6,7 @@ import {
   getRawConfigToml,
 } from "../http/client";
 import { configKeys, registryKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 60_000;
 const SCHEMA_STALE_MS = 300_000;
@@ -41,23 +42,19 @@ export const configQueries = {
     }),
 };
 
-type UseConfigOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
-export function useFullConfig(options: UseConfigOptions = {}) {
-  return useQuery({ ...configQueries.full(), ...options });
+
+export function useFullConfig(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(configQueries.full(), options));
 }
 
-export function useConfigSchema(options: UseConfigOptions = {}) {
-  return useQuery({ ...configQueries.schema(), ...options });
+export function useConfigSchema(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(configQueries.schema(), options));
 }
 
-export function useRegistrySchema(contentType: string, options: UseConfigOptions = {}) {
+export function useRegistrySchema(contentType: string, options: QueryOverrides = {}) {
   // Empty contentType disables query (enabled gate in configQueries)
-  return useQuery({ ...configQueries.registrySchema(contentType), ...options });
+  return useQuery(withOverrides(configQueries.registrySchema(contentType), options));
 }
 
 // Raw config.toml as text. Disabled by default — caller passes

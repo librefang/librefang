@@ -47,6 +47,7 @@ export function useVideoTask(params: VideoTaskParams | null, options: QueryOverr
   return useQuery({
     ...withOverrides(mediaQueries.videoTask(params ?? { taskId: "", provider: "" }), options),
     enabled: Boolean(params) && options.enabled !== false,
+    refetchIntervalInBackground: true,
     refetchInterval: (query) => {
       const data = query.state.data;
       return shouldPollVideoTask(data) ? VIDEO_TASK_REFETCH_MS : false;

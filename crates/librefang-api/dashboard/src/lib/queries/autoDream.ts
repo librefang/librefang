@@ -1,6 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getAutoDreamStatus } from "../http/client";
 import { autoDreamKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 // Polling at 15s matches the cron scheduler cadence — short enough that a
 // dream fired via the manual trigger becomes visible quickly, long enough
@@ -18,18 +19,6 @@ export const autoDreamQueries = {
     }),
 };
 
-type UseAutoDreamStatusOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
-
-export function useAutoDreamStatus(options: UseAutoDreamStatusOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...autoDreamQueries.status(),
-    enabled,
-    staleTime,
-    refetchInterval,
-  });
+export function useAutoDreamStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(autoDreamQueries.status(), options));
 }

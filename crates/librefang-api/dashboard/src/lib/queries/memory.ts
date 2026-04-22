@@ -8,16 +8,11 @@ import {
 } from "../http/client";
 import { healthDetailQueryOptions } from "./runtime";
 import { memoryKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
-
-type UseMemoryHealthOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
 export const memoryQueries = {
 
@@ -78,13 +73,9 @@ export function useMemoryConfig() {
  * narrows the returned data so consumers of this hook don't re-render on
  * unrelated health field changes.
  */
-export function useMemoryHealth(options: UseMemoryHealthOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
+export function useMemoryHealth(options: QueryOverrides = {}) {
   return useQuery({
-    ...healthDetailQueryOptions(),
-    enabled,
-    staleTime,
-    refetchInterval,
+    ...withOverrides(healthDetailQueryOptions(), options),
     select: (data): boolean => data.memory?.embedding_available ?? false,
   });
 }

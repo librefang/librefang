@@ -58,8 +58,8 @@ export const approvalQueries = {
     }),
 };
 
-export function useApprovals(options: { enabled?: boolean } = {}) {
-  return useQuery({ ...approvalQueries.list(), enabled: options.enabled });
+export function useApprovals(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(approvalQueries.list(), options));
 }
 
 export function useApprovalCount(options: QueryOverrides = {}) {
@@ -83,13 +83,9 @@ export function useApprovalAudit(
     agent_id?: string;
     tool_name?: string;
   } = {},
-  options: { enabled?: boolean; staleTime?: number } = {},
+  options: QueryOverrides = {},
 ) {
-  return useQuery({
-    ...approvalQueries.audit(params),
-    enabled: options.enabled,
-    staleTime: options.staleTime,
-  });
+  return useQuery(withOverrides(approvalQueries.audit(params), options));
 }
 
 export function useTotpStatus() {
