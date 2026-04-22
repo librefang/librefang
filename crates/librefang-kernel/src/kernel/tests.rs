@@ -1965,11 +1965,10 @@ async fn test_cron_create_preserves_peer_id() {
         "action": { "kind": "agent_turn", "message": "ping" },
     });
 
-    let job_id = kernel
+    kernel
         .cron_create(&agent_id, job_json)
         .await
         .expect("cron_create should succeed");
-    assert!(!job_id.is_empty());
 
     let jobs = kernel
         .cron_list(&agent_id)
@@ -1978,7 +1977,7 @@ async fn test_cron_create_preserves_peer_id() {
 
     let job = jobs
         .iter()
-        .find(|j| j["id"].as_str() == Some(&job_id))
+        .find(|j| j["name"].as_str() == Some("peer-id-regression"))
         .expect("created job should appear in list");
 
     assert_eq!(
@@ -1993,7 +1992,7 @@ async fn test_cron_create_preserves_peer_id() {
         "schedule": { "kind": "cron", "expr": "0 * * * *" },
         "action": { "kind": "agent_turn", "message": "ping" },
     });
-    let job_id2 = kernel
+    kernel
         .cron_create(&agent_id, job_no_peer)
         .await
         .expect("cron_create without peer_id should succeed");
@@ -2003,7 +2002,7 @@ async fn test_cron_create_preserves_peer_id() {
         .expect("cron_list should succeed");
     let job2 = jobs2
         .iter()
-        .find(|j| j["id"].as_str() == Some(&job_id2))
+        .find(|j| j["name"].as_str() == Some("no-peer-id"))
         .expect("second job should appear in list");
     assert!(
         job2["peer_id"].is_null(),
