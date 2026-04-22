@@ -523,7 +523,11 @@ function normalizeBaseJid(jid) {
 }
 
 async function handleSessionRecovery(deviceJid, baseJid, msgId) {
-  if (!baseJid || !sock || typeof sock.assertSessions !== 'function') return;
+  if (!baseJid) return;
+  if (!sock || typeof sock.assertSessions !== 'function') {
+    console.debug(`[gateway][session-recovery] skipped for ${deviceJid}: socket not ready or assertSessions unavailable`);
+    return;
+  }
   const now = Date.now();
   const entry = sessionRecoveryMap.get(baseJid) || {
     attempts: 0,
