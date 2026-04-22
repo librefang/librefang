@@ -197,6 +197,7 @@ mod tests {
                     },
                     content: MessageContent::Text(text),
                     pinned: false,
+                    timestamp: None,
                 }
             })
             .collect()
@@ -258,6 +259,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -270,6 +272,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
         // Tiny context window to force all stages
@@ -311,6 +314,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
         // Tiny context window to force stage 3 tool truncation

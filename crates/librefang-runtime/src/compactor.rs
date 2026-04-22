@@ -671,6 +671,7 @@ async fn summarize_messages(
                 provider_metadata: None,
             }]),
             pinned: false,
+            timestamp: None,
         }],
         tools: vec![],
         max_tokens: config.max_summary_tokens,
@@ -795,6 +796,7 @@ async fn summarize_in_chunks(
                 provider_metadata: None,
             }]),
             pinned: false,
+            timestamp: None,
         }],
         tools: vec![],
         max_tokens: config.max_summary_tokens,
@@ -1100,6 +1102,7 @@ mod tests {
                 provider_metadata: None,
             }]),
             pinned: false,
+            timestamp: None,
         };
         messages[2] = Message {
             role: Role::User,
@@ -1112,6 +1115,7 @@ mod tests {
                 approval_request_id: None,
             }]),
             pinned: false,
+            timestamp: None,
         };
 
         let session = Session {
@@ -1445,6 +1449,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1457,6 +1462,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1465,6 +1471,7 @@ mod tests {
                     data: "base64data".to_string(),
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1631,6 +1638,7 @@ mod tests {
                 approval_request_id: None,
             }]),
             pinned: false,
+            timestamp: None,
         }];
         let text = build_conversation_text(&messages, &config);
         // The base64 blob should be stripped/replaced by session_repair
@@ -1654,6 +1662,7 @@ mod tests {
                 approval_request_id: None,
             }]),
             pinned: false,
+            timestamp: None,
         }];
         let text = build_conversation_text(&messages, &config);
         // Should be capped at ~2000 chars (plus the "..." suffix)
@@ -1681,6 +1690,7 @@ mod tests {
                 approval_request_id: None,
             }]),
             pinned: false,
+            timestamp: None,
         }];
         let text = build_conversation_text(&messages, &config);
         assert!(text.contains(short_result));

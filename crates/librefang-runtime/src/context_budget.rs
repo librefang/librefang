@@ -380,6 +380,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: librefang_types::message::Role::User,
@@ -392,6 +393,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -446,6 +448,7 @@ mod tests {
                 approval_request_id: None,
             }]),
             pinned: false,
+            timestamp: None,
         }];
         // Must not panic on multi-byte content
         let compacted = apply_context_guard(&mut messages, &budget, &[]);

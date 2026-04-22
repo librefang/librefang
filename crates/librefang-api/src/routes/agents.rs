@@ -984,6 +984,7 @@ pub fn inject_attachments_into_session(
         role: Role::User,
         content: MessageContent::Blocks(image_blocks),
         pinned: false,
+        timestamp: Some(chrono::Utc::now()),
     });
 
     if let Err(e) = kernel.memory_substrate().save_session(&session) {
@@ -1456,6 +1457,14 @@ pub async fn get_agent_session(
                 }
                 if !msg_images.is_empty() {
                     msg["images"] = serde_json::Value::Array(msg_images);
+                }
+                // Expose the real message timestamp so the dashboard can
+                // render historical times correctly on resume instead of
+                // falling back to render-time `Date.now()` (#2934). Serialized
+                // as RFC 3339; messages persisted before the field existed
+                // come through as `null`.
+                if let Some(ts) = m.timestamp {
+                    msg["timestamp"] = serde_json::Value::String(ts.to_rfc3339());
                 }
                 built_messages.push(msg);
             }
