@@ -419,39 +419,6 @@ fn is_oversized(message: &Message, config: &CompactionConfig) -> bool {
     message.content.text_length() > config.max_chunk_chars / 2
 }
 
-/// Find the last consecutive message index (from the head) that ends with an
-/// unresolved ToolUse -- i.e., an assistant message that has a ToolUse block
-/// but is NOT followed by a matching ToolResult user message.
-///
-/// Returns the index in `[0, messages.len())`, or `None` if no unresolved pair
-/// spans the head/middle boundary.
-fn find_head_unresolved_tool_use(messages: &[Message]) -> Option<(usize, String)> {
-    let len = messages.len();
-    // Must have at least 2 messages for a ToolUse/ToolResult pair to exist
-    if len < 2 {
-        return None;
-    }
-
-    // Look at the last message of the "to_compact" head and the first message
-    // of the "kept" tail.  If the tail starts with a ToolResult whose id matches
-    // a ToolUse at the end of the head, the pair spans the boundary.
-    let head_last = &messages[len - 1];
-    let tail_first = &messages[len - 1]; // same message -- we're inspecting the split
-
-    // Only assistant messages can contain unresolved ToolUse
-    let assistant_with_tool_use =
-        if head_last.role == Role::Assistant && message_has_tool_use(head_last) {
-            head_last
-        } else {
-            return None;
-        };
-
-    // Extract the first trailing ToolUse id from the assistant message
-    let tool_use_id = extract_first_tool_use_id(assistant_with_tool_use)?;
-
-    Some((len - 1, tool_use_id))
-}
-
 /// Extract the first `tool_use_id` from a message's ToolUse blocks.
 fn extract_first_tool_use_id(msg: &Message) -> Option<String> {
     match &msg.content {

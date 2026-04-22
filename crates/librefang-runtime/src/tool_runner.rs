@@ -367,7 +367,7 @@ pub async fn execute_tool_raw(
         tts_engine,
         docker_config,
         process_manager,
-        process_registry,
+        process_registry: _,
         sender_id,
         channel: _,
         checkpoint_manager,
@@ -5956,6 +5956,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -5994,6 +5995,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6029,6 +6031,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6064,6 +6067,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6098,6 +6102,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6132,6 +6137,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6166,6 +6172,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6201,6 +6208,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6237,6 +6245,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6299,6 +6308,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6339,6 +6349,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6386,6 +6397,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6434,6 +6446,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6493,6 +6506,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6688,6 +6702,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6745,6 +6760,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -6961,6 +6977,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7003,6 +7020,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7045,6 +7063,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7096,6 +7115,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7151,6 +7171,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7249,6 +7270,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7290,6 +7312,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7340,6 +7363,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7380,6 +7404,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7420,6 +7445,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7459,6 +7485,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
@@ -7498,6 +7525,7 @@ mod tests {
             None, // sender_id
             None, // channel
             None, // checkpoint_manager
+            None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
         )
