@@ -1100,7 +1100,9 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
         agent_id: agentId,
       });
       resetForm();
-      onRefresh();
+      // No explicit refetch: useCreateSchedule invalidates cronKeys.all via
+      // invalidateScheduleCaches, which is a prefix of cronKeys.jobs(agentId)
+      // used by useCronJobs — the list re-fetches automatically.
       addToast(t("hands.schedule_created", { defaultValue: "Schedule created" }), "success");
     } catch (err: unknown) {
       addToast(err instanceof Error ? err.message : t("common.error"), "error");
@@ -1123,7 +1125,10 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
           {t("hands.new_schedule", { defaultValue: "New schedule" })}
         </button>
       ) : (
-        <div className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5">
+        <form
+          onSubmit={(e) => { e.preventDefault(); void handleCreate(); }}
+          className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5"
+        >
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name", { defaultValue: "Name" })}</label>
             <input
@@ -1159,20 +1164,21 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
           </div>
           <div className="flex gap-2">
             <button
-              onClick={handleCreate}
+              type="submit"
               disabled={!name.trim() || !message.trim() || createScheduleMut.isPending}
               className="flex-1 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold hover:bg-brand/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {createScheduleMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mx-auto" /> : t("common.create", { defaultValue: "Create" })}
             </button>
             <button
+              type="button"
               onClick={resetForm}
               className="px-3 py-1.5 rounded-lg bg-main text-text-dim text-xs font-bold hover:text-text-main transition-colors"
             >
               {t("common.cancel")}
             </button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* Existing schedule list */}
