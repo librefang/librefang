@@ -204,6 +204,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _message_text: &str,
         _sender_name: &str,
         _model: Option<&str>,
+        _bot_name: Option<&str>,
     ) -> bool {
         true
     }
@@ -2079,7 +2080,16 @@ async fn dispatch_message(
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
-                if !handle.classify_reply_intent(text, sender, model).await {
+                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                let channel_key_for_name = match account_id {
+                    Some(aid) => format!("{}:{}", ct_str, aid),
+                    None => ct_str.to_string(),
+                };
+                let bot_name = router.channel_default_name(&channel_key_for_name);
+                if !handle
+                    .classify_reply_intent(text, sender, model, bot_name.as_deref())
+                    .await
+                {
                     debug!(
                         channel = ct_str,
                         sender = %sender,
@@ -2728,7 +2738,7 @@ async fn dispatch_message(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -3378,7 +3388,7 @@ async fn dispatch_with_blocks(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
     if let Err(denied) = handle
