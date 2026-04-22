@@ -531,6 +531,21 @@ pub struct BrowserConfig {
     pub max_sessions: usize,
     /// Path to Chromium/Chrome binary. Auto-detected if None.
     pub chromium_path: Option<String>,
+    /// Remote CDP endpoint URL. When set, librefang attaches to an
+    /// already-running browser instead of spawning a local Chromium process.
+    ///
+    /// Accepts either a WebSocket URL (`ws://host:9222`) or an HTTP URL
+    /// (`http://host:9222`) from which the browser WebSocket URL is discovered
+    /// via `/json/version`.
+    ///
+    /// **Security**: CDP provides full browser control and is unauthenticated.
+    /// Never expose this port on a public interface. Use SSH tunnels, WireGuard,
+    /// or a loopback-only port on a trusted host.
+    ///
+    /// When set, `headless`, `viewport_*`, and the local chromium discovery
+    /// path are ignored — browser lifecycle is the operator's responsibility.
+    #[serde(default)]
+    pub cdp_endpoint: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -544,6 +559,7 @@ impl Default for BrowserConfig {
             idle_timeout_secs: 300,
             max_sessions: 5,
             chromium_path: None,
+            cdp_endpoint: None,
         }
     }
 }
