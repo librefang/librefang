@@ -3143,10 +3143,17 @@ pub async fn start_channel_bridge_with_config(
                 },
             };
             if let Some(agent_id) = agent_id {
-                // Use account_id-qualified channel key for multi-bot routing
+                // Use account_id-qualified channel key for multi-bot routing.
+                // Use the stable lowercase string (channel_type_to_str) rather
+                // than Debug format (`{:?}`) which is not stable API.
+                let ct = adapter.channel_type();
                 let channel_key = match account_id {
-                    Some(aid) => format!("{:?}:{}", adapter.channel_type(), aid),
-                    None => format!("{:?}", adapter.channel_type()),
+                    Some(aid) => format!(
+                        "{}:{}",
+                        librefang_channels::router::channel_type_to_str(&ct),
+                        aid
+                    ),
+                    None => librefang_channels::router::channel_type_to_str(&ct).to_string(),
                 };
                 info!(
                     "{} default agent: {name} ({agent_id}) [channel: {channel_key}]",

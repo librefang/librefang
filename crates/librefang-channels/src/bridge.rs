@@ -2728,7 +2728,7 @@ async fn dispatch_message(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -3378,7 +3378,7 @@ async fn dispatch_with_blocks(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
     if let Err(denied) = handle
