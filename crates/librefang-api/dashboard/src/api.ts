@@ -297,6 +297,9 @@ export interface AgentSessionMessage {
   content?: unknown;
   tools?: AgentTool[];
   images?: AgentSessionImage[];
+  /** RFC 3339 timestamp from the server; may be absent for messages
+   * persisted before the field was introduced. */
+  timestamp?: string;
 }
 
 export interface AgentSessionResponse {

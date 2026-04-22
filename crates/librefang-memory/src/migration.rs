@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 19;
+const SCHEMA_VERSION: u32 = 20;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -85,6 +85,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 19 {
         migrate_v19(conn)?;
+    }
+
+    if current_version < 20 {
+        migrate_v20(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -639,6 +643,27 @@ fn migrate_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (19, datetime('now'), 'Add provider column for per-provider budgets')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 20: Add `claimed_at` column to `task_queue` so the kernel can
+/// detect and auto-reset stuck `in_progress` tasks whose worker LLM stalled
+/// or crashed without calling `task_complete` (issue #2923 / #2926).
+fn migrate_v20(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "task_queue", "claimed_at") {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN claimed_at TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_status_claimed_at ON task_queue(status, claimed_at)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (20, datetime('now'), 'Add claimed_at column to task_queue for stuck-task auto-reset')",
         [],
     )?;
     Ok(())

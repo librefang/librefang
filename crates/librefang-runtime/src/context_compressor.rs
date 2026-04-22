@@ -353,6 +353,7 @@ impl ContextCompressor {
             role: summary_role,
             content: MessageContent::Text(summary_content),
             pinned: any_middle_pinned,
+            timestamp: Some(chrono::Utc::now()),
         };
 
         let mut compressed = Vec::with_capacity(head.len() + 1 + tail.len());
