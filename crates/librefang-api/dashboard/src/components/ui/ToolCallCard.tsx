@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle } from "lucide-react";
 import type { AgentTool } from "../../api";
@@ -22,15 +22,15 @@ function formatToolContent(value: unknown): string {
   }
 }
 
-export function ToolCallCard({ tool }: { tool: AgentTool }) {
+export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: AgentTool }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(tool.expanded ?? false);
   const isRunning = tool.running ?? false;
   const isError = tool.is_error ?? false;
   const hasResult = tool.result !== undefined && tool.result !== null;
 
-  const inputText = formatToolContent(tool.input);
-  const resultText = formatToolContent(tool.result);
+  const inputText = useMemo(() => formatToolContent(tool.input), [tool.input]);
+  const resultText = useMemo(() => formatToolContent(tool.result), [tool.result]);
 
   return (
     <div className="rounded-lg border border-border-subtle/50 bg-main/50 overflow-hidden my-1.5">
@@ -58,25 +58,25 @@ export function ToolCallCard({ tool }: { tool: AgentTool }) {
       </button>
 
       {/* Expanded content */}
-      {expanded && (
+      {expanded ? (
         <div className="px-3 pb-2.5 space-y-2 border-t border-border-subtle/30">
           {/* Input */}
-          {inputText && (
+          {inputText ? (
             <div className="mt-2">
               <span className="text-[9px] font-semibold text-text-dim/50 uppercase tracking-wider">{t("chat.tool_input", { defaultValue: "Input" })}</span>
               <pre className="mt-1 text-[11px] leading-relaxed text-text-dim whitespace-pre-wrap break-words overflow-y-auto max-h-40 rounded-md bg-main px-2.5 py-2 border border-border-subtle/30 font-mono">
                 {inputText}
               </pre>
             </div>
-          )}
+          ) : null}
           {/* Result */}
-          {isRunning && !hasResult && (
+          {isRunning && !hasResult ? (
             <div className="flex items-center gap-2 mt-2 text-[11px] text-text-dim/60">
               <Loader2 className="w-3 h-3 animate-spin" />
               <span>{t("chat.tool_running", { defaultValue: "Running…" })}</span>
             </div>
-          )}
-          {hasResult && (
+          ) : null}
+          {hasResult ? (
             <div>
               <span className={`text-[9px] font-semibold uppercase tracking-wider ${isError ? "text-error/60" : "text-text-dim/50"}`}>
                 {isError ? t("chat.tool_error", { defaultValue: "Error" }) : t("chat.tool_result", { defaultValue: "Result" })}
@@ -89,9 +89,9 @@ export function ToolCallCard({ tool }: { tool: AgentTool }) {
                 {resultText}
               </pre>
             </div>
-          )}
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
-}
+});

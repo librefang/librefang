@@ -117,7 +117,7 @@ function validateSectionRequired(
     const v = values[fKey];
     if (f.required && (v === undefined || v === null || v === "")) {
       errors.push(`${pathPrefix}.${fKey}`);
-    } else if (f.type === "number" && typeof v === "string" && v !== "") {
+    } else if (f.type === "number" && (typeof v !== "number" || Number.isNaN(v))) {
       errors.push(`${pathPrefix}.${fKey}`);
     }
   }
@@ -154,7 +154,7 @@ function validateRequired(
     const v = values[key];
     if (field.required && (v === undefined || v === null || v === "")) {
       errors.push(key);
-    } else if (field.type === "number" && typeof v === "string" && v !== "") {
+    } else if (field.type === "number" && (typeof v !== "number" || Number.isNaN(v))) {
       errors.push(key);
     }
   }
@@ -544,7 +544,7 @@ export function SchemaForm({
   const defaultValues = useMemo(() => {
     if (!schema) return {};
     return buildDefaults(schema, initialValues);
-  }, [schema, initialValues]);
+  }, [schema]);
 
   const [values, setValues] = useState<Record<string, unknown>>({});
 

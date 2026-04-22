@@ -24,6 +24,7 @@ const TERM_MIN_COLS = 1;
 const TERM_MAX_COLS = 1000;
 const TERM_MIN_ROWS = 1;
 const TERM_MAX_ROWS = 500;
+const SETTLE_TIMEOUT_MS = 100;
 
 function clampTermSize(cols: number, rows: number): { cols: number; rows: number } | null {
   const c = Math.max(TERM_MIN_COLS, Math.min(TERM_MAX_COLS, Math.floor(cols)));
@@ -73,12 +74,17 @@ export function TerminalTabs({
   const [dragId, setDragId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
-  const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editingIdRef = useRef<string | null>(null);
   const windowsRef = useRef<TerminalWindow[]>([]);
 
   useEffect(() => {
     windowsRef.current = windows;
   }, [windows]);
+
+  useEffect(() => {
+    editingIdRef.current = editingId;
+  }, [editingId]);
 
   // Keep tab order in sync with server windows list.
   // Skip when windows is empty (query still loading) to avoid wiping persisted order.
@@ -98,30 +104,32 @@ export function TerminalTabs({
 
   const handleTabClick = useCallback(
     (windowId: string) => {
-      if (editingId === windowId) return;
+      if (editingIdRef.current === windowId) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "switch_window", window: windowId }));
       onSwitchWindow(windowId);
 
-      for (const id of settleTimeoutsRef.current) clearTimeout(id);
-      settleTimeoutsRef.current = [];
+      if (settleTimeoutRef.current !== null) {
+        clearTimeout(settleTimeoutRef.current);
+      }
 
-      const tid = setTimeout(() => {
+      settleTimeoutRef.current = setTimeout(() => {
         const term = terminalRef.current;
         const fit = fitAddonRef.current;
         if (!term || !fit || !ws || ws.readyState !== WebSocket.OPEN) return;
         fit.fit();
         const size = clampTermSize(term.cols, term.rows);
         if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
-      }, 100);
-      settleTimeoutsRef.current = [tid];
+      }, SETTLE_TIMEOUT_MS);
     },
-    [ws, onSwitchWindow, terminalRef, fitAddonRef, editingId]
+    [ws, onSwitchWindow, terminalRef, fitAddonRef]
   );
 
   useEffect(() => {
     return () => {
-      for (const id of settleTimeoutsRef.current) clearTimeout(id);
+      if (settleTimeoutRef.current !== null) {
+        clearTimeout(settleTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -205,8 +213,7 @@ export function TerminalTabs({
             onSwitchWindow("");
           }
         }
-      } catch (err) {
-        console.error("Failed to delete terminal window", err);
+      } catch {
         addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },

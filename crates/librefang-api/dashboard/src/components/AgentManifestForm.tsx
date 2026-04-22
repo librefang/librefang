@@ -158,7 +158,7 @@ export function AgentManifestForm({
             onChange={(e) => updateModel({ system_prompt: e.target.value })}
             placeholder={t("agents.form.system_prompt_placeholder")}
             rows={3}
-            className={`${inputClass} resize-y font-mono text-xs`}
+            className={textareaClass}
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
@@ -453,11 +453,7 @@ export function AgentManifestForm({
               <span className="text-[10px] font-bold text-text-dim uppercase">#{idx + 1}</span>
               <button
                 type="button"
-                onClick={() => {
-                  const next = value.fallback_models.slice();
-                  next.splice(idx, 1);
-                  update({ fallback_models: next });
-                }}
+                onClick={() => update({ fallback_models: value.fallback_models.filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
                 aria-label="remove fallback"
               >
@@ -468,44 +464,28 @@ export function AgentManifestForm({
               <input
                 type="text"
                 value={fb.provider}
-                onChange={(e) => {
-                  const next = value.fallback_models.slice();
-                  next[idx] = { ...fb, provider: e.target.value };
-                  update({ fallback_models: next });
-                }}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, provider: e.target.value }) })}
                 placeholder={t("agents.form.provider")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.model}
-                onChange={(e) => {
-                  const next = value.fallback_models.slice();
-                  next[idx] = { ...fb, model: e.target.value };
-                  update({ fallback_models: next });
-                }}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, model: e.target.value }) })}
                 placeholder={t("agents.form.model_id")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.api_key_env}
-                onChange={(e) => {
-                  const next = value.fallback_models.slice();
-                  next[idx] = { ...fb, api_key_env: e.target.value };
-                  update({ fallback_models: next });
-                }}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, api_key_env: e.target.value }) })}
                 placeholder={t("agents.form.api_key_env")}
                 className={inputClass}
               />
               <input
                 type="text"
                 value={fb.base_url}
-                onChange={(e) => {
-                  const next = value.fallback_models.slice();
-                  next[idx] = { ...fb, base_url: e.target.value };
-                  update({ fallback_models: next });
-                }}
+                onChange={(e) => update({ fallback_models: patchListItem(value.fallback_models, idx, { ...fb, base_url: e.target.value }) })}
                 placeholder={t("agents.form.base_url")}
                 className={inputClass}
               />
@@ -711,11 +691,7 @@ export function AgentManifestForm({
               <span className="text-[10px] font-bold text-text-dim uppercase">#{idx + 1}</span>
               <button
                 type="button"
-                onClick={() => {
-                  const next = value.context_injection.slice();
-                  next.splice(idx, 1);
-                  update({ context_injection: next });
-                }}
+                onClick={() => update({ context_injection: value.context_injection.filter((_, i) => i !== idx) })}
                 className="text-text-dim hover:text-error"
                 aria-label="remove context injection"
               >
@@ -726,24 +702,18 @@ export function AgentManifestForm({
               <input
                 type="text"
                 value={ci.name}
-                onChange={(e) => {
-                  const next = value.context_injection.slice();
-                  next[idx] = { ...ci, name: e.target.value };
-                  update({ context_injection: next });
-                }}
+                onChange={(e) => update({ context_injection: patchListItem(value.context_injection, idx, { ...ci, name: e.target.value }) })}
                 placeholder={t("agents.form.injection_name")}
                 className={inputClass}
               />
               <select
                 value={ci.position}
-                onChange={(e) => {
-                  const next = value.context_injection.slice();
-                  next[idx] = {
+                onChange={(e) => update({
+                  context_injection: patchListItem(value.context_injection, idx, {
                     ...ci,
                     position: e.target.value as ManifestFormState["context_injection"][number]["position"],
-                  };
-                  update({ context_injection: next });
-                }}
+                  }),
+                })}
                 className={inputClass}
               >
                 <option value="system">{t("agents.form.position_system")}</option>
@@ -753,23 +723,15 @@ export function AgentManifestForm({
             </div>
             <textarea
               value={ci.content}
-              onChange={(e) => {
-                const next = value.context_injection.slice();
-                next[idx] = { ...ci, content: e.target.value };
-                update({ context_injection: next });
-              }}
+              onChange={(e) => update({ context_injection: patchListItem(value.context_injection, idx, { ...ci, content: e.target.value }) })}
               placeholder={t("agents.form.injection_content")}
               rows={2}
-              className={`${inputClass} resize-y font-mono text-xs`}
+              className={textareaClass}
             />
             <input
               type="text"
               value={ci.condition}
-              onChange={(e) => {
-                const next = value.context_injection.slice();
-                next[idx] = { ...ci, condition: e.target.value };
-                update({ context_injection: next });
-              }}
+              onChange={(e) => update({ context_injection: patchListItem(value.context_injection, idx, { ...ci, condition: e.target.value }) })}
               placeholder={t("agents.form.injection_condition")}
               className={inputClass}
             />
@@ -836,7 +798,7 @@ export function AgentManifestForm({
                   } as Partial<ManifestFormState>)
                 }
                 rows={6}
-                className={`${inputClass} resize-y font-mono text-xs`}
+                className={textareaClass}
               />
             </Field>
             <Toggle
@@ -967,6 +929,15 @@ export function AgentManifestForm({
 const inputClass =
   "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
+const textareaClass = `${inputClass} resize-y font-mono text-xs`;
+
+/** Patch a single item in an immutable list. Pass an object to replace, or a function to transform. */
+function patchListItem<T>(list: T[], idx: number, patch: T | ((item: T) => T)): T[] {
+  const next = list.slice();
+  next[idx] = typeof patch === "function" ? (patch as (item: T) => T)(next[idx]) : patch;
+  return next;
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2.5 rounded-xl border border-border-subtle/60 bg-surface/40 p-3">
@@ -990,7 +961,11 @@ function CollapsibleSection({
       className="group rounded-xl border border-border-subtle/60 bg-surface/40 overflow-hidden"
       open={defaultOpen}
     >
-      <summary className="flex items-center justify-between p-3 cursor-pointer list-none select-none">
+      <summary
+        className="flex items-center justify-between p-3 cursor-pointer list-none select-none"
+        role="button"
+        tabIndex={0}
+      >
         <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim">
           {title}
         </span>

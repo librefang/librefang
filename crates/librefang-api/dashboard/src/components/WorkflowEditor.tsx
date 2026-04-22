@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ReactFlow,
@@ -15,6 +15,11 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useUIStore } from "../lib/store";
 import { ChevronLeft } from "lucide-react";
+
+interface CustomNodeProps {
+  data: { label: string; description: string };
+  type: string;
+}
 
 interface WorkflowEditorProps {
   initialNodes?: Node[];
@@ -34,7 +39,7 @@ const nodeTypesConfig = [
   { type: "channel", color: "var(--accent-color)", icon: "M" },
 ];
 
-function CustomNode({ data, type }: any) {
+const CustomNode = React.memo(function CustomNode({ data, type }: CustomNodeProps) {
   const config = nodeTypesConfig.find(n => n.type === type) || nodeTypesConfig[2];
   return (
     <div className="rounded-lg border-2 border-border-subtle bg-surface shadow-lg min-w-[150px] overflow-hidden">
@@ -47,7 +52,16 @@ function CustomNode({ data, type }: any) {
       </div>
     </div>
   );
-}
+});
+
+const nodeTypes = { custom: CustomNode };
+
+const triggerTypes = nodeTypesConfig.filter(n =>
+  ["start", "schedule", "webhook", "channel"].includes(n.type)
+);
+const logicTypes = nodeTypesConfig.filter(n =>
+  ["agent", "condition"].includes(n.type)
+);
 
 export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, onClose, title }: WorkflowEditorProps) {
   const { t } = useTranslation();
@@ -60,13 +74,13 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
 
   const addNode = useCallback((type: string) => {
     const newNode: Node = {
-      id: `${type}-${Date.now()}`,
+      id: `${type}-${crypto.randomUUID()}`,
       type: "custom",
-      position: { x: 100, y: 100 },
+      position: { x: 100 + nodes.length * 40, y: 100 + nodes.length * 40 },
       data: { label: t(`canvas.nodes.${type}`), description: t(`canvas.nodes.${type}_desc`) }
     };
     setNodes((nds) => [...nds, newNode]);
-  }, [setNodes, t]);
+  }, [setNodes, t, nodes.length]);
 
   return (
     <div className="fixed inset-0 z-100 flex flex-col bg-main animate-in fade-in duration-300">
@@ -109,7 +123,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
             <section>
               <p className="text-[10px] font-bold text-brand uppercase mb-3">{t("canvas.triggers")}</p>
               <div className="grid gap-2">
-                {nodeTypesConfig.filter(n => ["start", "schedule", "webhook", "channel"].includes(n.type)).map(n => (
+                {triggerTypes.map(n => (
                   <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-brand transition-colors text-left group">
                     <div className="h-8 w-8 rounded-lg flex items-center justify-center text-white text-xs font-black shadow-sm" style={{ backgroundColor: n.color }}>{n.icon}</div>
                     <span className="text-xs font-bold group-hover:text-brand">{t(`canvas.nodes.${n.type}`)}</span>
@@ -120,7 +134,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
             <section>
               <p className="text-[10px] font-bold text-brand uppercase mb-3">{t("canvas.logic_actions")}</p>
               <div className="grid gap-2">
-                {nodeTypesConfig.filter(n => ["agent", "condition"].includes(n.type)).map(n => (
+                {logicTypes.map(n => (
                   <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-brand transition-colors text-left group">
                     <div className="h-8 w-8 rounded-lg flex items-center justify-center text-white text-xs font-black shadow-sm" style={{ backgroundColor: n.color }}>{n.icon}</div>
                     <span className="text-xs font-bold group-hover:text-brand">{t(`canvas.nodes.${n.type}`)}</span>
@@ -131,7 +145,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
           </div>
         </aside>
         <main className="flex-1 relative">
-          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} nodeTypes={{ custom: CustomNode }} colorMode={theme}>
+          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} nodeTypes={nodeTypes} colorMode={theme}>
             <Background color={theme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"} />
             <Controls className="bg-surface! border-border-subtle! shadow-xl!" />
             <MiniMap nodeStrokeColor="var(--border-color)" maskColor={theme === "dark" ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.6)"} className="bg-surface! border-border-subtle! rounded-xl!" />

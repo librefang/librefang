@@ -60,7 +60,7 @@ export function TomlViewer({
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   return (
@@ -100,6 +100,7 @@ export function TomlViewer({
               disabled={!body}
               className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
               title={t("toml_viewer.copy")}
+              aria-label={t("toml_viewer.copy")}
             >
               <Copy className="w-3.5 h-3.5" />
             </button>
@@ -109,6 +110,7 @@ export function TomlViewer({
               disabled={!body}
               className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
               title={t("toml_viewer.download")}
+              aria-label={t("toml_viewer.download")}
             >
               <Download className="w-3.5 h-3.5" />
             </button>
@@ -124,7 +126,7 @@ export function TomlViewer({
             {t("toml_viewer.loading")}
           </div>
         ) : (
-          <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text overflow-auto max-h-[65vh] whitespace-pre-wrap break-all">
+          <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text overflow-auto max-h-[65vh] whitespace-pre-wrap">
             {body}
           </pre>
         )}

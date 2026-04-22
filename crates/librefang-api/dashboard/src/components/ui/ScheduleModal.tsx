@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
 
@@ -37,16 +37,28 @@ const COMMON_TIMEZONES = [
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const MINUTES = [0, 5, 10, 15, 20, 30, 45];
 
+const RE_DIGITS = /^\d+$/;
+const RE_SINGLE_DIGIT = /^\d$/;
+const RE_CRON_FIELD = /^(\*|(\*\/)?[0-9]+([-,/][0-9]+)*)$/;
+
+const CUSTOM_CRON_OPTS: string[][] = [
+  ["*", "*/5", "*/10", "*/15", "*/30", ...Array.from({ length: 60 }, (_, i) => String(i))],
+  ["*", "*/2", "*/4", "*/6", "*/12", ...Array.from({ length: 24 }, (_, i) => String(i))],
+  ["*", ...Array.from({ length: 31 }, (_, i) => String(i + 1))],
+  ["*", ...Array.from({ length: 12 }, (_, i) => String(i + 1))],
+  ["*", "0", "1", "2", "3", "4", "5", "6", "1-5"],
+];
+
 function parseCronType(cron: string): { type: ScheduleType; min?: number; hour?: number; day?: number; weekday?: number; interval?: number } {
   const parts = cron.split(/\s+/);
   if (parts.length !== 5) return { type: "custom" };
   const [m, h, dom, , dow] = parts;
   if (m.startsWith("*/") && h === "*") return { type: "interval_min", interval: parseInt(m.slice(2)) || 5 };
   if (m === "0" && h.startsWith("*/")) return { type: "interval_hour", interval: parseInt(h.slice(2)) || 1 };
-  if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom.match(/^\d+$/) && dow === "*") return { type: "monthly", hour: +h, min: +m, day: +dom };
-  if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow.match(/^\d$/)) return { type: "weekly", hour: +h, min: +m, weekday: +dow };
-  if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "1-5") return { type: "weekday", hour: +h, min: +m };
-  if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "*") return { type: "daily", hour: +h, min: +m };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return { type: "monthly", hour: +h, min: +m, day: +dom };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return { type: "weekly", hour: +h, min: +m, weekday: +dow };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return { type: "weekday", hour: +h, min: +m };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return { type: "daily", hour: +h, min: +m };
   return { type: "custom" };
 }
 
@@ -60,6 +72,27 @@ function detectBrowserTimezone(): string {
   }
 }
 
+function buildCronFrom(
+  scheduleType: ScheduleType,
+  intervalMin: number,
+  intervalHour: number,
+  hour: number,
+  minute: number,
+  weekday: number,
+  monthDay: number,
+  customCron: string,
+): string {
+  switch (scheduleType) {
+    case "interval_min": return `*/${intervalMin} * * * *`;
+    case "interval_hour": return `0 */${intervalHour} * * *`;
+    case "daily": return `${minute} ${hour} * * *`;
+    case "weekday": return `${minute} ${hour} * * 1-5`;
+    case "weekly": return `${minute} ${hour} * * ${weekday}`;
+    case "monthly": return `${minute} ${hour} ${monthDay} * *`;
+    case "custom": return customCron;
+  }
+}
+
 export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
   const { t } = useTranslation();
 
@@ -67,10 +100,11 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
   const detectedTz = initialTz || detectBrowserTimezone();
   const [timezone, setTimezone] = useState(detectedTz);
 
-  // If the detected/initial timezone isn't in the common list, include it
-  const timezoneOptions = COMMON_TIMEZONES.includes(detectedTz)
-    ? COMMON_TIMEZONES
-    : [detectedTz, ...COMMON_TIMEZONES];
+  const timezoneOptions = useMemo(
+    () => (COMMON_TIMEZONES.includes(detectedTz) ? COMMON_TIMEZONES : [detectedTz, ...COMMON_TIMEZONES]),
+    [detectedTz],
+  );
+
   const [scheduleType, setScheduleType] = useState<ScheduleType>(parsed.type);
   const [intervalMin, setIntervalMin] = useState(parsed.type === "interval_min" ? (parsed.interval ?? 5) : 5);
   const [intervalHour, setIntervalHour] = useState(parsed.type === "interval_hour" ? (parsed.interval ?? 1) : 1);
@@ -80,22 +114,10 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
   const [monthDay, setMonthDay] = useState(parsed.day ?? 1);
   const [customCron, setCustomCron] = useState(initialCron || "0 9 * * *");
 
-  const buildCron = (): string => {
-    switch (scheduleType) {
-      case "interval_min": return `*/${intervalMin} * * * *`;
-      case "interval_hour": return `0 */${intervalHour} * * *`;
-      case "daily": return `${minute} ${hour} * * *`;
-      case "weekday": return `${minute} ${hour} * * 1-5`;
-      case "weekly": return `${minute} ${hour} * * ${weekday}`;
-      case "monthly": return `${minute} ${hour} ${monthDay} * *`;
-      case "custom": return customCron;
-    }
-  };
-
   const validateCron = (cron: string): boolean => {
     const parts = cron.trim().split(/\s+/);
     if (parts.length !== 5) return false;
-    return parts.every(p => /^(\*|(\*\/)?[0-9]+([-,/][0-9]+)*)$/.test(p));
+    return parts.every(p => RE_CRON_FIELD.test(p));
   };
 
   const describeCron = (cron: string): string => {
@@ -111,26 +133,28 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
     const time = `${pad(h)}:${pad(m)}`;
     if (m.startsWith("*/") && h === "*") return t("scheduler.cron_every_n_min", { n: m.slice(2) });
     if (m === "0" && h.startsWith("*/")) return t("scheduler.cron_every_n_hour", { n: h.slice(2) });
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom.match(/^\d+$/) && dow === "*") return t("scheduler.cron_monthly", { dom, time });
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow.match(/^\d$/)) return t("scheduler.cron_weekly", { day: weekdays[+dow], time });
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "1-5") return t("scheduler.cron_weekdays", { time });
-    if (m.match(/^\d+$/) && h.match(/^\d+$/) && dom === "*" && dow === "*") return t("scheduler.cron_daily", { time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return t("scheduler.cron_monthly", { dom, time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return t("scheduler.cron_weekly", { day: weekdays[+dow], time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return t("scheduler.cron_weekdays", { time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return t("scheduler.cron_daily", { time });
     return cron;
   };
 
-  const [previewCron, setPreviewCron] = useState(buildCron());
-  useEffect(() => setPreviewCron(buildCron()), [scheduleType, intervalMin, intervalHour, hour, minute, weekday, monthDay, customCron]);
+  const previewCron = buildCronFrom(scheduleType, intervalMin, intervalHour, hour, minute, weekday, monthDay, customCron);
   const cronValid = validateCron(previewCron);
 
-  const types: { key: ScheduleType; label: string }[] = [
-    { key: "interval_min", label: t("scheduler.type_interval_min") },
-    { key: "interval_hour", label: t("scheduler.type_interval_hour") },
-    { key: "daily", label: t("scheduler.type_daily") },
-    { key: "weekday", label: t("scheduler.type_weekday") },
-    { key: "weekly", label: t("scheduler.type_weekly") },
-    { key: "monthly", label: t("scheduler.type_monthly") },
-    { key: "custom", label: t("scheduler.type_custom") },
-  ];
+  const types = useMemo<{ key: ScheduleType; label: string }[]>(
+    () => [
+      { key: "interval_min", label: t("scheduler.type_interval_min") },
+      { key: "interval_hour", label: t("scheduler.type_interval_hour") },
+      { key: "daily", label: t("scheduler.type_daily") },
+      { key: "weekday", label: t("scheduler.type_weekday") },
+      { key: "weekly", label: t("scheduler.type_weekly") },
+      { key: "monthly", label: t("scheduler.type_monthly") },
+      { key: "custom", label: t("scheduler.type_custom") },
+    ],
+    [t],
+  );
 
   const sel = "h-9 rounded-lg border border-border-subtle bg-main px-2 text-sm outline-none focus:border-brand transition-colors";
   const num = "h-9 w-16 rounded-lg border border-border-subtle bg-main px-2 text-sm font-mono text-center outline-none focus:border-brand transition-colors";
@@ -147,25 +171,49 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
     </div>
   );
 
-  const wdShort = [
-    t("scheduler.weekday_short_mon"), t("scheduler.weekday_short_tue"),
-    t("scheduler.weekday_short_wed"), t("scheduler.weekday_short_thu"),
-    t("scheduler.weekday_short_fri"), t("scheduler.weekday_short_sat"),
-    t("scheduler.weekday_short_sun"),
-  ];
+  const wdShort = useMemo(
+    () => [
+      t("scheduler.weekday_short_mon"), t("scheduler.weekday_short_tue"),
+      t("scheduler.weekday_short_wed"), t("scheduler.weekday_short_thu"),
+      t("scheduler.weekday_short_fri"), t("scheduler.weekday_short_sat"),
+      t("scheduler.weekday_short_sun"),
+    ],
+    [t],
+  );
 
-  const cronFieldHeaders = [
-    t("scheduler.field_min"), t("scheduler.field_hour"),
-    t("scheduler.field_day"), t("scheduler.field_month"),
-    t("scheduler.field_weekday"),
-  ];
+  const cronFieldHeaders = useMemo(
+    () => [
+      t("scheduler.field_min"), t("scheduler.field_hour"),
+      t("scheduler.field_day"), t("scheduler.field_month"),
+      t("scheduler.field_weekday"),
+    ],
+    [t],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    },
+    [onClose],
+  );
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
 
   return (
-    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="schedule-modal-title"
+      className="fixed inset-0 z-100 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={onClose}
+    >
       <div className="w-full max-w-140 mx-4 rounded-2xl bg-surface border border-border-subtle shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="p-5 pb-3">
-          <h3 className="text-base font-black">{title}</h3>
+          <h3 id="schedule-modal-title" className="text-base font-black">{title}</h3>
           {subtitle && <p className="text-[11px] text-text-dim mt-0.5 truncate">{subtitle}</p>}
         </div>
 
@@ -241,13 +289,6 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
               const f = [...fields]; f[idx] = v;
               setCustomCron(f.slice(0, 5).join(" "));
             };
-            const opts: string[][] = [
-              ["*", "*/5", "*/10", "*/15", "*/30", ...Array.from({ length: 60 }, (_, i) => String(i))],
-              ["*", "*/2", "*/4", "*/6", "*/12", ...Array.from({ length: 24 }, (_, i) => String(i))],
-              ["*", ...Array.from({ length: 31 }, (_, i) => String(i + 1))],
-              ["*", ...Array.from({ length: 12 }, (_, i) => String(i + 1))],
-              ["*", "0", "1", "2", "3", "4", "5", "6", "1-5"],
-            ];
             return (
               <div className="grid grid-cols-5 gap-2 w-full">
                 {cronFieldHeaders.map((h, i) => (
@@ -255,7 +296,7 @@ export function ScheduleModal({ title, subtitle, initialCron, initialTz, onSave,
                     <p className="text-[9px] font-bold text-text-dim/50 text-center mb-1">{h}</p>
                     <select value={fields[i] || "*"} onChange={e => updateField(i, e.target.value)}
                       className="w-full h-9 rounded-lg border border-border-subtle bg-main text-xs font-mono text-center outline-none focus:border-brand transition-colors">
-                      {opts[i].map(v => <option key={v} value={v}>{v}</option>)}
+                      {CUSTOM_CRON_OPTS[i].map(v => <option key={v} value={v}>{v}</option>)}
                     </select>
                   </div>
                 ))}
