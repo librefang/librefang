@@ -109,6 +109,9 @@ impl CachedWorkspaceMetadata {
 struct CachedSkillMetadata {
     skill_summary: String,
     skill_prompt_context: String,
+    /// Total number of enabled skills represented in this summary.
+    /// Used by the prompt builder for progressive disclosure (inline vs summary mode).
+    skill_count: usize,
     created_at: std::time::Instant,
 }
 
@@ -3649,6 +3652,7 @@ system_prompt = "You are a helpful assistant."
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
                 skill_summary: String::new(),
+                skill_count: 0,
                 skill_prompt_context: String::new(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
@@ -4647,6 +4651,7 @@ system_prompt = "You are a helpful assistant."
                     .as_ref()
                     .map(|s| s.skill_summary.clone())
                     .unwrap_or_default(),
+                skill_count: skill_meta.as_ref().map(|s| s.skill_count).unwrap_or(0),
                 skill_prompt_context: skill_meta
                     .as_ref()
                     .map(|s| s.skill_prompt_context.clone())
@@ -5972,6 +5977,7 @@ system_prompt = "You are a helpful assistant."
                     .as_ref()
                     .map(|s| s.skill_summary.clone())
                     .unwrap_or_default(),
+                skill_count: skill_meta.as_ref().map(|s| s.skill_count).unwrap_or(0),
                 skill_prompt_context: skill_meta
                     .as_ref()
                     .map(|s| s.skill_prompt_context.clone())
@@ -11909,9 +11915,12 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        let skills = self.sorted_enabled_skills(skill_allowlist);
+        let skill_count = skills.len();
         let metadata = CachedSkillMetadata {
-            skill_summary: self.build_skill_summary(skill_allowlist),
+            skill_summary: self.build_skill_summary_from_skills(&skills),
             skill_prompt_context: self.collect_prompt_context(skill_allowlist),
+            skill_count,
             created_at: std::time::Instant::now(),
         };
 
@@ -11993,10 +12002,17 @@ system_prompt = "You are a helpful assistant."
         skills
     }
 
-    fn build_skill_summary(&self, skill_allowlist: &[String]) -> String {
+    /// Build a skill summary string from a pre-sorted skills slice.
+    ///
+    /// Accepts the already-filtered-and-sorted list returned by
+    /// [`sorted_enabled_skills`] so the caller can reuse it for counting
+    /// without a second registry read.
+    fn build_skill_summary_from_skills(
+        &self,
+        skills: &[librefang_skills::InstalledSkill],
+    ) -> String {
         use librefang_runtime::prompt_builder::{sanitize_for_prompt, SKILL_NAME_DISPLAY_CAP};
 
-        let skills = self.sorted_enabled_skills(skill_allowlist);
         if skills.is_empty() {
             return String::new();
         }
@@ -12008,7 +12024,7 @@ system_prompt = "You are a helpful assistant."
             String,
             Vec<&librefang_skills::InstalledSkill>,
         > = std::collections::BTreeMap::new();
-        for skill in &skills {
+        for skill in skills {
             let category = librefang_skills::registry::derive_category(&skill.manifest).to_string();
             categories.entry(category).or_default().push(skill);
         }

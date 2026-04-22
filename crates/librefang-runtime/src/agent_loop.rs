@@ -2640,6 +2640,7 @@ pub async fn run_agent_loop(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
+    let mut last_prompt_tokens: usize = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -2647,6 +2648,72 @@ pub async fn run_agent_loop(
         // Fire agent:step external hook (fire-and-forget).
         if let Some(ref k) = kernel {
             k.fire_agent_step(&agent_id_str, iteration);
+        }
+
+        // Pluggable context engine: threshold-gated compaction. When the
+        // engine signals that the current token count has crossed its
+        // compression threshold, run a compaction pass *before* assemble so
+        // the assembled context is already trimmed.
+        //
+        // `last_prompt_tokens` carries the prompt-token count from the
+        // previous LLM call — never a running sum.  This correctly gates
+        // `should_compress` on each turn's own input cost.  On the first
+        // iteration `last_prompt_tokens` is 0, so compaction can only fire
+        // when the model's context window itself (via `ctx_window`) is
+        // below threshold.  `total_usage` (accumulated across iterations) is
+        // never read here, so it remains a clean snapshot for the kernel
+        // budget tracker and is never mutated by the compaction path.
+        if let Some(engine) = context_engine {
+            if engine.should_compress(last_prompt_tokens, ctx_window) {
+                debug!(
+                    iteration,
+                    last_prompt_tokens, ctx_window, "Context engine requested compaction"
+                );
+                match engine
+                    .compact(
+                        session.agent_id,
+                        &messages,
+                        driver.clone(),
+                        &manifest.model.model,
+                        ctx_window,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        debug!(
+                            kept = result.kept_messages.len(),
+                            "Context engine compaction complete"
+                        );
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
+                    }
+                    Err(e) => {
+                        warn!("Context engine compaction failed (continuing): {e}");
+                    }
+                }
+            }
         }
 
         // Context assembly — use context engine if available, else inline logic
@@ -2735,6 +2802,11 @@ pub async fn run_agent_loop(
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+
+        // Snapshot prompt tokens for the next iteration's should_compress check.
+        // This is the per-turn input cost, NOT a running sum — we deliberately
+        // do NOT accumulate into last_prompt_tokens.
+        last_prompt_tokens = response.usage.input_tokens as usize;
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
@@ -3661,9 +3733,69 @@ pub async fn run_agent_loop_streaming(
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
+    let mut last_prompt_tokens: usize = 0;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
+
+        // Pluggable context engine: threshold-gated compaction (same as the
+        // non-streaming loop). `last_prompt_tokens` carries only the previous
+        // turn's prompt cost — never the cumulative total.  `total_usage`
+        // (accumulated) is never read or written here.
+        if let Some(engine) = context_engine {
+            if engine.should_compress(last_prompt_tokens, ctx_window) {
+                debug!(
+                    iteration,
+                    last_prompt_tokens,
+                    ctx_window,
+                    "Context engine requested compaction (streaming path)"
+                );
+                match engine
+                    .compact(
+                        session.agent_id,
+                        &messages,
+                        driver.clone(),
+                        &manifest.model.model,
+                        ctx_window,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        debug!(
+                            kept = result.kept_messages.len(),
+                            "Context engine compaction complete (streaming)"
+                        );
+                        // Inject the LLM-generated summary as a synthetic user message
+                        // so the agent retains context about what was compacted.
+                        // Without this, the summary is silently discarded and the agent
+                        // loses all knowledge of earlier turns.
+                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
+                        if !result.summary.is_empty() {
+                            compacted.push(Message {
+                                role: Role::User,
+                                content: MessageContent::Text(format!(
+                                    "[Context compaction summary] Earlier conversation turns \
+                                     were summarised to preserve context space. Summary of \
+                                     removed messages: {}",
+                                    result.summary
+                                )),
+                                pinned: false,
+                            });
+                        }
+                        compacted.extend(result.kept_messages);
+                        messages = compacted;
+                        // Reset last_prompt_tokens so should_compress does not
+                        // re-fire on the next iteration before the LLM has run.
+                        // Do NOT touch total_usage — it is the cross-turn budget
+                        // accumulator and must never be zeroed here.
+                        last_prompt_tokens = 0;
+                    }
+                    Err(e) => {
+                        warn!("Context engine compaction failed (continuing, streaming): {e}");
+                    }
+                }
+            }
+        }
 
         // Context assembly — use context engine if available, else inline logic
         let recovery = if let Some(engine) = context_engine {
@@ -3815,6 +3947,11 @@ pub async fn run_agent_loop_streaming(
         };
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+
+        // Snapshot prompt tokens for the next iteration's should_compress check.
+        // This is the per-turn input cost, NOT a running sum — we deliberately
+        // do NOT accumulate into last_prompt_tokens.
+        last_prompt_tokens = response.usage.input_tokens as usize;
 
         // Strip image base64 from earlier messages (LLM already processed them)
         strip_processed_image_data(&mut messages);
