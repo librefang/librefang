@@ -217,6 +217,7 @@ export function RuntimePage() {
           {[1, 2, 3, 4].map(i => <CardSkeleton key={i} />)}
         </div>
       ) : snapshotQuery.isError || healthDetailQuery.isError || securityQuery.isError ? (
+        // Only gate whole page on primary overview/security sources; audit, backups, and task queues can fail independently.
         <Card padding="lg">
           <div className="flex items-center gap-3 text-error">
             <XCircle className="w-5 h-5" />
