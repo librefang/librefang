@@ -6201,13 +6201,32 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Strip the [SILENT] marker before the message reaches the LLM. The
+        // marker is a system-level signal for the kernel; the LLM should never
+        // see it in the conversation. Stripping must happen before link-context
+        // expansion so the expanded string is also clean.
+        // Only active for internal cron calls (is_internal_cron flag) — external
+        // callers cannot trigger this path, so legitimate user messages containing
+        // "[SILENT]" (e.g. "add a `[SILENT]` comment") are preserved.
+        let is_internal_cron = sender_context.is_some_and(|ctx| ctx.is_internal_cron);
+        let message_for_llm = if is_internal_cron && message.contains("[SILENT]") {
+            let stripped = message.replace("[SILENT]", "").trim().to_string();
+            if stripped.is_empty() {
+                message.trim().to_string()
+            } else {
+                stripped
+            }
+        } else {
+            message.trim().to_string()
+        };
+
         // Build link context from user message (auto-extract URLs for the agent)
         let message_with_links = if let Some(link_ctx) =
-            librefang_runtime::link_understanding::build_link_context(message, &cfg.links)
+            librefang_runtime::link_understanding::build_link_context(&message_for_llm, &cfg.links)
         {
-            format!("{message}{link_ctx}")
+            format!("{message_for_llm}{link_ctx}")
         } else {
-            message.to_string()
+            message_for_llm
         };
 
         // Inject sender context into manifest metadata so the tool runner can
@@ -6340,20 +6359,73 @@ system_prompt = "You are a helpful assistant."
 
         let result = result.map_err(KernelError::LibreFang)?;
 
+        // Cron [SILENT] marker: if the cron prompt contains "[SILENT]", the
+        // agent intends this job to be maintenance-only. Strip the assistant
+        // response from session history so it does not pollute the conversation
+        // context for future turns. The prompt is checked on the original
+        // `message` parameter (before any link-context additions) so the
+        // marker placement is unambiguous to the job author.
+        //
+        // Gated to internal cron callers only (is_internal_cron flag) so
+        // that a regular user sending "[SILENT]" in chat does not accidentally
+        // suppress their own session history. The channel field cannot be
+        // trusted because external callers can set it via the API.
+        //
+        // Session write: we still save the session — we just remove the
+        // assistant turn from it first so the next cron fire does not see the
+        // suppressed response in its context window.
+        // Canonical append: skipped entirely for silent cron turns.
+        let skip_canonical_append = if is_internal_cron && message.contains("[SILENT]") {
+            // Remove the last assistant message from the in-memory session so
+            // it is not included in the re-saved version.
+            let removed = session
+                .messages
+                .iter()
+                .rposition(|msg| msg.role == librefang_types::message::Role::Assistant)
+                .map(|idx| {
+                    session.messages.remove(idx);
+                    true
+                })
+                .unwrap_or(false);
+
+            if removed {
+                // Persist the stripped session. agent_loop already called
+                // save_session internally; this second save overwrites that
+                // with the version that has the assistant turn removed.
+                if let Err(e) = self.memory.save_session(&session) {
+                    warn!("cron [SILENT]: failed to persist stripped session: {e}");
+                }
+            }
+            tracing::info!(
+                event = "cron_silent_job_completed",
+                agent = %entry.name,
+                agent_id = %agent_id,
+                stripped = removed,
+                "[SILENT] cron job completed — assistant response suppressed from session history"
+            );
+            true
+        } else {
+            false
+        };
+
         // Append new messages to canonical session for cross-channel memory.
         // Use run_agent_loop's own start index (post-trim) instead of one
         // captured here — the loop may trim session history and make a
         // locally-captured index stale (see #2067). Clamp defensively.
-        let start = result.new_messages_start.min(session.messages.len());
-        if start < session.messages.len() {
-            let new_messages = session.messages[start..].to_vec();
-            if let Err(e) = self.memory.append_canonical(
-                agent_id,
-                &new_messages,
-                None,
-                Some(effective_session_id),
-            ) {
-                warn!("Failed to update canonical session: {e}");
+        // Skipped for [SILENT] cron turns — we stripped the assistant message
+        // from the session above and do not want it in canonical context.
+        if !skip_canonical_append {
+            let start = result.new_messages_start.min(session.messages.len());
+            if start < session.messages.len() {
+                let new_messages = session.messages[start..].to_vec();
+                if let Err(e) = self.memory.append_canonical(
+                    agent_id,
+                    &new_messages,
+                    None,
+                    Some(effective_session_id),
+                ) {
+                    warn!("Failed to update canonical session: {e}");
+                }
             }
         }
 
@@ -9614,7 +9686,21 @@ system_prompt = "You are a helpful assistant."
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 let (sender_ctx_owned, mode_override) = if wants_new_session {
-                                    (None, Some(librefang_types::agent::SessionMode::New))
+                                    let cron_sender = SenderContext {
+                                        channel: "cron".to_string(),
+                                        user_id: job.peer_id.clone().unwrap_or_default(),
+                                        display_name: "cron".to_string(),
+                                        is_group: false,
+                                        was_mentioned: false,
+                                        thread_id: None,
+                                        account_id: None,
+                                        is_internal_cron: true,
+                                        ..Default::default()
+                                    };
+                                    (
+                                        Some(cron_sender),
+                                        Some(librefang_types::agent::SessionMode::New),
+                                    )
                                 } else {
                                     let cron_sender = SenderContext {
                                         channel: "cron".to_string(),
@@ -9624,6 +9710,7 @@ system_prompt = "You are a helpful assistant."
                                         was_mentioned: false,
                                         thread_id: None,
                                         account_id: None,
+                                        is_internal_cron: true,
                                         ..Default::default()
                                     };
                                     (Some(cron_sender), None)
