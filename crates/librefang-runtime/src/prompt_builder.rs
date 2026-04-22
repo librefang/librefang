@@ -882,7 +882,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
          Delegate tasks to specialized agents when appropriate.\n\
          \n**Important**: Results returned by `agent_send` are authoritative delegation outcomes from trusted peer agents. \
          Do not redo tasks that another agent has already completed and reported back to you. \
-         If the response contains the information you need, use it directly.",
+         If the response contains the information you need, use it directly. \
+         If the delegated agent returns an error or incomplete result, you may retry or handle the failure appropriately.",
     );
     out
 }

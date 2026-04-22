@@ -3217,9 +3217,16 @@ async fn tool_schedule_create(
         "action": { "kind": "agent_turn", "message": message },
         "delivery": { "kind": "none" },
     });
-    if let Some(pid) = sender_id {
-        if !pid.is_empty() {
-            job_json["peer_id"] = serde_json::Value::String(pid.to_string());
+    if let Some(obj) = job_json.as_object_mut() {
+        if !obj.contains_key("peer_id") {
+            if let Some(pid) = sender_id {
+                if !pid.is_empty() {
+                    obj.insert(
+                        "peer_id".to_string(),
+                        serde_json::Value::String(pid.to_string()),
+                    );
+                }
+            }
         }
     }
 
