@@ -205,6 +205,8 @@ export function WorkflowsPage() {
   const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;
 
   const hasWorkflows = workflows.length > 0;
+  const getStepResultKey = (step: any, index: number) =>
+    step.id ?? step.step_id ?? step.step_name ?? step.name ?? ([step.agent_name, step.duration_ms, step.input_tokens, step.output_tokens].filter(Boolean).join(":") || index);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -407,7 +409,7 @@ export function WorkflowsPage() {
                     </div>
                     <div className="space-y-2">
                       {dryRunResult.steps.map((step, i) => (
-                        <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                        <div key={getStepResultKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                           <button
                             className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                             onClick={() => setExpandedStepIdx(expandedStepIdx === i ? null : i)}>
@@ -457,7 +459,7 @@ export function WorkflowsPage() {
                       <div className="space-y-1.5 border-t border-success/20 pt-2">
                         <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.step_details", { defaultValue: "Step details" })}</p>
                         {((runMutation.data as any).step_results as any[]).map((s: any, i: number) => (
-                          <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                          <div key={getStepResultKey(s, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                             <button
                               className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                               onClick={() => setExpandedStepIdx(expandedStepIdx === i + 1000 ? null : i + 1000)}>
@@ -557,7 +559,7 @@ export function WorkflowsPage() {
                                 </div>
                               )}
                               {runDetailQuery.data.step_results.map((step, si) => (
-                                <div key={si} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                                <div key={getStepResultKey(step, si)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                                   <button
                                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
                                     onClick={() => setExpandedStepIdx(expandedStepIdx === si + 2000 ? null : si + 2000)}>

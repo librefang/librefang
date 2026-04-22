@@ -154,7 +154,7 @@ function ModifyForm({
 
 function AuditLogTab() {
   const { t } = useTranslation();
-  const [offset, setOffset] = useState(() => 0);
+  const [offset, setOffset] = useState(0);
 
   const auditQuery = useApprovalAudit({ limit: AUDIT_PAGE_SIZE, offset });
 

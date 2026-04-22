@@ -72,10 +72,19 @@ function ensureAgentEntry(map: Map<string, AgentTokenMetric>, agent: string): Ag
 function parseMetrics(text: string): ParsedMetrics {
   const requests: HttpMetric[] = [];
   const agentMap = new Map<string, AgentTokenMetric>();
+  const gaugeMap = new Map<string, number>();
   const lines = text.split("\n");
   let version = "";
 
   for (const line of lines) {
+    const spaceIdx = line.indexOf(" ");
+    if (spaceIdx > 0) {
+      const namePart = line.slice(0, spaceIdx);
+      if (!namePart.includes("{")) {
+        gaugeMap.set(namePart, parseFloat(line.slice(spaceIdx + 1)) || 0);
+      }
+    }
+
     if (line.startsWith("librefang_http_requests_total{")) {
       const match = line.match(
         /librefang_http_requests_total\{method="([^"]+)",path="([^"]+)",status="([^"]+)"\}\s+(\d+)/
@@ -131,17 +140,6 @@ function parseMetrics(text: string): ParsedMetrics {
     }
   }
 
-  const gaugeMap = new Map<string, number>();
-  for (const line of lines) {
-    const spaceIdx = line.indexOf(" ");
-    if (spaceIdx > 0) {
-      const namePart = line.slice(0, spaceIdx);
-      if (!namePart.includes("{")) {
-        gaugeMap.set(namePart, parseFloat(line.slice(spaceIdx + 1)) || 0);
-      }
-    }
-  }
-
   const system: SystemMetrics = {
     uptime: gaugeMap.get("librefang_uptime_seconds") || 0,
     agentsActive: gaugeMap.get("librefang_agents_active") || 0,
@@ -158,13 +156,11 @@ function parseMetrics(text: string): ParsedMetrics {
 
 // ── Component ────────────────────────────────────────────────────────
 
-function MetricCard({ label, icon, value, variant, prefix, decimals }: {
+function MetricCard({ label, icon, value, variant }: {
   label: string;
   icon: ReactNode;
-  value: number | ReactNode;
+  value: ReactNode;
   variant: "success" | "brand" | "accent" | "warning" | "error";
-  prefix?: string;
-  decimals?: number;
 }) {
   const bgClass = { success: "bg-success/10", brand: "bg-brand/10", accent: "bg-accent/10", warning: "bg-warning/10", error: "bg-error/10" }[variant];
   return (
@@ -173,13 +169,7 @@ function MetricCard({ label, icon, value, variant, prefix, decimals }: {
         <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{label}</span>
         <div className={`w-7 h-7 rounded-lg ${bgClass} flex items-center justify-center`}>{icon}</div>
       </div>
-      <div className="mt-1">
-        {typeof value === "number" ? (
-          <span className="text-xl font-black tracking-tight"><AnimatedNumber value={value} prefix={prefix} decimals={decimals} /></span>
-        ) : (
-          value
-        )}
-      </div>
+      <div className="mt-1">{value}</div>
     </Card>
   );
 }
@@ -264,16 +254,14 @@ export function TelemetryPage() {
             <MetricCard
               label={t("telemetry.active_sessions")}
               icon={<Users className="w-3.5 h-3.5 text-accent" />}
-              value={parsed.system.activeSessions}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.activeSessions} /></span>}
               variant="accent"
             />
             <MetricCard
               label={t("telemetry.cost_today")}
               icon={<DollarSign className="w-3.5 h-3.5 text-warning" />}
-              value={parsed.system.costToday}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.costToday} prefix="$" decimals={4} /></span>}
               variant="warning"
-              prefix="$"
-              decimals={4}
             />
             <MetricCard
               label={t("telemetry.total_requests")}
@@ -284,13 +272,13 @@ export function TelemetryPage() {
             <MetricCard
               label={t("telemetry.panics")}
               icon={<AlertTriangle className="w-3.5 h-3.5 text-error" />}
-              value={parsed.system.panics}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.panics} /></span>}
               variant="error"
             />
             <MetricCard
               label={t("telemetry.restarts")}
               icon={<RotateCcw className="w-3.5 h-3.5 text-warning" />}
-              value={parsed.system.restarts}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.restarts} /></span>}
               variant="warning"
             />
             <MetricCard

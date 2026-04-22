@@ -866,6 +866,7 @@
     "no_trend_data": "No trend data available yet",
     "cost_per_call": "Cost per Call",
     "cheapest_call": "Cheapest/Call",
+    "avg_cost_per_call": "Avg Cost/Call",
     "help": "View usage statistics and cost analytics. Monitor API calls, token consumption, and set budget limits to control spending.",
     "cost": "Cost",
     "avg": "Avg",

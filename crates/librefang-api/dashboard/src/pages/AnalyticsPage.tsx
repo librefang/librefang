@@ -11,6 +11,14 @@ import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, Trending
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
 
+interface BudgetForm {
+  hourly?: string;
+  daily?: string;
+  monthly?: string;
+  tokens?: string;
+  alert?: string;
+}
+
 export function AnalyticsPage() {
   const { t } = useTranslation();
 
@@ -31,14 +39,6 @@ export function AnalyticsPage() {
   const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
   const modelChartData = useMemo(() => (usageByModel as any[]).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
   const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: any) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
-
-  interface BudgetForm {
-    hourly?: string;
-    daily?: string;
-    monthly?: string;
-    tokens?: string;
-    alert?: string;
-  }
 
   const [budgetForm, setBudgetForm] = useState<Partial<BudgetForm>>({});
 
@@ -122,13 +122,13 @@ export function AnalyticsPage() {
     return [
       { icon: Activity, label: t("analytics.avg_latency") || "Avg Latency", value: `${avgLatency.toFixed(0)}ms`, color: "text-blue-500", bg: "bg-blue-500/10" },
       { icon: Gauge, label: t("analytics.fastest_model") || "Fastest Model", value: fastest?.model?.slice(0, 12) ?? "-", color: "text-success", bg: "bg-success/10" },
-      { icon: Target, label: t("analytics.cheapest_call") || "Cheapest/Call", value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
+      { icon: Target, label: t("analytics.avg_cost_per_call") || "Avg Cost/Call", value: `$${avgCostPerCall.toFixed(4)}`, color: "text-purple-500", bg: "bg-purple-500/10" },
       { icon: Clock, label: t("analytics.total_calls") || "Total Calls", value: totalCalls.toString(), color: "text-warning", bg: "bg-warning/10" },
     ];
   }, [modelPerformance, t]);
 
   const handleRefresh = useCallback(() => {
-    Promise.all([
+    void Promise.all([
       usageQuery.refetch(),
       usageByAgentQuery.refetch(),
       usageByModelQuery.refetch(),
