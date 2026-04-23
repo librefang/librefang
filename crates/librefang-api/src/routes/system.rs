@@ -1123,8 +1123,13 @@ pub async fn invoke_tool(
     )
     .await;
 
+    let status = if result.is_error {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
     (
-        StatusCode::OK,
+        status,
         Json(
             serde_json::to_value(result).unwrap_or_else(
                 |_| serde_json::json!({"error": "Failed to serialize tool result"}),

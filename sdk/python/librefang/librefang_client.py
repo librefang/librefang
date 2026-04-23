@@ -284,8 +284,8 @@ class _ToolResource(_Resource):
     def get(self, name: str):
         return self._c._request("GET", f"/api/tools/{name}")
 
-    def invoke(self, name: str, input: dict):
-        return self._c._request("POST", f"/api/tools/{name}/invoke", input)
+    def invoke(self, name: str, tool_input: dict):
+        return self._c._request("POST", f"/api/tools/{name}/invoke", tool_input)
 
 
 # ── Model Resource ──────────────────────────────────────────────
