@@ -531,6 +531,28 @@ pub struct BrowserConfig {
     pub max_sessions: usize,
     /// Path to Chromium/Chrome binary. Auto-detected if None.
     pub chromium_path: Option<String>,
+    /// Remote CDP endpoint to attach to instead of spawning a local Chromium.
+    ///
+    /// Accepted formats:
+    /// - `ws://host:port/devtools/browser/<id>` — page-level WebSocket (direct attach)
+    /// - `http://host:port` — HTTP discovery endpoint; librefang calls `GET /json/new`
+    ///   to create a fresh tab and connects to the returned WebSocket URL.
+    ///
+    /// When set, `headless`, `chromium_path`, and local-process discovery are
+    /// ignored. Browser lifecycle (start/stop) is the operator's responsibility.
+    ///
+    /// **Security**: CDP is unauthenticated. Never expose the debugging port on a
+    /// public interface. Use SSH tunnels, WireGuard, or a trusted-network path.
+    #[serde(default)]
+    pub cdp_endpoint: Option<String>,
+    /// Environment variable that holds a bearer token for the CDP endpoint.
+    ///
+    /// Some CDP proxies (e.g. Browserless) require `Authorization: Bearer <token>`
+    /// on the WebSocket upgrade request. Set this to the name of an env var that
+    /// contains the token (e.g. `"LIBREFANG_CDP_TOKEN"`); librefang reads the
+    /// value at connect time and never logs it.
+    #[serde(default)]
+    pub cdp_auth_token_env: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -544,6 +566,8 @@ impl Default for BrowserConfig {
             idle_timeout_secs: 300,
             max_sessions: 5,
             chromium_path: None,
+            cdp_endpoint: None,
+            cdp_auth_token_env: None,
         }
     }
 }
@@ -2244,6 +2268,20 @@ pub struct KernelConfig {
     /// Increase for browser automation or long-running builds.
     #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: u64,
+    /// Per-tool timeout overrides. Exact key matches take priority over glob
+    /// patterns; among globs, the longest matching pattern wins (most specific
+    /// first). Falls back to `tool_timeout_secs` when no entry matches.
+    ///
+    /// Example:
+    /// ```toml
+    /// [tool_timeouts]
+    /// agent_send    = 600
+    /// agent_spawn   = 600
+    /// "mcp_browser_*" = 900
+    /// shell_exec    = 300
+    /// ```
+    #[serde(default)]
+    pub tool_timeouts: std::collections::HashMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -3834,6 +3872,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
+            tool_timeouts: std::collections::HashMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
