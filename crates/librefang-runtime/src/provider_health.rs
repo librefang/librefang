@@ -458,6 +458,7 @@ mod tests {
             parameter_size: Some("3.2B".to_string()),
             quantization_level: Some("Q4_K_M".to_string()),
             family: Some("llama".to_string()),
+            families: None,
             size: Some(1_928_000_000),
         };
         let json = serde_json::to_value(&info).unwrap();
@@ -475,6 +476,7 @@ mod tests {
             parameter_size: None,
             quantization_level: None,
             family: None,
+            families: None,
             size: None,
         };
         let json = serde_json::to_value(&info).unwrap();
