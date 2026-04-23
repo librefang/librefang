@@ -804,8 +804,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
-             gemini-cli, codex-cli, qwen, minimax, zhipu. \
+             azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, gemini-cli, \
+             codex-cli, qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
+             qianfan, volcengine, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
