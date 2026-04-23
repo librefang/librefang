@@ -3780,6 +3780,20 @@ async fn stream_with_retry(
                 )));
             }
             Err(e) => {
+                let err_str = e.to_string();
+                if llm_errors::is_transient(&err_str) && attempt < MAX_RETRIES {
+                    warn!(
+                        attempt,
+                        error = %err_str,
+                        "LLM stream died with transient error, retrying"
+                    );
+                    last_error = Some("Transient stream error".to_string());
+                    tokio::time::sleep(Duration::from_millis(
+                        BASE_RETRY_DELAY_MS * 2u64.pow(attempt),
+                    ))
+                    .await;
+                    continue;
+                }
                 let (is_billing, err) =
                     build_user_facing_llm_error(&e, "LLM stream error classified");
                 record_retry_failure(provider, cooldown, is_billing);
