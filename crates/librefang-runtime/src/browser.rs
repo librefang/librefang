@@ -366,7 +366,7 @@ impl BrowserSession {
     /// Attach to a remote CDP endpoint instead of spawning a local Chromium.
     ///
     /// Accepted formats for `cdp_endpoint`:
-    /// - `http[s]://host:port` — HTTP discovery; `POST /json/new` creates a fresh
+    /// - `http[s]://host:port` — HTTP discovery; `GET /json/new` creates a fresh
     ///   tab and returns its WebSocket URL. The created target ID is stored for
     ///   cleanup when the session ends.
     /// - `ws[s]://…` — Direct WebSocket attach (assumes page-level endpoint).
@@ -384,7 +384,7 @@ impl BrowserSession {
             let new_url = format!("{base}/json/new");
             let resp = tokio::time::timeout(
                 Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
-                crate::http_client::new_client().post(&new_url).send(),
+                crate::http_client::new_client().get(&new_url).send(),
             )
             .await
             .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
