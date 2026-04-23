@@ -8,9 +8,10 @@ import {
   getBudgetStatus,
 } from "../http/client";
 import { usageKeys, budgetKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 30_000;
-const STALE_MS = 30_000;
+const STALE_MS = 20_000;
 
 export const usageQueries = {
   summary: () =>
@@ -53,33 +54,33 @@ export const usageQueries = {
 export const budgetQueries = {
   status: () =>
     queryOptions({
-      queryKey: budgetKeys.all,
+      queryKey: budgetKeys.status(),
       queryFn: getBudgetStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
     }),
 };
 
-export function useUsageSummary() {
-  return useQuery(usageQueries.summary());
+export function useUsageSummary(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.summary(), options));
 }
 
-export function useUsageByAgent() {
-  return useQuery(usageQueries.byAgent());
+export function useUsageByAgent(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.byAgent(), options));
 }
 
-export function useUsageByModel() {
-  return useQuery(usageQueries.byModel());
+export function useUsageByModel(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.byModel(), options));
 }
 
-export function useUsageDaily() {
-  return useQuery(usageQueries.daily());
+export function useUsageDaily(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.daily(), options));
 }
 
-export function useModelPerformance() {
-  return useQuery(usageQueries.modelPerformance());
+export function useModelPerformance(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(usageQueries.modelPerformance(), options));
 }
 
-export function useBudgetStatus() {
-  return useQuery(budgetQueries.status());
+export function useBudgetStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(budgetQueries.status(), options));
 }

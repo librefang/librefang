@@ -8,6 +8,7 @@ import {
   getMcpAuthStatus,
 } from "../http/client";
 import { mcpKeys } from "./keys";
+import { QueryOverrides, withOverrides } from "./options";
 
 const SERVERS_STALE_MS = 30_000;
 const SERVERS_REFRESH_MS = 30_000;
@@ -29,7 +30,7 @@ export const mcpQueries = {
       staleTime: SERVERS_STALE_MS,
       enabled: Boolean(id),
     }),
-  catalog: (opts: { enabled?: boolean } = {}) =>
+  catalog: (opts: QueryOverrides = {}) =>
     queryOptions({
       queryKey: mcpKeys.catalog(),
       queryFn: listMcpCatalog,
@@ -49,39 +50,36 @@ export const mcpQueries = {
       queryFn: getMcpHealth,
       staleTime: HEALTH_STALE_MS,
     }),
-  authStatus: (id: string, opts: { enabled?: boolean } = {}) =>
+  authStatus: (id: string, opts: QueryOverrides = {}) =>
     queryOptions({
       queryKey: mcpKeys.authStatus(id),
       queryFn: () => getMcpAuthStatus(id),
-      // Auth polling needs a fresh read on each fetchQuery call.
-      staleTime: 0,
+      // 2s staleTime balances OAuth polling freshness with request deduplication during rapid refetch cycles.
+      staleTime: 2_000,
       enabled: opts.enabled ?? Boolean(id),
     }),
 };
 
-export function useMcpServers() {
-  return useQuery(mcpQueries.servers());
+export function useMcpServers(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.servers(), options));
 }
 
-export function useMcpServer(id: string) {
-  return useQuery(mcpQueries.server(id));
+export function useMcpServer(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.server(id), options));
 }
 
-export function useMcpCatalog(opts: { enabled?: boolean } = {}) {
-  return useQuery(mcpQueries.catalog(opts));
+export function useMcpCatalog(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.catalog(), options));
 }
 
-export function useMcpCatalogEntry(id: string) {
-  return useQuery(mcpQueries.catalogEntry(id));
+export function useMcpCatalogEntry(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.catalogEntry(id), options));
 }
 
-export function useMcpHealth() {
-  return useQuery(mcpQueries.health());
+export function useMcpHealth(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.health(), options));
 }
 
-export function useMcpAuthStatus(id: string, options: { enabled?: boolean } = {}) {
-  return useQuery({
-    ...mcpQueries.authStatus(id, options),
-    enabled: options.enabled ?? Boolean(id),
-  });
+export function useMcpAuthStatus(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.authStatus(id), options));
 }
