@@ -834,8 +834,28 @@ async fn execute_single_tool_call(
     };
     fire_hook_best_effort(ctx.hooks, &hook_ctx);
 
+    // Allow plugins to rewrite the tool result before it enters the conversation context.
+    let result_content = if let Some(hook_reg) = ctx.hooks {
+        let transform_ctx = crate::hooks::HookContext {
+            agent_name: &ctx.manifest.name,
+            agent_id: ctx.caller_id_str,
+            event: librefang_types::agent::HookEvent::TransformToolResult,
+            data: serde_json::json!({
+                "tool_name": &tool_call.name,
+                "args": &tool_call.input,
+                "result": &result.content,
+                "is_error": result.is_error,
+            }),
+        };
+        hook_reg
+            .fire_transform(&transform_ctx)
+            .unwrap_or_else(|| result.content.clone())
+    } else {
+        result.content.clone()
+    };
+
     let content = sanitize_tool_result_content(
-        &result.content,
+        &result_content,
         ctx.context_budget,
         ctx.context_engine,
         ctx.context_window_tokens,

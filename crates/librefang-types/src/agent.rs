@@ -116,6 +116,9 @@ pub enum HookEvent {
     BeforeToolCall,
     /// Fires after a tool call completes.
     AfterToolCall,
+    /// Fires after tool execution to allow rewriting the result string.
+    /// The first handler returning Ok(Some(s)) wins; others are skipped.
+    TransformToolResult,
     /// Fires before the system prompt is constructed.
     BeforePromptBuild,
     /// Fires after the agent loop completes.
