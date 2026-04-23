@@ -8142,6 +8142,42 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Startup session prune + VACUUM: run once at boot before background
+        // agents start. Mirrors Hermes `maybe_auto_prune_and_vacuum()` — only
+        // VACUUM when rows were actually deleted so the rewrite is worthwhile.
+        {
+            let session_cfg = cfg.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup {
+                let mut pruned_total: u64 = 0;
+                if session_cfg.retention_days > 0 {
+                    match self
+                        .memory
+                        .cleanup_expired_sessions(session_cfg.retention_days)
+                    {
+                        Ok(n) => pruned_total += n,
+                        Err(e) => warn!("Startup session prune (expired) failed: {e}"),
+                    }
+                }
+                if session_cfg.max_sessions_per_agent > 0 {
+                    match self
+                        .memory
+                        .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                    {
+                        Ok(n) => pruned_total += n,
+                        Err(e) => warn!("Startup session prune (excess) failed: {e}"),
+                    }
+                }
+                if let Err(e) = self.memory.vacuum_if_shrank(pruned_total as usize) {
+                    warn!("Startup VACUUM after session prune failed: {e}");
+                }
+                if pruned_total > 0 {
+                    info!("Startup session prune: removed {pruned_total} session(s)");
+                }
+            }
+        }
+
         // Periodic cleanup of expired image uploads (24h TTL)
         {
             let kernel = Arc::clone(self);
