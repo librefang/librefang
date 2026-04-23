@@ -1042,7 +1042,13 @@ fn check_requirement(req: &HandRequirement) -> bool {
                     || which_binary("chrome")
                     || std::env::var("CHROME_PATH")
                         .map(|v| !v.is_empty())
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                    || std::path::Path::new(
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                    )
+                    .exists()
+                    || std::path::Path::new("/Applications/Chromium.app/Contents/MacOS/Chromium")
+                        .exists();
             }
             false
         }
