@@ -26,6 +26,7 @@ use librefang_kernel::{config::load_config, LibreFangKernel};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -3032,7 +3033,7 @@ fn chrono_lite_date() -> String {
     }
     let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month: u64 = 1;
-    let mut day: i64 = remaining_days as i64 + 1;
+    let mut day: i64 = remaining_days + 1;
     let mut md: i64 = if is_leap_year(year) { 29 } else { 28 };
     while day > md {
         day -= md;
@@ -3079,7 +3080,7 @@ fn prune_rotated_logs(config: Option<&std::path::Path>, max_age_days: u64) {
             .strip_prefix("daemon-")
             .and_then(|s| s.strip_suffix(".log"));
         let is_old = date_str
-            .and_then(|s| parse_daily_date_timestamp(s))
+            .and_then(parse_daily_date_timestamp)
             .map(|ts| ts < cutoff)
             .unwrap_or(false);
         if is_old {
@@ -3117,10 +3118,12 @@ fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
 
 /// Guard that tees all stdout/stderr to a log file in foreground mode.
 /// On drop, restores original stdout/stderr and joins the tee thread.
+#[cfg(unix)]
 struct ForegroundTeeGuard {
     _pipe_fd: RawFd, // kept alive to keep pipe open until guard drops
 }
 
+#[cfg(unix)]
 impl Drop for ForegroundTeeGuard {
     fn drop(&mut self) {
         // Restore original stdout/stderr
@@ -3134,6 +3137,7 @@ impl Drop for ForegroundTeeGuard {
 
 /// Set up tee for --foreground mode: redirect stdout/stderr to a pipe,
 /// spawn a background thread that copies to both terminal and log file.
+#[cfg(unix)]
 fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     // Create pipe for stdout+stderr (we'll write to it, background thread reads)
     let mut fds = [0i32, 0i32];
@@ -3315,6 +3319,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
     } else {
         daemon_log_path_for_config(config.as_deref())
     };
+    #[cfg(unix)]
     let _foreground_guard = if foreground {
         Some(setup_foreground_tee(&log_path))
     } else {
