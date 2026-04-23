@@ -66,8 +66,8 @@ export const auditRecentQueryOptions = (limit: number) =>
   queryOptions({
     queryKey: auditKeys.recent(limit),
     queryFn: () => listAuditRecent(limit),
-    staleTime: 120_000,
-    refetchInterval: 120_000,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
   });
 
 export function useAuditRecent(limit: number, options: QueryOverrides = {}) {
@@ -78,8 +78,8 @@ export const auditVerifyQueryOptions = () =>
   queryOptions({
     queryKey: auditKeys.verify(),
     queryFn: verifyAuditChain,
-    staleTime: 120_000,
-    refetchInterval: 120_000,
+    staleTime: 60_000,
+    // No refetchInterval — chain verification is expensive; fetch on mount/focus only.
   });
 
 export function useAuditVerify(options: QueryOverrides = {}) {
