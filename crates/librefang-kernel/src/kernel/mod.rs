@@ -10217,7 +10217,7 @@ system_prompt = "You are a helpful assistant."
                                 // {"wakeAgent": false} in the last non-empty output line.
                                 // Only fires when the script exits successfully.
                                 if let Some(script_path) = pre_check_script {
-                                    if !cron_script_wake_gate(&job_name, script_path) {
+                                    if !cron_script_wake_gate(&job_name, script_path).await {
                                         tracing::info!(
                                             job = %job_name,
                                             "cron: script gate wakeAgent=false, skipping agent"
@@ -13008,12 +13008,23 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
 /// - Find the last non-empty stdout line and try to parse it as JSON.
 /// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
 /// - Everything else (non-JSON, missing key, null, 0, "") → return true.
-fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
-    use std::process::Command;
+async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+    use tokio::process::Command;
 
-    let output = match Command::new(script_path).output() {
-        Ok(o) => o,
-        Err(e) => {
+    // Hard cap: pre-check scripts must complete within 30 s.
+    // A hung script would otherwise block the cron dispatcher indefinitely.
+    let run = async { Command::new(script_path).output().await };
+
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+        Err(_elapsed) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                "cron: pre-check script timed out after 30s, waking agent"
+            );
+            return true;
+        }
+        Ok(Err(e)) => {
             tracing::warn!(
                 job = %job_name,
                 script = %script_path,
@@ -13022,6 +13033,7 @@ fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
             );
             return true;
         }
+        Ok(Ok(o)) => o,
     };
 
     if !output.status.success() {
