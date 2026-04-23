@@ -1,8 +1,8 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listSessions, getSessionDetails } from "../http/client";
 import { sessionKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
-const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 
 export const sessionQueries = {
@@ -11,7 +11,7 @@ export const sessionQueries = {
       queryKey: sessionKeys.lists(),
       queryFn: listSessions,
       staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
+      refetchInterval: STALE_MS,
     }),
   detail: (sessionId: string) =>
     queryOptions({
@@ -21,10 +21,10 @@ export const sessionQueries = {
     }),
 };
 
-export function useSessions() {
-  return useQuery(sessionQueries.list());
+export function useSessions(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(sessionQueries.list(), options));
 }
 
-export function useSessionDetails(sessionId: string) {
-  return useQuery(sessionQueries.detail(sessionId));
+export function useSessionDetails(sessionId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(sessionQueries.detail(sessionId), options));
 }

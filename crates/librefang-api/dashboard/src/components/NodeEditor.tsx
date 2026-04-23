@@ -1,6 +1,11 @@
 import { useTranslation } from "react-i18next";
 
-export function NodeEditor({ node, onUpdate }: any) {
+interface NodeEditorProps {
+  node: { id: string; type: string; data?: { label?: string } } | null;
+  onUpdate: (id: string, data: { label: string }) => void;
+}
+
+export function NodeEditor({ node, onUpdate }: NodeEditorProps) {
   const { t } = useTranslation();
 
   if (!node) return (
@@ -14,17 +19,19 @@ export function NodeEditor({ node, onUpdate }: any) {
       <h3 className="text-[10px] font-black uppercase tracking-widest text-text-dim mb-6">{t("common.properties")}</h3>
       <div className="space-y-4">
         <div>
-          <label className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.label")}</label>
-          <input 
-            value={node.data.label} 
+          <label htmlFor="node-label" className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.label")}</label>
+          <input
+            id="node-label"
+            value={node.data?.label ?? ""}
             onChange={(e) => onUpdate(node.id, { label: e.target.value })}
             className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors"
           />
         </div>
         <div>
-          <label className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.type")}</label>
-          <input 
-            value={node.type} 
+          <label htmlFor="node-type" className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.type")}</label>
+          <input
+            id="node-type"
+            value={node.type}
             readOnly
             className="w-full rounded-xl border border-border-subtle bg-main/50 px-4 py-2 text-sm text-text-dim cursor-not-allowed"
           />

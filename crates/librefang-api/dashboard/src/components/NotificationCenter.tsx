@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { Bell, Check, X, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
@@ -6,13 +6,17 @@ import { useNavigate } from "@tanstack/react-router";
 import { useApprovalCount, useApprovals, useTotpStatus } from "../lib/queries/approvals";
 import { useApproveApproval, useRejectApproval } from "../lib/mutations/approvals";
 
+const POLL_INTERVAL_MS = 5_000;
+const MAX_VISIBLE_ITEMS = 10;
+const MAX_BADGE_COUNT = 99;
+
 export function NotificationCenter() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
 
-  const countQuery = useApprovalCount({ refetchInterval: 5_000 });
+  const countQuery = useApprovalCount({ refetchInterval: POLL_INTERVAL_MS });
   const listQuery = useApprovals({ enabled: open });
   const totpQuery = useTotpStatus();
   const approveMutation = useApproveApproval();
@@ -21,11 +25,12 @@ export function NotificationCenter() {
   const totpEnforced = totpQuery.data?.enforced ?? false;
 
   const pendingCount = countQuery.data ?? 0;
-  const pendingItems = (listQuery.data ?? []).filter(
-    (a) => !a.status || a.status === "pending"
+  const pendingItems = useMemo(
+    () => (listQuery.data ?? []).filter((a) => !a.status || a.status === "pending"),
+    [listQuery.data]
   );
 
-  const handleAction = async (id: string, action: "approve" | "reject") => {
+  const handleAction = useCallback(async (id: string, action: "approve" | "reject") => {
     // When TOTP is enforced, redirect to Approvals page for approve
     if (action === "approve" && totpEnforced) {
       setOpen(false);
@@ -43,12 +48,12 @@ export function NotificationCenter() {
     } catch {
       addToast(t("common.error", "Action failed"), "error");
     }
-  };
+  }, [totpEnforced, approveMutation, rejectMutation, addToast, navigate, t]);
 
-  const goToAgent = (agentId: string) => {
+  const goToAgent = useCallback((agentId: string) => {
     setOpen(false);
     navigate({ to: "/chat", search: { agentId } });
-  };
+  }, [navigate]);
 
   return (
     <div className="relative">
@@ -64,7 +69,7 @@ export function NotificationCenter() {
           <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-error/60 ring-2 ring-surface" title={t("common.error", "Connection error")} />
         ) : pendingCount > 0 ? (
           <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-error px-1 text-[10px] font-bold text-white">
-            {pendingCount > 99 ? "99+" : pendingCount}
+            {pendingCount > MAX_BADGE_COUNT ? `${MAX_BADGE_COUNT}+` : pendingCount}
           </span>
         ) : null}
       </button>
@@ -75,7 +80,7 @@ export function NotificationCenter() {
             className="fixed inset-0 z-40"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 top-full mt-1 z-50 w-96 rounded-xl border border-border-subtle bg-surface shadow-xl">
+          <div className="absolute right-0 top-full mt-1 z-50 w-96 rounded-xl border border-border-subtle bg-surface shadow-xl" role="menu">
             <div className="px-4 py-3 border-b border-border-subtle flex items-center justify-between">
               <h3 className="text-sm font-bold text-text-main">
                 {t("approvals.pending_review", "Pending Approvals")}
@@ -98,9 +103,10 @@ export function NotificationCenter() {
                   {t("approvals.queue_clear_desc", "All clear")}
                 </div>
               ) : (
-                pendingItems.slice(0, 10).map((item) => (
+                pendingItems.slice(0, MAX_VISIBLE_ITEMS).map((item) => (
                   <div
                     key={item.id}
+                    role="menuitem"
                     className="px-4 py-3 border-b last:border-0 border-border-subtle hover:bg-surface-hover transition-colors"
                   >
                     <div className="flex items-start justify-between gap-2">

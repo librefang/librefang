@@ -106,7 +106,7 @@ describe("useApprovals", () => {
 
 describe("usePluginRegistries", () => {
   it("should not fetch when enabled is false", async () => {
-    const { result } = renderHook(() => usePluginRegistries(false), {
+    const { result } = renderHook(() => usePluginRegistries({ enabled: false }), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
@@ -119,7 +119,7 @@ describe("usePluginRegistries", () => {
   it("should fetch by default when enabled is undefined", async () => {
     mockListPluginRegistries.mockResolvedValue({ registries: [] });
 
-    renderHook(() => usePluginRegistries(undefined), {
+    renderHook(() => usePluginRegistries(), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
@@ -133,7 +133,7 @@ describe("usePluginRegistries", () => {
     const mockData = { registries: [{ id: "npm", url: "https://registry.npmjs.org" }] };
     mockListPluginRegistries.mockResolvedValue(mockData);
 
-    const { result } = renderHook(() => usePluginRegistries(true), {
+    const { result } = renderHook(() => usePluginRegistries({ enabled: true }), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
@@ -149,7 +149,7 @@ describe("usePluginRegistries", () => {
 
     const { queryClient, wrapper } = createQueryClientWrapper();
 
-    renderHook(() => usePluginRegistries(true), { wrapper });
+    renderHook(() => usePluginRegistries({ enabled: true }), { wrapper });
 
     await waitFor(() => {
       expect(queryClient.getQueryData(pluginKeys.registries())).toEqual(mockData);

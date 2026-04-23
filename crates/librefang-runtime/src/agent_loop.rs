@@ -745,10 +745,9 @@ async fn execute_single_tool_call(
     }
 
     let effective_exec_policy = ctx.manifest.exec_policy.as_ref();
-    let tool_timeout = ctx
-        .kernel
-        .as_ref()
-        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
+    let tool_timeout = ctx.kernel.as_ref().map_or(TOOL_TIMEOUT_SECS, |k| {
+        k.tool_timeout_secs_for(&tool_call.name)
+    });
     let trace_start = Instant::now();
     let trace_timestamp = chrono::Utc::now();
     let result = match tokio::time::timeout(
@@ -835,8 +834,28 @@ async fn execute_single_tool_call(
     };
     fire_hook_best_effort(ctx.hooks, &hook_ctx);
 
+    // Allow plugins to rewrite the tool result before it enters the conversation context.
+    let result_content = if let Some(hook_reg) = ctx.hooks {
+        let transform_ctx = crate::hooks::HookContext {
+            agent_name: &ctx.manifest.name,
+            agent_id: ctx.caller_id_str,
+            event: librefang_types::agent::HookEvent::TransformToolResult,
+            data: serde_json::json!({
+                "tool_name": &tool_call.name,
+                "args": &tool_call.input,
+                "result": &result.content,
+                "is_error": result.is_error,
+            }),
+        };
+        hook_reg
+            .fire_transform(&transform_ctx)
+            .unwrap_or_else(|| result.content.clone())
+    } else {
+        result.content.clone()
+    };
+
     let content = sanitize_tool_result_content(
-        &result.content,
+        &result_content,
         ctx.context_budget,
         ctx.context_engine,
         ctx.context_window_tokens,
@@ -3761,6 +3780,20 @@ async fn stream_with_retry(
                 )));
             }
             Err(e) => {
+                let err_str = e.to_string();
+                if llm_errors::is_transient(&err_str) && attempt < MAX_RETRIES {
+                    warn!(
+                        attempt,
+                        error = %err_str,
+                        "LLM stream died with transient error, retrying"
+                    );
+                    last_error = Some("Transient stream error".to_string());
+                    tokio::time::sleep(Duration::from_millis(
+                        BASE_RETRY_DELAY_MS * 2u64.pow(attempt),
+                    ))
+                    .await;
+                    continue;
+                }
                 let (is_billing, err) =
                     build_user_facing_llm_error(&e, "LLM stream error classified");
                 record_retry_failure(provider, cooldown, is_billing);

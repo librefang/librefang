@@ -438,6 +438,10 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-session message locks — used instead of `agent_msg_locks` when a caller
+    /// supplies an explicit `session_id_override`. Allows concurrent messages to
+    /// different sessions of the same agent (multi-tab / multi-session UIs).
+    session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
@@ -678,6 +682,31 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Build the roots list for a specific MCP server config.
+    ///
+    /// Starts with the default roots (workspaces directory) and, for stdio
+    /// servers, appends any absolute-path arguments the user configured.
+    /// This ensures that filesystem-aware MCP servers (e.g.
+    /// `@modelcontextprotocol/server-filesystem`) receive the directories
+    /// explicitly passed in their args — such as `/mnt/obsidian` — rather
+    /// than being silently restricted to the agent workspace.
+    fn mcp_roots_for_server(
+        &self,
+        server_config: &librefang_types::config::McpServerConfigEntry,
+    ) -> Vec<String> {
+        use librefang_types::config::McpTransportEntry;
+        let mut roots = self.default_mcp_roots();
+        if let Some(McpTransportEntry::Stdio { args, .. }) = &server_config.transport {
+            for arg in args {
+                let p = std::path::Path::new(arg.as_str());
+                if p.is_absolute() && !roots.contains(arg) {
+                    roots.push(arg.clone());
+                }
+            }
+        }
+        roots
+    }
+
     /// Build the default list of root directories to advertise to MCP servers
     /// via the MCP Roots capability.
     ///
@@ -789,6 +818,14 @@ impl LibreFangKernel {
                 },
             };
 
+            // Merge agent workspace into server-specific roots.
+            let mut server_roots = self.mcp_roots_for_server(server_config);
+            for r in &roots {
+                if !server_roots.contains(r) {
+                    server_roots.push(r.clone());
+                }
+            }
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
@@ -798,7 +835,8 @@ impl LibreFangKernel {
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: roots.clone(),
+                taint_policy: server_config.taint_policy.clone(),
+                roots: server_roots,
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -1027,11 +1065,12 @@ impl LibreFangKernel {
         handle.spawn(async move {
             loop {
                 // Read sweeper knobs live — hot reload takes effect on next tick.
-                let (interval_secs, ttl_secs) = {
+                let (interval_secs, ttl_secs, max_retries) = {
                     let cfg = kernel.config.load();
                     (
                         cfg.task_board.sweep_interval_secs.max(1),
                         cfg.task_board.claim_ttl_secs,
+                        cfg.task_board.max_retries,
                     )
                 };
 
@@ -1051,7 +1090,7 @@ impl LibreFangKernel {
                     continue;
                 }
 
-                match kernel.memory.task_reset_stuck(ttl_secs).await {
+                match kernel.memory.task_reset_stuck(ttl_secs, max_retries).await {
                     Ok(reset) if !reset.is_empty() => {
                         warn!(
                             count = reset.len(),
@@ -1781,6 +1820,10 @@ impl LibreFangKernel {
             .provider_proxy_urls
             .get(&config.default_model.provider)
             .cloned();
+        let default_request_timeout_secs = config
+            .provider_request_timeout_secs
+            .get(&config.default_model.provider)
+            .copied();
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -1791,6 +1834,7 @@ impl LibreFangKernel {
             message_timeout_secs: config.default_model.message_timeout_secs,
             mcp_bridge: Some(mcp_bridge_cfg.clone()),
             proxy_url: default_proxy_url.clone(),
+            request_timeout_secs: default_request_timeout_secs,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1827,6 +1871,7 @@ impl LibreFangKernel {
                     message_timeout_secs: config.default_model.message_timeout_secs,
                     mcp_bridge: Some(mcp_bridge_cfg.clone()),
                     proxy_url: default_proxy_url.clone(),
+                    request_timeout_secs: default_request_timeout_secs,
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1932,6 +1977,10 @@ impl LibreFangKernel {
                             message_timeout_secs: config.default_model.message_timeout_secs,
                             mcp_bridge: Some(mcp_bridge_cfg.clone()),
                             proxy_url: config.provider_proxy_urls.get(provider).cloned(),
+                            request_timeout_secs: config
+                                .provider_request_timeout_secs
+                                .get(provider)
+                                .copied(),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -1983,6 +2032,10 @@ impl LibreFangKernel {
                 message_timeout_secs: config.default_model.message_timeout_secs,
                 mcp_bridge: Some(mcp_bridge_cfg.clone()),
                 proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
+                request_timeout_secs: config
+                    .provider_request_timeout_secs
+                    .get(&fb.provider)
+                    .copied(),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -2627,6 +2680,7 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            session_msg_locks: dashmap::DashMap::new(),
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
@@ -3536,8 +3590,17 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_full(agent_id, message, handle, None, Some(sender), None, None)
-            .await
+        self.send_message_full(
+            agent_id,
+            message,
+            handle,
+            None,
+            Some(sender),
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a message with both sender identity context and a per-call
@@ -3566,6 +3629,7 @@ system_prompt = "You are a helpful assistant."
             Some(sender),
             None,
             thinking_override,
+            None,
         )
         .await
     }
@@ -3591,6 +3655,7 @@ system_prompt = "You are a helpful assistant."
             Some(sender),
             None,
             None,
+            None,
         )
         .await
     }
@@ -3602,8 +3667,17 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(agent_id, message, kernel_handle, None, None, None, None)
-            .await
+        self.send_message_full(
+            agent_id,
+            message,
+            kernel_handle,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a message with a per-call deep-thinking override.
@@ -3627,6 +3701,37 @@ system_prompt = "You are a helpful assistant."
             None,
             None,
             thinking_override,
+            None,
+        )
+        .await
+    }
+
+    /// Send a message with an explicit session ID override, optional sender context,
+    /// and optional deep-thinking override.
+    ///
+    /// Used by the HTTP `/message` endpoint when the caller supplies a `session_id`
+    /// in the request body (multi-tab / multi-session UIs). Resolution order:
+    /// explicit session_id > channel-derived > registry canonical.
+    ///
+    /// Returns 400 if `session_id_override` belongs to a different agent.
+    pub async fn send_message_with_session_override(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full(
+            agent_id,
+            message,
+            kernel_handle,
+            None,
+            sender_context,
+            None,
+            thinking_override,
+            session_id_override,
         )
         .await
     }
@@ -3652,6 +3757,7 @@ system_prompt = "You are a helpful assistant."
             message,
             kernel_handle,
             content_blocks,
+            None,
             None,
             None,
             None,
@@ -3689,6 +3795,7 @@ system_prompt = "You are a helpful assistant."
             None,
             home_channel.as_ref(),
             session_mode_override,
+            None,
             None,
         )
         .await
@@ -4037,6 +4144,7 @@ system_prompt = "You are a helpful assistant."
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
         thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire a shared read lock on the config reload barrier.
         // This is non-blocking under normal operation (many readers proceed in
@@ -4048,15 +4156,22 @@ system_prompt = "You are a helpful assistant."
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
 
-        // Acquire per-agent lock to serialize concurrent messages for the same agent.
-        // This prevents session corruption when multiple messages arrive in quick
-        // succession (e.g. rapid voice messages via Telegram). Messages for different
-        // agents are not blocked — each agent has its own independent lock.
-        let lock = self
-            .agent_msg_locks
-            .entry(agent_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+        // When the caller supplies an explicit session_id, scope the lock to that
+        // session so concurrent messages to *different* sessions of the same agent
+        // are not serialized against each other (multi-tab / multi-session UIs).
+        // Without an override, fall back to the per-agent lock to preserve the
+        // existing serialization guarantee for single-session agents.
+        let lock = if let Some(sid) = session_id_override {
+            self.session_msg_locks
+                .entry(sid)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        } else {
+            self.agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
         let _guard = lock.lock().await;
 
         // Enforce quota on the effective target agent (after routing)
@@ -4094,6 +4209,7 @@ system_prompt = "You are a helpful assistant."
                     sender_context,
                     session_mode_override,
                     thinking_override,
+                    session_id_override,
                 )
                 .await
             }
@@ -4446,8 +4562,33 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None, None)
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None, None, None)
             .await
+    }
+
+    /// Streaming variant with an explicit session ID override.
+    ///
+    /// Used by the HTTP `/message/stream` endpoint when the caller supplies a
+    /// `session_id` in the request body (multi-tab / multi-session UIs).
+    pub async fn send_message_streaming_with_routing_and_session_override(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            None,
+            None,
+            session_id_override,
+        )
+        .await
     }
 
     /// Sender-aware streaming entry point for channel bridges.
@@ -4461,8 +4602,15 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(agent_id, message, kernel_handle, Some(sender), None)
-            .await
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            Some(sender),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Streaming entry point with per-call deep-thinking override.
@@ -4486,6 +4634,36 @@ system_prompt = "You are a helpful assistant."
             kernel_handle,
             Some(sender),
             thinking_override,
+            None,
+        )
+        .await
+    }
+
+    /// Streaming entry point that combines a sender context with a per-request
+    /// `session_id_override` (multi-tab WebSocket UIs, issue #2959). The
+    /// override wins over channel-derived session resolution. When `None`,
+    /// behavior is identical to
+    /// [`Self::send_message_streaming_with_sender_context_routing_and_thinking`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_streaming_with_sender_context_routing_thinking_and_session(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            Some(sender),
+            thinking_override,
+            session_id_override,
         )
         .await
     }
@@ -4566,12 +4744,18 @@ system_prompt = "You are a helpful assistant."
             allowed_tools,
             interrupt: Some(interrupt),
         };
+        // INVARIANT: forks must use the canonical session so the parent turn's
+        // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
+        // here — it would win over the fork branch in
+        // `send_message_streaming_with_sender_and_opts`'s session resolver and
+        // break cache alignment (see issue #2959 for the override semantics).
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
             fork_prompt,
             None, // auto-wire self
             None, // no sender context — fork uses the canonical session
             None, // no thinking override
+            None, // forks MUST stay on canonical — see invariant above
             loop_opts,
         )
     }
@@ -4583,6 +4767,28 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_with_sender_and_session(
+            agent_id,
+            message,
+            kernel_handle,
+            sender_context,
+            thinking_override,
+            None,
+        )
+    }
+
+    fn send_message_streaming_with_sender_and_session(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -4603,6 +4809,7 @@ system_prompt = "You are a helpful assistant."
             kernel_handle,
             sender_context,
             thinking_override,
+            session_id_override,
             loop_opts,
         )
     }
@@ -4621,6 +4828,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
         loop_opts: librefang_runtime::agent_loop::LoopOptions,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
@@ -4707,35 +4915,53 @@ system_prompt = "You are a helpful assistant."
         }
 
         // LLM agent: true streaming via agent loop
-        // Derive session ID: channel-specific sessions are deterministic per
-        // (channel, chat_id). Including chat_id prevents context bleed between
-        // a group and a DM that share the same (agent, channel). For non-channel
-        // invocations, respect the agent's session_mode.
-        //
-        // `use_canonical_session` short-circuits the channel branch: the sender
-        // wants routing-cache scoping (per-channel assistant auto-router) but
-        // storage to land in `entry.session_id`. Used by the dashboard WS so
-        // webui chat shares history with agent_send / session management.
-        let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                let scope = match &ctx.chat_id {
-                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
-                    _ => ctx.channel.clone(),
-                };
-                SessionId::for_channel(agent_id, &scope)
+        // Session resolution order (highest priority first):
+        // 1. Explicit override from the HTTP caller (multi-tab / multi-session UIs).
+        //    Safety check: existing session must belong to this agent.
+        // 2. Channel-derived deterministic ID: `SessionId::for_channel(agent, scope)`.
+        // 3. Fork: always canonical to preserve prompt-cache alignment.
+        // 4. Session-mode fallback: Persistent = entry.session_id, New = fresh UUID.
+        let effective_session_id = if let Some(sid) = session_id_override {
+            if let Some(existing) = self
+                .memory
+                .get_session(sid)
+                .map_err(KernelError::LibreFang)?
+            {
+                if existing.agent_id != agent_id {
+                    return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                        format!("session {} belongs to a different agent", sid),
+                    )));
+                }
             }
-            // Fork calls always target the agent's canonical session —
-            // the whole point of fork mode is to share the parent turn's
-            // context (and therefore its prompt-cache prefix). An agent
-            // with `session_mode = "new"` would otherwise land on
-            // `SessionId::new()` here, producing a fresh empty session
-            // and breaking cache alignment. Force Persistent for forks
-            // regardless of manifest.
-            _ if loop_opts.is_fork => entry.session_id,
-            _ => match entry.manifest.session_mode {
-                librefang_types::agent::SessionMode::Persistent => entry.session_id,
-                librefang_types::agent::SessionMode::New => SessionId::new(),
-            },
+            sid
+        } else {
+            match sender_context {
+                Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
+                    let scope = match &ctx.chat_id {
+                        Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                        _ => ctx.channel.clone(),
+                    };
+                    SessionId::for_channel(agent_id, &scope)
+                }
+                // Fork calls always target the agent's canonical session —
+                // the whole point of fork mode is to share the parent turn's
+                // context (and therefore its prompt-cache prefix). An agent
+                // with `session_mode = "new"` would otherwise land on
+                // `SessionId::new()` here, producing a fresh empty session
+                // and breaking cache alignment. Force Persistent for forks
+                // regardless of manifest.
+                //
+                // NOTE: an explicit `session_id_override` (above) wins over
+                // this branch — if you ever plumb an override through a fork
+                // caller, prompt-cache alignment WILL break. The current
+                // `run_forked_agent_streaming` deliberately passes `None` to
+                // preserve this invariant.
+                _ if loop_opts.is_fork => entry.session_id,
+                _ => match entry.manifest.session_mode {
+                    librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                    librefang_types::agent::SessionMode::New => SessionId::new(),
+                },
+            }
         };
 
         let mut session = self
@@ -5650,6 +5876,7 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -5657,12 +5884,13 @@ system_prompt = "You are a helpful assistant."
         let effective_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
-        self.send_message_streaming_with_sender(
+        self.send_message_streaming_with_sender_and_session(
             effective_id,
             message,
             kernel_handle,
             sender_context,
             thinking_override,
+            session_id_override,
         )
     }
 
@@ -5988,6 +6216,7 @@ system_prompt = "You are a helpful assistant."
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
         thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -5995,28 +6224,45 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
-        // Derive session ID: channel-specific sessions are deterministic per
-        // (channel, chat_id). Including chat_id prevents context bleed between
-        // a group and a DM that share the same (agent, channel). For non-channel
-        // invocations (background ticks, triggers, agent_send), resolve the
-        // effective session mode: per-trigger override > agent manifest default.
+        // Derive session ID. Resolution order (highest priority first):
         //
-        // `use_canonical_session` short-circuits the channel branch so the
-        // dashboard WS (channel="webui") persists to `entry.session_id` while
-        // still scoping routing caches per-surface.
-        let effective_session_id = match sender_context {
-            Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                let scope = match &ctx.chat_id {
-                    Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
-                    _ => ctx.channel.clone(),
-                };
-                SessionId::for_channel(agent_id, &scope)
+        // 1. Explicit override from the HTTP caller (multi-tab / multi-session UIs).
+        //    Safety check: if the session exists and belongs to a different agent,
+        //    reject with an error so sessions can never bleed across agents.
+        // 2. Channel-derived deterministic ID: `SessionId::for_channel(agent, scope)`
+        //    where scope = "<channel>:<chat_id>" (or just "<channel>"). Prevents
+        //    context bleed between group and DM on the same (agent, channel).
+        // 3. Session-mode fallback: per-trigger override > agent manifest default.
+        //    `use_canonical_session` forces Persistent so the dashboard WS always
+        //    persists to `entry.session_id`.
+        let effective_session_id = if let Some(sid) = session_id_override {
+            if let Some(existing) = self
+                .memory
+                .get_session(sid)
+                .map_err(KernelError::LibreFang)?
+            {
+                if existing.agent_id != agent_id {
+                    return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                        format!("session {} belongs to a different agent", sid),
+                    )));
+                }
             }
-            _ => {
-                let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
-                match mode {
-                    librefang_types::agent::SessionMode::Persistent => entry.session_id,
-                    librefang_types::agent::SessionMode::New => SessionId::new(),
+            sid
+        } else {
+            match sender_context {
+                Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
+                    let scope = match &ctx.chat_id {
+                        Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                        _ => ctx.channel.clone(),
+                    };
+                    SessionId::for_channel(agent_id, &scope)
+                }
+                _ => {
+                    let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
+                    match mode {
+                        librefang_types::agent::SessionMode::Persistent => entry.session_id,
+                        librefang_types::agent::SessionMode::New => SessionId::new(),
+                    }
                 }
             }
         };
@@ -9638,10 +9884,28 @@ system_prompt = "You are a helpful assistant."
                                 librefang_types::model_catalog::AuthStatus::NotRequired,
                             );
                             if !result.discovered_models.is_empty() {
-                                catalog.merge_discovered_models(
-                                    provider_id,
-                                    &result.discovered_models,
-                                );
+                                // Use enriched metadata when available (Ollama populates
+                                // discovered_model_info; other providers leave it empty).
+                                let info: Vec<_> = if result.discovered_model_info.is_empty() {
+                                    result
+                                        .discovered_models
+                                        .iter()
+                                        .map(|name| {
+                                            librefang_runtime::provider_health::DiscoveredModelInfo {
+                                                name: name.clone(),
+                                                parameter_size: None,
+                                                quantization_level: None,
+                                                family: None,
+                                                families: None,
+                                                size: None,
+                                                capabilities: vec![],
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    result.discovered_model_info.clone()
+                                };
+                                catalog.merge_discovered_models(provider_id, &info);
                             }
                         }
                     } else {
@@ -9773,6 +10037,42 @@ system_prompt = "You are a helpful assistant."
                     session_cfg.retention_days,
                     session_cfg.max_sessions_per_agent,
                 );
+            }
+        }
+
+        // Startup session prune + VACUUM: run once at boot before background
+        // agents start. Mirrors Hermes `maybe_auto_prune_and_vacuum()` — only
+        // VACUUM when rows were actually deleted so the rewrite is worthwhile.
+        {
+            let session_cfg = cfg.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup {
+                let mut pruned_total: u64 = 0;
+                if session_cfg.retention_days > 0 {
+                    match self
+                        .memory
+                        .cleanup_expired_sessions(session_cfg.retention_days)
+                    {
+                        Ok(n) => pruned_total += n,
+                        Err(e) => warn!("Startup session prune (expired) failed: {e}"),
+                    }
+                }
+                if session_cfg.max_sessions_per_agent > 0 {
+                    match self
+                        .memory
+                        .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                    {
+                        Ok(n) => pruned_total += n,
+                        Err(e) => warn!("Startup session prune (excess) failed: {e}"),
+                    }
+                }
+                if let Err(e) = self.memory.vacuum_if_shrank(pruned_total as usize) {
+                    warn!("Startup VACUUM after session prune failed: {e}");
+                }
+                if pruned_total > 0 {
+                    info!("Startup session prune: removed {pruned_total} session(s)");
+                }
             }
         }
 
@@ -9963,9 +10263,25 @@ system_prompt = "You are a helpful assistant."
                             librefang_types::scheduler::CronAction::AgentTurn {
                                 message,
                                 timeout_secs,
+                                pre_check_script,
                                 ..
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+
+                                // Wake-gate: run pre_check_script and check for
+                                // {"wakeAgent": false} in the last non-empty output line.
+                                // Only fires when the script exits successfully.
+                                if let Some(script_path) = pre_check_script {
+                                    if !cron_script_wake_gate(&job_name, script_path).await {
+                                        tracing::info!(
+                                            job = %job_name,
+                                            "cron: script gate wakeAgent=false, skipping agent"
+                                        );
+                                        kernel.cron_scheduler.record_success(job_id);
+                                        continue;
+                                    }
+                                }
+
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
@@ -10013,6 +10329,48 @@ system_prompt = "You are a helpful assistant."
                                     (Some(cron_sender), None)
                                 };
                                 let sender_ctx = sender_ctx_owned.as_ref();
+
+                                // Prune the persistent cron session before firing
+                                // if the user has configured a size cap.
+                                if !wants_new_session {
+                                    let cfg_snap = kernel.config.load();
+                                    let max_tokens = cfg_snap.cron_session_max_tokens;
+                                    let max_messages = cfg_snap.cron_session_max_messages;
+                                    drop(cfg_snap);
+                                    if max_tokens.is_some() || max_messages.is_some() {
+                                        let cron_sid = SessionId::for_channel(agent_id, "cron");
+                                        if let Ok(Some(mut session)) =
+                                            kernel.memory.get_session(cron_sid)
+                                        {
+                                            // Prune by message count first.
+                                            if let Some(max_msgs) = max_messages {
+                                                if session.messages.len() > max_msgs {
+                                                    let excess = session.messages.len() - max_msgs;
+                                                    session.messages.drain(0..excess);
+                                                }
+                                            }
+                                            // Prune by token count.
+                                            if let Some(max_tok) = max_tokens {
+                                                use librefang_runtime::compactor::estimate_token_count;
+                                                loop {
+                                                    let est = estimate_token_count(
+                                                        &session.messages,
+                                                        None,
+                                                        None,
+                                                    );
+                                                    if est <= max_tok as usize
+                                                        || session.messages.is_empty()
+                                                    {
+                                                        break;
+                                                    }
+                                                    session.messages.remove(0);
+                                                }
+                                            }
+                                            let _ = kernel.memory.save_session(&session);
+                                        }
+                                    }
+                                }
+
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_full(
@@ -10022,6 +10380,7 @@ system_prompt = "You are a helpful assistant."
                                         None,
                                         sender_ctx,
                                         mode_override,
+                                        None,
                                         None,
                                     ),
                                 )
@@ -10576,6 +10935,10 @@ system_prompt = "You are a helpful assistant."
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
                 mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
                 proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
+                request_timeout_secs: cfg
+                    .provider_request_timeout_secs
+                    .get(agent_provider)
+                    .copied(),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -10661,6 +11024,10 @@ system_prompt = "You are a helpful assistant."
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
                     proxy_url: cfg.provider_proxy_urls.get(&fb_provider).cloned(),
+                    request_timeout_secs: cfg
+                        .provider_request_timeout_secs
+                        .get(&fb_provider)
+                        .copied(),
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
@@ -10736,7 +11103,8 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: self.default_mcp_roots(),
+                taint_policy: server_config.taint_policy.clone(),
+                roots: self.mcp_roots_for_server(server_config),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -10884,7 +11252,8 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.default_mcp_roots(),
+            taint_policy: server_config.taint_policy.clone(),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -11007,7 +11376,8 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: self.default_mcp_roots(),
+                taint_policy: server_config.taint_policy.clone(),
+                roots: self.mcp_roots_for_server(server_config),
             };
 
             self.mcp_health.register(&server_config.name);
@@ -11152,7 +11522,8 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.default_mcp_roots(),
+            taint_policy: server_config.taint_policy.clone(),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -12695,6 +13066,78 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
     format!("{truncated} …[truncated]")
 }
 
+/// Run a cron job's pre-check script and parse the wake gate from its output.
+///
+/// Returns `true` if the agent should be woken (normal path), `false` to skip.
+///
+/// Rules (mirrors Hermes `_parse_wake_gate`):
+/// - Script must exit 0; on any error we default to waking the agent.
+/// - Find the last non-empty stdout line and try to parse it as JSON.
+/// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
+/// - Everything else (non-JSON, missing key, null, 0, "") → return true.
+async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+    use tokio::process::Command;
+
+    // Hard cap: pre-check scripts must complete within 30 s.
+    // A hung script would otherwise block the cron dispatcher indefinitely.
+    let run = async { Command::new(script_path).output().await };
+
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+        Err(_elapsed) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                "cron: pre-check script timed out after 30s, waking agent"
+            );
+            return true;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                error = %e,
+                "cron: pre-check script failed to launch, waking agent"
+            );
+            return true;
+        }
+        Ok(Ok(o)) => o,
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            job = %job_name,
+            script = %script_path,
+            code = ?output.status.code(),
+            "cron: pre-check script exited non-zero, waking agent"
+        );
+        return true;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_wake_gate(&stdout)
+}
+
+/// Parse the wake gate from script stdout.
+///
+/// Finds the last non-empty line, tries JSON-decode, checks `wakeAgent`.
+/// Returns `true` (wake) unless `wakeAgent` is strictly `false`.
+fn parse_wake_gate(script_output: &str) -> bool {
+    let last_line = script_output.lines().rfind(|l| !l.trim().is_empty());
+
+    let last_line = match last_line {
+        Some(l) => l.trim(),
+        None => return true,
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(last_line) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+
+    // Only `{"wakeAgent": false}` (strict bool false) skips the agent.
+    value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
+}
+
 /// Deliver a cron job's agent response to the configured delivery target.
 async fn cron_deliver_response(
     kernel: &LibreFangKernel,
@@ -13361,6 +13804,20 @@ impl KernelHandle for LibreFangKernel {
             .task_retry(task_id)
             .await
             .map_err(|e| format!("Task retry failed: {e}"))
+    }
+
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
+        self.memory
+            .task_get(task_id)
+            .await
+            .map_err(|e| format!("Task get failed: {e}"))
+    }
+
+    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String> {
+        self.memory
+            .task_update_status(task_id, new_status)
+            .await
+            .map_err(|e| format!("Task update status failed: {e}"))
     }
 
     async fn publish_event(
@@ -14530,6 +14987,27 @@ impl KernelHandle for LibreFangKernel {
 
     fn tool_timeout_secs(&self) -> u64 {
         let cfg = self.config.load();
+        cfg.tool_timeout_secs
+    }
+
+    fn tool_timeout_secs_for(&self, tool_name: &str) -> u64 {
+        let cfg = self.config.load();
+        // 1. Exact match
+        if let Some(&t) = cfg.tool_timeouts.get(tool_name) {
+            return t;
+        }
+        // 2. Best glob match — longest pattern wins (most specific first).
+        // HashMap iteration is unordered; picking the longest matching pattern
+        // gives deterministic resolution when multiple globs match.
+        let best = cfg
+            .tool_timeouts
+            .iter()
+            .filter(|(pattern, _)| librefang_types::capability::glob_matches(pattern, tool_name))
+            .max_by_key(|(pattern, _)| pattern.len());
+        if let Some((_, &timeout)) = best {
+            return timeout;
+        }
+        // 3. Global fallback
         cfg.tool_timeout_secs
     }
 

@@ -380,7 +380,26 @@ fn attach_probe_result(
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
         if let Ok(mut cat) = catalog.write() {
-            cat.merge_discovered_models(provider_id, &probe.discovered_models);
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+                probe
+                    .discovered_models
+                    .iter()
+                    .map(
+                        |name| librefang_runtime::provider_health::DiscoveredModelInfo {
+                            name: name.clone(),
+                            parameter_size: None,
+                            quantization_level: None,
+                            family: None,
+                            families: None,
+                            size: None,
+                            capabilities: vec![],
+                        },
+                    )
+                    .collect()
+            } else {
+                probe.discovered_model_info.clone()
+            };
+            cat.merge_discovered_models(provider_id, &info);
         }
     }
     if !probe.discovered_model_info.is_empty() {
@@ -1398,7 +1417,26 @@ pub async fn set_provider_url(
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
         if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+                probe
+                    .discovered_models
+                    .iter()
+                    .map(
+                        |n| librefang_runtime::provider_health::DiscoveredModelInfo {
+                            name: n.clone(),
+                            parameter_size: None,
+                            quantization_level: None,
+                            family: None,
+                            families: None,
+                            size: None,
+                            capabilities: vec![],
+                        },
+                    )
+                    .collect()
+            } else {
+                probe.discovered_model_info.clone()
+            };
+            catalog.merge_discovered_models(&name, &info);
         }
     }
 

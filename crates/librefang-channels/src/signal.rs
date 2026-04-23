@@ -5,6 +5,7 @@
 
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::Utc;
 use futures::Stream;
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // Poll interval is now configurable via SignalConfig.
 
@@ -68,13 +69,31 @@ impl SignalAdapter {
         recipient: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_message_with_attachments(recipient, text, &[])
+            .await
+    }
+
+    /// Send a message with optional base64-encoded attachments via signal-cli REST API.
+    ///
+    /// Each attachment entry is `{"data": "<base64>", "filename": "<name>"}`.
+    /// When `attachments` is empty the request degrades to a plain text message.
+    async fn api_send_message_with_attachments(
+        &self,
+        recipient: &str,
+        text: &str,
+        attachments: &[serde_json::Value],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/v2/send", self.api_url);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "message": text,
             "number": self.phone_number,
             "recipients": [recipient],
         });
+
+        if !attachments.is_empty() {
+            body["base64_attachments"] = serde_json::Value::Array(attachments.to_vec());
+        }
 
         let resp = self.client.post(&url).json(&body).send().await?;
 
@@ -85,6 +104,28 @@ impl SignalAdapter {
         }
 
         Ok(())
+    }
+
+    /// Download a URL and return the raw bytes.
+    async fn fetch_bytes(
+        &self,
+        url: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let resp = self.client.get(url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(format!("Failed to download attachment ({status}): {url}").into());
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Build a signal-cli base64_attachments entry from raw bytes and a filename.
+    fn make_attachment(data: &[u8], filename: &str) -> serde_json::Value {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        serde_json::json!({
+            "data": encoded,
+            "filename": filename,
+        })
     }
 
     /// Receive messages from signal-cli REST API.
@@ -249,13 +290,284 @@ impl ChannelAdapter for SignalAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let recipient = &user.platform_id;
         match content {
             ChannelContent::Text(text) => {
-                self.api_send_message(&user.platform_id, &text).await?;
+                self.api_send_message(recipient, &text).await?;
             }
-            _ => {
-                self.api_send_message(&user.platform_id, "(Unsupported content type)")
+
+            // --- Image ---
+            ChannelContent::Image { url, caption, .. } => {
+                let caption_text = caption.unwrap_or_default();
+                match self.fetch_bytes(&url).await {
+                    Ok(bytes) => {
+                        // Derive filename from the URL path; fall back to "image.jpg".
+                        let filename = url
+                            .rsplit('/')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("image.jpg");
+                        let attachment = Self::make_attachment(&bytes, filename);
+                        self.api_send_message_with_attachments(
+                            recipient,
+                            &caption_text,
+                            &[attachment],
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!("Signal: failed to download image attachment from {url}: {e}");
+                        // Fall back to sending the URL as text so the user gets something.
+                        let fallback = if caption_text.is_empty() {
+                            url
+                        } else {
+                            format!("{caption_text}\n{url}")
+                        };
+                        self.api_send_message(recipient, &fallback).await?;
+                    }
+                }
+            }
+
+            // --- File (URL-based) ---
+            ChannelContent::File { url, filename } => match self.fetch_bytes(&url).await {
+                Ok(bytes) => {
+                    let attachment = Self::make_attachment(&bytes, &filename);
+                    self.api_send_message_with_attachments(recipient, "", &[attachment])
+                        .await?;
+                }
+                Err(e) => {
+                    warn!("Signal: failed to download file attachment from {url}: {e}");
+                    self.api_send_message(recipient, &url).await?;
+                }
+            },
+
+            // --- FileData (raw bytes already in memory) ---
+            ChannelContent::FileData {
+                data,
+                filename,
+                mime_type: _,
+            } => {
+                let attachment = Self::make_attachment(&data, &filename);
+                self.api_send_message_with_attachments(recipient, "", &[attachment])
                     .await?;
+            }
+
+            // --- Voice memo ---
+            ChannelContent::Voice { url, caption, .. } => {
+                let caption_text = caption.unwrap_or_default();
+                match self.fetch_bytes(&url).await {
+                    Ok(bytes) => {
+                        let filename = url
+                            .rsplit('/')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("voice.ogg");
+                        let attachment = Self::make_attachment(&bytes, filename);
+                        self.api_send_message_with_attachments(
+                            recipient,
+                            &caption_text,
+                            &[attachment],
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!("Signal: failed to download voice attachment from {url}: {e}");
+                        self.api_send_message(recipient, &url).await?;
+                    }
+                }
+            }
+
+            // --- Video ---
+            ChannelContent::Video {
+                url,
+                caption,
+                filename,
+                ..
+            } => {
+                let caption_text = caption.unwrap_or_default();
+                let fname = filename.unwrap_or_else(|| {
+                    url.rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("video.mp4")
+                        .to_string()
+                });
+                match self.fetch_bytes(&url).await {
+                    Ok(bytes) => {
+                        let attachment = Self::make_attachment(&bytes, &fname);
+                        self.api_send_message_with_attachments(
+                            recipient,
+                            &caption_text,
+                            &[attachment],
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!("Signal: failed to download video attachment from {url}: {e}");
+                        let fallback = if caption_text.is_empty() {
+                            url
+                        } else {
+                            format!("{caption_text}\n{url}")
+                        };
+                        self.api_send_message(recipient, &fallback).await?;
+                    }
+                }
+            }
+
+            // --- Audio (music/podcast) ---
+            ChannelContent::Audio { url, caption, .. } => {
+                let caption_text = caption.unwrap_or_default();
+                match self.fetch_bytes(&url).await {
+                    Ok(bytes) => {
+                        let filename = url
+                            .rsplit('/')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("audio.mp3");
+                        let attachment = Self::make_attachment(&bytes, filename);
+                        self.api_send_message_with_attachments(
+                            recipient,
+                            &caption_text,
+                            &[attachment],
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!("Signal: failed to download audio attachment from {url}: {e}");
+                        self.api_send_message(recipient, &url).await?;
+                    }
+                }
+            }
+
+            // --- Animation / GIF ---
+            ChannelContent::Animation { url, caption, .. } => {
+                let caption_text = caption.unwrap_or_default();
+                match self.fetch_bytes(&url).await {
+                    Ok(bytes) => {
+                        let filename = url
+                            .rsplit('/')
+                            .next()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("animation.gif");
+                        let attachment = Self::make_attachment(&bytes, filename);
+                        self.api_send_message_with_attachments(
+                            recipient,
+                            &caption_text,
+                            &[attachment],
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        warn!("Signal: failed to download animation from {url}: {e}");
+                        self.api_send_message(recipient, &url).await?;
+                    }
+                }
+            }
+
+            // --- Unsupported variants: log and skip ---
+            ChannelContent::Sticker { file_id } => {
+                warn!(
+                    "Signal: Sticker (file_id={file_id}) not supported by signal-cli REST API — skipping"
+                );
+            }
+            ChannelContent::MediaGroup { items } => {
+                warn!(
+                    "Signal: MediaGroup ({} items) not natively supported — sending items individually",
+                    items.len()
+                );
+                for item in items {
+                    use crate::types::MediaGroupItem;
+                    match item {
+                        MediaGroupItem::Photo { url, caption } => {
+                            self.send(
+                                user,
+                                ChannelContent::Image {
+                                    url,
+                                    caption,
+                                    mime_type: None,
+                                },
+                            )
+                            .await?;
+                        }
+                        MediaGroupItem::Video {
+                            url,
+                            caption,
+                            duration_seconds,
+                        } => {
+                            self.send(
+                                user,
+                                ChannelContent::Video {
+                                    url,
+                                    caption,
+                                    duration_seconds,
+                                    filename: None,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+            ChannelContent::Poll {
+                question, options, ..
+            } => {
+                warn!("Signal: Poll not supported by signal-cli REST API — skipping");
+                // Send question + options as plain text so the user sees something.
+                let text = format!(
+                    "{question}\n{}",
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, o)| format!("{}. {o}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                self.api_send_message(recipient, &text).await?;
+            }
+            ChannelContent::PollAnswer { .. } => {
+                warn!("Signal: PollAnswer is inbound-only — skipping outbound send");
+            }
+            ChannelContent::Location { lat, lon } => {
+                // signal-cli REST API does not expose a location message type;
+                // send coordinates as text.
+                self.api_send_message(recipient, &format!("📍 {lat}, {lon}"))
+                    .await?;
+            }
+            ChannelContent::Command { name, args } => {
+                let text = if args.is_empty() {
+                    format!("/{name}")
+                } else {
+                    format!("/{name} {}", args.join(" "))
+                };
+                self.api_send_message(recipient, &text).await?;
+            }
+            ChannelContent::Interactive { text, buttons } => {
+                // Render as plain text with button labels listed as hints.
+                let mut out = text;
+                for row in &buttons {
+                    out.push('\n');
+                    for btn in row {
+                        out.push_str(&format!("  [{}]", btn.label));
+                    }
+                }
+                self.api_send_message(recipient, &out).await?;
+            }
+            ChannelContent::ButtonCallback { .. } => {
+                warn!("Signal: ButtonCallback is inbound-only — skipping outbound send");
+            }
+            ChannelContent::DeleteMessage { .. } => {
+                warn!("Signal: DeleteMessage not supported by signal-cli REST API — skipping");
+            }
+            ChannelContent::EditInteractive { text, buttons, .. } => {
+                // No edit API in signal-cli REST; re-send as a new message.
+                let mut out = text;
+                for row in &buttons {
+                    out.push('\n');
+                    for btn in row {
+                        out.push_str(&format!("  [{}]", btn.label));
+                    }
+                }
+                self.api_send_message(recipient, &out).await?;
             }
         }
         Ok(())

@@ -6,6 +6,7 @@
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
 use async_trait::async_trait;
 use futures::Stream;
+use librefang_types::config::{DmPolicy, GroupPolicy};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -39,6 +40,15 @@ pub struct WhatsAppAdapter {
     gateway_url: Option<String>,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// DM message policy: how to handle direct messages.
+    dm_policy: DmPolicy,
+    /// Group message policy: how to handle group/community messages.
+    group_policy: GroupPolicy,
+    /// Bot's own phone number (used for mention detection in group chats).
+    /// Should match the `phone_number_id` display number, e.g. "+15551234567".
+    bot_phone: Option<String>,
+    /// Bot display name (used as fallback mention keyword in group chats).
+    bot_name: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -63,6 +73,10 @@ impl WhatsAppAdapter {
             allowed_users,
             gateway_url: None,
             account_id: None,
+            dm_policy: DmPolicy::default(),
+            group_policy: GroupPolicy::default(),
+            bot_phone: None,
+            bot_name: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
@@ -80,6 +94,247 @@ impl WhatsAppAdapter {
     pub fn with_gateway(mut self, gateway_url: Option<String>) -> Self {
         self.gateway_url = gateway_url.filter(|u| !u.is_empty());
         self
+    }
+
+    /// Set the DM policy for this adapter. Returns self for builder chaining.
+    pub fn with_dm_policy(mut self, policy: DmPolicy) -> Self {
+        self.dm_policy = policy;
+        self
+    }
+
+    /// Set the group message policy for this adapter. Returns self for builder chaining.
+    pub fn with_group_policy(mut self, policy: GroupPolicy) -> Self {
+        self.group_policy = policy;
+        self
+    }
+
+    /// Set the bot's own phone number for mention detection in group chats.
+    pub fn with_bot_phone(mut self, phone: Option<String>) -> Self {
+        self.bot_phone = phone;
+        self
+    }
+
+    /// Set the bot's display name for mention detection in group chats.
+    pub fn with_bot_name(mut self, name: Option<String>) -> Self {
+        self.bot_name = name;
+        self
+    }
+
+    /// Determine whether an incoming message should be handled based on the configured policies.
+    ///
+    /// - `is_group`: whether the message came from a group/community chat.
+    /// - `text`: the raw message text (used for mention detection under `MentionOnly`).
+    /// - `sender_phone`: the sender's phone number (used for `DmPolicy::AllowedOnly`).
+    ///
+    /// Returns `true` if the adapter should process and respond to the message.
+    pub fn should_handle_message(&self, is_group: bool, text: &str, sender_phone: &str) -> bool {
+        if is_group {
+            match self.group_policy {
+                GroupPolicy::All => true,
+                GroupPolicy::MentionOnly => self.is_bot_mentioned(text),
+                GroupPolicy::CommandsOnly => text.trim_start().starts_with('/'),
+                GroupPolicy::Ignore => false,
+            }
+        } else {
+            match self.dm_policy {
+                DmPolicy::Respond => true,
+                DmPolicy::AllowedOnly => self.is_allowed(sender_phone),
+                DmPolicy::Ignore => false,
+            }
+        }
+    }
+
+    /// Check whether the bot is @mentioned in the given message text.
+    ///
+    /// WhatsApp does not have a native @mention protocol at the Cloud API level,
+    /// so we look for the bot's phone number or display name anywhere in the text.
+    fn is_bot_mentioned(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        if let Some(ref phone) = self.bot_phone {
+            // Match bare number or with leading '@'
+            if lower.contains(phone.as_str())
+                || lower.contains(&format!("@{}", phone.trim_start_matches('+')))
+            {
+                return true;
+            }
+        }
+        if let Some(ref name) = self.bot_name {
+            if lower.contains(&name.to_lowercase()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Upload raw audio bytes to the WhatsApp Media API and return the media ID.
+    ///
+    /// The caller is responsible for providing the correct MIME type
+    /// (e.g. `"audio/ogg; codecs=opus"` for voice messages).
+    async fn api_upload_media(
+        &self,
+        audio: &[u8],
+        mime_type: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use reqwest::multipart;
+
+        let url = format!(
+            "https://graph.facebook.com/v21.0/{}/media",
+            self.phone_number_id
+        );
+
+        // Build multipart form: file field + messaging_product field
+        let file_part = multipart::Part::bytes(audio.to_vec())
+            .mime_str(mime_type)?
+            .file_name("voice.ogg");
+
+        let form = multipart::Form::new()
+            .text("messaging_product", "whatsapp")
+            .part("file", file_part);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&*self.access_token)
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!("WhatsApp media upload error {status}: {body}");
+            return Err(format!("WhatsApp media upload error {status}: {body}").into());
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        let media_id = json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("WhatsApp media upload: missing 'id' in response")?
+            .to_string();
+
+        Ok(media_id)
+    }
+
+    /// Send a voice message via the WhatsApp Cloud API.
+    ///
+    /// Uploads the raw audio bytes as a media object, then sends an `audio` message
+    /// referencing the returned media ID.  WhatsApp renders this as an inline voice note.
+    ///
+    /// # Arguments
+    /// * `to`        – recipient phone number (E.164 format, e.g. `"+15551234567"`).
+    /// * `audio`     – raw OGG/Opus bytes (or any audio format accepted by the API).
+    /// * `mime_type` – MIME type of the audio, e.g. `"audio/ogg; codecs=opus"`.
+    pub async fn send_voice(
+        &self,
+        to: &str,
+        audio: &[u8],
+        mime_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let media_id = self.api_upload_media(audio, mime_type).await?;
+
+        let url = format!(
+            "https://graph.facebook.com/v21.0/{}/messages",
+            self.phone_number_id
+        );
+        let body = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "audio",
+            "audio": { "id": media_id }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&*self.access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!("WhatsApp send_voice error {status}: {body}");
+            return Err(format!("WhatsApp send_voice error {status}: {body}").into());
+        }
+
+        Ok(())
+    }
+
+    /// Send a voice message via the WhatsApp Web gateway (Web/QR mode).
+    ///
+    /// The gateway is expected to accept `POST /message/send-voice` with a JSON body
+    /// containing `{ "to": "...", "audio": "<base64>", "mime_type": "..." }`.
+    #[allow(dead_code)]
+    async fn gateway_send_voice(
+        &self,
+        gateway_url: &str,
+        to: &str,
+        audio: &[u8],
+        mime_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}/message/send-voice", gateway_url.trim_end_matches('/'));
+
+        // base64-encode without pulling in a new crate — use standard library approach
+        let mut encoded = String::new();
+        {
+            use std::fmt::Write as FmtWrite;
+            const TABLE: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut buf = [0u8; 3];
+            let mut i = 0;
+            while i < audio.len() {
+                let remaining = audio.len() - i;
+                let chunk_len = remaining.min(3);
+                buf[..chunk_len].copy_from_slice(&audio[i..i + chunk_len]);
+                if chunk_len < 3 {
+                    buf[chunk_len..].fill(0);
+                }
+                let b0 = (buf[0] >> 2) as usize;
+                let b1 = (((buf[0] & 0x03) << 4) | (buf[1] >> 4)) as usize;
+                let b2 = (((buf[1] & 0x0f) << 2) | (buf[2] >> 6)) as usize;
+                let b3 = (buf[2] & 0x3f) as usize;
+                let _ = write!(encoded, "{}", TABLE[b0] as char);
+                let _ = write!(encoded, "{}", TABLE[b1] as char);
+                let _ = write!(
+                    encoded,
+                    "{}",
+                    if chunk_len >= 2 {
+                        TABLE[b2] as char
+                    } else {
+                        '='
+                    }
+                );
+                let _ = write!(
+                    encoded,
+                    "{}",
+                    if chunk_len >= 3 {
+                        TABLE[b3] as char
+                    } else {
+                        '='
+                    }
+                );
+                i += chunk_len;
+            }
+        }
+
+        let body = serde_json::json!({
+            "to": to,
+            "audio": encoded,
+            "mime_type": mime_type,
+        });
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!("WhatsApp gateway send-voice error {status}: {body}");
+            return Err(format!("WhatsApp gateway send-voice error {status}: {body}").into());
+        }
+
+        Ok(())
     }
 
     /// Send a text message via the WhatsApp Cloud API.
@@ -233,21 +488,32 @@ impl ChannelAdapter for WhatsAppAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Web/QR gateway mode: route all messages through the gateway
         if let Some(ref gw) = self.gateway_url {
-            let text = match &content {
-                ChannelContent::Text(t) => t.clone(),
-                ChannelContent::Image { caption, .. } => caption
-                    .clone()
-                    .unwrap_or_else(|| "(Image — not supported in Web mode)".to_string()),
-                ChannelContent::File { filename, .. } => {
-                    format!("(File: {filename} — not supported in Web mode)")
+            match &content {
+                ChannelContent::Voice { url, .. } => {
+                    // For voice messages in gateway mode, send as a text link fallback
+                    // unless the gateway supports send-voice (handled separately via send_voice()).
+                    let text = format!("(Voice message: {url})");
+                    self.gateway_send_message(gw, &user.platform_id, &text)
+                        .await?;
                 }
-                _ => "(Unsupported content type in Web mode)".to_string(),
-            };
-            // Split long messages the same way as Cloud API mode
-            let chunks = crate::types::split_message(&text, MAX_MESSAGE_LEN);
-            for chunk in chunks {
-                self.gateway_send_message(gw, &user.platform_id, chunk)
-                    .await?;
+                other => {
+                    let text = match other {
+                        ChannelContent::Text(t) => t.clone(),
+                        ChannelContent::Image { caption, .. } => caption
+                            .clone()
+                            .unwrap_or_else(|| "(Image — not supported in Web mode)".to_string()),
+                        ChannelContent::File { filename, .. } => {
+                            format!("(File: {filename} — not supported in Web mode)")
+                        }
+                        _ => "(Unsupported content type in Web mode)".to_string(),
+                    };
+                    // Split long messages the same way as Cloud API mode
+                    let chunks = crate::types::split_message(&text, MAX_MESSAGE_LEN);
+                    for chunk in chunks {
+                        self.gateway_send_message(gw, &user.platform_id, chunk)
+                            .await?;
+                    }
+                }
             }
             return Ok(());
         }
@@ -256,6 +522,33 @@ impl ChannelAdapter for WhatsAppAdapter {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
+            }
+            ChannelContent::Voice { url, .. } => {
+                // Voice messages with a URL are sent as audio links via the Cloud API.
+                // For raw byte uploads use `send_voice()` directly.
+                let body = serde_json::json!({
+                    "messaging_product": "whatsapp",
+                    "to": user.platform_id,
+                    "type": "audio",
+                    "audio": { "link": url }
+                });
+                let api_url = format!(
+                    "https://graph.facebook.com/v21.0/{}/messages",
+                    self.phone_number_id
+                );
+                let resp = self
+                    .client
+                    .post(&api_url)
+                    .bearer_auth(&*self.access_token)
+                    .json(&body)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let err = resp.text().await.unwrap_or_default();
+                    error!("WhatsApp voice send error {status}: {err}");
+                    return Err(format!("WhatsApp voice send error {status}: {err}").into());
+                }
             }
             ChannelContent::Image { url, caption, .. } => {
                 let body = serde_json::json!({
@@ -371,5 +664,108 @@ mod tests {
             vec![],
         );
         assert!(open.is_allowed("+anything"));
+    }
+
+    #[test]
+    fn test_dm_policy_defaults() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        );
+        // Default DmPolicy is Respond
+        assert!(adapter.should_handle_message(false, "hello", "+1234567890"));
+    }
+
+    #[test]
+    fn test_dm_policy_ignore() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_dm_policy(DmPolicy::Ignore);
+        assert!(!adapter.should_handle_message(false, "hello", "+1234567890"));
+    }
+
+    #[test]
+    fn test_dm_policy_allowed_only() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec!["+1234567890".to_string()],
+        )
+        .with_dm_policy(DmPolicy::AllowedOnly);
+        // Allowed sender → handle
+        assert!(adapter.should_handle_message(false, "hello", "+1234567890"));
+        // Unknown sender → reject
+        assert!(!adapter.should_handle_message(false, "hello", "+9999999999"));
+    }
+
+    #[test]
+    fn test_group_policy_all() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_group_policy(GroupPolicy::All);
+        assert!(adapter.should_handle_message(true, "any group message", ""));
+    }
+
+    #[test]
+    fn test_group_policy_mention_only() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_group_policy(GroupPolicy::MentionOnly)
+        .with_bot_name(Some("HermesBot".to_string()))
+        .with_bot_phone(Some("+15551234567".to_string()));
+
+        // Without mention — should not handle
+        assert!(!adapter.should_handle_message(true, "what time is it?", ""));
+        // With bot name mention
+        assert!(adapter.should_handle_message(true, "@HermesBot what time is it?", ""));
+        // With bot phone mention
+        assert!(adapter.should_handle_message(true, "+15551234567 hello", ""));
+    }
+
+    #[test]
+    fn test_group_policy_commands_only() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_group_policy(GroupPolicy::CommandsOnly);
+        assert!(!adapter.should_handle_message(true, "hello everyone", ""));
+        assert!(adapter.should_handle_message(true, "/help", ""));
+    }
+
+    #[test]
+    fn test_group_policy_ignore() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_group_policy(GroupPolicy::Ignore);
+        assert!(!adapter.should_handle_message(true, "/help", ""));
     }
 }

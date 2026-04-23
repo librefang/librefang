@@ -28,7 +28,7 @@ export function SliderInput({
   ticks,
 }: SliderInputProps) {
   const id = useId();
-  const pct = ((value - min) / (max - min)) * 100;
+  const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
 
   return (
     <div className={`space-y-1.5 ${!enabled ? "opacity-40" : ""}`}>
@@ -50,11 +50,14 @@ export function SliderInput({
             disabled={!enabled}
             className="w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed"
           />
-          {onToggle && (
+          {onToggle ? (
             <button
               type="button"
+              role="switch"
+              aria-checked={enabled}
+              aria-label={label}
               onClick={() => onToggle(!enabled)}
-              className={`relative w-8 h-4.5 rounded-full transition-colors ${
+              className={`relative w-8 h-[18px] rounded-full transition-colors ${
                 enabled ? "bg-brand" : "bg-border-subtle"
               }`}
             >
@@ -64,7 +67,7 @@ export function SliderInput({
                 }`}
               />
             </button>
-          )}
+          ) : null}
         </div>
       </div>
       <input
@@ -83,13 +86,13 @@ export function SliderInput({
             : undefined,
         }}
       />
-      {ticks && (
+      {ticks ? (
         <div className="flex justify-between text-[9px] text-text-dim/50 font-mono px-0.5">
           {ticks.map((t) => (
             <span key={t}>{formatTick ? formatTick(t) : t}</span>
           ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

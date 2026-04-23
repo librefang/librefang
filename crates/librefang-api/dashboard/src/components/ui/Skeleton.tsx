@@ -1,7 +1,7 @@
 export function Skeleton({ className = "" }: { className?: string }) {
   return (
     <div
-      className={`animate-pulse rounded-lg bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%] ${className}`}
+      className={`rounded-lg bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%] ${className}`}
       style={{ animation: "shimmer 1.5s ease-in-out infinite" }}
     />
   );
@@ -9,7 +9,7 @@ export function Skeleton({ className = "" }: { className?: string }) {
 
 export function CardSkeleton() {
   return (
-    <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm overflow-hidden">
+    <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm overflow-hidden" role="status" aria-busy="true">
       <div className="flex items-center justify-between mb-4">
         <Skeleton className="h-3 w-24" />
         <Skeleton className="h-8 w-8 rounded-lg" />
@@ -22,7 +22,7 @@ export function CardSkeleton() {
 
 export function ListSkeleton({ rows = 3 }: { rows?: number }) {
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" role="status" aria-busy="true">
       {Array.from({ length: rows }).map((_, i) => (
         <div
           key={i}
@@ -42,9 +42,18 @@ export function ListSkeleton({ rows = 3 }: { rows?: number }) {
   );
 }
 
+const GRID_COLS: Record<number, string> = {
+  1: "lg:grid-cols-1",
+  2: "lg:grid-cols-2",
+  3: "lg:grid-cols-3",
+  4: "lg:grid-cols-4",
+  5: "lg:grid-cols-5",
+  6: "lg:grid-cols-6",
+};
+
 export function GridSkeleton({ cols = 4 }: { cols?: number }) {
   return (
-    <div className={`grid gap-4 sm:grid-cols-2 lg:grid-cols-${cols}`}>
+    <div className={`grid gap-4 sm:grid-cols-2 ${GRID_COLS[cols] ?? "lg:grid-cols-4"}`} role="status" aria-busy="true">
       {Array.from({ length: cols }).map((_, i) => (
         <CardSkeleton key={i} />
       ))}
