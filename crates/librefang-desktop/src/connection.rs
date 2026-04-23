@@ -363,6 +363,23 @@ pub fn connection_html() -> String {
     color: #a1a1aa;
     cursor: pointer;
   }
+  .btn-reset {
+    width: 100%;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+    color: #52525b;
+    border: 1px dashed #3f3f46;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-top: 12px;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .btn-reset:hover:not(:disabled) {
+    color: #ef4444;
+    border-color: #ef4444;
+  }
   .status {
     margin-top: 16px;
     min-height: 20px;
@@ -399,11 +416,36 @@ pub fn connection_html() -> String {
     <label for="remember">Remember this choice</label>
   </div>
 
+  <button class="btn-reset" id="btn-reset" onclick="uninstallApp()">Uninstall LibreFang</button>
+
   <div class="status" id="status"></div>
 </div>
 
 <script>
-  const { invoke } = window.__TAURI__.core;
+  // Wait for Tauri v2 IPC to finish initializing before calling invoke.
+  // On about:blank pages, window.__TAURI__ is injected asynchronously by
+  // WebView2, so top-level access hits TDZ; lazy + polling avoids both.
+  function waitForTauri() {
+    return new Promise(function(resolve, reject) {
+      var deadline = Date.now() + 8000;
+      function check() {
+        if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
+          resolve();
+        } else if (Date.now() > deadline) {
+          reject(new Error('Tauri IPC unavailable — try restarting the app.'));
+        } else {
+          setTimeout(check, 50);
+        }
+      }
+      check();
+    });
+  }
+
+  function tauriInvoke(cmd, args) {
+    return waitForTauri().then(function() {
+      return window.__TAURI__.core.invoke(cmd, args);
+    });
+  }
 
   function setStatus(msg, cls) {
     const el = document.getElementById('status');
@@ -424,7 +466,7 @@ pub fn connection_html() -> String {
     setStatus('Testing connection...', 'info');
     setAllDisabled(true);
     try {
-      const result = await invoke('test_connection', { url });
+      await tauriInvoke('test_connection', { url });
       setStatus('Connected! Server is healthy.', 'success');
     } catch (e) {
       setStatus(String(e), 'error');
@@ -440,7 +482,7 @@ pub fn connection_html() -> String {
     setStatus('Connecting...', 'info');
     setAllDisabled(true);
     try {
-      await invoke('connect_remote', { url, remember });
+      await tauriInvoke('connect_remote', { url, remember });
     } catch (e) {
       setStatus(String(e), 'error');
       setAllDisabled(false);
@@ -452,10 +494,22 @@ pub fn connection_html() -> String {
     setStatus('Starting local server...', 'info');
     setAllDisabled(true);
     try {
-      await invoke('start_local', { remember });
+      await tauriInvoke('start_local', { remember });
     } catch (e) {
       setStatus(String(e), 'error');
       setAllDisabled(false);
+    }
+  }
+
+  async function uninstallApp() {
+    if (!confirm('Uninstall LibreFang? This will remove the application.')) return;
+    document.getElementById('btn-reset').disabled = true;
+    setStatus('Launching uninstaller...', 'info');
+    try {
+      await tauriInvoke('uninstall_app');
+    } catch (e) {
+      setStatus(String(e), 'error');
+      document.getElementById('btn-reset').disabled = false;
     }
   }
 </script>

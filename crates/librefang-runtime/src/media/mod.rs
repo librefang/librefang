@@ -309,9 +309,22 @@ fn create_media_driver(
         "minimax" => Ok(Arc::new(minimax::MiniMaxMediaDriver::new(base_url))),
         "openai" => Ok(Arc::new(openai::OpenAIMediaDriver::new(base_url))),
         "google_tts" => Ok(Arc::new(google_tts::GoogleTtsMediaDriver::new(base_url))),
-        other => Err(MediaError::InvalidRequest(format!(
-            "Unknown media provider: '{other}'. Available: openai, gemini, elevenlabs, minimax, google_tts"
-        ))),
+        other => {
+            // For user-defined providers with a configured base_url, use the
+            // generic OpenAI-compatible driver. The API key is read from the
+            // {PROVIDER_UPPER}_API_KEY environment variable.
+            if let Some(url) = base_url {
+                Ok(Arc::new(openai::GenericOpenAICompatMediaDriver::new(
+                    other, url,
+                )))
+            } else {
+                Err(MediaError::InvalidRequest(format!(
+                    "Unknown media provider '{other}' and no base_url configured. \
+                     Set provider_urls.{other} in config.toml to use this provider \
+                     with the OpenAI-compatible API."
+                )))
+            }
+        }
     }
 }
 

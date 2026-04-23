@@ -487,6 +487,18 @@ pub trait KernelHandle: Send + Sync {
         120
     }
 
+    /// Per-tool timeout override lookup.
+    ///
+    /// Resolution order:
+    /// 1. Exact match in `config.tool_timeouts`
+    /// 2. Longest glob match in `config.tool_timeouts` (most specific wins)
+    /// 3. Global `config.tool_timeout_secs`
+    ///
+    /// The default impl delegates to `tool_timeout_secs()` (no per-tool config).
+    fn tool_timeout_secs_for(&self, _tool_name: &str) -> u64 {
+        self.tool_timeout_secs()
+    }
+
     /// Maximum inter-agent call depth (from config). Default: 5.
     fn max_agent_call_depth(&self) -> u32 {
         5
