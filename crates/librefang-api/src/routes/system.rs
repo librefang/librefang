@@ -1055,10 +1055,28 @@ pub async fn get_tool(
 /// POST /api/tools/{name}/invoke — Invoke a kernel tool directly.
 ///
 /// External integrations (MCP bridges, scripts, automations) can call kernel
-/// tools without going through an agent loop. Pass `?agent_id=<uuid>` when
-/// invoking approval-gated tools so the approval callback can resolve the
-/// correct agent.
-#[utoipa::path(post, path = "/api/tools/{name}/invoke", tag = "skills", responses((status = 200, description = "Tool result")))]
+/// tools without going through an agent loop. Fail-closed: the endpoint
+/// rejects every request unless the tool is listed in
+/// `[tool_invoke] allowlist` and `tool_invoke.enabled = true`. Pass
+/// `?agent_id=<uuid>` when invoking approval-gated tools so the approval
+/// callback can resolve the correct agent; without an `agent_id` those
+/// tools are rejected to avoid orphaned deferred executions.
+#[utoipa::path(
+    post,
+    path = "/api/tools/{name}/invoke",
+    tag = "tools",
+    params(
+        ("name" = String, Path, description = "Tool name"),
+        ("agent_id" = Option<String>, Query, description = "Caller agent UUID (required for approval-gated tools)")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Tool execution result", body = serde_json::Value),
+        (status = 400, description = "Tool invocation failed or requires an agent context"),
+        (status = 403, description = "Endpoint disabled or tool not in allowlist"),
+        (status = 404, description = "Tool not found")
+    )
+)]
 pub async fn invoke_tool(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1066,8 +1084,79 @@ pub async fn invoke_tool(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(input): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let lang_code = super::resolve_lang(lang.as_ref());
     let caller_agent_id: Option<String> = params.get("agent_id").cloned();
 
+    // 1) Fail-closed allowlist check. Without an agent manifest gating which
+    //    tools the caller may run, any API-key holder would otherwise be able
+    //    to invoke every tool the kernel exposes.
+    let cfg = state.kernel.config_snapshot();
+    if !cfg.tool_invoke.permits(&name) {
+        let t = ErrorTranslator::new(lang_code);
+        let msg = if !cfg.tool_invoke.enabled {
+            t.t("api-error-tool-invoke-disabled")
+        } else {
+            t.t_args("api-error-tool-invoke-denied", &[("name", &name)])
+        };
+        return ApiErrorResponse::bad_request(msg)
+            .with_status(StatusCode::FORBIDDEN)
+            .into_json_tuple();
+    }
+
+    // 2) Deterministic existence check: builtin, connected MCP servers, and
+    //    skill-provided tools are the three sources execute_tool dispatches
+    //    to. Doing this up front lets us return a clean 404 instead of
+    //    string-matching the downstream "Unknown tool:" error.
+    let tool_exists = builtin_tool_definitions().iter().any(|t| t.name == name)
+        || state
+            .kernel
+            .mcp_tools_ref()
+            .lock()
+            .map(|mcp_tools| mcp_tools.iter().any(|t| t.name == name))
+            .unwrap_or(false)
+        || state
+            .kernel
+            .skill_registry_ref()
+            .read()
+            .ok()
+            .is_some_and(|reg| reg.find_tool_provider(&name).is_some());
+    if !tool_exists {
+        let t = ErrorTranslator::new(lang_code);
+        return ApiErrorResponse::not_found(
+            t.t_args("api-error-tool-not-found", &[("name", &name)]),
+        )
+        .into_json_tuple();
+    }
+
+    // 3) Approval-gated tools need a caller_agent_id that the approval
+    //    subsystem can later look up. A valid UUID query parameter is
+    //    required — without one, execute_tool would post the deferred
+    //    request with `agent_id = "unknown"` and the approval could never
+    //    resolve back to a real agent.
+    if state.kernel.approvals().requires_approval(&name) {
+        let agent_ok = caller_agent_id
+            .as_deref()
+            .is_some_and(|id| id.parse::<uuid::Uuid>().is_ok());
+        if !agent_ok {
+            let t = ErrorTranslator::new(lang_code);
+            return ApiErrorResponse::bad_request(
+                t.t_args("api-error-tool-requires-agent", &[("name", &name)]),
+            )
+            .into_json_tuple();
+        }
+    }
+
+    // 4) Snapshot the skill registry (so the RwLock guard does not cross the
+    //    `.await`) and resolve kernel-level sandbox defaults before dispatch.
+    let skill_snapshot = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .ok()
+        .map(|g| g.snapshot());
+    let workspace_root = cfg.effective_workspaces_dir();
+    let exec_policy = cfg.exec_policy.clone();
+    let docker_config = cfg.docker.clone();
     let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
 
     let result = execute_tool(
@@ -1075,41 +1164,30 @@ pub async fn invoke_tool(
         &name,
         &input,
         Some(&kernel),
-        None, // allowed_tools
+        None, // allowed_tools — already enforced by tool_invoke.allowlist above
         caller_agent_id.as_deref(),
-        None, // skill_registry
-        None, // allowed_skills
+        skill_snapshot.as_ref(),
+        None, // allowed_skills — gated by allowlist above
         Some(state.kernel.mcp_connections_ref()),
         Some(state.kernel.web_tools()),
         Some(state.kernel.browser()),
         None, // allowed_env_vars
-        None, // workspace_root
-        None, // media_engine
-        None, // media_drivers
-        None, // exec_policy
-        None, // tts_engine
-        None, // docker_config
+        Some(workspace_root.as_path()),
+        Some(state.kernel.media()),
+        Some(state.kernel.media_drivers()),
+        Some(&exec_policy),
+        Some(state.kernel.tts()),
+        Some(&docker_config),
         Some(state.kernel.processes()),
-        None, // process_registry
+        Some(state.kernel.process_registry()),
         None, // sender_id
         None, // channel
-        None, // checkpoint_manager
-        None, // interrupt
+        None, // checkpoint_manager — snapshotting is wired into agent loops
+        None, // interrupt — no session to cancel
         None, // session_id
-        None, // dangerous_command_checker
+        None, // dangerous_command_checker — session-scoped, not meaningful here
     )
     .await;
-
-    // execute_tool returns is_error + "Error: Unknown tool: <name>" for missing tools.
-    // All other tool sources (skills, MCP, dynamic) go through the same path, so we
-    // don't need a separate pre-flight existence check.
-    if result.is_error && result.content.contains("Unknown tool:") {
-        let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        return ApiErrorResponse::not_found(
-            tr.t_args("api-error-tool-not-found", &[("name", &name)]),
-        )
-        .into_json_tuple();
-    }
 
     let status = if result.is_error {
         StatusCode::BAD_REQUEST

@@ -6650,16 +6650,26 @@
     "/api/tools/{name}/invoke": {
       "post": {
         "tags": [
-          "skills"
+          "tools"
         ],
         "summary": "POST /api/tools/{name}/invoke — Invoke a kernel tool directly.",
-        "description": "External integrations (MCP bridges, scripts, automations) can call kernel\ntools without going through an agent loop. Pass `?agent_id=<uuid>` when\ninvoking approval-gated tools so the approval callback can resolve the\ncorrect agent.",
+        "description": "External integrations (MCP bridges, scripts, automations) can call kernel\ntools without going through an agent loop. Fail-closed: the endpoint\nrejects every request unless the tool is listed in\n`[tool_invoke] allowlist` and `tool_invoke.enabled = true`. Pass\n`?agent_id=<uuid>` when invoking approval-gated tools so the approval\ncallback can resolve the correct agent; without an `agent_id` those\ntools are rejected to avoid orphaned deferred executions.",
         "operationId": "invoke_tool",
         "parameters": [
           {
             "name": "name",
             "in": "path",
+            "description": "Tool name",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Caller agent UUID (required for approval-gated tools)",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -6675,7 +6685,21 @@
         },
         "responses": {
           "200": {
-            "description": "Tool result"
+            "description": "Tool execution result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Tool invocation failed or requires an agent context"
+          },
+          "403": {
+            "description": "Endpoint disabled or tool not in allowlist"
+          },
+          "404": {
+            "description": "Tool not found"
           }
         }
       }
