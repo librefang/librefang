@@ -369,26 +369,6 @@ impl FeishuAdapter {
         Ok(())
     }
 
-    /// Spawn a background task that adds a "Typing" reaction to `message_id`
-    /// and stores the returned reaction_id under `chat_id` for later removal.
-    ///
-    /// Delegates to the module-level `spawn_add_processing_reaction_static` helper
-    /// so the same logic can be reused from the webhook/WS task closures that
-    /// cannot borrow `&self`.
-    #[allow(dead_code)]
-    fn spawn_add_processing_reaction(&self, message_id: String, chat_id: String) {
-        spawn_add_processing_reaction_static(
-            self.client.clone(),
-            Arc::clone(&self.cached_token),
-            Arc::new(self.app_id.clone()),
-            self.app_secret.clone(),
-            Arc::clone(&self.pending_reactions),
-            self.region,
-            message_id,
-            chat_id,
-        );
-    }
-
     /// Spawn a background task that removes the pending processing reaction for `chat_id`.
     ///
     /// The (reaction_id, message_id) pair is taken from `pending_reactions` and
