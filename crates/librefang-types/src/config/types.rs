@@ -2168,6 +2168,16 @@ pub struct KernelConfig {
     /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
     #[serde(default)]
     pub provider_proxy_urls: HashMap<String, String>,
+    /// Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).
+    ///
+    /// Overrides the HTTP client's default read timeout for LLM API requests to the
+    /// specified provider. Useful for slower providers or long-context workloads.
+    /// e.g. `ollama = 300`, `anthropic = 120`
+    ///
+    /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.).
+    /// CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.
+    #[serde(default)]
+    pub provider_request_timeout_secs: HashMap<String, u64>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3859,6 +3869,7 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             provider_proxy_urls: HashMap::new(),
+            provider_request_timeout_secs: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),

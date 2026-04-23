@@ -94,11 +94,12 @@ impl DriverCache {
         let key_hash = hasher.finish();
 
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             config.provider,
             key_hash,
             config.base_url.as_deref().unwrap_or(""),
-            config.proxy_url.as_deref().unwrap_or("")
+            config.proxy_url.as_deref().unwrap_or(""),
+            config.request_timeout_secs.map_or(0, |s| s)
         )
     }
 }
@@ -686,15 +687,28 @@ fn create_driver_from_entry(
 
     let proxy_url = config.proxy_url.as_deref();
 
+    let request_timeout_secs = config.request_timeout_secs;
+
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy(
-            api_key, base_url, proxy_url,
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
         ))),
-        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::with_proxy(
-            api_key, base_url, proxy_url,
-        ))),
-        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy(
-            api_key, base_url, proxy_url,
+        ApiFormat::Anthropic => Ok(Arc::new(
+            anthropic::AnthropicDriver::with_proxy_and_timeout(
+                api_key,
+                base_url,
+                proxy_url,
+                request_timeout_secs,
+            ),
+        )),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
         ))),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
@@ -807,10 +821,11 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(openai::OpenAIDriver::with_proxy(
+        return Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
             api_key,
             base_url.clone(),
             config.proxy_url.as_deref(),
+            config.request_timeout_secs,
         )));
     }
 

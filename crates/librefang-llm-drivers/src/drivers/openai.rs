@@ -31,6 +31,9 @@ pub struct OpenAIDriver {
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
     moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
+    /// Per-provider HTTP request timeout in seconds.
+    /// Overrides the HTTP client's default read timeout when set.
+    request_timeout_secs: Option<u64>,
 }
 
 impl OpenAIDriver {
@@ -41,6 +44,16 @@ impl OpenAIDriver {
 
     /// Create a new OpenAI-compatible driver with an optional per-provider proxy.
     pub fn with_proxy(api_key: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        Self::with_proxy_and_timeout(api_key, base_url, proxy_url, None)
+    }
+
+    /// Create a new OpenAI-compatible driver with optional proxy and request timeout.
+    pub fn with_proxy_and_timeout(
+        api_key: String,
+        base_url: String,
+        proxy_url: Option<&str>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url),
             None => librefang_http::proxied_client(),
@@ -53,6 +66,7 @@ impl OpenAIDriver {
             use_api_key_header: false,
             url_query: None,
             moonshot_file_cache: Default::default(),
+            request_timeout_secs,
         }
     }
 
@@ -93,6 +107,7 @@ impl OpenAIDriver {
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
+            request_timeout_secs: None,
         }
     }
 
@@ -832,6 +847,9 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
 
             let resp = req_builder
                 .send()
@@ -1207,6 +1225,9 @@ impl LlmDriver for OpenAIDriver {
             }
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
+            }
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
             }
 
             let resp = req_builder
