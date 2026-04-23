@@ -297,6 +297,18 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         request.max_tokens
     };
 
+    // Anthropic rejects max_tokens=0 with HTTP 400; fall back to a safe
+    // model ceiling so callers that forget to set max_tokens still work.
+    let effective_max_tokens = if effective_max_tokens == 0 {
+        warn!(
+            model = %request.model,
+            "max_tokens resolved to 0, using model ceiling fallback of 8192"
+        );
+        8192
+    } else {
+        effective_max_tokens
+    };
+
     ApiRequest {
         model: request.model.clone(),
         max_tokens: effective_max_tokens,
