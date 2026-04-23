@@ -28,6 +28,9 @@ pub struct OpenAIDriver {
     /// Optional query string appended to the request URL (e.g., "api-version=2024-02-01").
     /// Used by Azure OpenAI.
     url_query: Option<String>,
+    /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
+    /// Avoids re-uploading the same file across agent loop iterations.
+    moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
 }
 
 impl OpenAIDriver {
@@ -49,6 +52,7 @@ impl OpenAIDriver {
             extra_headers: Vec::new(),
             use_api_key_header: false,
             url_query: None,
+            moonshot_file_cache: Default::default(),
         }
     }
 
@@ -88,12 +92,146 @@ impl OpenAIDriver {
             extra_headers: Vec::new(),
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
+            moonshot_file_cache: Default::default(),
         }
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
     fn kimi_needs_reasoning_content(&self, model: &str) -> bool {
-        self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
+        self.is_moonshot() || model.to_lowercase().contains("kimi")
+    }
+
+    /// True if the base URL points to Moonshot/Kimi.
+    fn is_moonshot(&self) -> bool {
+        self.base_url.contains("moonshot")
+    }
+
+    /// Upload a file to Moonshot's `/v1/files` endpoint and return the file ID.
+    async fn upload_file_to_moonshot(
+        &self,
+        data: &[u8],
+        filename: &str,
+        mime: &str,
+    ) -> Result<String, LlmError> {
+        let url = format!("{}/files", self.base_url);
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(mime)
+            .map_err(|e| LlmError::Http(format!("Invalid MIME type: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("purpose", "file-extract")
+            .part("file", part);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(self.api_key.as_str())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload failed: {e}")))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload read error: {e}")))?;
+
+        if !status.is_success() {
+            return Err(LlmError::Http(format!(
+                "Moonshot file upload returned {status}: {text}"
+            )));
+        }
+
+        let body: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| LlmError::Http(format!("Moonshot file upload parse error: {e}")))?;
+
+        body["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| LlmError::Http(format!("Moonshot file upload: missing 'id' in {body}")))
+    }
+
+    /// Pre-process a CompletionRequest for Moonshot: upload images/files and
+    /// replace ContentBlock::Image/ImageFile with a text marker that
+    /// `build_request()` converts to `OaiContentPart::File`.
+    async fn preprocess_moonshot_files(
+        &self,
+        request: &mut CompletionRequest,
+    ) -> Result<(), LlmError> {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        for msg in &mut request.messages {
+            let blocks = match &mut msg.content {
+                MessageContent::Blocks(b) => b,
+                _ => continue,
+            };
+
+            let mut i = 0;
+            while i < blocks.len() {
+                let (bytes, mime, filename) = match &blocks[i] {
+                    ContentBlock::Image { media_type, data } => {
+                        let decoded = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|e| LlmError::Http(format!("base64 decode: {e}")))?;
+                        let ext = ext_from_media_type(media_type);
+                        (decoded, media_type.clone(), format!("file.{ext}"))
+                    }
+                    ContentBlock::ImageFile { media_type, path } => {
+                        let bytes = tokio::fs::read(path)
+                            .await
+                            .map_err(|e| LlmError::Http(format!("Read {path}: {e}")))?;
+                        let fname = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                            .to_string();
+                        (bytes, media_type.clone(), fname)
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+
+                // Hash full file content with SHA-256 for cache key
+                let hash: [u8; 32] = Sha256::digest(&bytes).into();
+
+                // Short lock: check cache only, release before any network I/O
+                let cached = {
+                    let cache = self.moonshot_file_cache.lock().await;
+                    cache.get(&hash).cloned()
+                };
+
+                let file_id = if let Some(id) = cached {
+                    id
+                } else {
+                    let id = self
+                        .upload_file_to_moonshot(&bytes, &filename, &mime)
+                        .await?;
+                    debug!(file_id = %id, filename = %filename, "Uploaded file to Moonshot");
+                    // Short lock: insert result into cache
+                    let mut cache = self.moonshot_file_cache.lock().await;
+                    // Cap at 256 entries — full eviction (not true LRU) is acceptable
+                    // because the cache is only a dedup optimisation; stale entries just
+                    // trigger a re-upload which Moonshot handles idempotently.
+                    if cache.len() >= 256 {
+                        cache.clear();
+                    }
+                    cache.insert(hash, id.clone());
+                    id
+                };
+
+                // Replace the block with a text marker
+                blocks[i] = ContentBlock::Text {
+                    text: format!("<<moonshot_file:{file_id}>>"),
+                    provider_metadata: None,
+                };
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     /// True if this driver instance is pointed at an Ollama-compatible endpoint.
@@ -123,6 +261,21 @@ impl OpenAIDriver {
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
+    }
+}
+
+/// Map a MIME type to a file extension for Moonshot file uploads.
+fn ext_from_media_type(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "application/pdf" => "pdf",
+        "audio/ogg" => "ogg",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        _ => "bin",
     }
 }
 
@@ -250,11 +403,20 @@ enum OaiContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: OaiImageUrl },
+    /// Moonshot/Kimi file reference (uploaded via /v1/files).
+    #[serde(rename = "file")]
+    File { file_url: OaiFileUrl },
 }
 
 #[derive(Debug, Serialize)]
 struct OaiImageUrl {
     url: String,
+}
+
+/// Moonshot/Kimi file URL reference.
+#[derive(Debug, Serialize)]
+struct OaiFileUrl {
+    url: String, // "fileid://file-abc123"
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -375,6 +537,19 @@ impl OpenAIDriver {
                 }
                 (Role::User, MessageContent::Blocks(blocks)) => {
                     // Handle tool results and images in user messages
+                    let block_summary: Vec<&str> = blocks
+                        .iter()
+                        .map(|b| match b {
+                            ContentBlock::Text { .. } => "Text",
+                            ContentBlock::Image { .. } => "Image(base64)",
+                            ContentBlock::ImageFile { .. } => "ImageFile",
+                            ContentBlock::ToolResult { .. } => "ToolResult",
+                            ContentBlock::ToolUse { .. } => "ToolUse",
+                            ContentBlock::Thinking { .. } => "Thinking",
+                            _ => "Other",
+                        })
+                        .collect();
+                    tracing::debug!(blocks = ?block_summary, "build_request: user Blocks content");
                     let mut parts: Vec<OaiContentPart> = Vec::new();
                     let mut has_tool_results = false;
                     for block in blocks {
@@ -398,7 +573,20 @@ impl OpenAIDriver {
                                 });
                             }
                             ContentBlock::Text { text, .. } => {
-                                parts.push(OaiContentPart::Text { text: text.clone() });
+                                // Detect Moonshot file markers injected by
+                                // preprocess_moonshot_files()
+                                if let Some(file_id) = text
+                                    .strip_prefix("<<moonshot_file:")
+                                    .and_then(|s| s.strip_suffix(">>"))
+                                {
+                                    parts.push(OaiContentPart::File {
+                                        file_url: OaiFileUrl {
+                                            url: format!("fileid://{file_id}"),
+                                        },
+                                    });
+                                } else {
+                                    parts.push(OaiContentPart::Text { text: text.clone() });
+                                }
                             }
                             ContentBlock::Image { media_type, data } => {
                                 parts.push(OaiContentPart::ImageUrl {
@@ -599,7 +787,14 @@ impl OpenAIDriver {
 
 #[async_trait]
 impl LlmDriver for OpenAIDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        // Moonshot/Kimi: upload images/files via /v1/files before building request
+        if self.is_moonshot() {
+            self.preprocess_moonshot_files(&mut request).await?;
+        }
         let mut oai_request = self.build_request(&request)?;
 
         let max_retries = 3;
@@ -876,19 +1071,18 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value =
-                        match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
-                            Ok(v) => ensure_object(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %call.function.name,
-                                    raw_args_len = call.function.arguments.len(),
-                                    error = %e,
-                                    "Malformed tool call arguments from LLM"
-                                );
-                                malformed_tool_input(&e, call.function.arguments.len())
-                            }
-                        };
+                    let input: serde_json::Value = match parse_tool_args(&call.function.arguments) {
+                        Ok(v) => ensure_object(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = %call.function.name,
+                                raw_args_len = call.function.arguments.len(),
+                                error = %e,
+                                "Malformed tool call arguments from LLM"
+                            );
+                            malformed_tool_input(&e, call.function.arguments.len())
+                        }
+                    };
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -967,9 +1161,13 @@ impl LlmDriver for OpenAIDriver {
 
     async fn stream(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
+        // Moonshot/Kimi: upload images/files via /v1/files before building request
+        if self.is_moonshot() {
+            self.preprocess_moonshot_files(&mut request).await?;
+        }
         let mut oai_request = self.build_request(&request)?;
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
@@ -1438,19 +1636,18 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
-                let input: serde_json::Value =
-                    match serde_json::from_str::<serde_json::Value>(arguments) {
-                        Ok(v) => ensure_object(v),
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %name,
-                                raw_args_len = arguments.len(),
-                                error = %e,
-                                "Malformed tool call arguments from LLM stream"
-                            );
-                            malformed_tool_input(&e, arguments.len())
-                        }
-                    };
+                let input: serde_json::Value = match parse_tool_args(arguments) {
+                    Ok(v) => ensure_object(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %name,
+                            raw_args_len = arguments.len(),
+                            error = %e,
+                            "Malformed tool call arguments from LLM stream"
+                        );
+                        malformed_tool_input(&e, arguments.len())
+                    }
+                };
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1662,7 +1859,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         };
 
         // Parse args as JSON Value
-        let args_value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(args) {
+        let args_value: serde_json::Value = match parse_tool_args(args) {
             Ok(v) => ensure_object(v),
             Err(e) => {
                 tracing::warn!(
@@ -1749,6 +1946,48 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Parse tool call arguments that may have trailing non-JSON content.
+///
+/// Thinking models (DeepSeek-R1, Qwen 3.5, etc.) sometimes append reasoning
+/// tokens after the JSON object in the arguments buffer, producing strings like
+/// `{"query": "x"}\n\nI'll now search...`. `serde_json::from_str` rejects this
+/// with "trailing characters". This function finds the end of the first complete
+/// `{...}` JSON object via brace-depth tracking and parses only that slice.
+pub(crate) fn parse_tool_args(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    // Fast path: the whole string is valid JSON.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        return Ok(v);
+    }
+    // Slow path: find the end of the first complete `{...}` block.
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') {
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut prev_backslash = false;
+        for (i, ch) in trimmed.char_indices() {
+            if prev_backslash {
+                prev_backslash = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => prev_backslash = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let slice = &trimmed[..=i];
+                        return serde_json::from_str::<serde_json::Value>(slice);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Fall back to a full parse so the caller gets the original error.
+    serde_json::from_str::<serde_json::Value>(raw)
+}
+
 /// Marker key embedded in tool input when the LLM's streamed JSON was truncated.
 pub const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
 
@@ -1776,6 +2015,35 @@ pub(crate) fn malformed_tool_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_tool_args_clean_json() {
+        let v = parse_tool_args(r#"{"query":"hello","limit":5}"#).unwrap();
+        assert_eq!(v["query"], "hello");
+        assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn test_parse_tool_args_trailing_reasoning() {
+        let raw = "{\"query\": \"TO-DO\", \"limit\": 10}\n\nI'll now search for the items.";
+        let v = parse_tool_args(raw).unwrap();
+        assert_eq!(v["query"], "TO-DO");
+        assert_eq!(v["limit"], 10);
+    }
+
+    #[test]
+    fn test_parse_tool_args_empty_object_with_trailing() {
+        let raw = "{}\n\nsome reasoning text here";
+        let v = parse_tool_args(raw).unwrap();
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_tool_args_nested_object_with_trailing() {
+        let raw = r#"{"a":{"b":1},"c":"d"} trailing text"#;
+        let v = parse_tool_args(raw).unwrap();
+        assert_eq!(v["c"], "d");
+    }
 
     #[test]
     fn test_openai_driver_creation() {

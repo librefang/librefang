@@ -1,7 +1,19 @@
-import { useEffect } from "react";
+import { memo, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../../lib/store";
 import { CheckCircle, XCircle, AlertCircle, X } from "lucide-react";
+
+const TOAST_STYLES: Record<"success" | "error" | "info", string> = {
+  success: "border-success/30 bg-success/10 text-success",
+  error: "border-error/30 bg-error/10 text-error",
+  info: "border-brand/30 bg-brand/10 text-brand",
+};
+
+const TOAST_ICONS: Record<"success" | "error" | "info", React.ReactNode> = {
+  success: <CheckCircle className="h-4 w-4 shrink-0" />,
+  error: <XCircle className="h-4 w-4 shrink-0" />,
+  info: <AlertCircle className="h-4 w-4 shrink-0" />,
+};
 
 export function ToastContainer() {
   const toasts = useUIStore((s) => s.toasts);
@@ -14,39 +26,30 @@ export function ToastContainer() {
       aria-atomic="false"
     >
       {toasts.map((toast) => (
-        <ToastItem key={toast.id} {...toast} onDismiss={() => removeToast(toast.id)} />
+        <ToastItem key={toast.id} id={toast.id} message={toast.message} type={toast.type} removeToast={removeToast} />
       ))}
     </div>
   );
 }
 
-function ToastItem({ message, type, onDismiss }: { message: string; type: "success" | "error" | "info"; onDismiss: () => void }) {
+const ToastItem = memo(function ToastItem({ id, message, type, removeToast }: { id: string; message: string; type: "success" | "error" | "info"; removeToast: (id: string) => void }) {
   const { t } = useTranslation();
+
+  const onDismiss = useCallback(() => removeToast(id), [id, removeToast]);
+
   useEffect(() => {
     const timer = setTimeout(onDismiss, 3500);
     return () => clearTimeout(timer);
   }, [onDismiss]);
 
-  const styles = {
-    success: "border-success/30 bg-success/10 text-success",
-    error: "border-error/30 bg-error/10 text-error",
-    info: "border-brand/30 bg-brand/10 text-brand",
-  };
-
-  const icons = {
-    success: <CheckCircle className="h-4 w-4 shrink-0" />,
-    error: <XCircle className="h-4 w-4 shrink-0" />,
-    info: <AlertCircle className="h-4 w-4 shrink-0" />,
-  };
-
   // Errors get role=alert (assertive) — they interrupt the current announcement.
   // Non-errors use role=status (polite) — they wait until the screen reader is idle.
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg animate-in slide-in-from-right-5 ${styles[type]}`}
+      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg animate-in slide-in-from-right-5 ${TOAST_STYLES[type]}`}
       role={type === "error" ? "alert" : "status"}
     >
-      {icons[type]}
+      {TOAST_ICONS[type]}
       <span className="text-sm font-bold">{message}</span>
       <button
         onClick={onDismiss}
@@ -57,4 +60,4 @@ function ToastItem({ message, type, onDismiss }: { message: string; type: "succe
       </button>
     </div>
   );
-}
+});

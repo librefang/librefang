@@ -105,6 +105,31 @@ fn is_no_reply(text: &str) -> bool {
     crate::silent_response::is_silent_response(text)
 }
 
+/// Classify a response as a progress-text leak: a short ellipsis-terminated
+/// acknowledgment the model sometimes emits *before* a tool call that the
+/// turn ended without ever producing.
+///
+/// Observed in production when Claude Code / Qwen Code hit an internal limit
+/// after emitting a verbal preamble (e.g. `"Waiting for the script to
+/// complete..."`, `"Let me check that..."`) without the corresponding
+/// `tool_use` block. Without this guard the runtime delivers the preamble
+/// to the channel as the agent's final reply, which reads as nonsense to
+/// the user (cron-triggered ynab report surfaced on Telegram as the
+/// literal string `"Waiting for the script to complete..."`).
+///
+/// Heuristic is intentionally narrow to avoid swallowing legitimate replies:
+/// - Trimmed length ≤ 120 chars (progress preambles are short)
+/// - Ends with `...` or `…`. Two-dot `..` is intentionally excluded —
+///   models almost never emit it deliberately, and skipping it avoids
+///   clipping truncated abbreviations like `"See p.."`.
+fn is_progress_text_leak(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.chars().count() > 120 {
+        return false;
+    }
+    t.ends_with("...") || t.ends_with("…")
+}
+
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
 /// expected to recover from cheaply on the next iteration (approval denials,
 /// sandbox rejections, modify-and-retry hints, argument-truncation nudges).
@@ -720,10 +745,9 @@ async fn execute_single_tool_call(
     }
 
     let effective_exec_policy = ctx.manifest.exec_policy.as_ref();
-    let tool_timeout = ctx
-        .kernel
-        .as_ref()
-        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
+    let tool_timeout = ctx.kernel.as_ref().map_or(TOOL_TIMEOUT_SECS, |k| {
+        k.tool_timeout_secs_for(&tool_call.name)
+    });
     let trace_start = Instant::now();
     let trace_timestamp = chrono::Utc::now();
     let result = match tokio::time::timeout(
@@ -1292,6 +1316,12 @@ pub struct AgentLoopResult {
     /// is recommended. The kernel checks this to trigger background skill
     /// creation/improvement suggestions. Threshold: 5+ tool calls.
     pub skill_evolution_suggested: bool,
+    /// Optional private message destined for the agent's owner (operator DM),
+    /// produced when the LLM invokes the `notify_owner` tool during the turn.
+    /// `None` means the model did not request an owner-side notification.
+    /// Multiple notify_owner calls in the same turn are concatenated with
+    /// "\n\n" by the tool handler before being placed here.
+    pub owner_notice: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1640,6 +1670,7 @@ struct PromptSetupContext<'a> {
 struct PreparedMessages {
     messages: Vec<Message>,
     new_messages_start: usize,
+    repair_stats: crate::session_repair::RepairStats,
 }
 
 struct FinalizeEndTurnContext<'a> {
@@ -1670,6 +1701,9 @@ struct FinalizeEndTurnResultData {
     experiment_context: Option<ExperimentContext>,
     directives: librefang_types::message::ReplyDirectives,
     new_messages_start: usize,
+    /// Accumulated owner notices captured during this turn via the
+    /// `notify_owner` tool. Multiple invocations join with "\n\n".
+    owner_notice: Option<String>,
 }
 
 struct EndTurnRetryContext<'a> {
@@ -1967,7 +2001,8 @@ fn prepare_llm_messages(
         .cloned()
         .collect();
 
-    let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
+    let (mut messages, repair_stats) =
+        crate::session_repair::validate_and_repair_with_stats(&llm_messages);
 
     if let Some(cc_msg) = manifest
         .metadata
@@ -2001,7 +2036,34 @@ fn prepare_llm_messages(
     PreparedMessages {
         messages,
         new_messages_start,
+        repair_stats,
     }
+}
+
+/// Emit a single structured log line summarizing any repairs that session
+/// repair applied to the outgoing message history. Silent when the history
+/// was already well-formed (stats equal to default).
+fn log_repair_stats(
+    manifest: &AgentManifest,
+    session: &Session,
+    stats: &crate::session_repair::RepairStats,
+) {
+    if stats == &crate::session_repair::RepairStats::default() {
+        return;
+    }
+    info!(
+        agent = %manifest.name,
+        session_id = %session.id,
+        orphaned = stats.orphaned_results_removed,
+        empty = stats.empty_messages_removed,
+        merged = stats.messages_merged,
+        reordered = stats.results_reordered,
+        synthetic = stats.synthetic_results_inserted,
+        duplicates = stats.duplicates_removed,
+        rescued = stats.misplaced_results_rescued,
+        positional_synthetic = stats.positional_synthetic_inserted,
+        "Session repair applied fixes before LLM call"
+    );
 }
 
 /// Check if web search augmentation should be performed for this agent.
@@ -2218,6 +2280,7 @@ fn build_silent_agent_loop_result(
         latency_ms: 0,
         new_messages_start,
         skill_evolution_suggested: false,
+        owner_notice: None,
     }
 }
 
@@ -2430,9 +2493,8 @@ async fn finalize_successful_end_turn(
         experiment_context: end_turn.experiment_context,
         latency_ms: 0,
         new_messages_start: end_turn.new_messages_start,
-        // Suggest skill evolution when the agent used 5+ tool calls,
-        // indicating a non-trivial task that might be worth saving as a skill.
         skill_evolution_suggested: tool_call_count >= 5,
+        owner_notice: end_turn.owner_notice.clone(),
     })
 }
 
@@ -2636,12 +2698,14 @@ pub async fn run_agent_loop(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
+        repair_stats,
     } = prepare_llm_messages(
         manifest,
         session,
         &effective_user_message,
         memory_context_msg,
     );
+    log_repair_stats(manifest, session, &repair_stats);
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
@@ -2699,6 +2763,9 @@ pub async fn run_agent_loop(
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
+    // §A — accumulated owner_notice payloads from notify_owner tool calls.
+    // Multiple invocations in the same turn are joined with "\n\n".
+    let mut pending_owner_notice: Option<String> = None;
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
@@ -3029,6 +3096,39 @@ pub async fn run_agent_loop(
                     ));
                 }
 
+                // Progress-text-leak guard: model emitted a short ellipsis-
+                // terminated acknowledgment ("Waiting for the script to
+                // complete...") but the turn ended without producing the
+                // tool call that preamble was introducing. Surfacing this
+                // to the channel reads as nonsense; drop as silent and let
+                // the operator retrigger.
+                if response.tool_calls.is_empty()
+                    && !tools_recovered_from_text
+                    && is_progress_text_leak(&text)
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        text_excerpt = %text.chars().take(80).collect::<String>(),
+                        "Progress-text leak detected (ellipsis-terminated short reply without tool_use) — dropping as silent"
+                    );
+                    session
+                        .messages
+                        .push(Message::assistant("[no reply needed]".to_string()));
+                    memory
+                        .save_session_async(session)
+                        .await
+                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    return Ok(build_silent_agent_loop_result(
+                        total_usage,
+                        iteration + 1,
+                        parsed_directives,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    ));
+                }
+
                 match classify_end_turn_retry(EndTurnRetryContext {
                     text: &text,
                     response: &response,
@@ -3128,6 +3228,7 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         directives: reply_directives_from_parsed(parsed_directives),
                         new_messages_start,
+                        owner_notice: pending_owner_notice.take(),
                     },
                 )
                 .await;
@@ -3190,6 +3291,14 @@ pub async fn run_agent_loop(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+
+                    // §A — capture owner_notice side-channel from notify_owner tool.
+                    if let Some(ref notice) = executed.result.owner_notice {
+                        pending_owner_notice = Some(match pending_owner_notice.take() {
+                            Some(prev) => format!("{prev}\n\n{notice}"),
+                            None => notice.clone(),
+                        });
+                    }
 
                     // Layer 2: per-result budget — persist oversized outputs to disk.
                     let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
@@ -3372,6 +3481,7 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -3864,12 +3974,14 @@ pub async fn run_agent_loop_streaming(
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
+        repair_stats,
     } = prepare_llm_messages(
         manifest,
         session,
         &effective_user_message,
         memory_context_msg,
     );
+    log_repair_stats(manifest, session, &repair_stats);
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
@@ -3926,6 +4038,9 @@ pub async fn run_agent_loop_streaming(
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
+    // §A — accumulated owner_notice payloads from notify_owner tool calls.
+    // Multiple invocations in the same turn are joined with "\n\n".
+    let mut pending_owner_notice: Option<String> = None;
     let mut hallucination_retried = false;
     let mut action_nudge_retried = false;
     let mut consecutive_all_failed: u32 = 0;
@@ -4304,6 +4419,36 @@ pub async fn run_agent_loop_streaming(
                     ));
                 }
 
+                // Progress-text-leak guard (streaming path) — see non-stream
+                // mirror above. Drops ellipsis-terminated short preambles
+                // that arrive without the promised tool_use.
+                if response.tool_calls.is_empty()
+                    && !tools_recovered_from_text
+                    && is_progress_text_leak(&text)
+                {
+                    warn!(
+                        agent = %manifest.name,
+                        text_excerpt = %text.chars().take(80).collect::<String>(),
+                        "Progress-text leak detected (streaming, ellipsis-terminated short reply without tool_use) — dropping as silent"
+                    );
+                    session
+                        .messages
+                        .push(Message::assistant("[no reply needed]".to_string()));
+                    memory
+                        .save_session_async(session)
+                        .await
+                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    return Ok(build_silent_agent_loop_result(
+                        total_usage,
+                        iteration + 1,
+                        parsed_directives_s,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    ));
+                }
+
                 match classify_end_turn_retry(EndTurnRetryContext {
                     text: &text,
                     response: &response,
@@ -4402,6 +4547,7 @@ pub async fn run_agent_loop_streaming(
                         experiment_context,
                         directives: reply_directives_from_parsed(parsed_directives_s),
                         new_messages_start,
+                        owner_notice: pending_owner_notice.take(),
                     },
                 )
                 .await;
@@ -4460,6 +4606,25 @@ pub async fn run_agent_loop_streaming(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+
+                    // §A — capture owner_notice from notify_owner tool and
+                    // surface it on the live SSE stream so the gateway can
+                    // route it to OWNER_JID without waiting for turn end.
+                    if let Some(ref notice) = executed.result.owner_notice {
+                        pending_owner_notice = Some(match pending_owner_notice.take() {
+                            Some(prev) => format!("{prev}\n\n{notice}"),
+                            None => notice.clone(),
+                        });
+                        if stream_tx
+                            .send(StreamEvent::OwnerNotice {
+                                text: notice.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
+                    }
 
                     // Layer 2: per-result budget — persist oversized outputs to disk.
                     let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
@@ -4639,6 +4804,7 @@ pub async fn run_agent_loop_streaming(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         new_messages_start,
+                        owner_notice: None,
                     });
                 }
                 let text = response.text();
@@ -5421,15 +5587,44 @@ mod tests {
         assert!(is_no_reply("[no reply needed]"));
         assert!(is_no_reply("Some context. [no reply needed]"));
 
-        // Unbracketed variant the model sometimes emits
+        // Unbracketed variant — exact match only (ends_with dropped to avoid prose false-positives)
         assert!(is_no_reply("no reply needed"));
-        assert!(is_no_reply("context here\nno reply needed"));
 
         // Negatives — real responses must never be silenced
         assert!(!is_no_reply(""));
         assert!(!is_no_reply("Just replying normally."));
         assert!(!is_no_reply("NO_REPLY is my favorite token")); // prefix, not suffix
         assert!(!is_no_reply("no reply needed? let me check")); // doesn't end with marker
+        assert!(!is_no_reply("I filed the bug; no reply needed")); // prose ending — not a sentinel
+        assert!(!is_no_reply("context here\nno reply needed")); // multi-line prose ending
+    }
+
+    #[test]
+    fn test_is_progress_text_leak() {
+        // Real production leak — ellipsis-terminated preamble with no tool_use
+        assert!(is_progress_text_leak(
+            "Waiting for the script to complete..."
+        ));
+        assert!(is_progress_text_leak("Let me check that..."));
+        assert!(is_progress_text_leak("Processing..."));
+        assert!(is_progress_text_leak("One moment…"));
+        assert!(is_progress_text_leak("   Checking...   ")); // whitespace
+
+        // Negatives — real replies must never be flagged as leaks
+        assert!(!is_progress_text_leak(""));
+        assert!(!is_progress_text_leak("Done."));
+        assert!(!is_progress_text_leak("Here is the result."));
+        // Two-dot `..` is intentionally not a trigger (too broad, catches
+        // truncated abbreviations). See the `is_progress_text_leak` doc.
+        assert!(!is_progress_text_leak("Running.."));
+        assert!(!is_progress_text_leak("See p.."));
+        // Not an ellipsis, real reply
+        assert!(!is_progress_text_leak("The script ran successfully."));
+        // Over 120 chars — even ending with ellipsis, treat as real content
+        let long =
+            "This is a much longer response where the model actually produced a full explanation of what it did and the ellipsis at the end is just stylistic...";
+        assert!(long.chars().count() > 120);
+        assert!(!is_progress_text_leak(long));
     }
 
     #[test]
@@ -5506,6 +5701,8 @@ mod tests {
             "ws.rs",                   // librefang-api ws: doc comment only
             "purge_sentinels.rs", // CLI binary that *removes* the literal — delegates to canonical detector
             "purge_sentinels_test.rs", // fixtures for the CLI
+            "lib.rs",             // librefang-types: legacy is_no_reply_sentinel compat shim
+            "mod.rs",             // librefang-kernel: inline comment only
         ];
         let offenders: Vec<&str> = stdout
             .lines()
@@ -6332,6 +6529,7 @@ mod tests {
         let PreparedMessages {
             messages,
             new_messages_start,
+            ..
         } = prepare_llm_messages(
             &manifest,
             &mut session,
@@ -9414,6 +9612,28 @@ mod tests {
         assert_eq!(
             manifest.web_search_augmentation,
             librefang_types::agent::WebSearchAugmentationMode::Auto,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AgentLoopResult.owner_notice (§A — owner-notify channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn agent_loop_result_owner_notice_defaults_none() {
+        let r = AgentLoopResult::default();
+        assert!(r.owner_notice.is_none());
+    }
+
+    #[test]
+    fn agent_loop_result_owner_notice_can_be_set() {
+        let r = AgentLoopResult {
+            owner_notice: Some("Sir, the appointment is at 3pm.".into()),
+            ..AgentLoopResult::default()
+        };
+        assert_eq!(
+            r.owner_notice.as_deref(),
+            Some("Sir, the appointment is at 3pm.")
         );
     }
 }

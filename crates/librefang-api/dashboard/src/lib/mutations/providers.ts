@@ -5,44 +5,41 @@ import {
   deleteProviderKey,
   setProviderUrl,
   setDefaultProvider,
-} from "../../api";
+} from "../http/client";
 import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
+// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
 export function useTestProvider() {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: testProvider,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: providerKeys.all });
-    },
   });
 }
 
 export function useSetProviderKey() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, key }: { id: string; key: string }) =>
       setProviderKey(id, key),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: providerKeys.all });
-      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
 
 export function useDeleteProviderKey() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deleteProviderKey(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: providerKeys.all });
-      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
 
 export function useSetProviderUrl() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({
       id,
@@ -54,21 +51,21 @@ export function useSetProviderUrl() {
       proxyUrl?: string;
     }) => setProviderUrl(id, baseUrl, proxyUrl),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: providerKeys.all });
-      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
 
 export function useSetDefaultProvider() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, model }: { id: string; model?: string }) =>
       setDefaultProvider(id, model),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: providerKeys.all });
-      queryClient.invalidateQueries({ queryKey: modelKeys.lists() });
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.status() });
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.status() });
     },
   });
 }

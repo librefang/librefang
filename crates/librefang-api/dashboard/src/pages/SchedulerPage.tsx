@@ -402,6 +402,7 @@ export function SchedulerPage() {
             </div>
             {showCronPicker && (
               <ScheduleModal
+                isOpen={true}
                 title={t("scheduler.cron_exp")}
                 initialCron={cron}
                 initialTz={cronTz}

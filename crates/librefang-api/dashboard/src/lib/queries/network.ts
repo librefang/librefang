@@ -5,6 +5,7 @@ import {
   listA2AAgents,
 } from "../http/client";
 import { networkKeys, peerKeys, a2aKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 15_000;
 const STALE_MS = 30_000;
@@ -33,14 +34,14 @@ export const networkQueries = {
     }),
 };
 
-export function useNetworkStatus() {
-  return useQuery(networkQueries.status());
+export function useNetworkStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(networkQueries.status(), options));
 }
 
-export function usePeers() {
-  return useQuery(networkQueries.peers());
+export function usePeers(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(networkQueries.peers(), options));
 }
 
-export function useA2AAgents() {
-  return useQuery(networkQueries.a2aAgents());
+export function useA2AAgents(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(networkQueries.a2aAgents(), options));
 }

@@ -727,6 +727,7 @@ export function WorkflowsPage() {
       {/* Schedule Modal */}
       {scheduleWorkflowId && (
           <ScheduleModal
+            isOpen={true}
             title={t("nav.scheduler")}
             subtitle={scheduledWf?.name}
             initialCron={getWorkflowSchedule(scheduledWf ?? { id: "", name: "" })?.cron || "0 9 * * *"}

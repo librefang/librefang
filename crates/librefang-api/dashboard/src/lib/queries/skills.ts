@@ -15,16 +15,11 @@ import {
   fanghubListSkills,
 } from "../http/client";
 import { skillKeys, clawhubKeys, clawhubCnKeys, skillhubKeys, fanghubKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
 const BROWSE_STALE_MS = 60_000;
-
-type UseSkillOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
 
 export const skillQueries = {
   list: () =>
@@ -66,6 +61,7 @@ export const skillQueries = {
       queryKey: clawhubKeys.detail(slug),
       queryFn: () => clawhubGetSkill(slug),
       enabled: !!slug,
+      staleTime: BROWSE_STALE_MS,
     }),
   clawhubCnBrowse: (sort?: string, limit?: number, cursor?: string) =>
     queryOptions({
@@ -104,6 +100,7 @@ export const skillQueries = {
       queryKey: skillhubKeys.detail(slug),
       queryFn: () => skillhubGetSkill(slug),
       enabled: !!slug,
+      staleTime: BROWSE_STALE_MS,
     }),
   fanghubList: () =>
     queryOptions({
@@ -113,58 +110,46 @@ export const skillQueries = {
     }),
 };
 
-export function useSkills() {
-  return useQuery(skillQueries.list());
+export function useSkills(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.list(), options));
 }
 
-export function useSkillDetail(name: string, options: UseSkillOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...skillQueries.detail(name),
-    enabled: enabled ?? Boolean(name),
-    staleTime: staleTime ?? STALE_MS,
-    refetchInterval: refetchInterval ?? false,
-  });
+export function useSkillDetail(name: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.detail(name), options));
 }
 
 export function useSupportingFile(
   name: string,
   path: string,
-  options: UseSkillOptions = {},
+  options: QueryOverrides = {},
 ) {
-  const { enabled, staleTime, refetchInterval } = options;
-  return useQuery({
-    ...skillQueries.supportingFile(name, path),
-    enabled: enabled ?? (Boolean(name) && Boolean(path)),
-    staleTime: staleTime ?? STALE_MS,
-    refetchInterval: refetchInterval ?? false,
-  });
+  return useQuery(withOverrides(skillQueries.supportingFile(name, path), options));
 }
 
-export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string) {
-  return useQuery(skillQueries.clawhubBrowse(sort, limit, cursor));
+export function useClawHubBrowse(sort?: string, limit?: number, cursor?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.clawhubBrowse(sort, limit, cursor), options));
 }
 
-export function useClawHubSearch(query: string) {
-  return useQuery(skillQueries.clawhubSearch(query));
+export function useClawHubSearch(query: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.clawhubSearch(query), options));
 }
 
-export function useClawHubSkill(slug: string) {
-  return useQuery(skillQueries.clawhubSkill(slug));
+export function useClawHubSkill(slug: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.clawhubSkill(slug), options));
 }
 
-export function useSkillHubBrowse(sort?: string) {
-  return useQuery(skillQueries.skillhubBrowse(sort));
+export function useSkillHubBrowse(sort?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.skillhubBrowse(sort), options));
 }
 
-export function useSkillHubSearch(query: string) {
-  return useQuery(skillQueries.skillhubSearch(query));
+export function useSkillHubSearch(query: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.skillhubSearch(query), options));
 }
 
-export function useSkillHubSkill(slug: string) {
-  return useQuery(skillQueries.skillhubSkill(slug));
+export function useSkillHubSkill(slug: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.skillhubSkill(slug), options));
 }
 
-export function useFangHubSkills() {
-  return useQuery(skillQueries.fanghubList());
+export function useFangHubSkills(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.fanghubList(), options));
 }

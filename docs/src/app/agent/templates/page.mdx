@@ -181,6 +181,13 @@ memory_write = ["self.*"]           # Memory namespaces agent can write
 agent_spawn = true                  # Can this agent spawn other agents?
 agent_message = ["*"]               # Which agents can it message?
 shell = ["python *", "cargo *"]     # Allowed shell command patterns (whitelist)
+
+# Named shared workspaces (optional).
+# Multiple agents can declare the same path — they share the directory
+# without identity-file collisions. Paths are relative to workspaces_dir.
+# [workspaces]
+# library = { path = "shared/library", mode = "rw" }
+# archive = { path = "shared/archive", mode = "r"  }
 ```
 
 ### Available Tools
@@ -207,6 +214,55 @@ shell = ["python *", "cargo *"]     # Allowed shell command patterns (whitelist)
 4. **Use shell whitelists**. Never grant `shell = ["*"]`. Whitelist specific command patterns like `shell = ["python *", "cargo test *"]`.
 5. **Set token budgets**. Use `max_llm_tokens_per_hour` to prevent runaway costs. Start with 100,000 and adjust based on usage.
 6. **Use memory for continuity**. Grant `memory_store` and `memory_recall` so the agent can persist context across sessions.
+
+---
+
+## Agent Workspace
+
+Every agent gets a private home directory under `~/.librefang/workspaces/agents/<name>/`. The kernel writes identity files here on first spawn:
+
+```
+workspaces/agents/librarian/
+├── .identity/          ← identity files (managed by kernel)
+│   ├── SOUL.md         ← personality & mission
+│   ├── IDENTITY.md     ← visual identity (emoji, color, vibe)
+│   ├── USER.md         ← learned user preferences
+│   ├── TOOLS.md        ← tool & environment notes
+│   ├── MEMORY.md       ← long-term memory
+│   ├── AGENTS.md       ← behavioral guidelines
+│   └── BOOTSTRAP.md    ← first-run protocol
+├── sessions/           ← conversation history
+├── memory/             ← daily memory logs
+├── data/               ← agent-specific data
+├── output/             ← generated output files
+├── skills/             ← agent-specific skills
+└── logs/               ← agent logs
+```
+
+You can freely edit any file in `.identity/` — the kernel uses `create_new` and will never overwrite your edits.
+
+### Shared Workspaces
+
+Use `[workspaces]` to give multiple agents access to a shared directory without any collision. Each agent keeps its own private home; only the declared shared paths are shared.
+
+```toml
+# librarian/agent.toml
+[workspaces]
+library = { path = "shared/library", mode = "rw" }
+
+# researcher/agent.toml
+[workspaces]
+library = { path = "shared/library", mode = "r" }   # read-only
+```
+
+The kernel creates the directories on spawn and injects their resolved paths into `TOOLS.md`:
+
+```
+## Shared Workspaces
+- @library → /home/you/.librefang/workspaces/shared/library (read-write)
+```
+
+**Modes**: `rw` (read-write, default) or `r` (read-only). Paths are relative to `workspaces_dir` and must not be absolute or contain `..`.
 
 ---
 

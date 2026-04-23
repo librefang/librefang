@@ -9,6 +9,7 @@ import {
   getExperimentMetrics,
 } from "../http/client";
 import { agentKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
@@ -26,6 +27,7 @@ export const agentQueries = {
       queryKey: agentKeys.detail(agentId),
       queryFn: () => getAgentDetail(agentId),
       enabled: !!agentId,
+      staleTime: 30_000,
     }),
   sessions: (agentId: string) =>
     queryOptions({
@@ -59,30 +61,33 @@ export const agentQueries = {
     }),
 };
 
-export function useAgents(opts: { includeHands?: boolean } = {}) {
-  return useQuery(agentQueries.list(opts));
+export function useAgents(
+  opts: { includeHands?: boolean } = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(agentQueries.list(opts), options));
 }
 
-export function useAgentDetail(agentId: string) {
-  return useQuery(agentQueries.detail(agentId));
+export function useAgentDetail(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.detail(agentId), options));
 }
 
-export function useAgentSessions(agentId: string) {
-  return useQuery(agentQueries.sessions(agentId));
+export function useAgentSessions(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.sessions(agentId), options));
 }
 
-export function useAgentTemplates(options: { enabled?: boolean } = {}) {
-  return useQuery({ ...agentQueries.templates(), enabled: options.enabled });
+export function useAgentTemplates(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.templates(), options));
 }
 
-export function usePromptVersions(agentId: string) {
-  return useQuery(agentQueries.promptVersions(agentId));
+export function usePromptVersions(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.promptVersions(agentId), options));
 }
 
-export function useExperiments(agentId: string) {
-  return useQuery(agentQueries.experiments(agentId));
+export function useExperiments(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.experiments(agentId), options));
 }
 
-export function useExperimentMetrics(experimentId: string) {
-  return useQuery(agentQueries.experimentMetrics(experimentId));
+export function useExperimentMetrics(experimentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.experimentMetrics(experimentId), options));
 }

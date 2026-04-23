@@ -26,12 +26,13 @@ export function MultiSelectCmdk({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filteredOptions = useMemo(
-    () => options.filter(
-      (o) => !value.includes(o) && o.toLowerCase().includes(search.toLowerCase()),
-    ),
-    [options, value, search],
-  );
+  const filteredOptions = useMemo(() => {
+    const selected = new Set(value);
+    const searchLower = search.toLowerCase();
+    return options.filter(
+      (o) => !selected.has(o) && o.toLowerCase().includes(searchLower),
+    );
+  }, [options, value, search]);
 
   const focusInput = useCallback(() => {
     inputRef.current?.focus();
@@ -150,6 +151,9 @@ export function MultiSelectCmdk({
           {isOpen && (
             <Command.List
               ref={listRef}
+              role="listbox"
+              aria-multiselectable="true"
+              aria-label={t("common.select_options", { defaultValue: "Select options" })}
               className={`absolute left-0 right-0 z-50 max-h-60 overflow-y-auto rounded-xl border border-border-subtle bg-surface shadow-lg ${openAbove ? "bottom-full mb-1" : "top-full mt-1"}`}
               onMouseDown={(e) => e.preventDefault()}
             >
@@ -160,6 +164,8 @@ export function MultiSelectCmdk({
                 <Command.Item
                   key={option}
                   value={option}
+                  role="option"
+                  aria-selected={false}
                   onSelect={select}
                   className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
                 >

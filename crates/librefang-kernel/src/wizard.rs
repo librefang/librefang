@@ -176,6 +176,7 @@ impl SetupWizard {
             pinned_model: None,
             workspace: None,
             generate_identity_files: true,
+            workspaces: HashMap::new(),
             profile: None,
             fallback_models: vec![],
             exec_policy: None,

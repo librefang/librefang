@@ -350,6 +350,16 @@ pub async fn execute_tool_raw(
     ctx: &ToolExecContext<'_>,
 ) -> ToolResult {
     let tool_name = normalize_tool_name(tool_name);
+
+    // §A — notify_owner is dispatched before the result-string wrapper so it
+    // can carry a structured `owner_notice` side-channel back to the agent
+    // loop. The model sees only an opaque ack in `content` (so it cannot echo
+    // the private summary in a public reply); the real payload travels in
+    // `ToolResult.owner_notice` and is consumed by `agent_loop.rs`.
+    if tool_name == "notify_owner" {
+        return tool_notify_owner(tool_use_id, input);
+    }
+
     let ToolExecContext {
         kernel,
         allowed_tools,
@@ -379,6 +389,26 @@ pub async fn execute_tool_raw(
         // Filesystem tools
         "file_read" => tool_file_read(input, *workspace_root).await,
         "file_write" => {
+            // Enforce named workspace read-only restrictions before the sandbox resolves the path.
+            // Agents learn absolute workspace paths from TOOLS.md; an absolute path that falls
+            // inside a read-only named workspace must be rejected here.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let raw = input["path"].as_str().unwrap_or("");
+                if Path::new(raw).is_absolute() {
+                    let ro = k.readonly_workspace_prefixes(agent_id);
+                    if ro.iter().any(|prefix| Path::new(raw).starts_with(prefix)) {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Write denied: '{}' is in a read-only named workspace",
+                                raw
+                            ),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
             tool_file_write(input, *workspace_root).await
         }
@@ -598,7 +628,9 @@ pub async fn execute_tool_raw(
         "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
-        "schedule_create" => tool_schedule_create(input, *kernel, *caller_agent_id).await,
+        "schedule_create" => {
+            tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id).await
+        }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel).await,
 
@@ -658,7 +690,7 @@ pub async fn execute_tool_raw(
         "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
         // Cron scheduling tools
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id).await,
+        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
@@ -1185,6 +1217,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default: 30)" }
                 },
                 "required": ["command"]
+            }),
+        },
+        // --- Owner-side channel ---
+        ToolDefinition {
+            name: "notify_owner".to_string(),
+            description: "Send a private notice to the agent's owner (operator DM) WITHOUT posting it to the source chat. Use this in groups when you have something to tell the owner that should not be visible to other participants. Returns an opaque ack — do NOT repeat the summary in your public reply.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Short machine-readable category, e.g. 'confirmation_needed', 'stranger_request', 'escalation'."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Human-readable message body addressed to the owner."
+                    }
+                },
+                "required": ["reason", "summary"]
             }),
         },
         // --- Inter-agent tools ---
@@ -2685,6 +2736,63 @@ fn tool_agent_kill(
     Ok(format!("Agent {agent_id} killed successfully."))
 }
 
+/// `notify_owner(reason, summary)` — typed channel for owner-only speech.
+///
+/// Records the `summary` in `ToolResult.owner_notice` so the agent loop can
+/// route it to the operator's DM (e.g. WhatsApp `OWNER_JID`) instead of the
+/// source chat. Returns an opaque, model-visible acknowledgement so the LLM
+/// does NOT see (and therefore cannot leak) the private summary back into a
+/// public reply.
+///
+/// Errors are returned via `ToolResult.is_error = true` with a descriptive
+/// message; the model is expected to retry with corrected arguments.
+fn tool_notify_owner(tool_use_id: &str, input: &serde_json::Value) -> ToolResult {
+    let reason = input
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let summary = input
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    if reason.is_empty() || summary.is_empty() {
+        return ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: "Error: notify_owner requires non-empty 'reason' and 'summary' string fields."
+                .to_string(),
+            is_error: true,
+            ..Default::default()
+        };
+    }
+
+    // Compose the owner-side payload. The reason is prefixed so the operator
+    // can scan a long stream of notices without parsing the body. Format:
+    //     🎩 {reason}: {summary}
+    let owner_payload = format!("🎩 {reason}: {summary}");
+
+    // Structured log per OBS-01 — dispatch decision is recorded even before
+    // the gateway fans it out. Target JID(s) are resolved downstream.
+    tracing::info!(
+        event = "owner_notify",
+        reason = %reason,
+        summary_len = summary.len(),
+        "notify_owner tool invoked"
+    );
+
+    ToolResult {
+        tool_use_id: tool_use_id.to_string(),
+        // Opaque ack — intentionally devoid of summary content.
+        content: "Notice queued for the owner. Do not repeat the summary in your public reply."
+            .to_string(),
+        is_error: false,
+        owner_notice: Some(owner_payload),
+        ..Default::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared memory tools
 // ---------------------------------------------------------------------------
@@ -3175,6 +3283,7 @@ async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_create")?;
@@ -3208,12 +3317,24 @@ async fn tool_schedule_create(
     } else {
         serde_json::json!({ "kind": "cron", "expr": cron_expr })
     };
-    let job_json = serde_json::json!({
+    let mut job_json = serde_json::json!({
         "name": name,
         "schedule": schedule,
         "action": { "kind": "agent_turn", "message": message },
         "delivery": { "kind": "none" },
     });
+    if let Some(obj) = job_json.as_object_mut() {
+        if !obj.contains_key("peer_id") {
+            if let Some(pid) = sender_id {
+                if !pid.is_empty() {
+                    obj.insert(
+                        "peer_id".to_string(),
+                        serde_json::Value::String(pid.to_string()),
+                    );
+                }
+            }
+        }
+    }
 
     let result = kh.cron_create(agent_id, job_json).await?;
     Ok(format!(
@@ -3275,10 +3396,20 @@ async fn tool_cron_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_create")?;
-    kh.cron_create(agent_id, input.clone()).await
+    let mut job = input.clone();
+    if let (Some(pid), Some(obj)) = (sender_id, job.as_object_mut()) {
+        if !pid.is_empty() && !obj.contains_key("peer_id") {
+            obj.insert(
+                "peer_id".to_string(),
+                serde_json::Value::String(pid.to_string()),
+            );
+        }
+    }
+    kh.cron_create(agent_id, job).await
 }
 
 async fn tool_cron_list(
@@ -7921,6 +8052,58 @@ description = "test"
             .unwrap();
         assert!(result.contains("truncated"));
         // Must not panic — the point of this test
+    }
+    // -----------------------------------------------------------------------
+    // notify_owner tool (§A — owner-side channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn notify_owner_tool_is_registered_in_builtins() {
+        let defs = builtin_tool_definitions();
+        let notify = defs.iter().find(|d| d.name == "notify_owner");
+        assert!(
+            notify.is_some(),
+            "notify_owner must appear in builtin_tool_definitions"
+        );
+        let schema = &notify.unwrap().input_schema;
+        let required = schema["required"].as_array().expect("required array");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"reason"));
+        assert!(names.contains(&"summary"));
+    }
+
+    #[test]
+    fn notify_owner_tool_sets_owner_notice_and_opaque_ack() {
+        let input = serde_json::json!({
+            "reason": "confirmation_needed",
+            "summary": "Caterina has asked for confirmation of the appointment."
+        });
+        let r = tool_notify_owner("toolu_1", &input);
+        assert!(!r.is_error, "notify_owner should not be an error: {r:?}");
+        assert_eq!(r.tool_use_id, "toolu_1");
+        // Owner-side payload populated with prefixed reason.
+        let payload = r.owner_notice.as_deref().expect("owner_notice set");
+        assert!(payload.contains("confirmation_needed"));
+        assert!(payload.contains("Caterina"));
+        // Opaque ack does NOT echo the summary back to the model.
+        assert!(!r.content.contains("Caterina"));
+        assert!(!r.content.contains("confirmation_needed"));
+    }
+
+    #[test]
+    fn notify_owner_tool_rejects_empty_args() {
+        let cases = vec![
+            serde_json::json!({"reason": "", "summary": "x"}),
+            serde_json::json!({"reason": "x", "summary": ""}),
+            serde_json::json!({"reason": "x"}),
+            serde_json::json!({"summary": "x"}),
+            serde_json::json!({}),
+        ];
+        for input in cases {
+            let r = tool_notify_owner("t", &input);
+            assert!(r.is_error, "expected error for input {input:?}");
+            assert!(r.owner_notice.is_none());
+        }
     }
 }
 

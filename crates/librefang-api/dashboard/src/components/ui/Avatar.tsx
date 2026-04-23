@@ -1,4 +1,4 @@
-import { type HTMLAttributes } from "react";
+import { type HTMLAttributes, memo, useState } from "react";
 
 type AvatarSize = "sm" | "md" | "lg" | "xl";
 
@@ -24,15 +24,19 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-export function Avatar({
+export const Avatar = memo(function Avatar({
   className = "",
   fallback,
   size = "md",
   src,
   ...props
 }: AvatarProps) {
+  const [imgError, setImgError] = useState(false);
+
   return (
     <div
+      role="img"
+      aria-label={fallback}
       className={`
         relative flex shrink-0 items-center justify-center
         rounded-full bg-brand/10 text-brand font-black
@@ -42,11 +46,17 @@ export function Avatar({
       `}
       {...props}
     >
-      {src ? (
-        <img src={src} alt={fallback} className="h-full w-full object-cover" />
+      {src && !imgError ? (
+        <img
+          src={src}
+          alt={fallback}
+          loading="lazy"
+          onError={() => setImgError(true)}
+          className="h-full w-full object-cover"
+        />
       ) : (
         getInitials(fallback)
       )}
     </div>
   );
-}
+});

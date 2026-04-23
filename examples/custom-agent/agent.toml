@@ -28,3 +28,10 @@ tools = ["web_fetch", "file_read", "file_list"]
 memory_read = ["self.*"]
 memory_write = ["self.*"]
 agent_spawn = false
+
+# Named shared workspaces (optional).
+# Multiple agents can declare the same path — they share the directory
+# without identity-file collisions. Paths are relative to workspaces_dir.
+# [workspaces]
+# library = { path = "shared/library", mode = "rw" }
+# archive = { path = "shared/archive", mode = "r"  }

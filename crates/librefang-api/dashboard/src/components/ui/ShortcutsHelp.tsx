@@ -17,27 +17,33 @@ const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["Esc"], label: "Close dialog / modal" },
 ];
 
+const NAV_ENTRIES = Object.entries(G_NAV_SHORTCUTS);
+
+const KBD_CLASS =
+  "inline-flex h-6 min-w-[24px] items-center justify-center rounded border border-border-subtle bg-main px-1.5 text-[10px] font-mono font-semibold text-text-dim";
+
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(isOpen, dialogRef, true);
 
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const navEntries = Object.entries(G_NAV_SHORTCUTS);
-
   return (
     <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" onClick={onClose} />
       <div
         ref={dialogRef}
         role="dialog"
@@ -70,10 +76,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
                   <span className="text-xs text-text-dim">{s.label}</span>
                   <div className="flex items-center gap-1">
                     {s.keys.map((k, i) => (
-                      <kbd
-                        key={i}
-                        className="inline-flex h-6 min-w-[24px] items-center justify-center rounded border border-border-subtle bg-main px-1.5 text-[10px] font-mono font-semibold text-text-dim"
-                      >
+                      <kbd key={i} className={KBD_CLASS}>
                         {k}
                       </kbd>
                     ))}
@@ -88,14 +91,14 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
               Navigate (press <kbd className="inline-flex h-5 items-center rounded border border-border-subtle bg-main px-1 font-mono text-[9px]">g</kbd> then…)
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
-              {navEntries.map(([key, { label }]) => (
+              {NAV_ENTRIES.map(([key, { label }]) => (
                 <div key={key} className="flex items-center justify-between py-1">
                   <span className="text-xs text-text-dim">{label}</span>
                   <div className="flex items-center gap-1">
-                    <kbd className="inline-flex h-6 min-w-[24px] items-center justify-center rounded border border-border-subtle bg-main px-1.5 text-[10px] font-mono font-semibold text-text-dim">
+                    <kbd className={KBD_CLASS}>
                       g
                     </kbd>
-                    <kbd className="inline-flex h-6 min-w-[24px] items-center justify-center rounded border border-border-subtle bg-main px-1.5 text-[10px] font-mono font-semibold text-text-dim">
+                    <kbd className={KBD_CLASS}>
                       {key}
                     </kbd>
                   </div>
