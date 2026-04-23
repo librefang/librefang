@@ -1261,6 +1261,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         message: message.clone(),
                         model_override: None,
                         timeout_secs: None,
+                        pre_check_script: None,
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
                     peer_id: None,

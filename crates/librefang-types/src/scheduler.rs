@@ -680,6 +680,7 @@ mod tests {
             message: String::new(),
             model_override: None,
             timeout_secs: None,
+            pre_check_script: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("empty"), "{err}");
@@ -692,6 +693,7 @@ mod tests {
             message: "x".repeat(16_385),
             model_override: None,
             timeout_secs: None,
+            pre_check_script: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too long"), "{err}");
@@ -704,6 +706,7 @@ mod tests {
             message: "hello".into(),
             model_override: None,
             timeout_secs: Some(9),
+            pre_check_script: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too small"), "{err}");
@@ -716,6 +719,7 @@ mod tests {
             message: "hello".into(),
             model_override: None,
             timeout_secs: Some(601),
+            pre_check_script: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too large"), "{err}");
@@ -728,6 +732,7 @@ mod tests {
             message: "hello".into(),
             model_override: Some("claude-haiku-4-5-20251001".into()),
             timeout_secs: Some(10),
+            pre_check_script: None,
         };
         assert!(job.validate(0).is_ok());
 
@@ -735,6 +740,7 @@ mod tests {
             message: "hello".into(),
             model_override: None,
             timeout_secs: Some(600),
+            pre_check_script: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -746,6 +752,7 @@ mod tests {
             message: "hello".into(),
             model_override: None,
             timeout_secs: None,
+            pre_check_script: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -874,6 +881,7 @@ mod tests {
             message: "hi".into(),
             model_override: None,
             timeout_secs: Some(30),
+            pre_check_script: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"kind\":\"agent_turn\""));
