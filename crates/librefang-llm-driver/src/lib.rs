@@ -409,6 +409,14 @@ pub struct DriverConfig {
     /// When set, the driver uses this proxy instead of the global proxy config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// Per-provider HTTP request timeout in seconds.
+    ///
+    /// When set, this overrides the HTTP client's default read timeout for LLM
+    /// API requests. Useful for providers known to be slower (e.g. local models,
+    /// long-context workloads). CLI-based providers use `message_timeout_secs`
+    /// instead; this field only applies to HTTP API drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -438,6 +446,7 @@ impl Default for DriverConfig {
             message_timeout_secs: default_message_timeout_secs(),
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         }
     }
 }
@@ -474,6 +483,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("message_timeout_secs", &self.message_timeout_secs)
             .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
+            .field("request_timeout_secs", &self.request_timeout_secs)
             .finish()
     }
 }

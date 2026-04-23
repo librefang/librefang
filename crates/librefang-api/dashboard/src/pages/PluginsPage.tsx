@@ -62,7 +62,7 @@ export function PluginsPage() {
   const [scaffoldRuntime, setScaffoldRuntime] = useState("python");
 
   const pluginsQuery = usePlugins();
-  const registriesQuery = usePluginRegistries(tab === "registry");
+  const registriesQuery = usePluginRegistries({ enabled: tab === "registry" });
 
   const addToast = useUIStore((s) => s.addToast);
   const installMutation = useInstallPlugin();

@@ -17,8 +17,6 @@ import {
   AlertTriangle, Clock, Brain, Database, Lock, Eye,
 } from "lucide-react";
 import {
-  useDashboardSnapshot,
-  useVersionInfo,
   useQueueStatus,
   useHealthDetail,
   useSecurityStatus,
@@ -28,6 +26,7 @@ import {
   useTaskQueueStatus,
   useTaskQueue,
 } from "../lib/queries/runtime";
+import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import {
   useShutdownServer,
   useCreateBackup,

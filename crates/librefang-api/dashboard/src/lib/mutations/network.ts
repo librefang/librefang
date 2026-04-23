@@ -10,6 +10,7 @@ export function useDiscoverA2AAgent() {
   });
 }
 
+// fire-and-forget: task status tracked locally in A2APage, no query cache affected
 export function useSendA2ATask() {
   return useMutation({
     mutationFn: sendA2ATask,

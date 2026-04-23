@@ -889,6 +889,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
 
       {showCronPicker && (
         <ScheduleModal
+          isOpen={true}
           title={t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}
           subtitle={handName}
           initialCron={cron}

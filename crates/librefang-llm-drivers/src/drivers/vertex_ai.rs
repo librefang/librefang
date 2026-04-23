@@ -959,6 +959,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
@@ -979,6 +980,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "europe-west4");

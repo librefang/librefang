@@ -96,6 +96,13 @@ pub trait KernelHandle: Send + Sync {
     /// Retry a task by resetting it to pending. Returns true if reset.
     async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
 
+    /// Get a single task by ID including its result and retry_count.
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String>;
+
+    /// Update a task's status to `pending` (reset) or `cancelled`.
+    /// Returns true if the task was found and updated.
+    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String>;
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,
@@ -485,6 +492,18 @@ pub trait KernelHandle: Send + Sync {
     /// Tool execution timeout in seconds (from config). Default: 120.
     fn tool_timeout_secs(&self) -> u64 {
         120
+    }
+
+    /// Per-tool timeout override lookup.
+    ///
+    /// Resolution order:
+    /// 1. Exact match in `config.tool_timeouts`
+    /// 2. Longest glob match in `config.tool_timeouts` (most specific wins)
+    /// 3. Global `config.tool_timeout_secs`
+    ///
+    /// The default impl delegates to `tool_timeout_secs()` (no per-tool config).
+    fn tool_timeout_secs_for(&self, _tool_name: &str) -> u64 {
+        self.tool_timeout_secs()
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.

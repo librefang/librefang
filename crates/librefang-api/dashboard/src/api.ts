@@ -328,6 +328,13 @@ export interface SendAgentMessageOptions {
   thinking?: boolean;
   /** Whether to receive the model's reasoning trace. Defaults to true. */
   show_thinking?: boolean;
+  /**
+   * Optional explicit session id (issue #2959). When provided, this send
+   * targets the given session regardless of the agent's canonical session.
+   * Used by the chat UI when a specific session is selected in the URL so
+   * two browser tabs on the same agent don't race each other.
+   */
+  session_id?: string | null;
 }
 
 export interface ApiActionResponse {
@@ -978,6 +985,7 @@ export async function sendAgentMessage(
   const body: Record<string, unknown> = { message };
   if (options?.thinking !== undefined) body.thinking = options.thinking;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
+  if (options?.session_id) body.session_id = options.session_id;
   return post<AgentMessageResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/message`,
     body,

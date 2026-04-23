@@ -26,66 +26,66 @@ export function useShutdownServer(
 }
 
 export function useCreateBackup() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: createBackup,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.backups() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
     },
   });
 }
 
 export function useRestoreBackup() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: restoreBackup,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.backups() });
-      queryClient.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }
 
 export function useDeleteBackup() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteBackup,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.backups() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
     },
   });
 }
 
 export function useDeleteTask() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteTaskFromQueue,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
     },
   });
 }
 
 export function useRetryTask() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: retryTask,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
-      queryClient.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
     },
   });
 }
 
 export function useCleanupSessions() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: cleanupSessions,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: sessionKeys.all });
+      qc.invalidateQueries({ queryKey: sessionKeys.all });
     },
   });
 }

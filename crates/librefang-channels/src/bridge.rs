@@ -244,6 +244,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _sender_name: &str,
         _model: Option<&str>,
         _bot_name: Option<&str>,
+        _aliases: Option<&[String]>,
     ) -> bool {
         true
     }
@@ -2072,6 +2073,47 @@ async fn dispatch_message(
 ) {
     let ct_str = channel_type_str(&message.channel);
 
+    // --- Webhook direct delivery (deliver_only mode) ---
+    // If the incoming message was tagged by a deliver_only webhook route,
+    // forward the content straight to the configured delivery channel and
+    // return early — no LLM or agent is involved.
+    if message
+        .metadata
+        .get("__deliver_only__")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let target = message
+            .metadata
+            .get("__deliver_target__")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let text = match &message.content {
+            ChannelContent::Text(t) => t.as_str(),
+            _ => "",
+        };
+        let route = message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(ct_str);
+        info!(
+            route = route,
+            target = target,
+            "webhook: direct delivery for route {}, skipping agent",
+            route
+        );
+        if !target.is_empty() && !text.is_empty() {
+            if let Err(e) = handle
+                .send_channel_push(target, &message.sender.platform_id, text, None)
+                .await
+            {
+                warn!(target = target, error = %e, "webhook direct delivery failed");
+            }
+        }
+        return;
+    }
+
     // --- Input sanitization (prompt injection detection) ---
     if !sanitizer.is_off() {
         let text_to_check: Option<&str> = match &message.content {
@@ -2151,8 +2193,13 @@ async fn dispatch_message(
                     None => ct_str.to_string(),
                 };
                 let bot_name = router.channel_default_name(&channel_key_for_name);
+                let aliases = if ov.group_trigger_patterns.is_empty() {
+                    None
+                } else {
+                    Some(ov.group_trigger_patterns.as_slice())
+                };
                 if !handle
-                    .classify_reply_intent(text, sender, model, bot_name.as_deref())
+                    .classify_reply_intent(text, sender, model, bot_name.as_deref(), aliases)
                     .await
                 {
                     debug!(
@@ -5678,6 +5725,7 @@ mod tests {
                 _sender_name: &str,
                 _model: Option<&str>,
                 bot_name: Option<&str>,
+                _aliases: Option<&[String]>,
             ) -> bool {
                 *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
                 true
@@ -5705,17 +5753,20 @@ mod tests {
 
             let h = AlwaysTrue;
             assert!(
-                h.classify_reply_intent("hello", "user", None, Some("rodelo"))
+                h.classify_reply_intent("hello", "user", None, Some("rodelo"), None)
                     .await
             );
-            assert!(h.classify_reply_intent("hello", "user", None, None).await);
+            assert!(
+                h.classify_reply_intent("hello", "user", None, None, None)
+                    .await
+            );
         }
 
         #[tokio::test]
         async fn bot_name_is_forwarded_to_implementation() {
             let (handle, slot) = CapturingHandle::new();
             handle
-                .classify_reply_intent("rodelo qué hora es?", "Alice", None, Some("rodelo"))
+                .classify_reply_intent("rodelo qué hora es?", "Alice", None, Some("rodelo"), None)
                 .await;
             assert_eq!(
                 *slot.lock().unwrap(),
@@ -5728,7 +5779,7 @@ mod tests {
         async fn none_bot_name_is_forwarded() {
             let (handle, slot) = CapturingHandle::new();
             handle
-                .classify_reply_intent("hey there", "Bob", None, None)
+                .classify_reply_intent("hey there", "Bob", None, None, None)
                 .await;
             assert_eq!(
                 *slot.lock().unwrap(),

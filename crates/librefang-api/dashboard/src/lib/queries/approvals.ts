@@ -7,12 +7,13 @@ import {
   totpStatus,
 } from "../../api";
 import { approvalKeys, totpKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_APPROVALS = 10_000;
 const REFETCH_APPROVALS = 15_000;
 const STALE_COUNT = 10_000;
 const REFETCH_COUNT = 15_000;
-const STALE_PENDING = 5_000;
+const STALE_PENDING = 3_000;
 const REFETCH_PENDING = 5_000;
 const STALE_TOTP = 60_000;
 
@@ -47,6 +48,7 @@ export const approvalQueries = {
     queryOptions({
       queryKey: approvalKeys.audit(params),
       queryFn: () => queryApprovalAudit(params),
+      staleTime: 30_000,
     }),
   totpStatus: () =>
     queryOptions({
@@ -56,35 +58,34 @@ export const approvalQueries = {
     }),
 };
 
-export function useApprovals(options: { enabled?: boolean } = {}) {
-  return useQuery({ ...approvalQueries.list(), enabled: options.enabled });
+export function useApprovals(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(approvalQueries.list(), options));
 }
 
-export function useApprovalCount(options: { refetchInterval?: number } = {}) {
-  return useQuery({
-    ...approvalQueries.count(),
-    refetchInterval: options.refetchInterval ?? REFETCH_COUNT,
-  });
+export function useApprovalCount(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(approvalQueries.count(), options));
 }
 
 export function usePendingApprovals(
   agentId?: string,
-  options: { enabled?: boolean; refetchInterval?: number } = {},
+  options: QueryOverrides = {},
 ) {
   return useQuery({
-    ...approvalQueries.pending(agentId),
+    ...withOverrides(approvalQueries.pending(agentId), options),
     enabled: options.enabled ?? Boolean(agentId),
-    ...(options.refetchInterval != null ? { refetchInterval: options.refetchInterval } : {}),
   });
 }
 
-export function useApprovalAudit(params: {
-  limit?: number;
-  offset?: number;
-  agent_id?: string;
-  tool_name?: string;
-} = {}) {
-  return useQuery(approvalQueries.audit(params));
+export function useApprovalAudit(
+  params: {
+    limit?: number;
+    offset?: number;
+    agent_id?: string;
+    tool_name?: string;
+  } = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(approvalQueries.audit(params), options));
 }
 
 export function useTotpStatus() {

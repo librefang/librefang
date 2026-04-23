@@ -89,11 +89,15 @@ impl KernelConfig {
             "registry",
             "rate_limit",
             "tool_timeout_secs",
+            "tool_timeouts",
+            "cron_session_max_tokens",
+            "cron_session_max_messages",
             "max_upload_size_bytes",
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
             "max_request_body_bytes",
             "terminal",
+            "task_board",
         ]
     }
 
@@ -530,6 +534,21 @@ impl KernelConfig {
                     "Webhook configured but {} is not set",
                     wh.secret_env
                 ));
+            }
+            if wh.deliver_only {
+                match wh.deliver.as_deref() {
+                    None => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
+                         set deliver = \"<channel>\" (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some("log") => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
+                         delivery channel — use a real channel name (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some(_) => {}
+                }
             }
         }
         for li in self.channels.linkedin.iter() {

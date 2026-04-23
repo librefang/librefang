@@ -89,6 +89,7 @@ async fn test_http_connect_calls_oauth_provider_load_token() {
         oauth_provider: Some(provider.clone()),
         oauth_config: None,
         taint_scanning: true,
+        taint_policy: None,
         roots: vec![],
     };
 

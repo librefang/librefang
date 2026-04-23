@@ -106,6 +106,14 @@ function blankSectionEntry(section: RegistrySchemaSection): Record<string, unkno
   return entry;
 }
 
+function hasInvalidNumberValue(value: unknown, required: boolean): boolean {
+  if (value === undefined || value === null || value === "") {
+    return required;
+  }
+
+  return typeof value !== "number" || Number.isNaN(value);
+}
+
 // Recursively validate required fields within a section
 function validateSectionRequired(
   section: RegistrySchemaSection,
@@ -117,7 +125,7 @@ function validateSectionRequired(
     const v = values[fKey];
     if (f.required && (v === undefined || v === null || v === "")) {
       errors.push(`${pathPrefix}.${fKey}`);
-    } else if (f.type === "number" && typeof v === "string" && v !== "") {
+    } else if (f.type === "number" && hasInvalidNumberValue(v, f.required)) {
       errors.push(`${pathPrefix}.${fKey}`);
     }
   }
@@ -154,7 +162,7 @@ function validateRequired(
     const v = values[key];
     if (field.required && (v === undefined || v === null || v === "")) {
       errors.push(key);
-    } else if (field.type === "number" && typeof v === "string" && v !== "") {
+    } else if (field.type === "number" && hasInvalidNumberValue(v, field.required)) {
       errors.push(key);
     }
   }

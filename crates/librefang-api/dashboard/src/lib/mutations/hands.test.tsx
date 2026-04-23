@@ -135,7 +135,7 @@ describe("useUninstallHand", () => {
 });
 
 describe("useSetHandSecret", () => {
-  it("invalidates handKeys.all", async () => {
+  it("invalidates handKeys.lists() and handKeys.detail(handId)", async () => {
     const args: SetHandSecretInput = { handId: "h1", key: "k", value: "v" };
     vi.mocked(http.setHandSecret).mockResolvedValue({ ok: true });
     const { queryClient, wrapper } = createQueryClientWrapper();
@@ -146,13 +146,16 @@ describe("useSetHandSecret", () => {
     await result.current.mutateAsync(args);
 
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.all,
+      queryKey: handKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.detail("h1"),
     });
   });
 });
 
 describe("useUpdateHandSettings", () => {
-  it("invalidates handKeys.all", async () => {
+  it("invalidates handKeys.lists() and handKeys.detail(handId)", async () => {
     const args: UpdateHandSettingsInput = { handId: "h1", config: { foo: 1 } };
     vi.mocked(http.updateHandSettings).mockResolvedValue({
       status: "ok",
@@ -168,7 +171,10 @@ describe("useUpdateHandSettings", () => {
     await result.current.mutateAsync(args);
 
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.all,
+      queryKey: handKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.detail("h1"),
     });
   });
 });

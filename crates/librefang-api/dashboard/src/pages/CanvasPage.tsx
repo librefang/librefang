@@ -2255,6 +2255,7 @@ function CanvasPageInner() {
       {/* Schedule Modal */}
       {showScheduleModal && (
         <ScheduleModal
+          isOpen={true}
           title={t("nav.scheduler")}
           subtitle={workflowName}
           initialCron="0 9 * * *"
