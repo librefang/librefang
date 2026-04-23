@@ -112,7 +112,7 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
 url = "2"
 
 # WASM sandbox
-wasmtime = "43"
+wasmtime = "44"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
