@@ -730,30 +730,9 @@ fn create_driver_from_entry(
 
 /// Create an LLM driver based on provider name and configuration.
 ///
-/// Supported providers:
-/// - `anthropic` — Anthropic Claude (Messages API)
-/// - `openai` — OpenAI GPT models
-/// - `groq` — Groq (ultra-fast inference)
-/// - `openrouter` — OpenRouter (multi-model gateway)
-/// - `deepseek` — DeepSeek
-/// - `deepinfra` — DeepInfra (OpenAI-compatible inference)
-/// - `together` — Together AI
-/// - `mistral` — Mistral AI
-/// - `fireworks` — Fireworks AI
-/// - `ollama` — Ollama (local)
-/// - `vllm` — vLLM (local)
-/// - `lmstudio` — LM Studio (local)
-/// - `perplexity` — Perplexity AI (search-augmented)
-/// - `cohere` — Cohere (Command R)
-/// - `cerebras` — Cerebras (ultra-fast inference)
-/// - `sambanova` — SambaNova
-/// - `huggingface` — Hugging Face Inference API
-/// - `xai` — xAI (Grok)
-/// - `replicate` — Replicate
-/// - `azure-openai` — Azure OpenAI Service (deployment-based URL, `api-key` header)
-/// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
-/// - `qwen` — Qwen / DashScope (use `provider_regions` for intl/us endpoints)
-/// - Any custom provider with `base_url` set uses OpenAI-compatible format
+/// See `PROVIDER_REGISTRY` for the full list of built-in providers and their aliases.
+/// Any provider not in the registry can also be used by setting `base_url` directly —
+/// it will be treated as an OpenAI-compatible endpoint.
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
 
@@ -804,8 +783,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, gemini-cli, \
-             codex-cli, qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
+             azure-openai, vertex-ai, nvidia-nim, claude-code, qwen-code, gemini-cli, codex-cli, \
+             qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
              qianfan, volcengine, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
