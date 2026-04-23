@@ -1282,6 +1282,8 @@ pub async fn send_message(
                 StatusCode::NOT_FOUND
             } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if format!("{e}").contains("belongs to a different agent") {
+                StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
