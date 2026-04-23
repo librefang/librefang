@@ -34,7 +34,7 @@ toml = { workspace = true }
 open = "5"
 
 [features]
-default = ["librefang-api/default"]
+default = ["librefang-api/default", "custom-protocol"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 # Tauri uses custom-protocol in production builds
