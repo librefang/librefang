@@ -1095,6 +1095,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1112,6 +1113,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1235,6 +1237,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1259,6 +1262,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1283,6 +1287,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1316,6 +1321,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1343,6 +1349,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
 
         let driver = create_driver(&config);
@@ -1382,6 +1389,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1402,6 +1410,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1431,6 +1440,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1451,6 +1461,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1462,6 +1473,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1485,6 +1497,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);
