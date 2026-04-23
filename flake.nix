@@ -52,15 +52,13 @@
           cairo
           gdk-pixbuf
           pango
-          libayatana-appindicator
         ]);
 
-        # Filter source to only include Rust-relevant files plus non-Rust assets needed at compile time
+        # Filter source to include Rust files plus non-Rust assets needed at compile time
         src = pkgs.lib.fileset.toSource {
           root = ./.;
           fileset = pkgs.lib.fileset.unions [
             (craneLib.fileset.commonCargoSources ./.)
-            ./packages
             ./crates/librefang-types/locales
             ./crates/librefang-api/static
             ./crates/librefang-api/src/login_page.html
@@ -70,6 +68,7 @@
             ./crates/librefang-desktop/capabilities
             ./crates/librefang-desktop/icons
             ./crates/librefang-desktop/gen
+            ./packages/whatsapp-gateway
           ];
         };
 
@@ -115,9 +114,6 @@
         librefang-desktop = craneLib.buildPackage (desktopArgs // {
           cargoArtifacts = desktopCargoArtifacts;
           doCheck = false;
-          postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            patchelf --add-rpath "${pkgs.libayatana-appindicator}/lib" "$out/bin/librefang-desktop"
-          '';
           meta = with pkgs.lib; {
             description = "LibreFang — Open-source Agent Operating System (desktop UI)";
             homepage = "https://github.com/librefang/librefang";
