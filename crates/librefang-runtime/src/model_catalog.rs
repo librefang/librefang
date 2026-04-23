@@ -720,8 +720,18 @@ impl ModelCatalog {
             if existing_ids.contains(&info.name.to_lowercase()) {
                 continue;
             }
+            // Use capabilities from probe when available (Ollama ≥0.7 native or
+            // heuristic fallback). Fall back to local name/families heuristics.
             let (supports_vision, supports_tools, supports_thinking) =
-                infer_capabilities(&info.name, info.families.as_deref());
+                if !info.capabilities.is_empty() {
+                    let is_embedding = info.capabilities.iter().any(|c| c == "embedding");
+                    let has_vision = info.capabilities.iter().any(|c| c == "vision");
+                    let (_, _, supports_thinking) =
+                        infer_capabilities(&info.name, info.families.as_deref());
+                    (has_vision, !is_embedding, supports_thinking)
+                } else {
+                    infer_capabilities(&info.name, info.families.as_deref())
+                };
             let display = format!("{} ({})", info.name, provider);
             self.models.push(ModelCatalogEntry {
                 id: info.name.clone(),
@@ -734,7 +744,7 @@ impl ModelCatalog {
                 output_cost_per_m: 0.0,
                 supports_tools,
                 supports_vision,
-                supports_streaming: true,
+                supports_streaming: supports_tools,
                 supports_thinking,
                 aliases: Vec::new(),
             });
@@ -1107,6 +1117,7 @@ mod tests {
                 family: None,
                 families: None,
                 size: None,
+                capabilities: vec![],
             })
             .collect()
     }
@@ -1463,6 +1474,7 @@ id = "acme"
                 parameter_size: None,
                 quantization_level: None,
                 size: None,
+                capabilities: vec![],
             },
             // Embedding model: name contains "embed"
             DiscoveredModelInfo {
@@ -1472,6 +1484,7 @@ id = "acme"
                 parameter_size: None,
                 quantization_level: None,
                 size: None,
+                capabilities: vec![],
             },
             // Thinking model: name contains "deepseek-r1"
             DiscoveredModelInfo {
@@ -1481,6 +1494,7 @@ id = "acme"
                 parameter_size: None,
                 quantization_level: None,
                 size: None,
+                capabilities: vec![],
             },
             // Plain chat model
             DiscoveredModelInfo {
@@ -1490,6 +1504,7 @@ id = "acme"
                 parameter_size: None,
                 quantization_level: None,
                 size: None,
+                capabilities: vec![],
             },
         ];
         catalog.merge_discovered_models("ollama", &models);

@@ -10,11 +10,9 @@ import {
   getTaskQueueStatus,
   listTaskQueue,
   listCronJobs,
-} from "../../api";
+} from "../http/client";
 import { runtimeKeys, auditKeys, cronKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
-
-export { useDashboardSnapshot, useVersionInfo } from "./overview";
 
 export const systemStatusQueryOptions = () =>
   queryOptions({
@@ -56,7 +54,7 @@ export const securityStatusQueryOptions = () =>
   queryOptions({
     queryKey: runtimeKeys.security(),
     queryFn: getSecurityStatus,
-    staleTime: 60_000,
+    staleTime: 120_000,
     refetchInterval: 120_000,
   });
 
@@ -81,7 +79,7 @@ export const auditVerifyQueryOptions = () =>
     queryKey: auditKeys.verify(),
     queryFn: verifyAuditChain,
     staleTime: 60_000,
-    refetchInterval: 120_000,
+    // No refetchInterval — chain verification is expensive; fetch on mount/focus only.
   });
 
 export function useAuditVerify(options: QueryOverrides = {}) {
@@ -124,12 +122,15 @@ export function useTaskQueue(status?: string) {
   return useQuery(taskQueueQueryOptions(status));
 }
 
-export function useCronJobs(agentId?: string) {
-  return useQuery({
+export const cronJobsQueryOptions = (agentId?: string) =>
+  queryOptions({
     queryKey: cronKeys.jobs(agentId),
     queryFn: () => listCronJobs(agentId),
     enabled: !!agentId,
     staleTime: 30_000,
     refetchInterval: 30_000,
   });
+
+export function useCronJobs(agentId?: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(cronJobsQueryOptions(agentId), options));
 }

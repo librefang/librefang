@@ -341,6 +341,36 @@ impl MemorySubstrate {
         self.sessions.cleanup_orphan_sessions(live_agent_ids)
     }
 
+    /// Run WAL checkpoint then VACUUM if any rows were actually deleted.
+    ///
+    /// VACUUM rewrites the entire DB file and can take several seconds on
+    /// large databases, so it is only worth running when something was
+    /// genuinely removed. Callers should pass the total pruned row count
+    /// returned by the cleanup_* methods; this function is a no-op when
+    /// `pruned_count == 0`.
+    ///
+    /// VACUUM cannot run inside a transaction, so this method acquires the
+    /// connection lock directly and calls `execute_batch`. Errors are logged
+    /// as warnings rather than propagated — a failed VACUUM is not fatal.
+    pub fn vacuum_if_shrank(&self, pruned_count: usize) -> LibreFangResult<()> {
+        if pruned_count == 0 {
+            return Ok(());
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        // Flush WAL frames to the main DB file first so VACUUM has less work.
+        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+            tracing::warn!(error = %e, "WAL checkpoint before VACUUM failed; continuing");
+        }
+        tracing::info!(pruned_count, "Running VACUUM after session prune");
+        if let Err(e) = conn.execute_batch("VACUUM;") {
+            tracing::warn!(error = %e, "VACUUM after session prune failed");
+        }
+        Ok(())
+    }
+
     /// Full-text search across session content using FTS5.
     pub fn search_sessions(
         &self,

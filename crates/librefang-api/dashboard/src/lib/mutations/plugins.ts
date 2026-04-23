@@ -6,7 +6,7 @@ export function useInstallPlugin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: installPlugin,
-    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.lists() }),
   });
 }
 
@@ -14,7 +14,7 @@ export function useUninstallPlugin() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: uninstallPlugin,
-    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.lists() }),
   });
 }
 
@@ -23,7 +23,7 @@ export function useScaffoldPlugin() {
   return useMutation({
     mutationFn: ({ name, desc, runtime }: { name: string; desc: string; runtime?: string }) =>
       scaffoldPlugin(name, desc, runtime),
-    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.lists() }),
   });
 }
 

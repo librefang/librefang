@@ -11,7 +11,7 @@ export function useCreateTerminalWindow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: { name?: string } = {}) => createTerminalWindow(body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: terminalKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: terminalKeys.windows() }),
   });
 }
 
@@ -51,6 +51,6 @@ export function useDeleteTerminalWindow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (windowId: string) => deleteTerminalWindow(windowId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: terminalKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: terminalKeys.windows() }),
   });
 }

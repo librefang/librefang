@@ -5,7 +5,6 @@ import { Modal } from "./Modal";
 
 interface PageHeaderProps {
   icon: ReactNode;
-  badge: string;
   title: string;
   subtitle?: string;
   actions?: ReactNode;
@@ -47,15 +46,14 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
               aria-label={t("common.refresh")}
               aria-busy={isFetching}
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin motion-reduce:animate-none" : ""}`} />
               <span className="hidden sm:inline">{t("common.refresh")}</span>
             </button>
           )}
         </div>
       </header>
 
-      {/* Help Modal */}
-      <Modal isOpen={showHelp && !!helpText} onClose={() => setShowHelp(false)} title={title} size="md">
+      <Modal isOpen={showHelp && Boolean(helpText)} onClose={() => setShowHelp(false)} title={title} size="md">
         <div className="p-5">
           <p className="text-sm text-text-dim leading-relaxed whitespace-pre-line">{helpText}</p>
         </div>

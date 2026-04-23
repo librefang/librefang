@@ -392,6 +392,7 @@ fn attach_probe_result(
                             family: None,
                             families: None,
                             size: None,
+                            capabilities: vec![],
                         },
                     )
                     .collect()
@@ -1428,6 +1429,7 @@ pub async fn set_provider_url(
                             family: None,
                             families: None,
                             size: None,
+                            capabilities: vec![],
                         },
                     )
                     .collect()
