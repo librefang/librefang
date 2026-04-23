@@ -745,6 +745,11 @@ pub struct AgentManifest {
     /// the background LLM budget or concurrency semaphore after a turn.
     #[serde(default = "default_true")]
     pub auto_evolve: bool,
+    /// Per-agent channel behavior overrides (dm_policy, group_policy, etc.).
+    /// When set, these take priority over the channel-level `ChannelOverrides`
+    /// for this specific agent. Follows the same pattern as `exec_policy`.
+    #[serde(default)]
+    pub channel_overrides: Option<crate::config::ChannelOverrides>,
 }
 
 /// Access mode for a named workspace.
@@ -819,6 +824,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            channel_overrides: None,
         }
     }
 }
