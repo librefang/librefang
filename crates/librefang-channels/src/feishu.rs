@@ -1059,6 +1059,7 @@ async fn get_token_static(
 /// borrow `&FeishuAdapter`.  All state is passed by value/clone.
 ///
 /// No-op if `chat_id` already has a pending reaction (de-dup guard).
+#[allow(clippy::too_many_arguments)]
 fn spawn_add_processing_reaction_static(
     client: reqwest::Client,
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
