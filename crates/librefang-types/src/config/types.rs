@@ -3561,6 +3561,42 @@ fn default_prompt_caching() -> bool {
     true
 }
 
+/// Taint skip rules for a single argument path within a tool.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintPathPolicy {
+    /// Rule IDs to skip when scanning this path.  An empty list means
+    /// all rules apply (no exemption).
+    #[serde(default)]
+    pub skip_rules: Vec<crate::taint::TaintRuleId>,
+}
+
+/// Per-tool taint policy for an MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintToolPolicy {
+    /// Per-path exemptions.  The key is a minimal JSONPath expression
+    /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
+    /// listed here have all rules applied.
+    #[serde(default)]
+    pub paths: HashMap<String, McpTaintPathPolicy>,
+}
+
+/// Per-server taint policy that lets operators disable specific taint
+/// rules for known-safe fields rather than turning off all scanning.
+///
+/// Example config.toml:
+/// ```toml
+/// [mcp_servers.my_firefox.taint_policy.tools.navigate.paths]
+/// "$.tabId"     = { skip_rules = ["opaque_token"] }
+/// "$.sessionId" = { skip_rules = ["opaque_token"] }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintPolicy {
+    /// Per-tool exemptions.  The key is the tool name as it appears in
+    /// the MCP server's tool list (without the `mcp_<server>_` prefix).
+    #[serde(default)]
+    pub tools: HashMap<String, McpTaintToolPolicy>,
+}
+
 /// Configuration entry for an MCP server.
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
@@ -3607,6 +3643,13 @@ pub struct McpServerConfigEntry {
     /// trip the scanner. Key-name blocking remains active regardless.
     #[serde(default = "default_taint_scanning")]
     pub taint_scanning: bool,
+    /// Fine-grained taint exemptions per tool and per argument path.
+    ///
+    /// When `taint_scanning = true` (the default), specific rules can be
+    /// disabled for known-safe fields here rather than disabling all scanning.
+    /// When `taint_scanning = false`, this field is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint_policy: Option<McpTaintPolicy>,
 }
 
 fn default_taint_scanning() -> bool {

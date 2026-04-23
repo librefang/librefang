@@ -9,11 +9,12 @@
 pub mod mcp_oauth;
 
 use http::{HeaderName, HeaderValue};
+use librefang_types::config::McpTaintPolicy;
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
 };
-use librefang_types::taint::{check_outbound_text_violation, TaintSink};
+use librefang_types::taint::{check_outbound_text_violation_with_skip, TaintRuleId, TaintSink};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,86 +54,189 @@ fn is_sensitive_key_name(key: &str) -> bool {
     MCP_SENSITIVE_KEY_NAMES.iter().any(|k| lower == *k)
 }
 
-/// Walk every string leaf in a JSON argument tree and run
-/// [`check_outbound_text_violation`] against it with the
-/// `TaintSink::mcp_tool_call` sink. Returns a *redacted* rule
-/// description (JSON path + rule name) if any leaf trips the
-/// denylist, otherwise `None`.
+// ── Minimal JSONPath matching ───────────────────────────────────────────────
+
+/// Returns `true` if a dot-separated JSONPath `pattern` (as stored in
+/// `McpTaintPolicy`) matches the given `path` built by the walker.
 ///
-/// IMPORTANT: the returned string must NOT contain the offending
-/// payload. It flows back to the LLM as an error and is emitted to
-/// logs — echoing the secret we just blocked would defeat the
-/// filter. We only surface the JSON path to the offending leaf.
-///
-/// Non-string leaves (numbers, bools, null) can't carry plaintext
-/// credentials in any meaningful way, so they are skipped.
-///
-/// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
-fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
-    let sink = TaintSink::mcp_tool_call();
-    fn walk(v: &serde_json::Value, sink: &TaintSink, path: &str, depth: usize) -> Option<String> {
-        if depth > MCP_TAINT_SCAN_MAX_DEPTH {
-            return Some(format!(
-                "taint violation: MCP argument tree exceeds max depth {} at '{}'",
-                MCP_TAINT_SCAN_MAX_DEPTH, path
-            ));
-        }
-        match v {
-            serde_json::Value::String(s) => {
-                // Discard the underlying violation string entirely — it
-                // may be derived from the payload — and report only the
-                // JSON path of the offending leaf.
-                if check_outbound_text_violation(s, sink).is_some() {
-                    Some(format!(
-                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
-                        path, sink.name
-                    ))
-                } else {
-                    None
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for (i, item) in items.iter().enumerate() {
-                    let child = format!("{path}[{i}]");
-                    if let Some(violation) = walk(item, sink, &child, depth + 1) {
-                        return Some(violation);
-                    }
-                }
-                None
-            }
-            serde_json::Value::Object(obj) => {
-                for (k, v) in obj {
-                    let child = if path.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{path}.{k}")
-                    };
-                    // Credential-shaped object key with a non-empty
-                    // string value is an unambiguous outbound
-                    // credential, regardless of what the value looks
-                    // like (e.g. `"Authorization": "Bearer sk-…"`
-                    // has whitespace and wouldn't trip the text
-                    // heuristic alone).
-                    if is_sensitive_key_name(k) {
-                        if let serde_json::Value::String(s) = v {
-                            if !s.trim().is_empty() {
-                                return Some(format!(
-                                    "taint violation: sensitive MCP argument key at '{}' (blocked by sink '{}')",
-                                    child, sink.name
-                                ));
-                            }
-                        }
-                    }
-                    if let Some(violation) = walk(v, sink, &child, depth + 1) {
-                        return Some(violation);
-                    }
-                }
-                None
-            }
-            _ => None,
+/// Supported syntax:
+/// - `$.a.b`   — exact nested property
+/// - `$.a.*`   — any direct child of `$.a`
+/// - `$.a[*]`  — any array element of `$.a`
+/// - `$.*`     — any top-level property
+fn jsonpath_matches(pattern: &str, path: &str) -> bool {
+    if pattern == path {
+        return true;
+    }
+    let p_segs: Vec<&str> = split_jsonpath(pattern);
+    let h_segs: Vec<&str> = split_jsonpath(path);
+    segs_match(&p_segs, &h_segs)
+}
+
+fn split_jsonpath(p: &str) -> Vec<&str> {
+    // Split on '.' but preserve array notation like `items[0]` as one segment.
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, b) in p.bytes().enumerate() {
+        if b == b'.' && i > 0 {
+            out.push(&p[start..i]);
+            start = i + 1;
         }
     }
-    walk(value, &sink, "$", 0)
+    out.push(&p[start..]);
+    out
+}
+
+fn segs_match(pattern: &[&str], path: &[&str]) -> bool {
+    match (pattern, path) {
+        ([], []) => true,
+        ([], _) | (_, []) => false,
+        ([p, pr @ ..], [h, hr @ ..]) => {
+            let ok =
+                *p == *h || (*p == "*" && !h.contains('[')) || seg_array_wildcard_matches(p, h);
+            ok && segs_match(pr, hr)
+        }
+    }
+}
+
+/// Checks whether a pattern segment ending in `[*]` (e.g. `items[*]`)
+/// matches a path segment with a concrete index (e.g. `items[0]`).
+fn seg_array_wildcard_matches(pattern: &str, path: &str) -> bool {
+    let Some(prefix) = pattern.strip_suffix("[*]") else {
+        return false;
+    };
+    if !path.starts_with(prefix) {
+        return false;
+    }
+    let rest = &path[prefix.len()..];
+    rest.starts_with('[')
+        && rest.ends_with(']')
+        && rest[1..rest.len() - 1].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Collect all `TaintRuleId`s that should be skipped for a specific tool +
+/// argument path according to the server's `McpTaintPolicy`.
+///
+/// Returns an empty set when `policy` is `None` or the tool/path have no
+/// matching exemption entries — i.e. all rules apply.
+fn resolve_skip_rules(
+    policy: Option<&McpTaintPolicy>,
+    tool_name: &str,
+    json_path: &str,
+) -> std::collections::HashSet<TaintRuleId> {
+    let mut skip = std::collections::HashSet::new();
+    let Some(policy) = policy else {
+        return skip;
+    };
+    let Some(tool_policy) = policy.tools.get(tool_name) else {
+        return skip;
+    };
+    for (pattern, path_policy) in &tool_policy.paths {
+        if jsonpath_matches(pattern, json_path) {
+            for rule in &path_policy.skip_rules {
+                skip.insert(rule.clone());
+            }
+        }
+    }
+    skip
+}
+
+// ── Taint scanner ──────────────────────────────────────────────────────────
+
+/// Walk every string leaf in a JSON argument tree and check it against
+/// `TaintSink::mcp_tool_call`.  Returns a *redacted* rule description
+/// (JSON path + rule name) if any leaf trips the denylist, `None` otherwise.
+///
+/// When `taint_policy` and `tool_name` are supplied, per-path skip rules
+/// from the policy are applied before calling
+/// [`check_outbound_text_violation_with_skip`].
+///
+/// IMPORTANT: the returned string must NOT contain the offending payload.
+/// It flows back to the LLM as an error and is emitted to logs — echoing
+/// the secret we just blocked would defeat the filter. Only the JSON path
+/// of the offending leaf is surfaced.
+///
+/// Non-string leaves (numbers, bools, null) are skipped.
+///
+/// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
+#[cfg_attr(not(test), allow(dead_code))]
+fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
+    scan_mcp_arguments_for_taint_with_policy(value, None, "")
+}
+
+fn scan_mcp_arguments_for_taint_with_policy(
+    value: &serde_json::Value,
+    taint_policy: Option<&McpTaintPolicy>,
+    tool_name: &str,
+) -> Option<String> {
+    let sink = TaintSink::mcp_tool_call();
+    walk_taint(value, &sink, "$", 0, taint_policy, tool_name)
+}
+
+fn walk_taint(
+    v: &serde_json::Value,
+    sink: &TaintSink,
+    path: &str,
+    depth: usize,
+    policy: Option<&McpTaintPolicy>,
+    tool_name: &str,
+) -> Option<String> {
+    if depth > MCP_TAINT_SCAN_MAX_DEPTH {
+        return Some(format!(
+            "taint violation: MCP argument tree exceeds max depth {} at '{}'",
+            MCP_TAINT_SCAN_MAX_DEPTH, path
+        ));
+    }
+
+    let skip = resolve_skip_rules(policy, tool_name, path);
+
+    match v {
+        serde_json::Value::String(s) => {
+            // Discard the underlying violation string entirely — it may be
+            // derived from the payload — and report only the JSON path.
+            if check_outbound_text_violation_with_skip(s, sink, &skip).is_some() {
+                Some(format!(
+                    "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
+                    path, sink.name
+                ))
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                let child = format!("{path}[{i}]");
+                if let Some(v) = walk_taint(item, sink, &child, depth + 1, policy, tool_name) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(obj) => {
+            for (k, val) in obj {
+                let child = format!("{path}.{k}");
+                // Credential-shaped object key with a non-empty string value
+                // is an unambiguous outbound credential, regardless of the
+                // value shape (e.g. `"Authorization": "Bearer sk-…"` has
+                // whitespace and wouldn't trip the text heuristic alone).
+                if is_sensitive_key_name(k) && !skip.contains(&TaintRuleId::SensitiveKeyName) {
+                    if let serde_json::Value::String(s) = val {
+                        if !s.trim().is_empty() {
+                            return Some(format!(
+                                "taint violation: sensitive MCP argument key at '{}' (blocked by sink '{}')",
+                                child, sink.name
+                            ));
+                        }
+                    }
+                }
+                if let Some(v) = walk_taint(val, sink, &child, depth + 1, policy, tool_name) {
+                    return Some(v);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +286,13 @@ pub struct McpServerConfig {
     /// when this is `false` — only the content-based heuristic is disabled.
     #[serde(default = "default_taint_scanning")]
     pub taint_scanning: bool,
+    /// Fine-grained per-tool, per-path taint exemptions.
+    ///
+    /// When set, individual taint rules can be disabled for specific argument
+    /// paths in specific tools rather than disabling scanning entirely.
+    /// Ignored when `taint_scanning = false`.
+    #[serde(default)]
+    pub taint_policy: Option<McpTaintPolicy>,
     /// Root directories advertised to this MCP server via the MCP Roots capability.
     ///
     /// Each entry is an absolute path (e.g. `/home/user/project`).  librefang
@@ -210,6 +321,7 @@ impl std::fmt::Debug for McpServerConfig {
             )
             .field("oauth_config", &self.oauth_config)
             .field("taint_scanning", &self.taint_scanning)
+            .field("taint_policy", &self.taint_policy)
             .field("roots", &self.roots)
             .finish()
     }
@@ -226,6 +338,7 @@ impl Clone for McpServerConfig {
             oauth_provider: self.oauth_provider.clone(),
             oauth_config: self.oauth_config.clone(),
             taint_scanning: self.taint_scanning,
+            taint_policy: self.taint_policy.clone(),
             roots: self.roots.clone(),
         }
     }
@@ -1139,37 +1252,40 @@ impl McpConnection {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Result<String, String> {
-        // SECURITY: best-effort taint filter before shipping arguments
-        // to an out-of-process MCP server. An LLM that has been pushed
-        // into smuggling credentials into tool-call arguments would
-        // otherwise exfiltrate them straight through this call — the
-        // MCP transport hands the JSON to whoever implements the server.
-        // Walk every string leaf in the arguments tree and refuse the
-        // call if anything trips `check_outbound_text_violation`. Non-
-        // string leaves (numbers, bools, null) can't carry plaintext
-        // credentials in any meaningful way, so they are left alone.
-        //
-        // This is still a best-effort pattern match (see
-        // `librefang_types::taint::check_outbound_text_violation` for
-        // exactly which patterns trip it) — not a full information-
-        // flow tracker. Copy-pasted obfuscation still bypasses it.
-        if self.config.taint_scanning {
-            if let Some(violation) = scan_mcp_arguments_for_taint(arguments) {
-                // `violation` is already a redacted rule description from
-                // the scanner — do NOT concatenate the raw payload or the
-                // offending value into the error surface.
-                return Err(violation);
-            }
-        }
-
-        // Resolve to an owned String immediately so the borrow of self.original_names
-        // and self.config.name ends before any mutable operations below.
+        // Resolve raw (un-prefixed) tool name before taint check so we can
+        // look it up in the per-tool policy.
         let raw_name: String = self
             .original_names
             .get(name)
             .cloned()
             .or_else(|| strip_mcp_prefix(&self.config.name, name).map(|s| s.to_string()))
             .unwrap_or_else(|| name.to_string());
+
+        // SECURITY: best-effort taint filter before shipping arguments
+        // to an out-of-process MCP server. An LLM that has been pushed
+        // into smuggling credentials into tool-call arguments would
+        // otherwise exfiltrate them straight through this call — the
+        // MCP transport hands the JSON to whoever implements the server.
+        // Walk every string leaf in the arguments tree and refuse the
+        // call if anything trips `check_outbound_text_violation_with_skip`.
+        // Non-string leaves (numbers, bools, null) can't carry plaintext
+        // credentials in any meaningful way, so they are left alone.
+        //
+        // This is still a best-effort pattern match — not a full
+        // information-flow tracker. Copy-pasted obfuscation still bypasses
+        // it. Per-tool, per-path exemptions in `taint_policy` let operators
+        // disable specific rules for known-safe fields.
+        if self.config.taint_scanning {
+            let policy = self.config.taint_policy.as_ref();
+            if let Some(violation) =
+                scan_mcp_arguments_for_taint_with_policy(arguments, policy, &raw_name)
+            {
+                // `violation` is already a redacted rule description from
+                // the scanner — do NOT concatenate the raw payload or the
+                // offending value into the error surface.
+                return Err(violation);
+            }
+        }
 
         // Determine the transport kind without holding any reference into self.inner
         // across an await or across a mutable reborrow of self.  Using a simple
@@ -1980,6 +2096,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            taint_policy: None,
             roots: vec![],
         };
 
@@ -2011,6 +2128,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            taint_policy: None,
             roots: vec![],
         };
         let json = serde_json::to_string(&sse_config).unwrap();
@@ -2046,6 +2164,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            taint_policy: None,
             roots: vec![],
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
@@ -2076,6 +2195,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            taint_policy: None,
             roots: vec![],
         };
         let json = serde_json::to_string(&http_config).unwrap();
@@ -2122,6 +2242,7 @@ mod tests {
                 oauth_provider: None,
                 oauth_config: None,
                 taint_scanning: true,
+                taint_policy: None,
                 roots: vec![],
             },
             tools: Vec::new(),
@@ -2289,6 +2410,7 @@ mod tests {
             oauth_provider: None,
             oauth_config: None,
             taint_scanning: true,
+            taint_policy: None,
             roots: vec![],
         })
         .await

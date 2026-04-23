@@ -835,6 +835,7 @@ impl LibreFangKernel {
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: server_roots,
             };
 
@@ -11046,6 +11047,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11194,6 +11196,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            taint_policy: server_config.taint_policy.clone(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -11317,6 +11320,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11462,6 +11466,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            taint_policy: server_config.taint_policy.clone(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
