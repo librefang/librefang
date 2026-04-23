@@ -4729,13 +4729,18 @@ system_prompt = "You are a helpful assistant."
             allowed_tools,
             interrupt: Some(interrupt),
         };
+        // INVARIANT: forks must use the canonical session so the parent turn's
+        // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
+        // here — it would win over the fork branch in
+        // `send_message_streaming_with_sender_and_opts`'s session resolver and
+        // break cache alignment (see issue #2959 for the override semantics).
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
             fork_prompt,
             None, // auto-wire self
             None, // no sender context — fork uses the canonical session
             None, // no thinking override
-            None, // forks always use canonical session
+            None, // forks MUST stay on canonical — see invariant above
             loop_opts,
         )
     }
@@ -4930,6 +4935,12 @@ system_prompt = "You are a helpful assistant."
                 // `SessionId::new()` here, producing a fresh empty session
                 // and breaking cache alignment. Force Persistent for forks
                 // regardless of manifest.
+                //
+                // NOTE: an explicit `session_id_override` (above) wins over
+                // this branch — if you ever plumb an override through a fork
+                // caller, prompt-cache alignment WILL break. The current
+                // `run_forked_agent_streaming` deliberately passes `None` to
+                // preserve this invariant.
                 _ if loop_opts.is_fork => entry.session_id,
                 _ => match entry.manifest.session_mode {
                     librefang_types::agent::SessionMode::Persistent => entry.session_id,
