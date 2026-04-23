@@ -58,6 +58,12 @@ pub struct WebhookAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// When true, incoming messages are forwarded directly to `deliver_target`
+    /// without invoking an agent or LLM.
+    deliver_only: bool,
+    /// Target channel name for direct delivery (e.g. "telegram"). Used only
+    /// when `deliver_only` is true.
+    deliver_target: Option<String>,
 }
 
 impl WebhookAdapter {
@@ -73,11 +79,25 @@ impl WebhookAdapter {
             callback_url,
             client: crate::http_client::new_client(),
             account_id: None,
+            deliver_only: false,
+            deliver_target: None,
         }
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Enable direct-delivery mode. Returns self for builder chaining.
+    ///
+    /// When enabled, incoming messages are tagged with `__deliver_only__` and
+    /// `__deliver_target__` metadata so the bridge can forward them directly to
+    /// the specified channel without invoking an agent or LLM.
+    pub fn with_deliver_only(mut self, deliver_only: bool, deliver_target: Option<String>) -> Self {
+        self.deliver_only = deliver_only;
+        self.deliver_target = deliver_target;
         self
     }
 
@@ -183,6 +203,8 @@ impl ChannelAdapter for WebhookAdapter {
         let tx = Arc::new(tx);
         let secret = Arc::new(self.secret.clone());
         let account_id = Arc::new(self.account_id.clone());
+        let deliver_only = self.deliver_only;
+        let deliver_target = Arc::new(self.deliver_target.clone());
 
         let app = axum::Router::new().route(
             "/webhook",
@@ -190,10 +212,12 @@ impl ChannelAdapter for WebhookAdapter {
                 let tx = Arc::clone(&tx);
                 let secret = Arc::clone(&secret);
                 let account_id = Arc::clone(&account_id);
+                let deliver_target = Arc::clone(&deliver_target);
                 move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
                     let secret = Arc::clone(&secret);
                     let account_id = Arc::clone(&account_id);
+                    let deliver_target = Arc::clone(&deliver_target);
                     async move {
                         let signature = headers
                             .get("X-Webhook-Signature")
@@ -261,6 +285,18 @@ impl ChannelAdapter for WebhookAdapter {
                             if let Some(ref aid) = *account_id {
                                 msg.metadata
                                     .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            if deliver_only {
+                                msg.metadata.insert(
+                                    "__deliver_only__".to_string(),
+                                    serde_json::json!(true),
+                                );
+                                if let Some(ref target) = *deliver_target {
+                                    msg.metadata.insert(
+                                        "__deliver_target__".to_string(),
+                                        serde_json::json!(target),
+                                    );
+                                }
                             }
                             if tx.send(msg).await.is_err() {
                                 // Bridge receiver closed — the message is lost

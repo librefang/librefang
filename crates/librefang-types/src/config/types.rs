@@ -6072,6 +6072,15 @@ pub struct WebhookConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// When true, incoming POST bodies are forwarded directly to the delivery
+    /// target channel without invoking the LLM or any agent. Requires
+    /// `deliver` to be set to a valid channel name (not "log").
+    #[serde(default)]
+    pub deliver_only: bool,
+    /// Target channel name for direct delivery (e.g. "telegram", "discord").
+    /// Required when `deliver_only` is true.
+    #[serde(default)]
+    pub deliver: Option<String>,
 }
 
 impl Default for WebhookConfig {
@@ -6083,6 +6092,8 @@ impl Default for WebhookConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            deliver_only: false,
+            deliver: None,
         }
     }
 }
