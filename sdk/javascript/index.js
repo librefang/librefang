@@ -362,6 +362,14 @@ class ToolResource {
   async list() {
     return this._c._request("GET", "/api/tools");
   }
+
+  async get(name) {
+    return this._c._request("GET", "/api/tools/" + name);
+  }
+
+  async invoke(name, input) {
+    return this._c._request("POST", "/api/tools/" + name + "/invoke", input);
+  }
 }
 
 // ── Model Resource ──────────────────────────────────────────────

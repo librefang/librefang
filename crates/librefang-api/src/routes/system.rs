@@ -40,6 +40,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Tools
         .route("/tools", axum::routing::get(list_tools))
         .route("/tools/{name}", axum::routing::get(get_tool))
+        .route("/tools/{name}/invoke", axum::routing::post(invoke_tool))
         // Session management
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/search", axum::routing::get(search_sessions))
@@ -220,7 +221,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
-use librefang_runtime::tool_runner::builtin_tool_definitions;
+use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::agent::AgentId;
 use librefang_types::agent::AgentManifest;
 use librefang_types::i18n::ErrorTranslator;
@@ -1049,6 +1050,87 @@ pub async fn get_tool(
 
     ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)]))
         .into_json_tuple()
+}
+
+/// POST /api/tools/{name}/invoke — Invoke a kernel tool directly.
+///
+/// External integrations (MCP bridges, scripts, automations) can call kernel
+/// tools without going through an agent loop.
+#[utoipa::path(
+    post,
+    path = "/api/tools/{name}/invoke",
+    tag = "tools",
+    params(("name" = String, Path, description = "Tool name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Tool execution result", body = serde_json::Value),
+        (status = 404, description = "Tool not found"),
+        (status = 400, description = "Tool invocation failed")
+    )
+)]
+pub async fn invoke_tool(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(input): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Verify the tool exists (same lookup as get_tool)
+    let tool_exists = builtin_tool_definitions().iter().any(|t| t.name == name)
+        || state
+            .kernel
+            .mcp_tools_ref()
+            .lock()
+            .map(|mcp_tools| mcp_tools.iter().any(|t| t.name == name))
+            .unwrap_or(false);
+
+    if !tool_exists {
+        let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        return ApiErrorResponse::not_found(
+            tr.t_args("api-error-tool-not-found", &[("name", &name)]),
+        )
+        .into_json_tuple();
+    }
+
+    let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+
+    let result = execute_tool(
+        "rest-api",
+        &name,
+        &input,
+        Some(&kernel),
+        None, // allowed_tools
+        None, // caller_agent_id
+        None, // skill_registry
+        None, // allowed_skills
+        Some(state.kernel.mcp_connections_ref()),
+        Some(state.kernel.web_tools()),
+        Some(state.kernel.browser()),
+        None, // allowed_env_vars
+        None, // workspace_root
+        None, // media_engine
+        None, // media_drivers
+        None, // exec_policy
+        None, // tts_engine
+        None, // docker_config
+        Some(state.kernel.processes()),
+        None, // process_registry
+        None, // sender_id
+        None, // channel
+        None, // checkpoint_manager
+        None, // interrupt
+        None, // session_id
+        None, // dangerous_command_checker
+    )
+    .await;
+
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(result).unwrap_or_else(
+                |_| serde_json::json!({"error": "Failed to serialize tool result"}),
+            ),
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------

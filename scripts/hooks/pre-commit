@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pre-commit hook: ensure Rust code is formatted.
+# Pre-commit hook: ensure Rust code is formatted and openapi.json is up to date.
 # Install: git config core.hooksPath scripts/hooks
 
 cargo fmt --check 2>/dev/null
@@ -8,4 +8,14 @@ if [ $? -ne 0 ]; then
     cargo fmt
     echo "Formatted. Please re-stage and commit again."
     exit 1
+fi
+
+# Regenerate openapi.json if API routes changed
+if git diff --cached --name-only | grep -q "crates/librefang-api/src/routes/"; then
+    echo "Regenerating openapi.json..."
+    cargo xtask codegen --openapi 2>/dev/null
+    if [ -f openapi.json ]; then
+        git add openapi.json
+        echo "openapi.json updated and staged."
+    fi
 fi
