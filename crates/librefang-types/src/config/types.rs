@@ -2245,8 +2245,8 @@ pub struct KernelConfig {
     #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: u64,
     /// Per-tool timeout overrides. Exact key matches take priority over glob
-    /// patterns; among globs, iteration order is unspecified (TOML tables are
-    /// unordered). Falls back to `tool_timeout_secs` when no entry matches.
+    /// patterns; among globs, the longest matching pattern wins (most specific
+    /// first). Falls back to `tool_timeout_secs` when no entry matches.
     ///
     /// Example:
     /// ```toml

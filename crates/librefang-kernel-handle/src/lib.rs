@@ -491,7 +491,7 @@ pub trait KernelHandle: Send + Sync {
     ///
     /// Resolution order:
     /// 1. Exact match in `config.tool_timeouts`
-    /// 2. First glob match in `config.tool_timeouts`
+    /// 2. Longest glob match in `config.tool_timeouts` (most specific wins)
     /// 3. Global `config.tool_timeout_secs`
     ///
     /// The default impl delegates to `tool_timeout_secs()` (no per-tool config).
