@@ -187,6 +187,12 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
+  // providers
+  testProvider,
+  setProviderKey,
+  deleteProviderKey,
+  setProviderUrl,
+  setDefaultProvider,
   // network / a2a
   discoverA2AAgent,
   sendA2ATask,
@@ -262,6 +268,7 @@ export type {
   MediaMusicResult,
   MediaProvider,
   MediaVideoStatus,
+  MediaVideoSubmitResult,
   SpeechResult,
   TerminalHealth,
   TerminalWindow,
