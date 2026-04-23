@@ -482,6 +482,16 @@ func (r *ToolResource) List() ([]map[string]interface{}, error) {
 	return getSlice(data, "tools"), nil
 }
 
+func (r *ToolResource) Get(name string) (map[string]interface{}, error) {
+	resp, err := r.client.doRequest("GET", fmt.Sprintf("/api/tools/%s", name), nil)
+	return toMap(resp), err
+}
+
+func (r *ToolResource) Invoke(name string, input map[string]interface{}) (map[string]interface{}, error) {
+	resp, err := r.client.doRequest("POST", fmt.Sprintf("/api/tools/%s/invoke", name), input)
+	return toMap(resp), err
+}
+
 // --- Model Resource ---
 
 type ModelResource struct{ client *Client }

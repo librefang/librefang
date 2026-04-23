@@ -1074,23 +1074,6 @@ pub async fn invoke_tool(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(input): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Verify the tool exists (same lookup as get_tool)
-    let tool_exists = builtin_tool_definitions().iter().any(|t| t.name == name)
-        || state
-            .kernel
-            .mcp_tools_ref()
-            .lock()
-            .map(|mcp_tools| mcp_tools.iter().any(|t| t.name == name))
-            .unwrap_or(false);
-
-    if !tool_exists {
-        let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        return ApiErrorResponse::not_found(
-            tr.t_args("api-error-tool-not-found", &[("name", &name)]),
-        )
-        .into_json_tuple();
-    }
-
     let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
 
     let result = execute_tool(
@@ -1122,6 +1105,17 @@ pub async fn invoke_tool(
         None, // dangerous_command_checker
     )
     .await;
+
+    // execute_tool returns is_error + "Error: Unknown tool: <name>" for missing tools.
+    // All other tool sources (skills, MCP, dynamic) go through the same path, so we
+    // don't need a separate pre-flight existence check.
+    if result.is_error && result.content.contains("Unknown tool:") {
+        let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        return ApiErrorResponse::not_found(
+            tr.t_args("api-error-tool-not-found", &[("name", &name)]),
+        )
+        .into_json_tuple();
+    }
 
     let status = if result.is_error {
         StatusCode::BAD_REQUEST
