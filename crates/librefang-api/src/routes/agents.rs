@@ -4834,6 +4834,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4852,6 +4853,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4874,6 +4876,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
@@ -4904,6 +4907,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: Some(roster.clone()),
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants, roster);
