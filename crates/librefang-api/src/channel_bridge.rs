@@ -1656,7 +1656,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let bot_identity_section = {
             let name_part = match safe_bot_name.as_deref() {
-                Some(name) if !name.is_empty() => format!("The bot's name is \"{name}\"."),
+                Some(name) if !name.is_empty() => format!(" The bot's name is \"{name}\"."),
                 _ => String::new(),
             };
             let alias_part = if safe_aliases.is_empty() {
@@ -1672,10 +1672,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             if name_part.is_empty() && alias_part.is_empty() {
                 String::new()
             } else {
+                let example_name = safe_bot_name
+                    .as_deref()
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| safe_aliases.first().map(|s| s.as_str()))
+                    .unwrap_or("bot");
                 format!(
                     "Bot identity:{name_part}{alias_part} \
                      A message that addresses the bot by name or alias \
-                     (e.g. \"rodelo, do X\" or \"@bot help\") counts as directed at the bot.\n\n"
+                     (e.g. \"{example_name}, do X\" or \"@{example_name} help\") counts as directed at the bot.\n\n"
                 )
             }
         };
