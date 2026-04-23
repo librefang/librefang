@@ -1,8 +1,8 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, memo, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "success";
-type ButtonSize = "sm" | "md" | "lg";
+export type ButtonSize = "sm" | "md" | "lg";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
@@ -26,7 +26,7 @@ const sizeStyles: Record<ButtonSize, string> = {
   lg: "px-6 py-3 text-base",
 };
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
       className = "",
@@ -45,9 +45,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         disabled={disabled || isLoading}
+        aria-busy={isLoading}
         className={`
           inline-flex items-center justify-center gap-2 rounded-xl font-bold
-          transition-all duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)]
+          transition-colors duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
           active:scale-[0.96] active:duration-100
           focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1
           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
@@ -67,6 +68,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       </button>
     );
   }
-);
+));
 
 Button.displayName = "Button";

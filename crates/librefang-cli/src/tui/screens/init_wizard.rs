@@ -159,20 +159,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         hint: "",
     },
     ProviderInfo {
-        name: "venice",
-        display: "Venice.ai",
-        env_var: "VENICE_API_KEY",
-        needs_key: true,
-        hint: "uncensored",
-    },
-    ProviderInfo {
-        name: "ai21",
-        display: "AI21",
-        env_var: "AI21_API_KEY",
-        needs_key: true,
-        hint: "",
-    },
-    ProviderInfo {
         name: "claude-code",
         display: "Claude Code",
         env_var: "",

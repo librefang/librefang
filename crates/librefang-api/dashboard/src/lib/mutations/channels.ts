@@ -6,7 +6,7 @@ import {
   sendCommsMessage,
   postCommsTask,
 } from "../http/client";
-import { channelKeys } from "../queries/keys";
+import { channelKeys, commsKeys } from "../queries/keys";
 
 export function useConfigureChannel() {
   const qc = useQueryClient();
@@ -24,6 +24,7 @@ export function useConfigureChannel() {
   });
 }
 
+// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
 export function useTestChannel() {
   return useMutation({
     mutationFn: (channelName: string) => testChannel(channelName),
@@ -41,21 +42,29 @@ export function useReloadChannels() {
 }
 
 export function useSendCommsMessage() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: {
       from_agent_id: string;
       to_agent_id: string;
       message: string;
     }) => sendCommsMessage(payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: commsKeys.all });
+    },
   });
 }
 
 export function usePostCommsTask() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: {
       title: string;
       description?: string;
       assigned_to?: string;
     }) => postCommsTask(payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: commsKeys.all });
+    },
   });
 }

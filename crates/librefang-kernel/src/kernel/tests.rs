@@ -209,6 +209,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         channel: None,
         route_to: vec![explicit_target],
         escalation_count: 1,
+        session_id: None,
     };
 
     kernel.notify_escalated_approval(&req, req.id).await;
@@ -284,6 +285,7 @@ fn test_send_to_agent_by_name_resolution() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(entry).unwrap();
 
@@ -323,6 +325,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e1).unwrap();
 
@@ -348,6 +351,7 @@ fn test_find_agents_by_tag() {
         onboarding_completed_at: None,
         source_toml_path: None,
         is_hand: false,
+        ..Default::default()
     };
     registry.register(e2).unwrap();
 
@@ -1201,6 +1205,102 @@ async fn test_spawn_approval_sweep_task_is_idempotent() {
     assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
 }
 
+/// The task-board sweeper must be spawn-idempotent so repeated callers
+/// (server bootstrap, CLI helpers, tests) don't end up with multiple loops
+/// hammering the DB (issue #2923).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_task_board_sweep_task_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    Arc::clone(&kernel).spawn_task_board_sweep_task();
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+
+    // Re-spawning while already running is a no-op — the atomic guard
+    // short-circuits instead of starting a second loop.
+    Arc::clone(&kernel).spawn_task_board_sweep_task();
+    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+
+    kernel.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    assert!(!kernel.task_board_sweep_started.load(Ordering::Acquire));
+}
+
+/// End-to-end sanity check at the kernel layer: after a worker claims a task
+/// and stalls, the sweeper flips it back to `pending` so another worker can
+/// re-claim (issue #2923). Bypasses the background loop by invoking the
+/// substrate directly with a small TTL so the test doesn't have to wait
+/// 10 minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_task_board_sweep_resets_stuck_in_progress_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let mem = kernel.memory_substrate();
+
+    // Post and claim a task so status = in_progress.
+    let task_id = mem
+        .task_post("Stuck work", "Worker will stall", Some("worker"), None)
+        .await
+        .expect("post");
+    let claimed = mem
+        .task_claim("worker", Some("worker"))
+        .await
+        .expect("claim")
+        .expect("should find task");
+    assert_eq!(claimed["status"], "in_progress");
+    assert_eq!(claimed["id"], task_id);
+
+    // Simulate the worker stalling: back-date claimed_at so a 1 s TTL trips.
+    // This mirrors what happens in production when an LLM returns an empty
+    // response after the claim and the session silently dies.
+    {
+        let _ = mem; // borrow so the raw connection dance below compiles cleanly
+    }
+
+    // Manually tick: set claimed_at to the past, then reset with a small TTL.
+    // Sleeping for real 1 s would bloat the suite for no gain.
+    let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    // The substrate does not expose raw SQL so we re-post + re-claim + reset
+    // via a short TTL that will immediately apply to the fresh claim.
+    // Instead, we leverage task_reset_stuck's own TTL to cover "now < cutoff"
+    // by waiting the full TTL window once.
+    // Use the internal API directly with a tiny TTL so the just-claimed row
+    // is already past the cutoff by the time we call it.
+    // claimed_at was stamped ~now, so cutoff = now - 0s will NOT include it.
+    // Sleep one second to push it past a 1 s TTL.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let _ = past; // keep the variable (documents intent) even if unused
+
+    let reset = mem.task_reset_stuck(1, 0).await.expect("sweep");
+    assert_eq!(reset, vec![task_id.clone()], "stuck task should be reset");
+
+    let pending = mem.task_list(Some("pending")).await.expect("list");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], task_id);
+    assert_eq!(pending[0]["assigned_to"], "");
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_evaluate_condition_none() {
     let tags = vec!["chat".to_string(), "dev".to_string()];
@@ -1832,4 +1932,82 @@ fn test_skill_evolve_tools_default_available_to_restricted_agent() {
             "declared tool {required} missing from {filtered:?}"
         );
     }
+}
+
+// Regression test for the fix that reads peer_id from job_json.
+// Before the fix, cron_create always set peer_id: None regardless of the
+// job payload, so OFP-triggered cron jobs lost the peer context entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cron_create_preserves_peer_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let agents = kernel.registry.list();
+    let assistant = agents
+        .iter()
+        .find(|a| a.name == "assistant")
+        .expect("assistant should exist");
+    let agent_id = assistant.id.to_string();
+
+    let job_json = serde_json::json!({
+        "name": "peer-id-regression",
+        "peer_id": "peer-abc-123",
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
+    });
+
+    kernel
+        .cron_create(&agent_id, job_json)
+        .await
+        .expect("cron_create should succeed");
+
+    let jobs = kernel
+        .cron_list(&agent_id)
+        .await
+        .expect("cron_list should succeed");
+
+    let job = jobs
+        .iter()
+        .find(|j| j["name"].as_str() == Some("peer-id-regression"))
+        .expect("created job should appear in list");
+
+    assert_eq!(
+        job["peer_id"].as_str(),
+        Some("peer-abc-123"),
+        "peer_id must be preserved from job_json, not silently dropped"
+    );
+
+    // Also verify that a job created WITHOUT peer_id has peer_id = null.
+    let job_no_peer = serde_json::json!({
+        "name": "no-peer-id",
+        "schedule": { "kind": "cron", "expr": "0 * * * *" },
+        "action": { "kind": "agent_turn", "message": "ping" },
+    });
+    kernel
+        .cron_create(&agent_id, job_no_peer)
+        .await
+        .expect("cron_create without peer_id should succeed");
+    let jobs2 = kernel
+        .cron_list(&agent_id)
+        .await
+        .expect("cron_list should succeed");
+    let job2 = jobs2
+        .iter()
+        .find(|j| j["name"].as_str() == Some("no-peer-id"))
+        .expect("second job should appear in list");
+    assert!(
+        job2["peer_id"].is_null(),
+        "peer_id should be null when not provided"
+    );
+
+    kernel.shutdown();
 }

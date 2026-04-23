@@ -291,6 +291,13 @@ pub struct ApprovalRequest {
     /// Number of times this request has been escalated (max 3).
     #[serde(default)]
     pub escalation_count: u8,
+    /// Session ID that submitted this request (for per-session queue operations).
+    ///
+    /// When set, `resolve_all_for_session` can resolve all pending requests
+    /// belonging to this session atomically (mirrors Hermes-Agent's
+    /// `resolve_gateway_approval(session_key, choice, resolve_all=True)`).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -832,6 +839,7 @@ mod tests {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
+            session_id: None,
         }
     }
 

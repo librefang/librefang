@@ -218,6 +218,16 @@ pub struct MessageRequest {
     /// `None` defaults to `true` when thinking content is available.
     #[serde(default)]
     pub show_thinking: Option<bool>,
+    /// Optional explicit session ID (UUID string) to use for this message.
+    ///
+    /// When set, overrides the default session resolution (channel-derived or
+    /// registry canonical). Enables multi-tab / multi-session UIs where the
+    /// caller tracks which session each conversation belongs to.
+    ///
+    /// Safety: the server rejects a `session_id` that belongs to a different
+    /// agent with 400 Bad Request.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Response from sending a message.
@@ -251,6 +261,14 @@ pub struct MessageResponse {
     /// requested `show_thinking = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// §A — Optional private notice destined for the agent's owner DM,
+    /// produced when the model invoked the `notify_owner` tool during the
+    /// turn. Channel adapters (e.g. whatsapp-gateway) MUST route this to
+    /// the owner's address (e.g. OWNER_JID) and NOT to the source chat.
+    /// Adapters that don't support owner-side delivery should ignore it
+    /// (BC-01 — Telegram/Discord/Slack continue to function unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_notice: Option<String>,
 }
 
 /// Request to inject a message into a running agent's tool-execution loop (#956).

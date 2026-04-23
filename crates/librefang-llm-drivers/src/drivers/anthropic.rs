@@ -3,7 +3,9 @@
 //! Full implementation of the Anthropic Messages API with tool use support,
 //! system prompt extraction, and retry on 429/529 errors.
 
+use crate::backoff::standard_retry_delay;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::config::ResponseFormat;
@@ -20,6 +22,9 @@ pub struct AnthropicDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    /// Per-provider HTTP request timeout in seconds.
+    /// Overrides the HTTP client's default read timeout when set.
+    request_timeout_secs: Option<u64>,
 }
 
 impl AnthropicDriver {
@@ -30,6 +35,16 @@ impl AnthropicDriver {
 
     /// Create a new Anthropic driver with an optional per-provider proxy.
     pub fn with_proxy(api_key: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        Self::with_proxy_and_timeout(api_key, base_url, proxy_url, None)
+    }
+
+    /// Create a new Anthropic driver with optional proxy and request timeout.
+    pub fn with_proxy_and_timeout(
+        api_key: String,
+        base_url: String,
+        proxy_url: Option<&str>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url),
             None => librefang_http::proxied_client(),
@@ -38,6 +53,7 @@ impl AnthropicDriver {
             api_key: Zeroizing::new(api_key),
             base_url,
             client,
+            request_timeout_secs,
         }
     }
 }
@@ -295,6 +311,18 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         request.max_tokens
     };
 
+    // Anthropic rejects max_tokens=0 with HTTP 400; fall back to a safe
+    // minimum so callers that forget to set max_tokens still work.
+    let effective_max_tokens = if effective_max_tokens == 0 {
+        warn!(
+            model = %request.model,
+            "max_tokens resolved to 0, falling back to safe minimum of 8192"
+        );
+        8192
+    } else {
+        effective_max_tokens
+    };
+
     ApiRequest {
         model: request.model.clone(),
         max_tokens: effective_max_tokens,
@@ -322,13 +350,17 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic API request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
-                .json(&api_request)
+                .json(&api_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -337,9 +369,20 @@ impl LlmDriver for AnthropicDriver {
 
             if status == 429 || status == 529 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or(std::time::Duration::ZERO);
+                    let delay = standard_retry_delay(attempt + 1, retry_after);
+                    warn!(
+                        status,
+                        delay_ms = delay.as_millis(),
+                        "Rate limited, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {
@@ -360,6 +403,23 @@ impl LlmDriver for AnthropicDriver {
                     .map(|e| e.error.message)
                     .unwrap_or(body);
                 return Err(LlmError::Api { status, message });
+            }
+
+            // Extract and log rate limit headers before consuming the response body.
+            if let Some(snap) = RateLimitSnapshot::from_headers(resp.headers()) {
+                if snap.has_warning() {
+                    warn!(
+                        target: "librefang::rate_limit",
+                        "Anthropic rate limit warning:\n{}",
+                        snap.display()
+                    );
+                } else {
+                    debug!(
+                        target: "librefang::rate_limit",
+                        "Anthropic rate limits OK:\n{}",
+                        snap.display()
+                    );
+                }
             }
 
             let body = resp
@@ -392,13 +452,17 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic streaming request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
-                .json(&api_request)
+                .json(&api_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -407,9 +471,20 @@ impl LlmDriver for AnthropicDriver {
 
             if status == 429 || status == 529 {
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited (stream), retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or(std::time::Duration::ZERO);
+                    let delay = standard_retry_delay(attempt + 1, retry_after);
+                    warn!(
+                        status,
+                        delay_ms = delay.as_millis(),
+                        "Rate limited (stream), retrying"
+                    );
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {
@@ -430,6 +505,23 @@ impl LlmDriver for AnthropicDriver {
                     .map(|e| e.error.message)
                     .unwrap_or(body);
                 return Err(LlmError::Api { status, message });
+            }
+
+            // Extract and log rate limit headers before consuming the stream.
+            if let Some(snap) = RateLimitSnapshot::from_headers(resp.headers()) {
+                if snap.has_warning() {
+                    warn!(
+                        target: "librefang::rate_limit",
+                        "Anthropic rate limit warning (stream):\n{}",
+                        snap.display()
+                    );
+                } else {
+                    debug!(
+                        target: "librefang::rate_limit",
+                        "Anthropic rate limits OK (stream):\n{}",
+                        snap.display()
+                    );
+                }
             }
 
             // Parse the SSE stream
@@ -565,10 +657,8 @@ impl LlmDriver for AnthropicDriver {
                                 input_json,
                             }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value = match serde_json::from_str::<
-                                    serde_json::Value,
-                                >(
-                                    input_json
+                                let input: serde_json::Value = match super::openai::parse_tool_args(
+                                    input_json,
                                 ) {
                                     Ok(v) => ensure_object(v),
                                     Err(e) => {
@@ -632,7 +722,7 @@ impl LlmDriver for AnthropicDriver {
                         input_json,
                     } => {
                         let input: serde_json::Value =
-                            match serde_json::from_str::<serde_json::Value>(&input_json) {
+                            match super::openai::parse_tool_args(&input_json) {
                                 Ok(v) => ensure_object(v),
                                 Err(e) => {
                                     tracing::warn!(
@@ -1061,6 +1151,7 @@ mod tests {
                 provider_metadata: None,
             }]),
             pinned: false,
+            timestamp: None,
         };
         let api_msg = convert_message(&msg);
         match api_msg.content {

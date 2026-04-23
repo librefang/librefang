@@ -182,9 +182,23 @@ describe("query key factories", () => {
       ]);
     });
 
+    it("searchOrList is nested under lists", () => {
+      const searchKey = memoryKeys.searchOrList("test");
+      expect(searchKey).toEqual(["memory", "list", "searchOrList", "test"]);
+      const listsPrefix = memoryKeys.lists();
+      expect(searchKey.slice(0, listsPrefix.length)).toEqual(listsPrefix);
+    });
+
     it("stats is per agent or global", () => {
+      expect(memoryKeys.statsAll()).toEqual(["memory", "stats"]);
       expect(memoryKeys.stats()).toEqual(["memory", "stats", undefined]);
       expect(memoryKeys.stats("a1")).toEqual(["memory", "stats", "a1"]);
+    });
+
+    it("statsAll prefixes per-agent stats keys", () => {
+      const prefix = memoryKeys.statsAll();
+      expect(memoryKeys.stats().slice(0, prefix.length)).toEqual(prefix);
+      expect(memoryKeys.stats("a1").slice(0, prefix.length)).toEqual(prefix);
     });
   });
 

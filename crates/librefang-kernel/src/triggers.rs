@@ -70,7 +70,22 @@ pub enum TriggerPattern {
     /// Match custom events by content substring.
     ContentMatch { substring: String },
     /// Match when a task is posted to the Task Board.
-    TaskPosted,
+    ///
+    /// `assignee_match` narrows the match to tasks assigned to a specific
+    /// agent:
+    /// - `Some("self")` — only fire for tasks assigned to the trigger-owning
+    ///   agent. Accepts both the agent's UUID and its display name.
+    /// - `Some("<uuid>"|"<name>")` — only fire for tasks assigned to that
+    ///   specific agent.
+    /// - `None` — fire for every `TaskPosted` event (legacy behavior).
+    ///
+    /// The field is `#[serde(default)]` so legacy triggers persisted or
+    /// transmitted as the bare JSON string `"task_posted"` still parse via
+    /// the `preprocess_pattern_json` helper (see API route).
+    TaskPosted {
+        #[serde(default)]
+        assignee_match: Option<String>,
+    },
     /// Match when a task is claimed from the Task Board.
     TaskClaimed,
     /// Match when a task is completed on the Task Board.
@@ -216,7 +231,22 @@ impl TriggerEngine {
         }
         let data = std::fs::read_to_string(path)
             .map_err(|e| LibreFangError::Internal(format!("Failed to read trigger jobs: {e}")))?;
-        let triggers: Vec<Trigger> = serde_json::from_str(&data)
+        let mut raw: Vec<serde_json::Value> = serde_json::from_str(&data)
+            .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
+        // Migrate legacy unit-variant patterns to struct form so old persisted
+        // files survive enum additions. Currently covers `"task_posted"` which
+        // gained `assignee_match` (the only struct variant with optional fields).
+        for entry in &mut raw {
+            if let Some(pattern) = entry.get_mut("pattern") {
+                if matches!(pattern.as_str(), Some("task_posted")) {
+                    *pattern = serde_json::json!({ "task_posted": {} });
+                }
+            }
+        }
+        let triggers: Vec<Trigger> = raw
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
             .map_err(|e| LibreFangError::Internal(format!("Failed to parse trigger jobs: {e}")))?;
         let count = triggers.len();
         for trigger in triggers {
@@ -545,6 +575,22 @@ impl TriggerEngine {
     /// 2. **Per-event budget** — at most `max_triggers_per_event` triggers may fire
     ///    from a single event evaluation. Excess matches are dropped with a warning.
     pub fn evaluate(&self, event: &Event) -> (Vec<TriggerMatch>, bool) {
+        self.evaluate_with_resolver(event, |_| None)
+    }
+
+    /// Like [`evaluate`] but accepts an `agent_id -> name` resolver so
+    /// patterns that match on the owning agent's identity
+    /// (e.g. `TaskPosted { assignee_match: Some("self") }`) can compare the
+    /// event's `assigned_to` string against the trigger-owner's **name** in
+    /// addition to its UUID.
+    ///
+    /// Callers that don't have a name lookup available can still use
+    /// [`evaluate`] — `self` matching will then only accept UUID strings.
+    pub fn evaluate_with_resolver(
+        &self,
+        event: &Event,
+        resolve_name: impl Fn(AgentId) -> Option<String>,
+    ) -> (Vec<TriggerMatch>, bool) {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
         let mut state_mutated = false;
@@ -580,7 +626,9 @@ impl TriggerEngine {
                 }
             }
 
-            if matches_pattern(&trigger.pattern, event, &event_description) {
+            let owner_name = resolve_name(trigger.agent_id);
+            let owner = Some((trigger.agent_id, owner_name));
+            if matches_pattern(&trigger.pattern, event, &event_description, owner) {
                 // Enforce per-event trigger budget (storm prevention).
                 //
                 // We intentionally `break` here rather than `continue` — once the
@@ -647,7 +695,12 @@ impl Default for TriggerEngine {
 }
 
 /// Check if an event matches a trigger pattern.
-fn matches_pattern(pattern: &TriggerPattern, event: &Event, description: &str) -> bool {
+fn matches_pattern(
+    pattern: &TriggerPattern,
+    event: &Event,
+    description: &str,
+    owner: Option<(AgentId, Option<String>)>,
+) -> bool {
     match pattern {
         TriggerPattern::All => true,
         TriggerPattern::Lifecycle => {
@@ -689,10 +742,32 @@ fn matches_pattern(pattern: &TriggerPattern, event: &Event, description: &str) -
         TriggerPattern::ContentMatch { substring } => description
             .to_lowercase()
             .contains(&substring.to_lowercase()),
-        TriggerPattern::TaskPosted => matches!(
-            event.payload,
-            EventPayload::System(SystemEvent::TaskPosted { .. })
-        ),
+        TriggerPattern::TaskPosted { assignee_match } => match &event.payload {
+            EventPayload::System(SystemEvent::TaskPosted { assigned_to, .. }) => {
+                match assignee_match {
+                    None => true,
+                    Some(filter) => {
+                        // Empty assigned_to can't match any filter — the task
+                        // isn't assigned to anyone, so an assignee_match
+                        // predicate is definitionally false.
+                        let Some(assigned) = assigned_to else {
+                            return false;
+                        };
+                        match filter.as_str() {
+                            "self" => match &owner {
+                                Some((id, name)) => {
+                                    assigned == &id.to_string()
+                                        || name.as_deref() == Some(assigned.as_str())
+                                }
+                                None => false,
+                            },
+                            other => assigned == other,
+                        }
+                    }
+                }
+            }
+            _ => false,
+        },
         TriggerPattern::TaskClaimed => matches!(
             event.payload,
             EventPayload::System(SystemEvent::TaskClaimed { .. })
@@ -1521,5 +1596,98 @@ mod tests {
             entry.cooldown_secs = Some(0);
         }
         assert_eq!(engine.evaluate(&event2).0.len(), 0);
+    }
+
+    #[test]
+    fn task_posted_assignee_match_self_filters_by_uuid_and_name() {
+        // Regression test for #2924 — `{"task_posted":{"assignee_match":"self"}}`
+        // must only fire for tasks assigned to the trigger-owning agent.
+        let engine = TriggerEngine::new();
+        let worker = AgentId::new();
+        let delegator = AgentId::new();
+
+        engine.register(
+            worker,
+            TriggerPattern::TaskPosted {
+                assignee_match: Some("self".to_string()),
+            },
+            "claim and work on {{event}}".to_string(),
+            0,
+        );
+
+        // A task assigned to the delegator must NOT match.
+        let event_other = Event::new(
+            delegator,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-1".to_string(),
+                title: "Unrelated".to_string(),
+                assigned_to: Some(delegator.to_string()),
+                created_by: Some(delegator.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&event_other, |id| {
+            if id == worker {
+                Some("worker".to_string())
+            } else {
+                None
+            }
+        });
+        assert!(
+            matches.is_empty(),
+            "assignee_match:self must reject tasks assigned to a different agent"
+        );
+
+        // A task assigned to the worker (by UUID) MUST match.
+        let event_for_me = Event::new(
+            delegator,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-2".to_string(),
+                title: "For me".to_string(),
+                assigned_to: Some(worker.to_string()),
+                created_by: Some(delegator.to_string()),
+            }),
+        );
+        let (matches, _) = engine.evaluate_with_resolver(&event_for_me, |id| {
+            if id == worker {
+                Some("worker".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            matches.len(),
+            1,
+            "assignee_match:self must fire for tasks assigned to the owner by UUID"
+        );
+
+        // A task assigned to the worker (by name) MUST also match.
+        let event_for_me_by_name = Event::new(
+            delegator,
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::TaskPosted {
+                task_id: "t-3".to_string(),
+                title: "For me by name".to_string(),
+                assigned_to: Some("worker".to_string()),
+                created_by: Some(delegator.to_string()),
+            }),
+        );
+        // Reset cooldown so we can evaluate a second matching event.
+        for mut entry in engine.triggers.iter_mut() {
+            entry.cooldown_secs = Some(0);
+        }
+        let (matches, _) = engine.evaluate_with_resolver(&event_for_me_by_name, |id| {
+            if id == worker {
+                Some("worker".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            matches.len(),
+            1,
+            "assignee_match:self must accept the owner's display name too"
+        );
     }
 }

@@ -3042,6 +3042,7 @@ pub async fn hand_send_message(
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
+                    owner_notice: result.owner_notice,
                 })),
             )
         }
@@ -5411,6 +5412,7 @@ mod tests {
             headers: vec!["xc-mcp-token: secret".to_string()],
             oauth: None,
             taint_scanning: true,
+            taint_policy: None,
         };
 
         upsert_mcp_server_config(&config_path, &entry).expect("upsert should succeed");
@@ -5465,6 +5467,7 @@ mod tests {
             headers: vec![],
             oauth: None,
             taint_scanning: true,
+            taint_policy: None,
         };
         upsert_mcp_server_config(&config_path, &v1).unwrap();
 
@@ -5479,6 +5482,7 @@ mod tests {
             headers: vec![],
             oauth: None,
             taint_scanning: true,
+            taint_policy: None,
         };
         upsert_mcp_server_config(&config_path, &v2).unwrap();
 

@@ -76,7 +76,10 @@ export function useSetHandSecret() {
       key: string;
       value: string;
     }) => setHandSecret(handId, key, value),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: handKeys.lists() });
+      qc.invalidateQueries({ queryKey: handKeys.detail(variables.handId) });
+    },
   });
 }
 
@@ -90,7 +93,10 @@ export function useUpdateHandSettings() {
       handId: string;
       config: Record<string, unknown>;
     }) => updateHandSettings(handId, config),
-    onSuccess: () => qc.invalidateQueries({ queryKey: handKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: handKeys.lists() });
+      qc.invalidateQueries({ queryKey: handKeys.detail(variables.handId) });
+    },
   });
 }
 

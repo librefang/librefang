@@ -327,6 +327,15 @@ pub struct SenderContext {
     /// `switch_agent_session` actually affect what the user sees.
     #[serde(default)]
     pub use_canonical_session: bool,
+    /// Set by the kernel's internal cron runner only — never by external API
+    /// callers. Gates [SILENT] marker processing so a regular user who
+    /// happens to type "[SILENT]" in chat does not accidentally suppress
+    /// their session history.
+    ///
+    /// Intentionally excluded from serialization so external callers cannot
+    /// inject `"is_internal_cron": true` through a JSON payload.
+    #[serde(skip)]
+    pub is_internal_cron: bool,
 }
 
 /// Reference to a participant in a group chat.
@@ -622,6 +631,9 @@ pub trait ChannelAdapter: Send + Sync {
 /// HTML-entity-aware: never cuts in the middle of `&...;` sequences
 /// (e.g. `&amp;`, `&lt;`, `&#123;`).
 ///
+/// HTML-tag-aware: never cuts inside an unclosed Telegram HTML tag
+/// (e.g. `<code>`, `<pre>`, `<b>`, `<i>`, `<u>`, `<s>`, `<a>`).
+///
 /// Shared utility used by Telegram, Discord, and Slack adapters.
 #[inline]
 pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
@@ -641,6 +653,18 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         // from safe_end: if we find `&` without a subsequent `;` before the
         // boundary, move the split point to just before that `&`.
         let safe_end = retreat_past_html_entity(remaining, safe_end);
+        // Avoid splitting inside an unclosed Telegram HTML tag (e.g. `<code>`).
+        // If there is an unclosed tag at the boundary, retreat to just before
+        // its opening `<`.  Fall back to safe_end if retreating would produce
+        // an empty chunk (tag longer than max_len).
+        let safe_end = {
+            let retreated = retreat_past_html_tag(remaining, safe_end);
+            if retreated == 0 {
+                safe_end
+            } else {
+                retreated
+            }
+        };
         let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk);
@@ -651,6 +675,100 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
             .unwrap_or(rest);
     }
     chunks
+}
+
+/// If `pos` falls inside an unclosed Telegram HTML tag in `text[..pos]`,
+/// return the byte index of the opening `<` so the caller splits before it.
+/// Otherwise return `pos` unchanged.
+///
+/// Telegram's supported tags: `b`, `i`, `u`, `s`, `code`, `pre`, `a`.
+/// Matching is case-insensitive.  Self-closing tags are ignored.
+///
+/// The function counts open vs close tags for each tag name.  If any tag
+/// has more opens than closes, the position is retreated to just before the
+/// last unmatched opening tag's `<`.
+///
+/// If retreating would produce an empty chunk (i.e. the result would be 0),
+/// the caller should fall back to the original position to avoid an
+/// infinite loop.
+fn retreat_past_html_tag(text: &str, pos: usize) -> usize {
+    // Only Telegram-supported inline/block tags.
+    const TELEGRAM_TAGS: &[&str] = &["b", "i", "u", "s", "code", "pre", "a"];
+
+    let slice = &text[..pos];
+
+    // Walk the slice collecting tag events.
+    // We record the byte offset of the `<` for each opening tag so we can
+    // retreat to it if needed.
+    //
+    // Opening tags look like: `<tagname` (followed by `>` or whitespace or `/>`)
+    // Closing tags look like: `</tagname`
+    let mut opens: Vec<(String, usize)> = Vec::new(); // (tag_name, lt_pos) stack of unclosed opens
+    let mut i = 0usize;
+    let bytes = slice.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let lt_pos = i;
+        i += 1; // skip `<`
+        if i >= bytes.len() {
+            break;
+        }
+        // Detect closing tag
+        let is_closing = bytes[i] == b'/';
+        if is_closing {
+            i += 1;
+        }
+        // Read tag name (ASCII letters only)
+        let name_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let name = &slice[name_start..i];
+        if name.is_empty() {
+            continue;
+        }
+        let name_lower = name.to_ascii_lowercase();
+        if !TELEGRAM_TAGS.contains(&name_lower.as_str()) {
+            // Skip to end of tag to avoid false positives inside attributes
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            continue;
+        }
+        // Advance to the end of the tag (`>`).
+        // A self-closing tag ends with `/>` — the slash must be immediately
+        // before the `>`.  Checking for any `/` inside the tag incorrectly
+        // flags tags whose attributes contain URLs (e.g. `<a href="…/…">`).
+        while i < bytes.len() && bytes[i] != b'>' {
+            i += 1;
+        }
+        // `i` now points at `>` (or is past the end if the tag is unclosed).
+        let self_closing = i >= 1 && i < bytes.len() && bytes[i - 1] == b'/';
+        if i < bytes.len() {
+            i += 1; // consume `>`
+        }
+        if self_closing {
+            continue;
+        }
+        if is_closing {
+            // Pop the most recent matching open from our stack
+            if let Some(last_match) = opens.iter().rposition(|(n, _)| n == &name_lower) {
+                opens.remove(last_match);
+            }
+        } else {
+            opens.push((name_lower, lt_pos));
+        }
+    }
+
+    // If there are unclosed tags, retreat to the earliest unclosed opening `<`.
+    if let Some(&(_, lt_pos)) = opens.first() {
+        lt_pos
+    } else {
+        pos
+    }
 }
 
 /// If `pos` falls inside an HTML entity (`&...;`), return the index of the
@@ -773,6 +891,56 @@ mod tests {
         // Should not panic; should return either 4 or an earlier valid boundary.
         assert!(text.is_char_boundary(result));
         assert!(result <= 4);
+    }
+
+    // ── retreat_past_html_tag regression tests ────────────────────────────
+
+    /// Regression: `<a href="https://example.com/path/to/page">` must NOT be
+    /// treated as self-closing just because the URL contains `/` characters.
+    /// Only `/>` (slash immediately before `>`) is a self-closing indicator.
+    #[test]
+    fn test_anchor_with_url_not_self_closing() {
+        // max_len=57: large enough to hold the anchor block (56 chars) in one
+        // chunk, but smaller than the full string (63 chars) so a split occurs.
+        let text = "prefix\n<a href=\"https://example.com/path/to/page\">link text</a>";
+        let chunks = split_message(text, 57);
+        // The opening <a> and its closing </a> must land in the same chunk.
+        let anchor_chunk = chunks.iter().find(|c| c.contains("<a "));
+        let close_chunk = chunks.iter().find(|c| c.contains("</a>"));
+        assert!(anchor_chunk.is_some(), "no chunk contains opening <a>");
+        assert_eq!(
+            anchor_chunk, close_chunk,
+            "opening <a> and closing </a> ended up in different chunks: {:?}",
+            chunks
+        );
+    }
+
+    /// Direct unit test: `retreat_past_html_tag` on an unclosed `<code>` block.
+    #[test]
+    fn test_retreat_past_html_tag_unclosed_code() {
+        let text = "hello <code>world";
+        let pos = text.len();
+        let result = retreat_past_html_tag(text, pos);
+        // Should retreat to the `<` of `<code>`
+        assert_eq!(&text[result..], "<code>world");
+    }
+
+    /// Direct unit test: balanced tags return `pos` unchanged.
+    #[test]
+    fn test_retreat_past_html_tag_balanced_returns_pos() {
+        let text = "hello <b>world</b> end";
+        let pos = text.len();
+        let result = retreat_past_html_tag(text, pos);
+        assert_eq!(result, pos);
+    }
+
+    /// A tag longer than max_len must not cause an infinite loop.
+    #[test]
+    fn test_very_long_tag_no_infinite_loop() {
+        let text = "<code>abcdefghijklmnopqrstuvwxyz</code>";
+        let chunks = split_message(text, 8);
+        let rebuilt: String = chunks.concat();
+        assert_eq!(rebuilt, text);
     }
 
     #[test]

@@ -28,7 +28,7 @@ export function useSpawnAgent() {
   return useMutation({
     mutationFn: spawnAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -51,7 +51,7 @@ export function useCloneAgent() {
   return useMutation({
     mutationFn: cloneAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -72,7 +72,7 @@ export function useSuspendAgent() {
   return useMutation({
     mutationFn: suspendAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -82,8 +82,9 @@ export function useDeleteAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteAgent,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.removeQueries({ queryKey: agentKeys.detail(variables) });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -94,7 +95,7 @@ export function useResumeAgent() {
   return useMutation({
     mutationFn: resumeAgent,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
@@ -157,7 +158,11 @@ export function useCreateAgentSession() {
   return useMutation({
     mutationFn: ({ agentId, label }: { agentId: string; label?: string }) =>
       createAgentSession(agentId, label),
-    onSuccess: () => qc.invalidateQueries({ queryKey: agentKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
+    },
   });
 }
 
@@ -201,6 +206,8 @@ export function useDeleteAgentSession() {
 export function useDeletePromptVersion() {
   const qc = useQueryClient();
   return useMutation({
+    // agentId aliased to _agentId so it's available as variables.agentId in
+    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ versionId, agentId: _agentId }: { versionId: string; agentId: string }) =>
       deletePromptVersion(versionId),
     onSuccess: (_data, variables) => {
@@ -257,6 +264,8 @@ export function useCreateExperiment() {
 export function useStartExperiment() {
   const qc = useQueryClient();
   return useMutation({
+    // agentId aliased to _agentId so it's available as variables.agentId in
+    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       startExperiment(experimentId),
     onSuccess: (_data, variables) => {
@@ -269,6 +278,8 @@ export function useStartExperiment() {
 export function usePauseExperiment() {
   const qc = useQueryClient();
   return useMutation({
+    // agentId aliased to _agentId so it's available as variables.agentId in
+    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       pauseExperiment(experimentId),
     onSuccess: (_data, variables) => {
@@ -281,6 +292,8 @@ export function usePauseExperiment() {
 export function useCompleteExperiment() {
   const qc = useQueryClient();
   return useMutation({
+    // agentId aliased to _agentId so it's available as variables.agentId in
+    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       completeExperiment(experimentId),
     onSuccess: (_data, variables) => {

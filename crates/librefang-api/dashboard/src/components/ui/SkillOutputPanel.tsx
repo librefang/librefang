@@ -21,7 +21,7 @@ export function SkillOutputPanel() {
           {/* Header */}
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-border-subtle/50">
             <button
-              onClick={() => setCollapsed(!collapsed)}
+              onClick={() => setCollapsed(c => !c)}
               className="flex items-center gap-2 text-xs font-bold text-brand"
             >
               <Sparkles className="w-3.5 h-3.5" />
@@ -55,7 +55,7 @@ export function SkillOutputPanel() {
                       </span>
                       {output.agentName && (
                         <span className="text-[9px] text-text-dim">
-                          via {output.agentName}
+                          {t("skills.via", { defaultValue: "via" })} {output.agentName}
                         </span>
                       )}
                       <span className="text-[9px] text-text-dim/40 ml-auto">

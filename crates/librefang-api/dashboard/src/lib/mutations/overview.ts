@@ -3,11 +3,11 @@ import { postQuickInit } from "../../api";
 import { overviewKeys } from "../queries/keys";
 
 export function useQuickInit() {
-  const queryClient = useQueryClient();
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: postQuickInit,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }

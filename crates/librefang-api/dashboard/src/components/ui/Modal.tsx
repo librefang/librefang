@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useId, memo, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useFocusTrap } from "../../lib/useFocusTrap";
@@ -43,7 +43,7 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
 ///
 /// Children render inside the dialog container — provide your own
 /// body content and (optionally) your own header/footer.
-export function Modal({
+export const Modal = memo(function Modal({
   isOpen,
   onClose,
   title,
@@ -56,41 +56,43 @@ export function Modal({
 }: ModalProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef);
+  const onCloseRef = useRef(onClose);
+  const titleId = useId();
+  useFocusTrap(isOpen, dialogRef, true);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const titleId = title ? "modal-title-" + Math.random().toString(36).slice(2, 8) : undefined;
+  const handleBackdropClick = (e: React.MouseEvent) => {
+    // Stop the click from bubbling to an ancestor backdrop.
+    // `fixed inset-0` positions the overlay relative to the
+    // viewport, but React synthetic events still follow the
+    // DOM ancestor chain — so when this Modal is rendered
+    // inside another backdrop-dismissable modal (e.g.
+    // TomlViewer mounted inside HandsPage's HandDetailPanel),
+    // closing this one via backdrop would otherwise also
+    // close its parent. See codex review on #2722.
+    e.stopPropagation();
+    onClose();
+  };
 
   return (
     <div
       className="fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
       style={{ zIndex }}
-      onClick={
-        disableBackdropClose
-          ? undefined
-          : (e) => {
-              // Stop the click from bubbling to an ancestor backdrop.
-              // `fixed inset-0` positions the overlay relative to the
-              // viewport, but React synthetic events still follow the
-              // DOM ancestor chain — so when this Modal is rendered
-              // inside another backdrop-dismissable modal (e.g.
-              // TomlViewer mounted inside HandsPage's HandDetailPanel),
-              // closing this one via backdrop would otherwise also
-              // close its parent. See codex review on #2722.
-              e.stopPropagation();
-              onClose();
-            }
-      }
+      onClick={disableBackdropClose ? undefined : handleBackdropClick}
     >
       <div
         ref={dialogRef}
@@ -120,4 +122,4 @@ export function Modal({
       </div>
     </div>
   );
-}
+});

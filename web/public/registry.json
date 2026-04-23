@@ -2319,20 +2319,6 @@
   ],
   "providers": [
     {
-      "id": "ai21",
-      "name": "ai21",
-      "description": "",
-      "category": "",
-      "icon": ""
-    },
-    {
-      "id": "aider",
-      "name": "aider",
-      "description": "",
-      "category": "",
-      "icon": ""
-    },
-    {
       "id": "aion-labs",
       "name": "aion-labs",
       "description": "",
@@ -2391,13 +2377,6 @@
     {
       "id": "chatgpt",
       "name": "chatgpt",
-      "description": "",
-      "category": "",
-      "icon": ""
-    },
-    {
-      "id": "chutes",
-      "name": "chutes",
       "description": "",
       "category": "",
       "icon": ""
@@ -2734,13 +2713,6 @@
     {
       "id": "upstage",
       "name": "upstage",
-      "description": "",
-      "category": "",
-      "icon": ""
-    },
-    {
-      "id": "venice",
-      "name": "venice",
       "description": "",
       "category": "",
       "icon": ""

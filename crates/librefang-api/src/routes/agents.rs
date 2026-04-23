@@ -989,6 +989,7 @@ pub fn inject_attachments_into_session(
         role: Role::User,
         content: MessageContent::Blocks(image_blocks),
         pinned: false,
+        timestamp: Some(chrono::Utc::now()),
     });
 
     if let Err(e) = kernel.memory_substrate().save_session(&session) {
@@ -1188,6 +1189,20 @@ pub async fn send_message(
     let thinking_override = req.thinking;
     let show_thinking = req.show_thinking.unwrap_or(true);
 
+    // Parse optional explicit session_id override from the request body.
+    let session_id_override = match req.session_id.as_deref() {
+        None => None,
+        Some(s) => match s.parse::<uuid::Uuid>() {
+            Ok(id) => Some(librefang_types::agent::SessionId(id)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
+                );
+            }
+        },
+    };
+
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
         state
@@ -1196,29 +1211,18 @@ pub async fn send_message(
             .await
     } else {
         let sender_context = request_sender_context(&req);
-        if let Some(sender) = sender_context.as_ref() {
-            state
-                .kernel
-                .send_message_with_sender_context_and_thinking(
-                    agent_id,
-                    &effective_message,
-                    sender,
-                    thinking_override,
-                )
-                .await
-        } else {
-            let kernel_handle: Arc<dyn KernelHandle> =
-                state.kernel.clone() as Arc<dyn KernelHandle>;
-            state
-                .kernel
-                .send_message_with_thinking_override(
-                    agent_id,
-                    &effective_message,
-                    Some(kernel_handle),
-                    thinking_override,
-                )
-                .await
-        }
+        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+        state
+            .kernel
+            .send_message_with_session_override(
+                agent_id,
+                &effective_message,
+                Some(kernel_handle),
+                sender_context.as_ref(),
+                thinking_override,
+                session_id_override,
+            )
+            .await
     };
 
     match result {
@@ -1273,6 +1277,7 @@ pub async fn send_message(
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
                     thinking: thinking_trace,
+                    owner_notice: result.owner_notice,
                 })),
             )
         }
@@ -1282,6 +1287,8 @@ pub async fn send_message(
                 StatusCode::NOT_FOUND
             } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if format!("{e}").contains("belongs to a different agent") {
+                StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -1461,6 +1468,14 @@ pub async fn get_agent_session(
                 }
                 if !msg_images.is_empty() {
                     msg["images"] = serde_json::Value::Array(msg_images);
+                }
+                // Expose the real message timestamp so the dashboard can
+                // render historical times correctly on resume instead of
+                // falling back to render-time `Date.now()` (#2934). Serialized
+                // as RFC 3339; messages persisted before the field existed
+                // come through as `null`.
+                if let Some(ts) = m.timestamp {
+                    msg["timestamp"] = serde_json::Value::String(ts.to_rfc3339());
                 }
                 built_messages.push(msg);
             }
@@ -1861,10 +1876,30 @@ pub async fn send_message_stream(
         }
     }
 
+    // Parse optional explicit session_id override from the request body.
+    let session_id_override = match req.session_id.as_deref() {
+        None => None,
+        Some(s) => match s.parse::<uuid::Uuid>() {
+            Ok(id) => Some(librefang_types::agent::SessionId(id)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
+                )
+                    .into_response();
+            }
+        },
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     let (rx, _handle) = match state
         .kernel
-        .send_message_streaming_with_routing(agent_id, &req.message, Some(kernel_handle))
+        .send_message_streaming_with_routing_and_session_override(
+            agent_id,
+            &req.message,
+            Some(kernel_handle),
+            session_id_override,
+        )
         .await
     {
         Ok(pair) => pair,
@@ -1925,6 +1960,10 @@ pub async fn send_message_stream(
                         "phase": phase,
                         "detail": detail,
                     }))
+                    .unwrap_or_else(|_| Event::default().data("error")),
+                StreamEvent::OwnerNotice { text } => Event::default()
+                    .event("owner_notice")
+                    .json_data(serde_json::json!({ "text": text }))
                     .unwrap_or_else(|_| Event::default().data("error")),
                 _ => Event::default().comment("skip"),
             });
@@ -3614,18 +3653,26 @@ pub async fn clone_agent(
         }
     };
 
-    // Copy workspace files from source to destination
+    // Copy workspace identity files from source to destination
     let new_entry = state.kernel.agent_registry().get(new_id);
     if let (Some(ref src_ws), Some(ref new_entry)) = (source.manifest.workspace, new_entry) {
         if let Some(ref dst_ws) = new_entry.manifest.workspace {
             // Security: canonicalize both paths
             if let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) {
+                let src_identity = src_can.join(".identity");
+                let dst_identity = dst_can.join(".identity");
+                let _ = std::fs::create_dir_all(&dst_identity);
                 for &fname in KNOWN_IDENTITY_FILES {
-                    let src_file = src_can.join(fname);
-                    let dst_file = dst_can.join(fname);
+                    // Source: prefer .identity/ (post-migration), fall back to workspace root
+                    let src_file = if src_identity.join(fname).exists() {
+                        src_identity.join(fname)
+                    } else {
+                        src_can.join(fname)
+                    };
+                    let dst_file = dst_identity.join(fname);
                     if src_file.exists() {
                         if let Err(e) = std::fs::copy(&src_file, &dst_file) {
-                            tracing::warn!("Failed to copy file: {e}");
+                            tracing::warn!("Failed to copy identity file {fname}: {e}");
                         }
                     }
                 }
@@ -3758,7 +3805,13 @@ pub async fn list_agent_files(
 
     let mut files = Vec::new();
     for &name in KNOWN_IDENTITY_FILES {
-        let path = workspace.join(name);
+        // Check .identity/ first (current layout), then workspace root (pre-migration fallback)
+        let identity_path = workspace.join(".identity").join(name);
+        let path = if identity_path.exists() {
+            identity_path
+        } else {
+            workspace.join(name)
+        };
         let (exists, size_bytes) = if path.exists() {
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             (true, size)
@@ -3832,17 +3885,7 @@ pub async fn get_agent_file(
         }
     };
 
-    // Security: canonicalize and verify stays inside workspace
-    let file_path = workspace.join(&filename);
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
-            );
-        }
-    };
+    // Resolve canonical path: prefer .identity/ (current layout), fall back to workspace root
     let ws_canonical = match workspace.canonicalize() {
         Ok(p) => p,
         Err(_) => {
@@ -3852,6 +3895,24 @@ pub async fn get_agent_file(
             );
         }
     };
+
+    let identity_path = workspace.join(".identity").join(&filename);
+    let file_path = if identity_path.exists() {
+        identity_path
+    } else {
+        workspace.join(&filename)
+    };
+
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
+            );
+        }
+    };
+
     if !canonical.starts_with(&ws_canonical) {
         return (
             StatusCode::FORBIDDEN,
@@ -3965,20 +4026,23 @@ pub async fn set_agent_file(
         }
     };
 
-    let file_path = workspace.join(&filename);
-    // For new files, check the parent directory instead
-    let check_path = if file_path.exists() {
-        file_path
-            .canonicalize()
-            .unwrap_or_else(|_| file_path.clone())
-    } else {
-        // Parent must be inside workspace
-        file_path
-            .parent()
-            .and_then(|p| p.canonicalize().ok())
-            .map(|p| p.join(&filename))
-            .unwrap_or_else(|| file_path.clone())
-    };
+    // Always write to .identity/ (current layout)
+    let identity_dir = workspace.join(".identity");
+    if let Err(e) = std::fs::create_dir_all(&identity_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
+            ),
+        );
+    }
+    let file_path = identity_dir.join(&filename);
+
+    // Security: ensure .identity/ is inside the workspace
+    let check_path = identity_dir
+        .canonicalize()
+        .map(|p| p.join(&filename))
+        .unwrap_or_else(|_| file_path.clone());
     if !check_path.starts_with(&ws_canonical) {
         return (
             StatusCode::FORBIDDEN,
@@ -3987,7 +4051,7 @@ pub async fn set_agent_file(
     }
 
     // Atomic write: write to .tmp, then rename
-    let tmp_path = workspace.join(format!(".{filename}.tmp"));
+    let tmp_path = identity_dir.join(format!(".{filename}.tmp"));
     if let Err(e) = std::fs::write(&tmp_path, &req.content) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4075,23 +4139,30 @@ pub async fn delete_agent_file(
         }
     };
 
-    // Security: canonicalize and verify stays inside workspace
-    let file_path = workspace.join(&filename);
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
-            );
-        }
-    };
     let ws_canonical = match workspace.canonicalize() {
         Ok(p) => p,
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
+            );
+        }
+    };
+
+    // Resolve path: prefer .identity/ (current layout), fall back to workspace root
+    let identity_candidate = workspace.join(".identity").join(&filename);
+    let file_path = if identity_candidate.exists() {
+        identity_candidate
+    } else {
+        workspace.join(&filename)
+    };
+
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
     };
@@ -4861,6 +4932,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4879,6 +4951,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4901,6 +4974,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
@@ -4931,6 +5005,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: Some(roster.clone()),
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants, roster);

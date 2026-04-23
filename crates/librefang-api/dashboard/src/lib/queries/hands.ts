@@ -35,12 +35,14 @@ export const handQueries = {
       queryKey: handKeys.detail(handId),
       queryFn: () => getHandDetail(handId),
       enabled: !!handId,
+      staleTime: STALE_MS,
     }),
   settings: (handId: string) =>
     queryOptions({
       queryKey: handKeys.settings(handId),
       queryFn: () => getHandSettings(handId),
       enabled: !!handId,
+      staleTime: STALE_MS,
     }),
   stats: (instanceId: string) =>
     queryOptions({
@@ -75,12 +77,21 @@ export const handQueries = {
       queryKey: handKeys.session(instanceId),
       queryFn: () => getHandSession(instanceId),
       enabled: !!instanceId,
+      staleTime: STALE_MS,
     }),
   instanceStatus: (instanceId: string) =>
     queryOptions({
       queryKey: handKeys.instanceStatus(instanceId),
       queryFn: () => getHandInstanceStatus(instanceId),
       enabled: !!instanceId,
+      staleTime: STALE_MS,
+    }),
+  manifest: (handId: string, enabled = false) =>
+    queryOptions({
+      queryKey: handKeys.manifest(handId),
+      queryFn: () => getHandManifestToml(handId),
+      enabled: enabled && !!handId,
+      staleTime: 60_000,
     }),
 };
 
@@ -127,10 +138,5 @@ export function useHandInstanceStatus(instanceId: string) {
 // `enabled: true` only when the viewer modal opens, so we don't fetch
 // every hand's TOML eagerly.
 export function useHandManifestToml(handId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: handKeys.manifest(handId),
-    queryFn: () => getHandManifestToml(handId),
-    enabled: enabled && !!handId,
-    staleTime: 60_000,
-  });
+  return useQuery(handQueries.manifest(handId, enabled));
 }

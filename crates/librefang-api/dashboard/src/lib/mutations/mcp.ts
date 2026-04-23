@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   addMcpServer,
   updateMcpServer,
@@ -10,7 +10,7 @@ import {
 } from "../http/client";
 import { mcpKeys } from "../queries/keys";
 
-function invalidateMcpServer(qc: ReturnType<typeof useQueryClient>, id: string) {
+function invalidateMcpServer(qc: QueryClient, id: string) {
   return Promise.all([
     qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
     qc.invalidateQueries({ queryKey: mcpKeys.server(id) }),
@@ -23,7 +23,7 @@ export function useAddMcpServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: addMcpServer,
-    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
   });
 }
 
@@ -32,7 +32,10 @@ export function useUpdateMcpServer() {
   return useMutation({
     mutationFn: ({ id, server }: { id: string; server: Parameters<typeof updateMcpServer>[1] }) =>
       updateMcpServer(id, server),
-    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: mcpKeys.servers() });
+      qc.invalidateQueries({ queryKey: mcpKeys.server(variables.id) });
+    },
   });
 }
 
@@ -40,7 +43,10 @@ export function useDeleteMcpServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteMcpServer,
-    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: mcpKeys.servers() });
+      qc.removeQueries({ queryKey: mcpKeys.server(variables) });
+    },
   });
 }
 
@@ -48,7 +54,10 @@ export function useReconnectMcpServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: reconnectMcpServer,
-    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.all }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: mcpKeys.server(variables) });
+      qc.invalidateQueries({ queryKey: mcpKeys.health() });
+    },
   });
 }
 

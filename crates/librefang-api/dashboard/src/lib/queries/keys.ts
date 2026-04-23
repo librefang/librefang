@@ -194,8 +194,10 @@ export const memoryKeys = {
     limit?: number;
     category?: string;
   } = {}) => [...memoryKeys.lists(), filters] as const,
+  searchOrList: (search: string) => [...memoryKeys.lists(), "searchOrList", search] as const,
+  statsAll: () => [...memoryKeys.all, "stats"] as const,
   stats: (agentId?: string) =>
-    [...memoryKeys.all, "stats", agentId] as const,
+    [...memoryKeys.statsAll(), agentId] as const,
   config: () => [...memoryKeys.all, "config"] as const,
 };
 
@@ -211,12 +213,12 @@ export const usageKeys = {
 
 export const budgetKeys = {
   all: ["budget"] as const,
+  status: () => [...budgetKeys.all, "status"] as const,
 };
 
 export const goalKeys = {
   all: ["goals"] as const,
   lists: () => [...goalKeys.all, "list"] as const,
-  list: () => [...goalKeys.lists()] as const,
   templates: () => [...goalKeys.all, "templates"] as const,
 };
 
@@ -228,7 +230,6 @@ export const networkKeys = {
 export const peerKeys = {
   all: ["peers"] as const,
   lists: () => [...peerKeys.all, "list"] as const,
-  list: () => [...peerKeys.lists()] as const,
   details: () => [...peerKeys.all, "detail"] as const,
   detail: (id: string) => [...peerKeys.details(), id] as const,
 };

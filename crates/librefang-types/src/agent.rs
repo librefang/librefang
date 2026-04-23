@@ -116,6 +116,9 @@ pub enum HookEvent {
     BeforeToolCall,
     /// Fires after a tool call completes.
     AfterToolCall,
+    /// Fires after tool execution to allow rewriting the result string.
+    /// The first handler returning Ok(Some(s)) wins; others are skipped.
+    TransformToolResult,
     /// Fires before the system prompt is constructed.
     BeforePromptBuild,
     /// Fires after the agent loop completes.
@@ -228,6 +231,13 @@ impl SessionId {
     }
 }
 
+impl std::str::FromStr for SessionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(s).map(SessionId)
+    }
+}
+
 impl Default for SessionId {
     fn default() -> Self {
         Self::new()
@@ -273,10 +283,11 @@ pub enum WebSearchAugmentationMode {
 }
 
 /// The current lifecycle state of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Agent has been created but not yet started.
+    #[default]
     Created,
     /// Agent is actively running and processing events.
     Running,
@@ -636,6 +647,20 @@ pub struct AgentManifest {
     /// Whether to generate workspace identity files (SOUL.md, USER.md, etc.) on creation.
     #[serde(default = "default_true")]
     pub generate_identity_files: bool,
+    /// Named shared workspaces this agent can access.
+    ///
+    /// Each entry maps a symbolic name to a directory path (relative to `workspaces_dir`)
+    /// and an access mode. Multiple agents can declare the same path — they share the
+    /// directory without identity-file collisions because identity files live in the
+    /// agent's private home (`.identity/`), not in the shared workspace.
+    ///
+    /// ```toml
+    /// [workspaces]
+    /// library  = { path = "shared/library",  mode = "rw" }
+    /// archive  = { path = "shared/archive",  mode = "r"  }
+    /// ```
+    #[serde(default)]
+    pub workspaces: HashMap<String, WorkspaceDecl>,
     /// Per-agent exec policy override. If None, uses global exec_policy.
     /// Accepts string shorthand ("allow", "deny", "full", "allowlist") or full table.
     #[serde(default, deserialize_with = "crate::serde_compat::exec_policy_lenient")]
@@ -720,6 +745,34 @@ pub struct AgentManifest {
     /// the background LLM budget or concurrency semaphore after a turn.
     #[serde(default = "default_true")]
     pub auto_evolve: bool,
+    /// Per-agent channel behavior overrides (dm_policy, group_policy, etc.).
+    /// When set, these take priority over the channel-level `ChannelOverrides`
+    /// for this specific agent. Follows the same pattern as `exec_policy`.
+    #[serde(default)]
+    pub channel_overrides: Option<crate::config::ChannelOverrides>,
+}
+
+/// Access mode for a named workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    /// Full read-write access (default).
+    #[default]
+    #[serde(alias = "rw", alias = "read-write")]
+    ReadWrite,
+    /// Read-only access — write tool calls are rejected by the kernel.
+    #[serde(alias = "r", alias = "read", alias = "read-only")]
+    ReadOnly,
+}
+
+/// Declaration of a named workspace in `agent.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDecl {
+    /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
+    pub path: PathBuf,
+    /// Access mode. Defaults to read-write.
+    #[serde(default)]
+    pub mode: WorkspaceMode,
 }
 
 fn default_true() -> bool {
@@ -753,6 +806,7 @@ impl Default for AgentManifest {
             pinned_model: None,
             workspace: None,
             generate_identity_files: true,
+            workspaces: HashMap::new(),
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
@@ -770,6 +824,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            channel_overrides: None,
         }
     }
 }
@@ -901,6 +956,59 @@ pub struct AgentEntry {
     /// Whether this agent was spawned by a Hand (true) or is a regular agent (false).
     #[serde(default)]
     pub is_hand: bool,
+
+    // -----------------------------------------------------------------------
+    // Session auto-reset state (mirrors hermes-agent SessionEntry flags)
+    // -----------------------------------------------------------------------
+    /// When `true`, the next call to `execute_llm_agent` will force a hard
+    /// reset (cleared message history) before processing the message.
+    /// The session_id is kept; only the stored messages are wiped.
+    /// Set by operator action or stuck-loop recovery.  Takes priority over
+    /// `resume_pending`.
+    ///
+    /// Named `force_session_wipe` (not `suspended`) to avoid confusion with
+    /// `AgentState::Suspended` / `suspend_agent()`.
+    #[serde(default)]
+    pub force_session_wipe: bool,
+
+    /// When `true`, the agent was interrupted by a restart/shutdown but
+    /// recovery is expected.  Unlike `suspended`, the existing `session_id`
+    /// is preserved and the agent continues on the same transcript.
+    /// Cleared after the next successful turn.
+    #[serde(default)]
+    pub resume_pending: bool,
+
+    /// The reason for the most recent automatic session reset, if any.
+    /// `None` until the first auto-reset occurs.
+    #[serde(default)]
+    pub reset_reason: Option<crate::config::SessionResetReason>,
+}
+
+impl Default for AgentEntry {
+    fn default() -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: AgentId::default(),
+            name: String::new(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: now,
+            last_active: now,
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::default(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            force_session_wipe: false,
+            resume_pending: false,
+            reset_reason: None,
+        }
+    }
 }
 
 /// A stored prompt version for an agent.
@@ -1372,6 +1480,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1436,6 +1545,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1850,5 +1960,19 @@ model = "llama-3.3-70b-versatile"
         let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
         let sid = SessionId::for_channel(agent, "telegram");
         assert_eq!(sid.0.get_version_num(), 5, "SessionId must be UUID v5");
+    }
+
+    #[test]
+    fn session_id_from_str_parses_uuid() {
+        use std::str::FromStr;
+        let s = "550e8400-e29b-41d4-a716-446655440000";
+        let sid = SessionId::from_str(s).expect("valid uuid");
+        assert_eq!(sid.0.to_string(), s);
+    }
+
+    #[test]
+    fn session_id_from_str_rejects_garbage() {
+        use std::str::FromStr;
+        assert!(SessionId::from_str("not-a-uuid").is_err());
     }
 }

@@ -169,6 +169,8 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         auto_dream_min_sessions: None,
         show_progress: true,
         auto_evolve: true,
+        workspaces: HashMap::new(),
+        channel_overrides: None,
     })
 }
 

@@ -673,6 +673,7 @@ mod tests {
             prompt_context: None,
             source: None,
             config: Default::default(),
+            config_vars: Vec::new(),
         }
     }
 

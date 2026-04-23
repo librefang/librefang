@@ -5,6 +5,40 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.23] - 2026-04-23
+
+### Added
+
+- Auto-reset stuck in_progress tasks after TTL (closes #2923) (#2953) (@houko)
+- Named shared workspaces + identity file isolation (#2958) (@houko)
+- Add notify_owner tool + owner_notice output boundary (#2965) (@houko)
+- Moonshot/Kimi file upload support via /v1/files (#2966) (@houko)
+- Download channel files to disk for agent access (#2972) (@houko)
+- Session_key dispatch log + boot self-test for channel scoping (#2973) (@houko)
+
+### Fixed
+
+- Drop ellipsis-terminated preambles without tool_use as silent (#2617) (@f-liva)
+- Suppress NO_REPLY sentinel in streaming bridge, cron, and auto-reply (#2743) (@DaBlitzStein)
+- Make split_message HTML-tag-aware for Telegram (#2760) (@DaBlitzStein)
+- Auto-inject sender peer_id into cron jobs + delegation trust prompt (#2869) (@DaBlitzStein)
+- Route trigger-fired responses to agent's home channel (closes #2872) (#2952) (@houko)
+- Render real chat message timestamps on resume (closes #2934) (#2954) (@houko)
+- Apply assignee_match:self filter to task_posted triggers (closes #2924) (#2955) (@houko)
+- Inject bot identity into reply_precheck classifier (#2960) (@houko)
+- Sanitize bot_name in classify_reply_intent prompt; add unit tests (#2961) (@houko)
+- Tolerate tool_call_id collisions across turns in session_repair (#2962) (@houko)
+- Inject RELAY prompt only on explicit owner intent (#2967) (@houko)
+- Add missing timestamp field in session_repair Message structs (#2968) (@houko)
+- Fix all missing timestamp fields and incomplete test stubs (#2969) (@houko)
+- Read peer_id from job_json in cron_create (#2970) (@houko)
+- Recover Signal session when upsert delivers null payload (#2971) (@houko)
+
+
+## [2026.4.22] - 2026-04-22
+
+_No notable changes._
+
 ## [2026.4.21] - 2026-04-21
 
 ### Added

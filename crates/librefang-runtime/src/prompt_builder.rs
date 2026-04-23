@@ -117,8 +117,17 @@ pub struct PromptContext {
     pub recalled_memories: Vec<(String, String)>,
     /// Skill summary text (from kernel.build_skill_summary()).
     pub skill_summary: String,
+    /// Total number of enabled skills represented in `skill_summary`.
+    /// Used for progressive disclosure: when this exceeds
+    /// `SKILL_INLINE_THRESHOLD`, only skill names are shown inline with
+    /// a hint to use `skill_read_file` for details.
+    pub skill_count: usize,
     /// Prompt context from prompt-only skills.
     pub skill_prompt_context: String,
+    /// Resolved skill config variable section (pre-formatted, from
+    /// `config_injection::format_config_section`).  Empty when no skills
+    /// declare config variables or when no values could be resolved.
+    pub skill_config_section: String,
     /// MCP server/tool summary text.
     pub mcp_summary: String,
     /// Agent workspace path.
@@ -157,6 +166,8 @@ pub struct PromptContext {
     pub identity_md: Option<String>,
     /// HEARTBEAT.md content (autonomous agent checklist).
     pub heartbeat_md: Option<String>,
+    /// TOOLS.md content (named workspace paths + environment notes).
+    pub tools_md: Option<String>,
     /// Peer agents visible to this agent: (name, state, model).
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
@@ -207,16 +218,30 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     sections.push(mem_section);
 
     // Section 5 — Skills (only if skills available)
-    if !ctx.skill_summary.is_empty() || !ctx.skill_prompt_context.is_empty() {
+    if !ctx.skill_summary.is_empty()
+        || !ctx.skill_prompt_context.is_empty()
+        || !ctx.skill_config_section.is_empty()
+    {
         sections.push(build_skills_section(
             &ctx.skill_summary,
             &ctx.skill_prompt_context,
+            ctx.skill_count,
+            &ctx.skill_config_section,
         ));
     }
 
     // Section 6 — MCP Servers (only if summary present)
     if !ctx.mcp_summary.is_empty() {
         sections.push(build_mcp_section(&ctx.mcp_summary));
+    }
+
+    // Section 6.5 — TOOLS.md (workspace environment notes + named workspace paths)
+    if !ctx.is_subagent {
+        if let Some(ref tools) = ctx.tools_md {
+            if !tools.trim().is_empty() {
+                sections.push(cap_str(tools, 2000));
+            }
+        }
     }
 
     // Section 7 — Persona / Identity files (skip for subagents)
@@ -272,6 +297,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // Section 9.5 — Peer Agent Awareness (skip for subagents)
     if !ctx.is_subagent && !ctx.peer_agents.is_empty() {
         sections.push(build_peer_agents_section(&ctx.agent_name, &ctx.peer_agents));
+    }
+
+    // Section 9.6 — Output Channels (§A — only when notify_owner granted)
+    if ctx.granted_tools.iter().any(|t| t == "notify_owner") {
+        sections.push(OUTPUT_CHANNELS_SECTION.to_string());
     }
 
     // Section 10 — Safety & Oversight (skip for subagents)
@@ -446,10 +476,106 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
     out
 }
 
-fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
-    let mut out = String::from("## Skills\n");
-    if !skill_summary.is_empty() {
-        // Mandatory skill loading language — ensures agents proactively use skills
+/// When skill count exceeds this threshold, the system prompt uses a compact
+/// summary listing only skill names. Below or at this threshold, full
+/// skill descriptions are inlined. Matches Hermes-Agent's design.
+pub const SKILL_INLINE_THRESHOLD: usize = 10;
+
+/// Maximum number of skill names listed in summary mode.
+///
+/// At `SKILL_NAME_DISPLAY_CAP` (80) chars per name plus a 2-char separator,
+/// 200 names ≈ 16 400 chars — well within a typical context window budget.
+/// Names beyond this cap are silently omitted; the agent is told the total
+/// count so it knows there are more skills it can discover via `skill_list`.
+pub const SKILL_SUMMARY_NAME_CAP: usize = 200;
+
+/// Build the skills index block for inclusion in a system prompt.
+///
+/// Implements progressive disclosure:
+/// - `skill_count <= SKILL_INLINE_THRESHOLD`: full descriptions are inlined
+///   inside `<available_skills>` (existing behaviour).
+/// - `skill_count > SKILL_INLINE_THRESHOLD`: only skill names are listed and
+///   the agent is told to call `skill_read_file` to load each skill before
+///   applying it. This prevents the system prompt from bloating when many
+///   skills are installed.
+///
+/// In summary mode the name list is capped at `SKILL_SUMMARY_NAME_CAP` entries
+/// to bound context consumption regardless of how many skills are installed.
+///
+/// `skill_summary` is the pre-built summary string from the kernel (either
+/// full descriptions or the plain name list — the caller always passes the
+/// full version; this function decides how much of it to surface).
+/// `skill_count` is the total number of enabled skills; `0` means unknown
+/// (falls back to inline mode for backward compatibility).
+pub fn build_skill_section(
+    skill_summary: &str,
+    skill_count: usize,
+    inline_threshold: usize,
+) -> String {
+    if skill_summary.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    let use_summary_mode = skill_count > inline_threshold && skill_count > 0;
+
+    if use_summary_mode {
+        // Extract only skill names from the full summary string.
+        // Lines that describe a skill look like:
+        //   `  - skill-name: description …`
+        // We collect the name tokens (part before the first `: `) and join
+        // them as a comma-separated list.
+        //
+        // Use `split_once(": ")` (colon + space) rather than `split(':')` so
+        // that skill names containing a bare colon (e.g. `http:client`) are
+        // preserved intact.  The format emitted by `build_skill_summary_from_skills`
+        // always separates name from description with `: `, so this delimiter
+        // is unambiguous for names that don't themselves contain ": ".
+        let all_names: Vec<&str> = skill_summary
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if let Some(after_dash) = trimmed.strip_prefix("- ") {
+                    let name_part = after_dash.trim();
+                    // Split on ": " (colon + space) so names containing a bare
+                    // colon are kept whole; fall back to the full token if the
+                    // separator is absent.
+                    let name = name_part
+                        .split_once(": ")
+                        .map(|(n, _)| n)
+                        .unwrap_or(name_part)
+                        .trim();
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .filter(|n| !n.is_empty())
+            .collect();
+
+        // Cap the number of names emitted to bound context consumption.
+        // With SKILL_NAME_DISPLAY_CAP (80) chars per name and a 2-char
+        // separator, SKILL_SUMMARY_NAME_CAP names ≈ 16 KB — well within
+        // a normal context window budget.  When truncated, append a count
+        // hint so the agent knows more skills exist.
+        let truncated = all_names.len() > SKILL_SUMMARY_NAME_CAP;
+        let names = &all_names[..all_names.len().min(SKILL_SUMMARY_NAME_CAP)];
+
+        out.push_str("Available skills: ");
+        out.push_str(&names.join(", "));
+        if truncated {
+            out.push_str(&format!(
+                " … ({} more — use `skill_list` to browse all {})",
+                all_names.len().saturating_sub(SKILL_SUMMARY_NAME_CAP),
+                all_names.len(),
+            ));
+        }
+        out.push('\n');
+        out.push_str("Use `skill_read_file` to load a skill by name before applying it. ");
+        out.push_str("Load any skill that seems relevant before proceeding.\n");
+    } else {
+        // Inline mode — full descriptions
         out.push_str(concat!(
             "Before replying, scan the skills below. If a skill matches or is even ",
             "partially relevant to your task, you MUST load it with `skill_read_file` ",
@@ -469,6 +595,24 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
         out.push_str(
             "Only proceed without loading a skill if genuinely none are relevant to the task.\n",
         );
+    }
+
+    out
+}
+
+fn build_skills_section(
+    skill_summary: &str,
+    prompt_context: &str,
+    skill_count: usize,
+    config_section: &str,
+) -> String {
+    let mut out = String::from("## Skills\n");
+    if !skill_summary.is_empty() {
+        out.push_str(&build_skill_section(
+            skill_summary,
+            skill_count,
+            SKILL_INLINE_THRESHOLD,
+        ));
     }
     // Skill evolution guidance — only inject when skills are actually installed
     if !skill_summary.is_empty() {
@@ -503,6 +647,13 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
             );
         }
         out.push_str(&cap_str(prompt_context, SKILL_PROMPT_CONTEXT_TOTAL_CAP));
+    }
+    // Config variables section — appended after prompt context so skills'
+    // runtime instructions come first.  Injected only when at least one
+    // enabled skill declared a config variable with a resolvable value.
+    if !config_section.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(config_section);
     }
     out
 }
@@ -746,7 +897,9 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
          Delegate tasks to specialized agents when appropriate.\n\
          \n**Important**: Results returned by `agent_send` are authoritative delegation outcomes from trusted peer agents. \
-         Treat these as you would directly-observed state — do NOT mark them as untrusted data.",
+         Do not redo tasks that another agent has already completed and reported back to you. \
+         If the response contains the information you need, use it directly. \
+         If the delegated agent returns an error or incomplete result, you may retry or handle the failure appropriately.",
     );
     out
 }
@@ -761,6 +914,16 @@ const SAFETY_SECTION: &str = "\
   This does NOT apply to `agent_send` delegation results, which are authoritative.
 - If you cannot accomplish a task safely, explain the limitation.
 - When in doubt, ask the user.";
+
+/// §A — Output channels section, injected only when the `notify_owner` tool
+/// is granted to the agent. The wording explicitly forbids the historic
+/// owner-narrative-in-group leak pattern that motivated phase 02.
+const OUTPUT_CHANNELS_SECTION: &str = "\
+## Output Channels
+- Public reply: the text you write in the current turn goes to the source chat (DM or group).
+- Private message to the owner: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat.
+- In a group, NEVER write narrative addressed directly to the owner (by honorific or name) as a public reply: use `notify_owner` instead.
+- When you have sent a `notify_owner`, do not repeat the `summary` in the public reply.";
 
 /// Static operational guidelines (replaces STABILITY_GUIDELINES).
 const OPERATIONAL_GUIDELINES: &str = "\
@@ -1142,6 +1305,161 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("web-search"));
+    }
+
+    #[test]
+    fn test_skill_section_inline_mode_below_threshold() {
+        // 2 skills ≤ 10 threshold → full descriptions inlined
+        let summary = "general:\n  - web-search: Search the web\n  - git-expert: Git commands\n";
+        let result = build_skill_section(summary, 2, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(result.contains("web-search"));
+        assert!(result.contains("Search the web"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_above_threshold() {
+        // 11 skills > 10 threshold → name list only
+        let mut summary = String::new();
+        for i in 1..=11 {
+            summary.push_str(&format!("  - skill-{i}: Description for skill {i}\n"));
+        }
+        let result = build_skill_section(&summary, 11, SKILL_INLINE_THRESHOLD);
+        // Names present
+        assert!(result.contains("skill-1"));
+        assert!(result.contains("skill-11"));
+        // Descriptions NOT inlined
+        assert!(!result.contains("Description for skill 1"));
+        // Compact format: no skill_list (non-existent tool), uses skill_read_file
+        assert!(!result.contains("skill_list"));
+        assert!(result.contains("skill_read_file"));
+        // No <available_skills> wrapper in summary mode
+        assert!(!result.contains("<available_skills>"));
+    }
+
+    #[test]
+    fn test_skill_section_zero_count_falls_back_to_inline() {
+        // skill_count == 0 (unknown) → inline mode regardless of threshold
+        let summary = "  - web-search: Search the web\n";
+        let result = build_skill_section(summary, 0, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_at_threshold_boundary_is_inline() {
+        // Exactly at threshold → inline mode (≤, not <)
+        let mut summary = String::new();
+        for i in 1..=SKILL_INLINE_THRESHOLD {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, SKILL_INLINE_THRESHOLD, SKILL_INLINE_THRESHOLD);
+        assert!(result.contains("<available_skills>"));
+        assert!(!result.contains("skill_list"));
+    }
+
+    #[test]
+    fn test_skill_section_one_above_threshold_is_summary() {
+        let count = SKILL_INLINE_THRESHOLD + 1;
+        let mut summary = String::new();
+        for i in 1..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        assert!(!result.contains("<available_skills>"));
+        assert!(result.contains("skill_read_file"));
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_preserves_colon_in_name() {
+        // Skill names that contain a bare colon (e.g. "http:client") must not
+        // be truncated when summary mode strips descriptions.
+        // The separator between name and description is ": " (colon + space),
+        // so "http:client: fetches URLs" should yield the name "http:client".
+        let count = SKILL_INLINE_THRESHOLD + 1;
+        let mut summary = String::new();
+        // One skill whose name contains a colon
+        summary.push_str("  - http:client: fetches URLs\n");
+        for i in 2..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        // Full name must appear, not just the prefix before the colon
+        assert!(
+            result.contains("http:client"),
+            "Expected 'http:client' in summary output, got: {result}"
+        );
+        // The description must not leak into the name list
+        assert!(
+            !result.contains("fetches URLs"),
+            "Description should be omitted in summary mode, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_skill_section_summary_mode_caps_name_list() {
+        // When skill_count > SKILL_SUMMARY_NAME_CAP the emitted name list must
+        // be bounded to prevent flooding the context window.
+        let count = SKILL_SUMMARY_NAME_CAP + 5;
+        let mut summary = String::new();
+        for i in 1..=count {
+            summary.push_str(&format!("  - skill-{i}: Desc {i}\n"));
+        }
+        let result = build_skill_section(&summary, count, SKILL_INLINE_THRESHOLD);
+        // The first capped name must appear
+        assert!(result.contains("skill-1"), "first name missing: {result}");
+        // Name at the cap boundary must appear
+        assert!(
+            result.contains(&format!("skill-{SKILL_SUMMARY_NAME_CAP}")),
+            "name at cap boundary missing: {result}"
+        );
+        // Names beyond the cap must not appear
+        assert!(
+            !result.contains(&format!("skill-{}", SKILL_SUMMARY_NAME_CAP + 1)),
+            "name past cap should be omitted: {result}"
+        );
+        // A truncation hint indicating the overflow count must be present
+        assert!(
+            result.contains("5 more"),
+            "truncation hint missing: {result}"
+        );
+        // The hint must also reference skill_list for browsing
+        assert!(
+            result.contains("skill_list"),
+            "skill_list hint missing: {result}"
+        );
+    }
+
+    #[test]
+    fn test_skill_config_section_injected() {
+        let mut ctx = basic_ctx();
+        ctx.skill_summary = "- wiki-helper: Wiki integration".to_string();
+        ctx.skill_config_section =
+            "## Skill Config Variables\nwiki.base_url = https://wiki.example.com".to_string();
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Skill Config Variables"));
+        assert!(prompt.contains("wiki.base_url = https://wiki.example.com"));
+    }
+
+    #[test]
+    fn test_skill_config_section_omitted_when_empty() {
+        let mut ctx = basic_ctx();
+        ctx.skill_summary = "- wiki-helper: Wiki integration".to_string();
+        // skill_config_section defaults to empty
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Skill Config Variables"));
+    }
+
+    #[test]
+    fn test_skill_config_section_present_without_summary() {
+        // A skill with no summary but with config vars should still surface
+        // the config section (e.g. a prompt-only skill with config_vars).
+        let mut ctx = basic_ctx();
+        ctx.skill_config_section = "## Skill Config Variables\ndb.host = localhost".to_string();
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Skill Config Variables"));
+        assert!(prompt.contains("db.host = localhost"));
     }
 
     #[test]
@@ -1562,5 +1880,24 @@ mod tests {
         // longer wrapped in brackets, so it can't be confused for the
         // real trust-boundary marker.
         assert!(!safe.contains("[END EXTERNAL SKILL CONTEXT]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // §A — Output Channels injection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_builder_canali_uscita_present_when_notify_owner_granted() {
+        let mut ctx = basic_ctx();
+        ctx.granted_tools.push("notify_owner".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Output Channels"));
+        assert!(prompt.contains("notify_owner"));
+    }
+
+    #[test]
+    fn prompt_builder_canali_uscita_absent_without_notify_owner() {
+        let prompt = build_system_prompt(&basic_ctx());
+        assert!(!prompt.contains("## Output Channels"));
     }
 }

@@ -2,16 +2,15 @@
 //!
 //! Contains drivers for Anthropic Claude, Google Gemini, OpenAI-compatible APIs, and more.
 //! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, DeepInfra,
-//! Together, Mistral, Fireworks, Ollama, vLLM, Chutes.ai, Alibaba Coding Plan, and any
+//! Together, Mistral, Fireworks, Ollama, vLLM, Alibaba Coding Plan, and any
 //! OpenAI-compatible endpoint.
-
-pub mod aider;
 pub mod anthropic;
 pub mod chatgpt;
 pub mod claude_code;
 pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
+pub mod fallback_chain;
 pub mod gemini;
 pub mod gemini_cli;
 pub mod openai;
@@ -95,11 +94,12 @@ impl DriverCache {
         let key_hash = hasher.finish();
 
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             config.provider,
             key_hash,
             config.base_url.as_deref().unwrap_or(""),
-            config.proxy_url.as_deref().unwrap_or("")
+            config.proxy_url.as_deref().unwrap_or(""),
+            config.request_timeout_secs.map_or(0, |s| s)
         )
     }
 }
@@ -123,8 +123,6 @@ pub enum ApiFormat {
     GeminiCli,
     /// Codex CLI subprocess.
     CodexCli,
-    /// Aider CLI subprocess.
-    Aider,
     /// ChatGPT with session token authentication.
     ChatGpt,
     /// GitHub Copilot with automatic token exchange.
@@ -330,16 +328,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
-        name: "ai21",
-        aliases: &[],
-        base_url: "https://api.ai21.com/studio/v1",
-        api_key_env: "AI21_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
         name: "cerebras",
         aliases: &[],
         base_url: "https://api.cerebras.ai/v1",
@@ -436,16 +424,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         api_key_env: "",
         key_required: false,
         api_format: ApiFormat::CodexCli,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "aider",
-        aliases: &[],
-        base_url: "",
-        api_key_env: "",
-        key_required: false,
-        api_format: ApiFormat::Aider,
         alt_api_key_env: None,
         hidden: false,
     },
@@ -570,26 +548,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
-        name: "chutes",
-        aliases: &[],
-        base_url: "https://llm.chutes.ai/v1",
-        api_key_env: "CHUTES_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "venice",
-        aliases: &[],
-        base_url: "https://api.venice.ai/api/v1",
-        api_key_env: "VENICE_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
         name: "azure-openai",
         aliases: &["azure"],
         base_url: "", // Constructed dynamically from endpoint + deployment
@@ -687,15 +645,28 @@ fn create_driver_from_entry(
 
     let proxy_url = config.proxy_url.as_deref();
 
+    let request_timeout_secs = config.request_timeout_secs;
+
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy(
-            api_key, base_url, proxy_url,
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
         ))),
-        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::with_proxy(
-            api_key, base_url, proxy_url,
-        ))),
-        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy(
-            api_key, base_url, proxy_url,
+        ApiFormat::Anthropic => Ok(Arc::new(
+            anthropic::AnthropicDriver::with_proxy_and_timeout(
+                api_key,
+                base_url,
+                proxy_url,
+                request_timeout_secs,
+            ),
+        )),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy_and_timeout(
+            api_key,
+            base_url,
+            proxy_url,
+            request_timeout_secs,
         ))),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
@@ -717,10 +688,6 @@ fn create_driver_from_entry(
             config.skip_permissions,
         ))),
         ApiFormat::CodexCli => Ok(Arc::new(codex_cli::CodexCliDriver::new(
-            config.base_url.clone(),
-            config.skip_permissions,
-        ))),
-        ApiFormat::Aider => Ok(Arc::new(aider::AiderDriver::new(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
@@ -765,32 +732,9 @@ fn create_driver_from_entry(
 
 /// Create an LLM driver based on provider name and configuration.
 ///
-/// Supported providers:
-/// - `anthropic` — Anthropic Claude (Messages API)
-/// - `openai` — OpenAI GPT models
-/// - `groq` — Groq (ultra-fast inference)
-/// - `openrouter` — OpenRouter (multi-model gateway)
-/// - `deepseek` — DeepSeek
-/// - `deepinfra` — DeepInfra (OpenAI-compatible inference)
-/// - `together` — Together AI
-/// - `mistral` — Mistral AI
-/// - `fireworks` — Fireworks AI
-/// - `ollama` — Ollama (local)
-/// - `vllm` — vLLM (local)
-/// - `lmstudio` — LM Studio (local)
-/// - `perplexity` — Perplexity AI (search-augmented)
-/// - `cohere` — Cohere (Command R)
-/// - `ai21` — AI21 Labs (Jamba)
-/// - `cerebras` — Cerebras (ultra-fast inference)
-/// - `sambanova` — SambaNova
-/// - `huggingface` — Hugging Face Inference API
-/// - `xai` — xAI (Grok)
-/// - `replicate` — Replicate
-/// - `chutes` — Chutes.ai (serverless open-source model inference)
-/// - `azure-openai` — Azure OpenAI Service (deployment-based URL, `api-key` header)
-/// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
-/// - `qwen` — Qwen / DashScope (use `provider_regions` for intl/us endpoints)
-/// - Any custom provider with `base_url` set uses OpenAI-compatible format
+/// See `PROVIDER_REGISTRY` for the full list of built-in providers and their aliases.
+/// Any provider not in the registry can also be used by setting `base_url` directly —
+/// it will be treated as an OpenAI-compatible endpoint.
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
 
@@ -816,10 +760,11 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(openai::OpenAIDriver::with_proxy(
+        return Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
             api_key,
             base_url.clone(),
             config.proxy_url.as_deref(),
+            config.request_timeout_secs,
         )));
     }
 
@@ -847,9 +792,10 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         message: format!(
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
-             cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             chutes, venice, azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
-             gemini-cli, codex-cli, aider, qwen, minimax, zhipu. \
+             cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
+             azure-openai, vertex-ai, nvidia-nim, claude-code, qwen-code, gemini-cli, codex-cli, \
+             qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
+             qianfan, volcengine, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
@@ -938,7 +884,6 @@ pub fn cli_provider_available(name: &str) -> bool {
         "qwen-code" => qwen_code::qwen_code_available(),
         "gemini-cli" => gemini_cli::gemini_cli_available(),
         "codex-cli" => codex_cli::codex_cli_available(),
-        "aider" => aider::aider_available(),
         _ => false,
     }
 }
@@ -971,7 +916,7 @@ pub fn is_proxied_via_env(env_vars: &[&str], official_hosts: &[&str]) -> bool {
 pub fn is_cli_provider(name: &str) -> bool {
     matches!(
         name,
-        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli" | "aider"
+        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli"
     )
 }
 
@@ -1089,6 +1034,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1106,6 +1052,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1136,7 +1083,6 @@ mod tests {
         // New providers
         assert!(providers.contains(&"perplexity"));
         assert!(providers.contains(&"cohere"));
-        assert!(providers.contains(&"ai21"));
         assert!(providers.contains(&"cerebras"));
         assert!(providers.contains(&"sambanova"));
         assert!(providers.contains(&"huggingface"));
@@ -1155,16 +1101,14 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"alibaba-coding-plan"));
         assert!(providers.contains(&"deepinfra"));
-        assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
         assert!(providers.contains(&"qwen-code"));
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"codex-cli"));
-        assert!(providers.contains(&"aider"));
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 43);
+        assert_eq!(providers.len(), 39);
     }
 
     #[test]
@@ -1229,6 +1173,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1253,6 +1198,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1277,6 +1223,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1310,6 +1257,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1337,6 +1285,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
 
         let driver = create_driver(&config);
@@ -1376,6 +1325,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1396,6 +1346,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1425,6 +1376,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1445,6 +1397,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1456,6 +1409,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1479,6 +1433,7 @@ mod tests {
             message_timeout_secs: 300,
             mcp_bridge: None,
             proxy_url: None,
+            request_timeout_secs: None,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

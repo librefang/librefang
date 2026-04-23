@@ -62,6 +62,18 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(list_approvals).post(create_approval),
         )
         .route("/approvals/batch", axum::routing::post(batch_resolve))
+        .route(
+            "/approvals/session/{session_id}",
+            axum::routing::get(list_approvals_for_session),
+        )
+        .route(
+            "/approvals/session/{session_id}/approve_all",
+            axum::routing::post(approve_all_for_session),
+        )
+        .route(
+            "/approvals/session/{session_id}/reject_all",
+            axum::routing::post(reject_all_for_session),
+        )
         .route("/approvals/audit", axum::routing::get(audit_log))
         .route("/approvals/count", axum::routing::get(approval_count))
         .route("/approvals/totp/setup", axum::routing::post(totp_setup))
@@ -148,11 +160,17 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Queue status
         .route("/queue/status", axum::routing::get(queue_status))
         // Task queue management
+        .route(
+            "/tasks",
+            axum::routing::get(task_queue_list_root),
+        )
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
         .route(
             "/tasks/{id}",
-            axum::routing::delete(task_queue_delete),
+            axum::routing::get(task_queue_get)
+                .patch(task_queue_patch)
+                .delete(task_queue_delete),
         )
         .route(
             "/tasks/{id}/retry",
@@ -1350,6 +1368,7 @@ fn approval_to_json(
         "requested_at": a.requested_at,
         "created_at": a.requested_at,
         "timeout_secs": a.timeout_secs,
+        "session_id": a.session_id,
         "status": "pending"
     })
 }
@@ -1461,6 +1480,10 @@ pub struct CreateApprovalRequest {
     pub description: String,
     #[serde(default)]
     pub action_summary: String,
+    /// Optional session ID — when set, this request participates in
+    /// per-session batch resolve via `/api/approvals/session/{session_id}/approve_all`.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
@@ -1493,6 +1516,7 @@ pub async fn create_approval(
         channel: None,
         route_to: Vec::new(),
         escalation_count: 0,
+        session_id: req.session_id,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)
@@ -1839,6 +1863,278 @@ pub async fn batch_resolve(
     (
         StatusCode::OK,
         Json(serde_json::json!({"results": result_json})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Per-session approval helpers
+// ---------------------------------------------------------------------------
+
+/// GET /api/approvals/session/{session_id} — List pending approvals for a session.
+///
+/// Mirrors `has_blocking_approval(session_key)` from Hermes-Agent: returns all
+/// pending `ApprovalRequest`s whose `session_id` field matches the path param.
+#[utoipa::path(
+    get,
+    path = "/api/approvals/session/{session_id}",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "Pending approvals for session", body = serde_json::Value)
+    )
+)]
+pub async fn list_approvals_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    // Validate session_id is not empty/whitespace.
+    if session_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
+        );
+    }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
+        );
+    }
+    let registry_agents = state.kernel.agent_registry().list();
+    let pending = state
+        .kernel
+        .approvals()
+        .list_pending_for_session(&session_id);
+    let items: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|a| approval_to_json(a, &registry_agents))
+        .collect();
+    let count = items.len();
+    let has_pending = !items.is_empty();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "pending": items,
+            "count": count,
+            "has_pending": has_pending,
+        })),
+    )
+}
+
+/// POST /api/approvals/session/{session_id}/approve_all — Approve all pending
+/// approvals for the given session atomically.
+///
+/// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "once",
+/// resolve_all=True)`.  TOTP pre-check is enforced — if any pending request
+/// requires TOTP, the entire batch is rejected before any mutation.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ApproveAllForSessionRequest {
+    /// Optional count of approvals the caller expects to be pending.
+    /// If provided, the server verifies the actual pending count matches
+    /// before approving.  Returns 409 Conflict if the count changed.
+    #[serde(default)]
+    pub expected_count: Option<usize>,
+    /// Optional list of approval IDs the caller expects to be pending.
+    /// If provided, the server verifies the actual pending set matches before
+    /// approving.  Returns 409 Conflict if a new high-risk approval landed
+    /// between the operator viewing the list and clicking approve_all.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<String>>)]
+    pub expected_ids: Option<Vec<uuid::Uuid>>,
+}
+
+/// POST /api/approvals/session/{session_id}/approve_all — Approve all pending
+/// approvals for the given session atomically.
+#[utoipa::path(
+    post,
+    path = "/api/approvals/session/{session_id}/approve_all",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    request_body = ApproveAllForSessionRequest,
+    responses(
+        (status = 200, description = "All pending session approvals approved", body = serde_json::Value),
+        (status = 400, description = "TOTP required for one or more items", body = serde_json::Value),
+        (status = 409, description = "Pending set changed since request was issued", body = serde_json::Value),
+    )
+)]
+pub async fn approve_all_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    body: Option<Json<ApproveAllForSessionRequest>>,
+) -> impl IntoResponse {
+    let req = body
+        .map(|Json(r)| r)
+        .unwrap_or(ApproveAllForSessionRequest {
+            expected_count: None,
+            expected_ids: None,
+        });
+    // Validate session_id is not empty/whitespace.
+    if session_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
+        );
+    }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
+        );
+    }
+
+    // Collect pending IDs and pre-check for TOTP blockers.
+    let pending = state
+        .kernel
+        .approvals()
+        .list_pending_for_session(&session_id);
+
+    // Confirmation check: verify pending count matches expected_count if provided.
+    if let Some(expected_count) = req.expected_count {
+        if pending.len() != expected_count {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Pending approval count has changed since this request was issued. Refresh and try again.",
+                    "pending_count": pending.len(),
+                    "expected_count": expected_count,
+                })),
+            );
+        }
+    }
+
+    // Confirmation check: verify pending set matches expected_ids if provided.
+    // Always validate when expected_ids is Some(…), even for an empty slice —
+    // a caller asserting "there are zero pending approvals" must be protected too.
+    if let Some(ref expected) = req.expected_ids {
+        let pending_ids: std::collections::HashSet<_> = pending.iter().map(|r| r.id).collect();
+        let expected_set: std::collections::HashSet<_> = expected.iter().cloned().collect();
+        if pending_ids != expected_set {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Pending approval set has changed since this request was issued. Refresh and try again.",
+                    "pending_ids": pending_ids,
+                    "expected_ids": expected_set,
+                })),
+            );
+        }
+    }
+
+    // TOTP pre-check: reject entire batch if any item requires TOTP.
+    let policy = state.kernel.approvals().policy();
+    if pending
+        .iter()
+        .any(|req| policy.tool_requires_totp(&req.tool_name))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Session contains approvals that require TOTP. Approve those individually.",
+            })),
+        );
+    }
+
+    // Resolve each pending request through the kernel so deferred executions
+    // are properly spawned (resolve_tool_approval calls handle_approval_resolution
+    // for each deferred payload).
+    // Reuse the `pending` list collected above — avoids a TOCTOU race where the
+    // set could change between the pre-check and the resolve loop.
+    let mut resolved = 0usize;
+    for pending_req in pending {
+        if state
+            .kernel
+            .resolve_tool_approval(
+                pending_req.id,
+                librefang_types::approval::ApprovalDecision::Approved,
+                Some("api".to_string()),
+                false,
+                None,
+            )
+            .await
+            .is_ok()
+        {
+            // Non-existent / already-resolved items are skipped silently.
+            resolved += 1;
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "resolved": resolved,
+            "decision": "approved",
+        })),
+    )
+}
+
+/// POST /api/approvals/session/{session_id}/reject_all — Reject all pending
+/// approvals for the given session atomically.
+///
+/// Mirrors Hermes-Agent's `resolve_gateway_approval(session_key, "deny",
+/// resolve_all=True)`.
+#[utoipa::path(
+    post,
+    path = "/api/approvals/session/{session_id}/reject_all",
+    tag = "approvals",
+    params(("session_id" = String, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "All pending session approvals rejected", body = serde_json::Value)
+    )
+)]
+pub async fn reject_all_for_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    // Validate session_id is not empty/whitespace.
+    if session_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not be empty or whitespace"})),
+        );
+    }
+    // Reject excessively long session_id values to prevent DoS via memory/log amplification.
+    if session_id.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "session_id must not exceed 256 bytes"})),
+        );
+    }
+
+    // Route through resolve_tool_approval for each request so deferred
+    // executions are properly handled (even though rejection means the deferred
+    // will never run, this keeps the code path consistent).
+    let mut resolved = 0usize;
+    for pending_req in state
+        .kernel
+        .approvals()
+        .list_pending_for_session(&session_id)
+    {
+        if state
+            .kernel
+            .resolve_tool_approval(
+                pending_req.id,
+                librefang_types::approval::ApprovalDecision::Denied,
+                Some("api".to_string()),
+                false,
+                None,
+            )
+            .await
+            .is_ok()
+        {
+            resolved += 1;
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "resolved": resolved,
+            "decision": "rejected",
+        })),
     )
 }
 
@@ -3838,6 +4134,97 @@ pub async fn task_queue_retry(
                 "error": err_task_not_retryable
             })),
         ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// GET /api/tasks — List tasks with optional ?status=, ?assigned_to=, ?limit= filters.
+///
+/// This is the primary RESTful list endpoint. The legacy /api/tasks/list endpoint
+/// remains for backwards compatibility.
+pub async fn task_queue_list_root(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let status_filter = params.get("status").map(|s| s.as_str());
+    match state.kernel.task_list(status_filter).await {
+        Ok(mut tasks) => {
+            // Filter by assigned_to if provided
+            if let Some(assignee) = params.get("assigned_to") {
+                tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
+            }
+            // Apply limit
+            if let Some(limit_str) = params.get("limit") {
+                if let Ok(limit) = limit_str.parse::<usize>() {
+                    tasks.truncate(limit);
+                }
+            }
+            let total = tasks.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"tasks": tasks, "total": total})),
+            )
+        }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// GET /api/tasks/{id} — Get a single task by ID including its result.
+pub async fn task_queue_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let err_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-found")
+    };
+    match state.kernel.task_get(&id).await {
+        Ok(Some(task)) => (StatusCode::OK, Json(task)),
+        Ok(None) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// PATCH /api/tasks/{id} — Update task status.
+///
+/// Body: `{"status": "pending"}` or `{"status": "cancelled"}`
+/// - `pending`: resets a failed/in_progress task so it can be re-claimed
+/// - `cancelled`: cancels a pending/in_progress task
+pub async fn task_queue_patch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let err_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-found")
+    };
+    let new_status = match body["status"].as_str() {
+        Some(s @ ("pending" | "cancelled")) => s.to_string(),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Invalid status '{other}': only 'pending' and 'cancelled' are allowed")
+                })),
+            );
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'status' field"})),
+            );
+        }
+    };
+    match state.kernel.task_update_status(&id, &new_status).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": id, "status": new_status})),
+        ),
+        Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }

@@ -8,24 +8,14 @@ import {
 } from "../http/client";
 import { healthDetailQueryOptions } from "./runtime";
 import { memoryKeys } from "./keys";
+import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
 
-type UseMemoryHealthOptions = {
-  enabled?: boolean;
-  staleTime?: number;
-  refetchInterval?: number | false;
-};
-
 export const memoryQueries = {
-  list: (params?: { agentId?: string; offset?: number; limit?: number; category?: string }) =>
-    queryOptions({
-      queryKey: memoryKeys.list(params),
-      queryFn: () => listMemories(params),
-      staleTime: STALE_MS,
-    }),
+
   stats: (agentId?: string) =>
     queryOptions({
       queryKey: memoryKeys.stats(agentId),
@@ -41,13 +31,11 @@ export const memoryQueries = {
     }),
 };
 
-export function useMemories(params?: { agentId?: string; offset?: number; limit?: number; category?: string }) {
-  return useQuery(memoryQueries.list(params));
-}
+
 
 export const memorySearchOrListQueryOptions = (search: string) =>
   queryOptions<{ memories: MemoryItem[]; total: number }>({
-    queryKey: [...memoryKeys.lists(), "searchOrList", search] as const,
+    queryKey: memoryKeys.searchOrList(search),
     queryFn: async () => {
       if (search.trim()) {
         const items = await searchMemories({ query: search.trim(), limit: 50 });
@@ -85,13 +73,9 @@ export function useMemoryConfig() {
  * narrows the returned data so consumers of this hook don't re-render on
  * unrelated health field changes.
  */
-export function useMemoryHealth(options: UseMemoryHealthOptions = {}) {
-  const { enabled, staleTime, refetchInterval } = options;
+export function useMemoryHealth(options: QueryOverrides = {}) {
   return useQuery({
-    ...healthDetailQueryOptions(),
-    enabled,
-    staleTime,
-    refetchInterval,
+    ...withOverrides(healthDetailQueryOptions(), options),
     select: (data): boolean => data.memory?.embedding_available ?? false,
   });
 }

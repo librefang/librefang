@@ -154,7 +154,7 @@ describe.each([
   { name: "useSuspendAgent", hook: useSuspendAgent, arg: "agent-1" },
   { name: "useDeleteAgent", hook: useDeleteAgent, arg: "agent-1" },
   { name: "useResumeAgent", hook: useResumeAgent, arg: "agent-1" },
-])("$name invalidates agentKeys.all and overviewKeys.snapshot", ({ hook, arg }) => {
+])("$name invalidates agentKeys.lists and overviewKeys.snapshot", ({ hook, arg }) => {
   it("invalidates both keys", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
@@ -163,7 +163,7 @@ describe.each([
 
     await result.current.mutateAsync(arg);
 
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.lists() });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });
@@ -186,7 +186,7 @@ describe("useSpawnUarAgent", () => {
 });
 
 describe("useCreateAgentSession", () => {
-  it("invalidates agentKeys.all", async () => {
+  it("invalidates agentKeys.sessions, agentKeys.detail, and sessionKeys.lists", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -196,7 +196,15 @@ describe("useCreateAgentSession", () => {
 
     await result.current.mutateAsync({ agentId: "agent-1", label: "test" });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.sessions("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.lists(),
+    });
   });
 });
 

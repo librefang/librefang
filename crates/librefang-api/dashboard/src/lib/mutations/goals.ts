@@ -6,7 +6,7 @@ export function useCreateGoal() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: createGoal,
-    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.lists() }),
   });
 }
 
@@ -15,7 +15,7 @@ export function useUpdateGoal() {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: Parameters<typeof updateGoal>[1] }) =>
       updateGoal(id, data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.lists() }),
   });
 }
 
@@ -23,6 +23,6 @@ export function useDeleteGoal() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteGoal,
-    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.lists() }),
   });
 }

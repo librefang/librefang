@@ -34,6 +34,9 @@ pub struct RepairStats {
     pub duplicates_removed: usize,
     /// Number of ToolResult blocks rescued from assistant-role messages.
     pub misplaced_results_rescued: usize,
+    /// Number of synthetic error results inserted by the positional
+    /// Phase 2a1 pair-aware check (distinct from Phase 2c `synthetic_results_inserted`).
+    pub positional_synthetic_inserted: usize,
 }
 
 /// Validate and repair a message history for LLM consumption.
@@ -42,6 +45,7 @@ pub struct RepairStats {
 /// 1. Drops orphaned ToolResult blocks that have no matching ToolUse
 /// 2. Drops empty messages
 ///    - 2a. Rescues ToolResult blocks from assistant-role messages (crash artifacts)
+///    - 2a1. Enforces adjacent tool_result pairing per strict wire contract
 ///    - 2b. Reorders misplaced ToolResults to follow their matching ToolUse
 ///    - 2c. Inserts synthetic error results for unmatched ToolUse blocks
 ///    - 2d. Deduplicates ToolResults with the same tool_use_id
@@ -116,6 +120,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             role: msg.role,
             content: new_content,
             pinned: msg.pinned,
+            timestamp: msg.timestamp,
         });
     }
 
@@ -125,6 +130,13 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     // user-role message immediately after the assistant message.
     let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
     stats.misplaced_results_rescued = rescued_count;
+
+    // Phase 2a1: Pair-aware positional validation of assistant tool_calls
+    // against the immediately-following user tool_results. This is the
+    // strict Moonshot/OpenAI wire contract and MUST run before Phases
+    // 2b/2c/2d/2e so it sees the raw pre-repair shape. The later phases
+    // become safety nets that usually find nothing to do.
+    stats.positional_synthetic_inserted = enforce_adjacent_tool_result_pairs(&mut cleaned);
 
     // Phase 2b: Reorder misplaced ToolResults
     let reordered_count = reorder_tool_results(&mut cleaned);
@@ -203,6 +215,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             synthetic = stats.synthetic_results_inserted,
             duplicates = stats.duplicates_removed,
             rescued = stats.misplaced_results_rescued,
+            positional_synthetic = stats.positional_synthetic_inserted,
             "Session repair applied fixes"
         );
     }
@@ -276,6 +289,7 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
                     role: Role::User,
                     content: MessageContent::Blocks(rescued_blocks),
                     pinned: false,
+                    timestamp: None,
                 },
             );
         }
@@ -295,25 +309,161 @@ fn rescue_misplaced_tool_results(messages: &mut Vec<Message>) -> usize {
     total_rescued
 }
 
+/// Phase 2a1: Pair-aware positional validation of assistant tool_calls.
+///
+/// Returns the number of synthetic ToolResult blocks inserted.
+fn enforce_adjacent_tool_result_pairs(messages: &mut Vec<Message>) -> usize {
+    // For each assistant with ToolUse blocks, check the
+    // IMMEDIATELY FOLLOWING message for satisfaction. Missing ids get
+    // a synthetic inserted in the adjacent user (or a new user is inserted
+    // / appended as needed).
+    let mut positional_synthetic: usize = 0;
+    let mut i: usize = 0;
+    while i < messages.len() {
+        // Extract tool_use_ids from this message if it's an assistant with uses.
+        let ids_needed: Vec<String> = match (&messages[i].role, &messages[i].content) {
+            (Role::Assistant, MessageContent::Blocks(blocks)) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if ids_needed.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Collect tool_use_ids from the adjacent (i+1) user message, if any.
+        let adjacent_results: HashSet<String> = messages
+            .get(i + 1)
+            .filter(|m| m.role == Role::User)
+            .and_then(|m| match &m.content {
+                MessageContent::Blocks(bs) => Some(
+                    bs.iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                Some(tool_use_id.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<HashSet<String>>(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let missing: Vec<String> = ids_needed
+            .into_iter()
+            .filter(|id| !adjacent_results.contains(id))
+            .collect();
+
+        if missing.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        let missing_count = missing.len();
+        let synthetic_blocks: Vec<ContentBlock> = missing
+            .into_iter()
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id,
+                tool_name: String::new(),
+                content: "[Tool execution was interrupted or lost]".to_string(),
+                is_error: true,
+                status: ToolExecutionStatus::Error,
+                approval_request_id: None,
+            })
+            .collect();
+
+        if i + 1 < messages.len() {
+            if messages[i + 1].role == Role::User {
+                // Amend the adjacent user: either extend its Blocks, or upgrade
+                // its Text content to Blocks with the original text preserved.
+                let next = &mut messages[i + 1];
+                match &mut next.content {
+                    MessageContent::Blocks(bs) => {
+                        bs.extend(synthetic_blocks);
+                    }
+                    MessageContent::Text(_) => {
+                        let old = std::mem::replace(
+                            &mut next.content,
+                            MessageContent::Text(String::new()),
+                        );
+                        let mut new_blocks = content_to_blocks(old);
+                        new_blocks.extend(synthetic_blocks);
+                        next.content = MessageContent::Blocks(new_blocks);
+                    }
+                }
+            } else {
+                // Next message is not a User — insert a new user message
+                // immediately after this assistant.
+                messages.insert(
+                    i + 1,
+                    Message {
+                        role: Role::User,
+                        content: MessageContent::Blocks(synthetic_blocks),
+                        pinned: false,
+                        timestamp: None,
+                    },
+                );
+            }
+        } else {
+            // Tail of history — append a new user message.
+            messages.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(synthetic_blocks),
+                pinned: false,
+                timestamp: None,
+            });
+        }
+
+        positional_synthetic += missing_count;
+        // Skip the user we just amended/inserted.
+        i += 2;
+    }
+
+    positional_synthetic
+}
+
 /// Phase 2b: Reorder misplaced ToolResults -- ensure each result follows its use.
 ///
 /// Builds a map of tool_use_id to the index of the assistant message containing it.
 /// For each user message containing ToolResults, checks if the previous message is
 /// the correct assistant message. If not, moves the ToolResult to the correct position.
 fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
-    // Build map: tool_use_id → index of the assistant message containing it
-    let mut tool_use_index: HashMap<String, usize> = HashMap::new();
+    // Build map: tool_use_id → index of the assistant message containing it.
+    // Ids that appear in more than one assistant turn are collision ids
+    // (e.g. Moonshot/Kimi reuses per-completion counters like `memory_store:6`
+    // across turns). Reordering by a collision id would move a result from one
+    // turn to follow a different turn's ToolUse, corrupting the session.
+    // Those ids are excluded from the index so Phase 2b leaves their results
+    // in place (the existing `tool_use_index.get(id)` → None branch).
+    // Phase 2d uses an identical guard pattern (see `deduplicate_tool_results`).
+    let mut tool_use_turn_count: HashMap<String, usize> = HashMap::new();
+    let mut first_idx: HashMap<String, usize> = HashMap::new();
     for (idx, msg) in messages.iter().enumerate() {
         if msg.role == Role::Assistant {
             if let MessageContent::Blocks(blocks) = &msg.content {
                 for block in blocks {
                     if let ContentBlock::ToolUse { id, .. } = block {
-                        tool_use_index.insert(id.clone(), idx);
+                        *tool_use_turn_count.entry(id.clone()).or_insert(0) += 1;
+                        first_idx.entry(id.clone()).or_insert(idx);
                     }
                 }
             }
         }
     }
+    // Only ids with exactly ONE producing assistant message are safe to reorder by.
+    // Colliding ids (driver reuse across turns, e.g. Moonshot/Kimi) stay where
+    // Phase 2a1 placed them.
+    let tool_use_index: HashMap<String, usize> = first_idx
+        .into_iter()
+        .filter(|(id, _)| tool_use_turn_count.get(id).copied().unwrap_or(0) == 1)
+        .collect();
 
     // Collect misplaced ToolResult blocks that need to move.
     // Track (msg_idx, tool_use_id, block, target_assistant_idx).
@@ -429,6 +579,7 @@ fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
                         role: Role::User,
                         content: MessageContent::Blocks(blocks),
                         pinned: false,
+                        timestamp: None,
                     },
                 );
             }
@@ -527,6 +678,7 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
                     role: Role::User,
                     content: MessageContent::Blocks(blocks),
                     pinned: false,
+                    timestamp: None,
                 },
             );
         }
@@ -541,6 +693,29 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
 /// message history, keep the strongest result so approval placeholders can be
 /// replaced by their later terminal outcome. Returns the count of duplicates removed.
 fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
+    // Ids that appear in more than one assistant turn are positional duplicates
+    // (e.g. Moonshot reuses per-completion counters like `schedule_delete:6`).
+    // Deduplicating them globally would remove legitimate per-turn results, so
+    // we skip dedup for any id that is used by multiple assistant messages.
+    let mut tool_use_turn_count: HashMap<String, usize> = HashMap::new();
+    for msg in messages.iter() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            for block in blocks {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    *tool_use_turn_count.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let collision_ids: HashSet<String> = tool_use_turn_count
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(id, _)| id)
+        .collect();
+
     let mut kept_results: HashMap<String, ToolExecutionStatus> = HashMap::new();
 
     for msg in messages.iter() {
@@ -552,6 +727,9 @@ fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
                     ..
                 } = block
                 {
+                    if collision_ids.contains(tool_use_id) {
+                        continue;
+                    }
                     kept_results
                         .entry(tool_use_id.clone())
                         .and_modify(|kept_status| {
@@ -578,6 +756,10 @@ fn deduplicate_tool_results(messages: &mut Vec<Message>) -> usize {
                     ..
                 } = b
                 {
+                    // Never dedup results whose id is shared across multiple turns.
+                    if collision_ids.contains(tool_use_id) {
+                        return true;
+                    }
                     let keep_status = kept_results.get(tool_use_id).copied().unwrap_or(*status);
                     if seen_ids.contains(tool_use_id) || *status != keep_status {
                         return false;
@@ -828,7 +1010,7 @@ fn content_to_blocks(content: MessageContent) -> Vec<ContentBlock> {
 // ---------------------------------------------------------------------------
 
 /// Check if a message contains any `ToolUse` blocks.
-fn message_has_tool_use(msg: &Message) -> bool {
+pub fn message_has_tool_use(msg: &Message) -> bool {
     match &msg.content {
         MessageContent::Blocks(blocks) => blocks
             .iter()
@@ -839,7 +1021,7 @@ fn message_has_tool_use(msg: &Message) -> bool {
 
 /// Check if a message contains only `ToolResult` blocks (i.e. it is a tool-
 /// result delivery, not a fresh user question).
-fn message_is_only_tool_results(msg: &Message) -> bool {
+pub fn message_is_only_tool_results(msg: &Message) -> bool {
     match &msg.content {
         MessageContent::Blocks(blocks) => {
             !blocks.is_empty()
@@ -908,6 +1090,46 @@ fn is_safe_boundary(messages: &[Message], i: usize) -> bool {
 mod tests {
     use super::*;
 
+    fn tool_use_block(id: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "dummy_tool".to_string(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }
+    }
+
+    fn tool_result_block(id: &str, content: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            tool_name: String::new(),
+            content: content.to_string(),
+            is_error: false,
+            status: ToolExecutionStatus::default(),
+            approval_request_id: None,
+        }
+    }
+
+    /// For a given message, does its Blocks content satisfy `tool_use_id` with
+    /// a synthetic error result (is_error=true and content contains the
+    /// "interrupted or lost" marker)?
+    fn has_synthetic_result_for(msg: &Message, tool_use_id: &str) -> bool {
+        match &msg.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        is_error: true,
+                        content,
+                        ..
+                    } if id == tool_use_id && content.contains("interrupted")
+                )
+            }),
+            _ => false,
+        }
+    }
+
     #[test]
     fn valid_history_unchanged() {
         let messages = vec![
@@ -934,6 +1156,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -969,6 +1192,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -989,6 +1213,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1001,6 +1226,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are the results"),
         ];
@@ -1025,6 +1251,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("While you search, I have another question"),
             Message {
@@ -1038,6 +1265,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are results"),
         ];
@@ -1070,46 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn test_synthetic_result_for_orphaned_use() {
-        // Assistant has a ToolUse but there's no ToolResult anywhere
-        let messages = vec![
-            Message::user("Do something"),
-            Message {
-                role: Role::Assistant,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                    id: "tu-orphan".to_string(),
-                    name: "file_read".to_string(),
-                    input: serde_json::json!({"path": "/etc/hosts"}),
-                    provider_metadata: None,
-                }]),
-                pinned: false,
-            },
-            Message::assistant("I tried to read the file"),
-        ];
-
-        let (repaired, stats) = validate_and_repair_with_stats(&messages);
-        assert_eq!(stats.synthetic_results_inserted, 1);
-
-        // Find the synthetic result
-        let has_synthetic = repaired.iter().any(|m| match &m.content {
-            MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    is_error,
-                    content,
-                    ..
-                } => tool_use_id == "tu-orphan" && *is_error && content.contains("interrupted"),
-                _ => false,
-            }),
-            _ => false,
-        });
-        assert!(
-            has_synthetic,
-            "Should have inserted a synthetic error result"
-        );
-    }
-
-    #[test]
     fn test_deduplicate_tool_results() {
         let messages = vec![
             Message::user("Search"),
@@ -1122,6 +1310,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1134,6 +1323,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1146,6 +1336,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1239,12 +1430,14 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("World"),
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -1268,6 +1461,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("Never mind"),
             Message::assistant("OK"),
@@ -1305,6 +1499,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1336,6 +1531,7 @@ mod tests {
             role: Role::Assistant,
             content: MessageContent::Blocks(vec![]),
             pinned: false,
+            timestamp: None,
         }];
 
         let (repaired, stats) = validate_and_repair_with_stats(&messages);
@@ -1366,6 +1562,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             // Only tu-a has a result, tu-b is missing
             Message {
@@ -1379,6 +1576,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // Orphaned result from a non-existent tool use
             Message {
@@ -1392,12 +1590,14 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // Empty message
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1406,7 +1606,11 @@ mod tests {
 
         // Should have: removed orphan, removed empty, inserted synthetic for tu-b
         assert_eq!(stats.orphaned_results_removed, 1, "ghost result removed");
-        assert_eq!(stats.synthetic_results_inserted, 1, "tu-b gets synthetic");
+        assert_eq!(
+            stats.synthetic_results_inserted + stats.positional_synthetic_inserted,
+            1,
+            "tu-b gets synthetic"
+        );
         assert!(stats.empty_messages_removed >= 1, "empty message removed");
 
         // Verify tu-b has a synthetic result somewhere
@@ -1454,6 +1658,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hi"),
         ];
@@ -1477,6 +1682,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1489,6 +1695,7 @@ mod tests {
                     approval_request_id: Some("req-1".to_string()),
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1501,6 +1708,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1646,6 +1854,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1658,6 +1867,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("q2"),
             Message::assistant("a2"),
@@ -1683,6 +1893,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1695,6 +1906,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
         // min_trim = 2, forward scan hits ToolUse+ToolResult only, backward finds index 0
@@ -1741,6 +1953,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Here are the files"),
         ];
@@ -1796,6 +2009,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             // ToolResult in a SEPARATE assistant message (crash artifact)
             Message {
@@ -1809,6 +2023,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Done"),
         ];
@@ -1884,6 +2099,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("All done"),
         ];
@@ -1928,6 +2144,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Hmm"),
         ];
@@ -1977,6 +2194,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
             Message::assistant("Continuing"),
         ];
@@ -1989,6 +2207,301 @@ mod tests {
         assert_eq!(
             count, 1,
             "Should insert synthetic for tool_use with result in wrong role"
+        );
+    }
+
+    #[test]
+    fn phase3_does_not_merge_user_messages_with_tool_results() {
+        // Two consecutive user messages that each contain ToolResult blocks
+        // must NOT be merged — merging would fool Phase 2a1 into thinking
+        // tool_call_ids from different turns are satisfied.
+        let tool_result_a = ContentBlock::ToolResult {
+            tool_use_id: "call_a".to_string(),
+            tool_name: "tool_a".to_string(),
+            content: "result a".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::default(),
+            approval_request_id: None,
+        };
+        let tool_result_b = ContentBlock::ToolResult {
+            tool_use_id: "call_b".to_string(),
+            tool_name: "tool_b".to_string(),
+            content: "result b".to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::default(),
+            approval_request_id: None,
+        };
+
+        // Build: [asst(ToolUse A), user(ToolResult A), asst(ToolUse B), user(ToolResult B)]
+        // Phase 3 without fix would merge the two user messages.
+        // Phase 3 with fix must keep them separate.
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "call_a".to_string(),
+                    name: "tool_a".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_a]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "call_b".to_string(),
+                    name: "tool_b".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_b]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+        // History must stay as 4 messages (not merged into 3)
+        assert_eq!(
+            repaired.len(),
+            4,
+            "Phase 3 must not merge tool-result user messages"
+        );
+        assert_eq!(stats.messages_merged, 0);
+        // No synthetic insertions needed — all tool_use_ids are satisfied positionally
+        assert_eq!(stats.positional_synthetic_inserted, 0);
+    }
+
+    #[test]
+    fn phase3_still_merges_plain_user_messages() {
+        // Verify the fix does not break the legitimate merge of two plain text user messages.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("hello ".to_string()),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("world".to_string()),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+        assert_eq!(
+            repaired.len(),
+            1,
+            "Plain text user messages should still merge"
+        );
+        assert_eq!(stats.messages_merged, 1);
+    }
+
+    /// Regression test for the Phase 2b global-index bug with reused tool_call_ids.
+    ///
+    /// When a driver (e.g. Moonshot/Kimi) reuses a numeric `tool_call_id` like
+    /// `"memory_store:6"` across turns, Phase 2a1 correctly inserts a synthetic
+    /// ToolResult adjacent to the SECOND assistant that owns the orphaned call.
+    ///
+    /// Phase 2b currently builds a global `HashMap<tool_use_id, first_assistant_idx>`.
+    /// Because both assistants share the same id, `tool_use_index["memory_store:6"] = 0`
+    /// (first occurrence).  Phase 2b then sees the Phase-2a1 synthetic at position 5
+    /// (adjacent to the second assistant at position 4), computes
+    /// `expected_position = 0 + 1 = 1`, determines the synthetic is "misplaced",
+    /// removes it from position 5, and attempts to re-insert it next to the first
+    /// assistant.  This is a spurious reorder — `results_reordered` must be 0 for a
+    /// history where every ToolResult already sits in the correct adjacent position.
+    ///
+    /// Sequence under test:
+    ///   msg 0: assistant  ToolUse "memory_store:6"             (first use)
+    ///   msg 1: user       ToolResult "memory_store:6" "first"  (satisfied — adjacent)
+    ///   msg 2: assistant  Text "ack"
+    ///   msg 3: user       Text "next question"
+    ///   msg 4: assistant  ToolUse "memory_store:6"             (second use — ORPHANED)
+    ///   msg 5: user       Text "no result yet"                 (no ToolResult)
+    ///
+    /// After Phase 2a1: msg 5 gains a synthetic ToolResult for "memory_store:6".
+    /// Phase 2b must recognise that the synthetic at position 5 is ALREADY adjacent
+    /// to the assistant at position 4 that owns "memory_store:6" in this turn, and
+    /// must NOT move it.  The correct fix is for Phase 2b to skip ToolResults that
+    /// are already correctly positioned relative to the nearest prior assistant that
+    /// carries the same id, rather than using the globally-first assistant index.
+    #[test]
+    fn reorder_preserves_per_turn_synthetic_when_tool_id_collides_across_turns() {
+        let messages = vec![
+            // msg 0: first assistant emits ToolUse "memory_store:6"
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
+                pinned: false,
+                timestamp: None,
+            },
+            // msg 1: user answers with the real ToolResult — already adjacent
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_block("memory_store:6", "first")]),
+                pinned: false,
+                timestamp: None,
+            },
+            // msg 2: assistant sends plain text
+            Message::assistant("ack"),
+            // msg 3: user sends plain text
+            Message::user("next question"),
+            // msg 4: second assistant reuses the same id — this is the orphan
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("memory_store:6")]),
+                pinned: false,
+                timestamp: None,
+            },
+            // msg 5: user plain text — no ToolResult present (orphan trigger)
+            Message::user("no result yet"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        // (a) Phase 2a1 must have inserted exactly one synthetic.
+        assert_eq!(
+            stats.positional_synthetic_inserted, 1,
+            "Phase 2a1 should insert exactly one synthetic for the orphaned second \
+             memory_store:6"
+        );
+
+        // (b) Phase 2b must NOT treat the Phase-2a1 synthetic as misplaced.
+        //     The synthetic is already in the correct adjacent position (msg 5 → asst msg 4).
+        //     A non-zero reorder count is the observable symptom of the global-index bug.
+        assert_eq!(
+            stats.results_reordered, 0,
+            "Phase 2b must not spuriously reorder a ToolResult that is already adjacent \
+             to the correct assistant turn (global-index bug: both assistants share \
+             'memory_store:6' so the global map points to the FIRST assistant, causing \
+             the synthetic placed adjacent to the SECOND to be classified as misplaced)"
+        );
+
+        // Collect indices of all assistant messages that carry ToolUse "memory_store:6".
+        let asst_positions_with_id: Vec<usize> = repaired
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, m)| {
+                if m.role == Role::Assistant {
+                    if let MessageContent::Blocks(bs) = &m.content {
+                        if bs.iter().any(|b| {
+                            matches!(b, ContentBlock::ToolUse { id, .. } if id == "memory_store:6")
+                        }) {
+                            return Some(idx);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        assert_eq!(
+            asst_positions_with_id.len(),
+            2,
+            "both assistant turns with memory_store:6 must survive repair"
+        );
+
+        let first_asst_idx = asst_positions_with_id[0];
+        let second_asst_idx = asst_positions_with_id[1];
+
+        // (c) The SECOND assistant's immediately-following user must hold the synthetic.
+        let after_second = repaired
+            .get(second_asst_idx + 1)
+            .expect("user message must follow the second memory_store:6 assistant");
+        assert!(
+            has_synthetic_result_for(after_second, "memory_store:6"),
+            "the user message after the SECOND memory_store:6 assistant must hold the \
+             synthetic (Phase 2b must not move it to the first turn's adjacent user)"
+        );
+
+        // (d) The FIRST assistant's immediately-following user must hold exactly ONE
+        //     ToolResult — the original real one — and must NOT carry a duplicate or
+        //     a synthetic error appended by Phase 2b.
+        let after_first = repaired
+            .get(first_asst_idx + 1)
+            .expect("user message must follow the first memory_store:6 assistant");
+
+        let first_results: Vec<&ContentBlock> = match &after_first.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolResult { tool_use_id, .. }
+                        if tool_use_id == "memory_store:6"
+                    )
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        assert_eq!(
+            first_results.len(),
+            1,
+            "the first assistant's adjacent user must have exactly ONE ToolResult for \
+             memory_store:6 — Phase 2b must not append a second copy"
+        );
+
+        match first_results[0] {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                assert!(
+                    !is_error,
+                    "the preserved result for the first turn must not be a synthetic error"
+                );
+                assert_eq!(
+                    content, "first",
+                    "the preserved result content must be the original 'first'"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_phase_2a1_basic_orphaned_tool_use() {
+        // Single assistant turn with a ToolUse, followed by a user turn with
+        // plain text (no ToolResult). Phase 2a1 should insert a synthetic
+        // ToolResult for the orphaned call.
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("call_1")]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::user("plain text, no tool result"),
+        ];
+
+        let (repaired, stats) = validate_and_repair_with_stats(&messages);
+
+        // Phase 2a1 must insert exactly one synthetic ToolResult for "call_1".
+        assert_eq!(
+            stats.positional_synthetic_inserted, 1,
+            "Phase 2a1 should insert one synthetic for the orphaned call_1"
+        );
+
+        // The user message following the assistant must now contain the synthetic.
+        let after_assistant = &repaired[1];
+        assert_eq!(after_assistant.role, Role::User);
+        assert!(
+            has_synthetic_result_for(after_assistant, "call_1"),
+            "user message after assistant must contain synthetic ToolResult for call_1"
         );
     }
 }

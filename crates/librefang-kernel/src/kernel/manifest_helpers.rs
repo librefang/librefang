@@ -171,9 +171,9 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
         match prefix {
             "minimax" | "gemini" | "anthropic" | "openai" | "groq" | "deepseek" | "mistral"
             | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
-            | "cerebras" | "sambanova" | "replicate" | "huggingface" | "ai21" | "codex"
-            | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai"
-            | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
+            | "cerebras" | "sambanova" | "replicate" | "huggingface" | "codex" | "claude-code"
+            | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai" | "moonshot"
+            | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
             // "z.ai" is a domain alias for the zai provider
@@ -217,8 +217,6 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
         Some("mistral".to_string())
     } else if lower.starts_with("command") || lower.starts_with("embed-") {
         Some("cohere".to_string())
-    } else if lower.starts_with("jamba") {
-        Some("ai21".to_string())
     } else if lower.starts_with("sonar") {
         Some("perplexity".to_string())
     } else if lower.starts_with("glm") {

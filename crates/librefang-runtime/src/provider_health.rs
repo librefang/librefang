@@ -21,12 +21,20 @@ pub struct DiscoveredModelInfo {
     /// Quantization level (e.g., "Q4_K_M", "Q8_0").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization_level: Option<String>,
-    /// Model family (e.g., "llama", "gemma").
+    /// Model family (e.g., "llama", "gemma", "nomic-bert").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    /// All model families reported by Ollama (e.g., ["llama", "clip"]).
+    /// "clip" indicates a vision-capable model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub families: Option<Vec<String>>,
     /// On-disk size in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Capabilities reported by Ollama (e.g., ["completion", "vision", "tools"]).
+    /// Newer Ollama versions (≥0.7) include this in /api/tags; older versions omit it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub capabilities: Vec<String>,
 }
 
 /// Result of probing a provider endpoint.
@@ -57,6 +65,43 @@ impl Default for ProbeResult {
             probed_at: chrono::Utc::now().to_rfc3339(),
         }
     }
+}
+
+/// Infer Ollama model capabilities from the model name and family when the
+/// server does not include an explicit `capabilities` array (Ollama < 0.7).
+///
+/// Returns a subset of `["completion", "embedding", "vision", "tools"]`.
+fn infer_ollama_capabilities(name: &str, family: Option<&str>) -> Vec<String> {
+    let lower = name.to_lowercase();
+    let fam = family.unwrap_or("").to_lowercase();
+
+    // Embedding model detection — these do NOT support chat completions.
+    let is_embed = fam.contains("bert")
+        || lower.contains("embed")
+        || lower.contains("minilm")
+        || lower.contains("bge-")
+        || lower.contains("e5-")
+        || lower.contains("gte-");
+    if is_embed {
+        return vec!["embedding".to_string()];
+    }
+
+    let mut caps = vec!["completion".to_string()];
+
+    // Vision detection.
+    let has_vision = fam.contains("clip")
+        || lower.contains("llava")
+        || lower.contains("vision")
+        || lower.contains("vl:")
+        || lower.contains("-vl-")
+        || lower.contains("minicpm-v")
+        || lower.contains("bakllava")
+        || lower.contains("moondream");
+    if has_vision {
+        caps.push("vision".to_string());
+    }
+
+    caps
 }
 
 /// Check if a provider is a local HTTP provider that supports health probing.
@@ -221,6 +266,32 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
             .filter_map(|m| {
                 let name = m.get("name").and_then(|n| n.as_str())?.to_string();
                 let details = m.get("details");
+                let families = details
+                    .and_then(|d| d.get("families"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty());
+                let family = details
+                    .and_then(|d| d.get("family"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                // Ollama ≥0.7 exposes a top-level `capabilities` array per
+                // model in /api/tags. Older versions omit it — we fall back
+                // to heuristic detection from the model name and family.
+                let capabilities: Vec<String> =
+                    if let Some(caps) = m.get("capabilities").and_then(|v| v.as_array()) {
+                        caps.iter()
+                            .filter_map(|c| c.as_str().map(String::from))
+                            .collect()
+                    } else {
+                        infer_ollama_capabilities(&name, family.as_deref())
+                    };
+
                 Some(DiscoveredModelInfo {
                     name,
                     parameter_size: details
@@ -231,11 +302,10 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
                         .and_then(|d| d.get("quantization_level"))
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                    family: details
-                        .and_then(|d| d.get("family"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    family,
+                    families,
                     size: m.get("size").and_then(|v| v.as_u64()),
+                    capabilities,
                 })
             })
             .collect();
@@ -444,7 +514,9 @@ mod tests {
             parameter_size: Some("3.2B".to_string()),
             quantization_level: Some("Q4_K_M".to_string()),
             family: Some("llama".to_string()),
+            families: None,
             size: Some(1_928_000_000),
+            capabilities: vec!["completion".to_string()],
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "llama3.2:latest");
@@ -461,11 +533,45 @@ mod tests {
             parameter_size: None,
             quantization_level: None,
             family: None,
+            families: None,
             size: None,
+            capabilities: vec![],
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "gpt-4");
         assert!(json.get("parameter_size").is_none());
         assert!(json.get("quantization_level").is_none());
+        // Empty capabilities should be skipped
+        assert!(json.get("capabilities").is_none());
+    }
+
+    #[test]
+    fn test_infer_ollama_capabilities_embedding() {
+        assert_eq!(
+            infer_ollama_capabilities("nomic-embed-text:latest", Some("nomic-bert")),
+            vec!["embedding"]
+        );
+        assert_eq!(
+            infer_ollama_capabilities("bge-small-en:latest", None),
+            vec!["embedding"]
+        );
+        // all-minilm variants (e.g. all-minilm:l6-v2) must be detected as embedding
+        assert_eq!(
+            infer_ollama_capabilities("all-minilm:l6-v2", None),
+            vec!["embedding"]
+        );
+    }
+
+    #[test]
+    fn test_infer_ollama_capabilities_vision() {
+        let caps = infer_ollama_capabilities("llava:latest", Some("llava"));
+        assert!(caps.contains(&"completion".to_string()));
+        assert!(caps.contains(&"vision".to_string()));
+    }
+
+    #[test]
+    fn test_infer_ollama_capabilities_chat_only() {
+        let caps = infer_ollama_capabilities("llama3.2:latest", Some("llama"));
+        assert_eq!(caps, vec!["completion"]);
     }
 }

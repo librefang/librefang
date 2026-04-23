@@ -13,19 +13,28 @@
  * don't recognize, so callers can fall back to a different label (e.g. the
  * trigger ID) instead of rendering junk.
  */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
 export function formatTriggerPattern(pattern: unknown): string | undefined {
   if (pattern == null) return undefined;
   if (typeof pattern === "string") return pattern;
-  if (typeof pattern !== "object") return undefined;
+  if (!isRecord(pattern)) return undefined;
 
-  const entries = Object.entries(pattern as Record<string, unknown>);
+  const entries = Object.entries(pattern);
   if (entries.length === 0) return undefined;
   const [variant, payload] = entries[0];
 
-  if (payload == null || typeof payload !== "object") {
+  if (!isRecord(payload)) {
     return variant;
   }
-  const values = Object.values(payload as Record<string, unknown>)
-    .filter((v): v is string => typeof v === "string" && v.length > 0);
+
+  const values: string[] = [];
+  for (const v of Object.values(payload)) {
+    if (typeof v === "string" && v.length > 0) {
+      values.push(v);
+    }
+  }
   return values.length > 0 ? `${variant}: ${values.join(" ")}` : variant;
 }

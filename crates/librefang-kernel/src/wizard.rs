@@ -176,6 +176,7 @@ impl SetupWizard {
             pinned_model: None,
             workspace: None,
             generate_identity_files: true,
+            workspaces: HashMap::new(),
             profile: None,
             fallback_models: vec![],
             exec_policy: None,
@@ -195,6 +196,7 @@ impl SetupWizard {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            channel_overrides: None,
         };
 
         let skills_to_install: Vec<String> = intent

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useFocusTrap } from "../../lib/useFocusTrap";
@@ -20,7 +20,7 @@ interface ConfirmDialogProps {
 /// Modal confirmation dialog. Replaces `window.confirm()` with a styled
 /// dialog that matches the rest of the dashboard, supports destructive
 /// styling, and slides up from the bottom on mobile.
-export function ConfirmDialog({
+export const ConfirmDialog = React.memo(function ConfirmDialog({
   isOpen,
   title,
   message,
@@ -32,19 +32,30 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef);
+  const isConfirming = useRef(false);
+  const onCloseRef = useRef(onClose);
+  const onConfirmRef = useRef(onConfirm);
+  onCloseRef.current = onClose;
+  onConfirmRef.current = onConfirm;
+  useFocusTrap(isOpen, dialogRef, true);
+
+  useEffect(() => {
+    if (isOpen) {
+      isConfirming.current = false;
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
       // Enter confirms — safer on non-destructive dialogs; for destructive
       // we still require a click so users can't accidentally nuke data.
-      if (e.key === "Enter" && tone !== "destructive") onConfirm();
+      if (e.key === "Enter" && tone !== "destructive") onConfirmRef.current();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, onClose, onConfirm, tone]);
+  }, [isOpen, tone]);
 
   if (!isOpen) return null;
 
@@ -63,6 +74,7 @@ export function ConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
+        aria-describedby="confirm-dialog-message"
         className="relative w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale"
         onClick={(e) => e.stopPropagation()}
       >
@@ -83,7 +95,7 @@ export function ConfirmDialog({
           </div>
           <div className="flex-1 min-w-0">
             <h3 id="confirm-dialog-title" className="text-sm font-black tracking-tight">{title}</h3>
-            <p className="mt-1.5 text-xs text-text-dim leading-relaxed">{message}</p>
+            <p id="confirm-dialog-message" className="mt-1.5 text-xs text-text-dim leading-relaxed">{message}</p>
           </div>
         </div>
         <div className="flex gap-2 border-t border-border-subtle/50 px-5 py-3">
@@ -95,6 +107,8 @@ export function ConfirmDialog({
           </button>
           <button
             onClick={() => {
+              if (isConfirming.current) return;
+              isConfirming.current = true;
               onConfirm();
               onClose();
             }}
@@ -106,4 +120,4 @@ export function ConfirmDialog({
       </div>
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { transcribeAudio } from "../api";
 
 export function useVoiceInput(onTranscript: (text: string) => void) {
@@ -9,6 +9,9 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingRef = useRef(false);
+  const onTranscriptRef = useRef(onTranscript);
+
+  onTranscriptRef.current = onTranscript;
 
   const hasMediaDevices = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
 
@@ -55,7 +58,7 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
         try {
           const result = await transcribeAudio(blob);
           if (result.text.trim()) {
-            onTranscript(result.text.trim());
+            onTranscriptRef.current(result.text.trim());
           }
         } catch (err) {
           console.error("Transcription failed:", err);
@@ -72,7 +75,7 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
       console.error("Microphone access denied:", err);
       cleanup();
     }
-  }, [onTranscript, cleanup]);
+  }, [cleanup]);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current) {
@@ -88,6 +91,10 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
       startRecording();
     }
   }, [startRecording, stopRecording]);
+
+  useEffect(() => {
+    return () => { cleanup(); };
+  }, [cleanup]);
 
   return {
     isRecording,

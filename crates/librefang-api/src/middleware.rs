@@ -115,7 +115,9 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
         let agent_clone = path.starts_with("/api/agents/") && path.ends_with("/clone");
         let approval_action = path == "/api/approvals/batch"
             || path.ends_with("/approve")
+            || path.ends_with("/approve_all")
             || path.ends_with("/reject")
+            || path.ends_with("/reject_all")
             || path.ends_with("/modify");
         return agent_message || agent_clone || approval_action;
     }
@@ -747,6 +749,17 @@ mod tests {
             UserRole::Viewer,
             &post,
             "/api/agents/123/message"
+        ));
+        // Session-scoped approval endpoints are also denied for Viewer.
+        assert!(!user_role_allows_request(
+            UserRole::Viewer,
+            &post,
+            "/api/approvals/session/sess-1/approve_all"
+        ));
+        assert!(!user_role_allows_request(
+            UserRole::Viewer,
+            &post,
+            "/api/approvals/session/sess-1/reject_all"
         ));
     }
 

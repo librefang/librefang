@@ -69,10 +69,13 @@ export {
   // models
   listModels,
   getModelOverrides,
+  // providers
+  listProviders,
   // network / peers / a2a
   getNetworkStatus,
   listPeers,
   listA2AAgents,
+  getA2ATaskStatus,
   // plugins
   listPlugins,
   listPluginRegistries,
@@ -109,6 +112,21 @@ export {
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
+  // overview
+  loadDashboardSnapshot,
+  getVersionInfo,
+  // runtime
+  getStatus,
+  getQueueStatus,
+  getHealthDetail,
+  getSecurityStatus,
+  listBackups,
+  getTaskQueueStatus,
+  listTaskQueue,
+  listCronJobs,
+  // audit
+  listAuditRecent,
+  verifyAuditChain,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -187,6 +205,12 @@ export {
   removeCustomModel,
   updateModelOverrides,
   deleteModelOverrides,
+  // providers
+  testProvider,
+  setProviderKey,
+  deleteProviderKey,
+  setProviderUrl,
+  setDefaultProvider,
   // network / a2a
   discoverA2AAgent,
   sendA2ATask,
@@ -246,6 +270,8 @@ export {
 // Type re-exports used by hooks and pages
 // ---------------------------------------------------------------------------
 export type {
+  A2AAgentItem,
+  A2ATaskStatus,
   AutoDreamAbortOutcome,
   AutoDreamAgentStatus,
   AutoDreamProgress,
@@ -267,6 +293,7 @@ export type {
   MediaMusicResult,
   MediaProvider,
   MediaVideoStatus,
+  MediaVideoSubmitResult,
   SpeechResult,
   TerminalHealth,
   TerminalWindow,

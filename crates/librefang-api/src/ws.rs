@@ -24,7 +24,7 @@ use librefang_channels::types::SenderContext;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_runtime::llm_errors;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
@@ -369,9 +369,40 @@ pub async fn agent_ws(
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
+    // Optional per-connection explicit session_id override (issue #2959).
+    // When present, every send on this socket targets the given session —
+    // two browser tabs on the same agent with different `?session_id=` values
+    // no longer race each other's sessions. We validate at upgrade time so
+    // the client sees a rejected handshake rather than a connected-then-dropped
+    // socket.
+    let explicit_session: Option<SessionId> = match ws_query_param(&uri, "session_id") {
+        None => None,
+        Some(raw) => match raw.parse::<SessionId>() {
+            Ok(sid) => match state.kernel.memory_substrate().get_session(sid) {
+                Ok(Some(s)) if s.agent_id == agent_id => Some(sid),
+                Ok(Some(_)) | Ok(None) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        "WebSocket upgrade rejected: session_id invalid for agent"
+                    );
+                    return axum::http::StatusCode::BAD_REQUEST.into_response();
+                }
+                Err(e) => {
+                    warn!(error = %e, "WebSocket upgrade rejected: memory error resolving session");
+                    return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            },
+            Err(_) => {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+        },
+    };
+
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, ip, guard))
-        .into_response()
+    ws.on_upgrade(move |socket| {
+        handle_agent_ws(socket, state, agent_id, id_str, ip, guard, explicit_session)
+    })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +420,7 @@ async fn handle_agent_ws(
     id_str: String,
     client_ip: IpAddr,
     _guard: WsConnectionGuard,
+    explicit_session: Option<SessionId>,
 ) {
     info!(agent_id = %id_str, "WebSocket connected");
 
@@ -535,7 +567,16 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
-                handle_text_message(&sender, &state, agent_id, &text, &verbose, client_ip).await;
+                handle_text_message(
+                    &sender,
+                    &state,
+                    agent_id,
+                    &text,
+                    &verbose,
+                    client_ip,
+                    explicit_session,
+                )
+                .await;
             }
             Message::Close(_) => {
                 info!(agent_id = %id_str, "WebSocket closed by client");
@@ -567,6 +608,7 @@ async fn handle_text_message(
     text: &str,
     verbose: &Arc<AtomicU8>,
     client_ip: IpAddr,
+    explicit_session: Option<SessionId>,
 ) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -743,12 +785,13 @@ async fn handle_text_message(
             };
             match state
                 .kernel
-                .send_message_streaming_with_sender_context_routing_and_thinking(
+                .send_message_streaming_with_sender_context_routing_thinking_and_session(
                     agent_id,
                     &content,
                     Some(kernel_handle),
                     &sender_ctx,
                     thinking_override,
+                    explicit_session,
                 )
                 .await
             {

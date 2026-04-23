@@ -3,6 +3,10 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod desktop_install;
 mod http_client;
 pub mod i18n;
@@ -22,16 +26,19 @@ use librefang_kernel::{config::load_config, LibreFangKernel};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 #[cfg(windows)]
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
 const INIT_DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../templates/init_default_config.toml");
+const LOG_RETENTION_DAYS: u64 = 7;
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -141,7 +148,7 @@ enum Commands {
         spawned: bool,
         /// Override the bind address for this run (e.g. "0.0.0.0:4545" or "127.0.0.1:9000").
         /// Overrides LIBREFANG_LISTEN env var and api_listen in config.toml.
-        #[arg(long, value_name = "HOST:PORT")]
+        #[arg(long, value_name = "HOST:PORT", env = "LIBREFANG_LISTEN")]
         bind: Option<String>,
     },
     /// Restart the running daemon (or start it if not running).
@@ -3158,6 +3165,201 @@ fn spawn_detached_daemon(
         .map_err(|e| format!("spawn detached daemon: {e}"))
 }
 
+/// Generate a daily log path for the current daemon start.
+/// Returns e.g. ~/.librefang/logs/daemon-2026-04-23.log
+/// Same day restarts reuse the same file.
+fn timestamped_log_path(config: Option<&std::path::Path>) -> std::path::PathBuf {
+    let daemon = daemon_config_context(config);
+    let log_dir = daemon
+        .log_dir
+        .unwrap_or_else(|| daemon.home_dir.join("logs"));
+    let date = chrono_lite_date();
+    log_dir.join(format!("daemon-{date}.log"))
+}
+
+/// Lightweight date string (YYYY-MM-DD) without external dependencies.
+fn chrono_lite_date() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let days = secs / 86400;
+    let mut year = 1970;
+    let mut remaining_days = days as i64;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month: u64 = 1;
+    let mut day: i64 = remaining_days + 1;
+    let mut md: i64 = if is_leap_year(year) { 29 } else { 28 };
+    while day > md {
+        day -= md;
+        month += 1;
+        md = month_days
+            .get((month.saturating_sub(1)) as usize)
+            .copied()
+            .unwrap_or(28) as i64;
+    }
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+/// Prune rotated daemon logs older than `max_age_days`, keeping the log dir tidy.
+fn prune_rotated_logs(config: Option<&std::path::Path>, max_age_days: u64) {
+    let daemon = daemon_config_context(config);
+    let log_dir = daemon
+        .log_dir
+        .unwrap_or_else(|| daemon.home_dir.join("logs"));
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(max_age_days.saturating_mul(86400));
+
+    let entries = match std::fs::read_dir(&log_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !name.starts_with("daemon-") || !name.ends_with(".log") {
+            continue;
+        }
+        // Parse date from filename: daemon-YYYY-MM-DD.log
+        let date_str = name
+            .strip_prefix("daemon-")
+            .and_then(|s| s.strip_suffix(".log"));
+        let is_old = date_str
+            .and_then(parse_daily_date_timestamp)
+            .map(|ts| ts < cutoff)
+            .unwrap_or(false);
+        if is_old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Parse YYYY-MM-DD to Unix seconds at 00:00:00 UTC.
+fn parse_daily_date_timestamp(s: &str) -> Option<u64> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: u64 = parts[0].parse().ok()?;
+    let month: u64 = parts[1].parse().ok()?;
+    let day: u64 = parts[2].parse().ok()?;
+    Some(days_since_epoch(year, month, day) * 86400)
+}
+
+fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
+    let mut days = 0;
+    for y in 1970..year {
+        days += if is_leap_year(y as i64) { 366 } else { 365 };
+    }
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 1..month {
+        days += month_days.get((m - 1) as usize).copied().unwrap_or(28) as u64;
+    }
+    if is_leap_year(year as i64) && month > 2 {
+        days += 1;
+    }
+    days + day - 1
+}
+
+/// Guard that tees all stdout/stderr to a log file in foreground mode.
+/// On drop, restores original stdout/stderr and joins the tee thread.
+#[cfg(unix)]
+struct ForegroundTeeGuard {
+    _pipe_fd: RawFd, // kept alive to keep pipe open until guard drops
+}
+
+#[cfg(unix)]
+impl Drop for ForegroundTeeGuard {
+    fn drop(&mut self) {
+        // Restore original stdout/stderr
+        unsafe {
+            libc::dup2(self._pipe_fd, libc::STDOUT_FILENO);
+            libc::dup2(self._pipe_fd, libc::STDERR_FILENO);
+            libc::close(self._pipe_fd);
+        }
+    }
+}
+
+/// Set up tee for --foreground mode: redirect stdout/stderr to a pipe,
+/// spawn a background thread that copies to both terminal and log file.
+#[cfg(unix)]
+fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
+    // Create pipe for stdout+stderr (we'll write to it, background thread reads)
+    let mut fds = [0i32, 0i32];
+    unsafe {
+        libc::pipe(fds.as_mut_ptr());
+    }
+    let pipe_write = fds[1];
+    let pipe_read = fds[0];
+
+    // Save copy of original stdout/stderr (to restore on drop)
+    let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
+
+    // Redirect stdout and stderr to the pipe
+    unsafe {
+        libc::dup2(pipe_write, libc::STDOUT_FILENO);
+        libc::dup2(pipe_write, libc::STDERR_FILENO);
+        libc::close(pipe_write);
+    }
+
+    // Create log file (append mode)
+    let log_file = std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .expect("daemon log file"),
+    );
+
+    // Spawn background thread that reads from pipe and writes to both terminal and log
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n =
+                unsafe { libc::read(pipe_read, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                // EOF or error — exit; guard Drop will restore stdout/stderr
+                unsafe { libc::close(pipe_read) };
+                break;
+            }
+            // Write to terminal (original stdout/stderr)
+            unsafe {
+                libc::write(stdout_copy, buf.as_ptr() as *const libc::c_void, n as usize);
+                libc::write(stderr_copy, buf.as_ptr() as *const libc::c_void, n as usize);
+            }
+            // Write to log file
+            if let Ok(mut f) = log_file.lock() {
+                let _ = f.write_all(&buf[..n as usize]);
+                let _ = f.flush();
+            }
+        }
+        // guard Drop closes stdout_copy/stderr_copy; pipe_read is closed above on break
+    });
+
+    ForegroundTeeGuard {
+        _pipe_fd: stdout_copy,
+    }
+}
+
 /// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
 fn ensure_initialized(config: &Option<PathBuf>) {
     match config {
@@ -3278,7 +3480,28 @@ fn cmd_start(
     println!("  {}", i18n::t("daemon-starting"));
     ui::blank();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    // For --foreground mode, tee stdout/stderr to both the terminal and a time-stamped
+    // log file. Detached mode keeps appending to the stable daemon.log.
+    let log_path = if foreground {
+        // Prune rotated logs older than LOG_RETENTION_DAYS, then start a fresh daily file.
+        prune_rotated_logs(config.as_deref(), LOG_RETENTION_DAYS);
+        timestamped_log_path(config.as_deref())
+    } else {
+        daemon_log_path_for_config(config.as_deref())
+    };
+    #[cfg(unix)]
+    let _foreground_guard = if foreground {
+        Some(setup_foreground_tee(&log_path))
+    } else {
+        None
+    };
+    ui::kv(&i18n::t("label-log"), &log_path.display().to_string());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let kernel = match LibreFangKernel::boot(config.as_deref()) {
             Ok(k) => k,
