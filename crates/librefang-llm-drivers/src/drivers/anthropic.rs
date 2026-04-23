@@ -22,6 +22,9 @@ pub struct AnthropicDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    /// Per-provider HTTP request timeout in seconds.
+    /// Overrides the HTTP client's default read timeout when set.
+    request_timeout_secs: Option<u64>,
 }
 
 impl AnthropicDriver {
@@ -32,6 +35,16 @@ impl AnthropicDriver {
 
     /// Create a new Anthropic driver with an optional per-provider proxy.
     pub fn with_proxy(api_key: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        Self::with_proxy_and_timeout(api_key, base_url, proxy_url, None)
+    }
+
+    /// Create a new Anthropic driver with optional proxy and request timeout.
+    pub fn with_proxy_and_timeout(
+        api_key: String,
+        base_url: String,
+        proxy_url: Option<&str>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url),
             None => librefang_http::proxied_client(),
@@ -40,6 +53,7 @@ impl AnthropicDriver {
             api_key: Zeroizing::new(api_key),
             base_url,
             client,
+            request_timeout_secs,
         }
     }
 }
@@ -297,6 +311,18 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         request.max_tokens
     };
 
+    // Anthropic rejects max_tokens=0 with HTTP 400; fall back to a safe
+    // minimum so callers that forget to set max_tokens still work.
+    let effective_max_tokens = if effective_max_tokens == 0 {
+        warn!(
+            model = %request.model,
+            "max_tokens resolved to 0, falling back to safe minimum of 8192"
+        );
+        8192
+    } else {
+        effective_max_tokens
+    };
+
     ApiRequest {
         model: request.model.clone(),
         max_tokens: effective_max_tokens,
@@ -324,13 +350,17 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic API request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
-                .json(&api_request)
+                .json(&api_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -422,13 +452,17 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic streaming request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
-                .json(&api_request)
+                .json(&api_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;

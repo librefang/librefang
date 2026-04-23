@@ -2073,6 +2073,47 @@ async fn dispatch_message(
 ) {
     let ct_str = channel_type_str(&message.channel);
 
+    // --- Webhook direct delivery (deliver_only mode) ---
+    // If the incoming message was tagged by a deliver_only webhook route,
+    // forward the content straight to the configured delivery channel and
+    // return early — no LLM or agent is involved.
+    if message
+        .metadata
+        .get("__deliver_only__")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let target = message
+            .metadata
+            .get("__deliver_target__")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let text = match &message.content {
+            ChannelContent::Text(t) => t.as_str(),
+            _ => "",
+        };
+        let route = message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(ct_str);
+        info!(
+            route = route,
+            target = target,
+            "webhook: direct delivery for route {}, skipping agent",
+            route
+        );
+        if !target.is_empty() && !text.is_empty() {
+            if let Err(e) = handle
+                .send_channel_push(target, &message.sender.platform_id, text, None)
+                .await
+            {
+                warn!(target = target, error = %e, "webhook direct delivery failed");
+            }
+        }
+        return;
+    }
+
     // --- Input sanitization (prompt injection detection) ---
     if !sanitizer.is_off() {
         let text_to_check: Option<&str> = match &message.content {

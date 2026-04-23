@@ -29,6 +29,9 @@ pub struct GeminiDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    /// Per-provider HTTP request timeout in seconds.
+    /// Overrides the HTTP client's default read timeout when set.
+    request_timeout_secs: Option<u64>,
 }
 
 impl GeminiDriver {
@@ -39,6 +42,16 @@ impl GeminiDriver {
 
     /// Create a new Gemini driver with an optional per-provider proxy.
     pub fn with_proxy(api_key: String, base_url: String, proxy_url: Option<&str>) -> Self {
+        Self::with_proxy_and_timeout(api_key, base_url, proxy_url, None)
+    }
+
+    /// Create a new Gemini driver with optional proxy and request timeout.
+    pub fn with_proxy_and_timeout(
+        api_key: String,
+        base_url: String,
+        proxy_url: Option<&str>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url),
             None => librefang_http::proxied_client(),
@@ -47,6 +60,7 @@ impl GeminiDriver {
             api_key: Zeroizing::new(api_key),
             base_url,
             client,
+            request_timeout_secs,
         }
     }
 }
@@ -791,12 +805,16 @@ impl LlmDriver for GeminiDriver {
             );
             debug!(url = %url, attempt, "Sending Gemini API request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
-                .json(&gemini_request)
+                .json(&gemini_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -878,12 +896,16 @@ impl LlmDriver for GeminiDriver {
             );
             debug!(url = %url, attempt, "Sending Gemini streaming request");
 
-            let resp = self
+            let mut req_builder = self
                 .client
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
-                .json(&gemini_request)
+                .json(&gemini_request);
+            if let Some(secs) = self.request_timeout_secs {
+                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;

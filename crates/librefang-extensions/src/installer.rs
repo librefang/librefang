@@ -145,6 +145,7 @@ pub fn catalog_entry_to_mcp_server(entry: &McpCatalogEntry) -> McpServerConfigEn
         headers: Vec::new(),
         oauth,
         taint_scanning: true,
+        taint_policy: None,
     }
 }
 

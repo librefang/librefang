@@ -158,6 +158,15 @@ pub struct FeishuAdapter {
     /// Event dedup cache — maps event_id → first-seen Instant.
     /// Prevents duplicate processing when Feishu retries webhook/WS events.
     seen_events: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Processing-status reaction cache — maps chat_id → (reaction_id, message_id).
+    ///
+    /// When a message arrives we add a "Typing" reaction to give the user
+    /// immediate visual feedback.  The reaction_id returned by the API and
+    /// the original message_id are stored here keyed by chat_id so `send()`
+    /// can look up both values (reaction removal requires both).  The entry
+    /// is removed when the bot sends its reply.  Fail-open: reaction errors
+    /// never block message processing.
+    pending_reactions: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 impl FeishuAdapter {
@@ -183,6 +192,7 @@ impl FeishuAdapter {
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
             seen_events: Arc::new(Mutex::new(HashMap::new())),
+            pending_reactions: Arc::new(Mutex::new(HashMap::<String, (String, String)>::new())),
         }
     }
 
@@ -359,6 +369,72 @@ impl FeishuAdapter {
         Ok(())
     }
 
+    /// Spawn a background task that removes the pending processing reaction for `chat_id`.
+    ///
+    /// The (reaction_id, message_id) pair is taken from `pending_reactions` and
+    /// the entry is cleared.  No-op if no reaction is tracked for this chat.
+    fn spawn_remove_processing_reaction(&self, chat_id: &str) {
+        let entry = {
+            let mut map = self
+                .pending_reactions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.remove(chat_id)
+        };
+        let Some((reaction_id, message_id)) = entry else {
+            return;
+        };
+
+        let client_clone = self.client.clone();
+        let cached_token = Arc::clone(&self.cached_token);
+        let region = self.region;
+        let app_id = self.app_id.clone();
+        let app_secret = self.app_secret.clone();
+
+        tokio::spawn(async move {
+            let token =
+                match get_token_static(&client_clone, region, &app_id, &app_secret, &cached_token)
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(
+                            "{}: remove_processing_reaction get_token failed: {e}",
+                            region.label()
+                        );
+                        return;
+                    }
+                };
+            let url = format!(
+                "{}/open-apis/im/v1/messages/{}/reactions/{}",
+                region.api_base(),
+                message_id,
+                reaction_id
+            );
+            match client_clone.delete(&url).bearer_auth(&token).send().await {
+                Ok(resp) if !resp.status().is_success() => {
+                    warn!(
+                        "{}: remove_processing_reaction HTTP {} for {reaction_id}",
+                        region.label(),
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "{}: remove_processing_reaction HTTP failed: {e}",
+                        region.label()
+                    );
+                }
+                Ok(_) => {
+                    debug!(
+                        "{}: removed Typing reaction {reaction_id} on msg {message_id}",
+                        region.label()
+                    );
+                }
+            }
+        });
+    }
+
     /// Send an interactive card message to a Feishu/Lark chat.
     ///
     /// Uses the Feishu IM API with `msg_type: "interactive"` to send a card
@@ -439,6 +515,12 @@ impl FeishuAdapter {
         let label = self.region.label();
         let region = self.region;
         let tx = Arc::new(tx);
+        // Reaction-related clones for the webhook closure.
+        let pending_reactions = Arc::clone(&self.pending_reactions);
+        let reaction_client = self.client.clone();
+        let reaction_cached_token = Arc::clone(&self.cached_token);
+        let reaction_app_id = Arc::new(self.app_id.clone());
+        let reaction_app_secret = self.app_secret.clone();
 
         axum::Router::new().route(
             "/webhook",
@@ -447,11 +529,21 @@ impl FeishuAdapter {
                 let ek = Arc::clone(&encrypt_key);
                 let tx = Arc::clone(&tx);
                 let seen = Arc::clone(&seen_events);
+                let pending_reactions = Arc::clone(&pending_reactions);
+                let reaction_client = reaction_client.clone();
+                let reaction_cached_token = Arc::clone(&reaction_cached_token);
+                let reaction_app_id = Arc::clone(&reaction_app_id);
+                let reaction_app_secret = reaction_app_secret.clone();
                 move |body: axum::extract::Json<serde_json::Value>| {
                     let vt = Arc::clone(&vt);
                     let ek = Arc::clone(&ek);
                     let tx = Arc::clone(&tx);
                     let seen = Arc::clone(&seen);
+                    let pending_reactions = Arc::clone(&pending_reactions);
+                    let reaction_client = reaction_client.clone();
+                    let reaction_cached_token = Arc::clone(&reaction_cached_token);
+                    let reaction_app_id = Arc::clone(&reaction_app_id);
+                    let reaction_app_secret = reaction_app_secret.clone();
                     async move {
                         let payload = match decrypt_feishu_payload_if_needed(&body.0, ek.as_deref())
                         {
@@ -505,6 +597,25 @@ impl FeishuAdapter {
                                             serde_json::json!(aid),
                                         );
                                     }
+                                    // Spawn processing reaction (fail-open).
+                                    if let (
+                                        Some(serde_json::Value::String(msg_id)),
+                                        Some(serde_json::Value::String(chat_id)),
+                                    ) = (
+                                        msg.metadata.get("message_id").cloned(),
+                                        msg.metadata.get("chat_id").cloned(),
+                                    ) {
+                                        spawn_add_processing_reaction_static(
+                                            reaction_client.clone(),
+                                            Arc::clone(&reaction_cached_token),
+                                            Arc::clone(&reaction_app_id),
+                                            reaction_app_secret.clone(),
+                                            Arc::clone(&pending_reactions),
+                                            region,
+                                            msg_id,
+                                            chat_id,
+                                        );
+                                    }
                                     let _ = tx.send(msg).await;
                                 }
                             }
@@ -547,6 +658,11 @@ impl FeishuAdapter {
         let account_id = Arc::new(self.account_id.clone());
         let client = self.client.clone();
         let seen_events = Arc::clone(&self.seen_events);
+        // Reaction-related clones for the WS task.
+        let pending_reactions = Arc::clone(&self.pending_reactions);
+        let reaction_cached_token = Arc::clone(&self.cached_token);
+        let reaction_app_id = Arc::new(self.app_id.clone());
+        let reaction_app_secret = self.app_secret.clone();
 
         tokio::spawn(async move {
             let label = region.label();
@@ -654,6 +770,25 @@ impl FeishuAdapter {
                                                 serde_json::json!(aid),
                                             );
                                         }
+                                        // Spawn processing reaction (fail-open).
+                                        if let (
+                                            Some(serde_json::Value::String(msg_id)),
+                                            Some(serde_json::Value::String(chat_id)),
+                                        ) = (
+                                            channel_msg.metadata.get("message_id").cloned(),
+                                            channel_msg.metadata.get("chat_id").cloned(),
+                                        ) {
+                                            spawn_add_processing_reaction_static(
+                                                client.clone(),
+                                                Arc::clone(&reaction_cached_token),
+                                                Arc::clone(&reaction_app_id),
+                                                reaction_app_secret.clone(),
+                                                Arc::clone(&pending_reactions),
+                                                region,
+                                                msg_id,
+                                                chat_id,
+                                            );
+                                        }
                                         if tx.send(channel_msg).await.is_err() {
                                             info!("{label}: channel receiver dropped, exiting WS loop");
                                             return;
@@ -711,6 +846,25 @@ impl FeishuAdapter {
                                                 channel_msg.metadata.insert(
                                                     "account_id".to_string(),
                                                     serde_json::json!(aid),
+                                                );
+                                            }
+                                            // Spawn processing reaction (fail-open).
+                                            if let (
+                                                Some(serde_json::Value::String(msg_id)),
+                                                Some(serde_json::Value::String(chat_id)),
+                                            ) = (
+                                                channel_msg.metadata.get("message_id").cloned(),
+                                                channel_msg.metadata.get("chat_id").cloned(),
+                                            ) {
+                                                spawn_add_processing_reaction_static(
+                                                    client.clone(),
+                                                    Arc::clone(&reaction_cached_token),
+                                                    Arc::clone(&reaction_app_id),
+                                                    reaction_app_secret.clone(),
+                                                    Arc::clone(&pending_reactions),
+                                                    region,
+                                                    msg_id,
+                                                    chat_id,
                                                 );
                                             }
                                             if tx.send(channel_msg).await.is_err() {
@@ -877,6 +1031,97 @@ async fn get_token_static(
     *cached_token.write().await = Some((tenant_access_token.clone(), expiry));
 
     Ok(tenant_access_token)
+}
+
+/// Static helper that spawns a background task to add a "Typing" reaction.
+///
+/// Used by both the webhook closure and the WebSocket task, which cannot
+/// borrow `&FeishuAdapter`.  All state is passed by value/clone.
+///
+/// No-op if `chat_id` already has a pending reaction (de-dup guard).
+#[allow(clippy::too_many_arguments)]
+fn spawn_add_processing_reaction_static(
+    client: reqwest::Client,
+    cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    app_id: Arc<String>,
+    app_secret: Zeroizing<String>,
+    pending_reactions: Arc<Mutex<HashMap<String, (String, String)>>>,
+    region: FeishuRegion,
+    message_id: String,
+    chat_id: String,
+) {
+    // De-dup: skip if we already track a reaction for this chat.
+    {
+        let map = pending_reactions.lock().unwrap_or_else(|e| e.into_inner());
+        if map.contains_key(&chat_id) {
+            return;
+        }
+    }
+
+    tokio::spawn(async move {
+        let token =
+            match get_token_static(&client, region, &app_id, &app_secret, &cached_token).await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(
+                        "{}: spawn_add_processing_reaction get_token failed: {e}",
+                        region.label()
+                    );
+                    return;
+                }
+            };
+        let url = format!(
+            "{}/open-apis/im/v1/messages/{}/reactions",
+            region.api_base(),
+            message_id
+        );
+        let body = serde_json::json!({
+            "reaction_type": { "emoji_type": "Typing" }
+        });
+        match client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(json) if json["code"].as_i64().unwrap_or(-1) == 0 => {
+                    if let Some(reaction_id) =
+                        json["data"]["reaction_id"].as_str().map(|s| s.to_string())
+                    {
+                        debug!(
+                            "{}: added Typing reaction {reaction_id} on msg {message_id}",
+                            region.label()
+                        );
+                        let mut map = pending_reactions.lock().unwrap_or_else(|e| e.into_inner());
+                        // Key: chat_id — used by send() to look up via ChannelUser.platform_id.
+                        // Value: (reaction_id, message_id) — both required for DELETE call.
+                        map.insert(chat_id, (reaction_id, message_id));
+                    }
+                }
+                Ok(json) => {
+                    warn!(
+                        "{}: add_processing_reaction API error: {}",
+                        region.label(),
+                        json["msg"].as_str().unwrap_or("unknown")
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "{}: add_processing_reaction parse response failed: {e}",
+                        region.label()
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "{}: add_processing_reaction HTTP request failed: {e}",
+                    region.label()
+                );
+            }
+        }
+    });
 }
 
 fn decrypt_feishu_payload_if_needed(
@@ -1189,11 +1434,31 @@ fn parse_feishu_event(event: &serde_json::Value, region: FeishuRegion) -> Option
     let content_json: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
     let mut text = content_json["text"].as_str().unwrap_or("").to_string();
 
-    // Strip mention placeholders like "@_user_1 " that Feishu injects for @mentions
+    // Replace @mention placeholders (e.g. "@_user_1") with "@display_name".
+    //
+    // Feishu injects placeholder tokens like "@_user_1" into the text content
+    // for each @mention, with the corresponding name and open_id available in
+    // the `mentions` array.  The original code stripped these placeholders
+    // entirely, causing the agent to lose context about who was mentioned.
+    // We now replace each placeholder with "@name" so the mention context is
+    // preserved in the text passed to the agent.
+    //
+    // Special case: "@_all" is the broadcast mention and is rendered as "@all".
     if let Some(mentions) = message.get("mentions").and_then(|m| m.as_array()) {
         for mention in mentions {
             if let Some(key) = mention["key"].as_str() {
-                text = text.replace(key, "");
+                let replacement = if key == "@_all" {
+                    "@all".to_string()
+                } else {
+                    // Prefer the human-readable name; fall back to open_id.
+                    let name = mention["name"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| mention["id"]["open_id"].as_str().filter(|s| !s.is_empty()))
+                        .unwrap_or("user");
+                    format!("@{name}")
+                };
+                text = text.replace(key, &replacement);
             }
         }
     }
@@ -1451,6 +1716,11 @@ impl ChannelAdapter for FeishuAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Remove the processing reaction before sending the reply so users
+        // see the "Typing" indicator cleared at the same time the reply arrives.
+        // `user.platform_id` is the chat_id used as the pending_reactions key.
+        self.spawn_remove_processing_reaction(&user.platform_id);
+
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, "chat_id", &text)
@@ -2380,5 +2650,99 @@ mod tests {
         let seen = Mutex::new(HashMap::new());
         let payload = serde_json::json!({ "header": { "event_type": "foo" } });
         assert!(!is_duplicate_event(&payload, &seen));
+    }
+
+    /// @mention placeholders should be replaced with "@display_name" in text.
+    #[test]
+    fn test_parse_feishu_event_mention_replaced_with_name() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-mention-1",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_sender" },
+                    "sender_type": "user"
+                },
+                "message": {
+                    "message_id": "om_mention1",
+                    "chat_id": "oc_grp_mention",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    // Feishu injects "@_user_1" as a placeholder for the @mention.
+                    "content": "{\"text\":\"@_user_1 please review this\"}",
+                    "mentions": [
+                        {
+                            "key": "@_user_1",
+                            "name": "Alice",
+                            "id": {
+                                "open_id": "ou_alice"
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
+        match &msg.content {
+            ChannelContent::Text(text) => {
+                // Placeholder replaced with @name — not stripped.
+                assert!(
+                    text.contains("@Alice"),
+                    "expected @Alice in text, got: {text}"
+                );
+                assert!(
+                    !text.contains("@_user_1"),
+                    "raw placeholder should be gone, got: {text}"
+                );
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
+    }
+
+    /// @all placeholder should be normalised to "@all".
+    #[test]
+    fn test_parse_feishu_event_mention_all_normalised() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-mention-all",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_sender" },
+                    "sender_type": "user"
+                },
+                "message": {
+                    "message_id": "om_mention_all",
+                    "chat_id": "oc_grp_all",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"@_all attention\"}",
+                    "mentions": [
+                        {
+                            "key": "@_all",
+                            "name": "All Members"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
+        match &msg.content {
+            ChannelContent::Text(text) => {
+                assert!(text.contains("@all"), "expected @all in text, got: {text}");
+                assert!(
+                    !text.contains("@_all"),
+                    "raw @_all placeholder should be replaced, got: {text}"
+                );
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
     }
 }

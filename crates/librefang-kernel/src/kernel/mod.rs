@@ -835,6 +835,7 @@ impl LibreFangKernel {
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: server_roots,
             };
 
@@ -1819,6 +1820,10 @@ impl LibreFangKernel {
             .provider_proxy_urls
             .get(&config.default_model.provider)
             .cloned();
+        let default_request_timeout_secs = config
+            .provider_request_timeout_secs
+            .get(&config.default_model.provider)
+            .copied();
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
             api_key: default_api_key.clone(),
@@ -1829,6 +1834,7 @@ impl LibreFangKernel {
             message_timeout_secs: config.default_model.message_timeout_secs,
             mcp_bridge: Some(mcp_bridge_cfg.clone()),
             proxy_url: default_proxy_url.clone(),
+            request_timeout_secs: default_request_timeout_secs,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
         // even if the LLM provider is misconfigured. Users can fix config via dashboard.
@@ -1865,6 +1871,7 @@ impl LibreFangKernel {
                     message_timeout_secs: config.default_model.message_timeout_secs,
                     mcp_bridge: Some(mcp_bridge_cfg.clone()),
                     proxy_url: default_proxy_url.clone(),
+                    request_timeout_secs: default_request_timeout_secs,
                 };
                 match drivers::create_driver(&profile_config) {
                     Ok(profile_driver) => {
@@ -1970,6 +1977,10 @@ impl LibreFangKernel {
                             message_timeout_secs: config.default_model.message_timeout_secs,
                             mcp_bridge: Some(mcp_bridge_cfg.clone()),
                             proxy_url: config.provider_proxy_urls.get(provider).cloned(),
+                            request_timeout_secs: config
+                                .provider_request_timeout_secs
+                                .get(provider)
+                                .copied(),
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
@@ -2021,6 +2032,10 @@ impl LibreFangKernel {
                 message_timeout_secs: config.default_model.message_timeout_secs,
                 mcp_bridge: Some(mcp_bridge_cfg.clone()),
                 proxy_url: config.provider_proxy_urls.get(&fb.provider).cloned(),
+                request_timeout_secs: config
+                    .provider_request_timeout_secs
+                    .get(&fb.provider)
+                    .copied(),
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
@@ -4624,6 +4639,35 @@ system_prompt = "You are a helpful assistant."
         .await
     }
 
+    /// Streaming entry point that combines a sender context with a per-request
+    /// `session_id_override` (multi-tab WebSocket UIs, issue #2959). The
+    /// override wins over channel-derived session resolution. When `None`,
+    /// behavior is identical to
+    /// [`Self::send_message_streaming_with_sender_context_routing_and_thinking`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_streaming_with_sender_context_routing_thinking_and_session(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            Some(sender),
+            thinking_override,
+            session_id_override,
+        )
+        .await
+    }
+
     /// Send a message to an agent with streaming responses.
     ///
     /// Returns a receiver for incremental `StreamEvent`s and a `JoinHandle`
@@ -4700,13 +4744,18 @@ system_prompt = "You are a helpful assistant."
             allowed_tools,
             interrupt: Some(interrupt),
         };
+        // INVARIANT: forks must use the canonical session so the parent turn's
+        // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
+        // here — it would win over the fork branch in
+        // `send_message_streaming_with_sender_and_opts`'s session resolver and
+        // break cache alignment (see issue #2959 for the override semantics).
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
             fork_prompt,
             None, // auto-wire self
             None, // no sender context — fork uses the canonical session
             None, // no thinking override
-            None, // forks always use canonical session
+            None, // forks MUST stay on canonical — see invariant above
             loop_opts,
         )
     }
@@ -4901,6 +4950,12 @@ system_prompt = "You are a helpful assistant."
                 // `SessionId::new()` here, producing a fresh empty session
                 // and breaking cache alignment. Force Persistent for forks
                 // regardless of manifest.
+                //
+                // NOTE: an explicit `session_id_override` (above) wins over
+                // this branch — if you ever plumb an override through a fork
+                // caller, prompt-cache alignment WILL break. The current
+                // `run_forked_agent_streaming` deliberately passes `None` to
+                // preserve this invariant.
                 _ if loop_opts.is_fork => entry.session_id,
                 _ => match entry.manifest.session_mode {
                     librefang_types::agent::SessionMode::Persistent => entry.session_id,
@@ -10208,9 +10263,25 @@ system_prompt = "You are a helpful assistant."
                             librefang_types::scheduler::CronAction::AgentTurn {
                                 message,
                                 timeout_secs,
+                                pre_check_script,
                                 ..
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+
+                                // Wake-gate: run pre_check_script and check for
+                                // {"wakeAgent": false} in the last non-empty output line.
+                                // Only fires when the script exits successfully.
+                                if let Some(script_path) = pre_check_script {
+                                    if !cron_script_wake_gate(&job_name, script_path).await {
+                                        tracing::info!(
+                                            job = %job_name,
+                                            "cron: script gate wakeAgent=false, skipping agent"
+                                        );
+                                        kernel.cron_scheduler.record_success(job_id);
+                                        continue;
+                                    }
+                                }
+
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
@@ -10864,6 +10935,10 @@ system_prompt = "You are a helpful assistant."
                 message_timeout_secs: cfg.default_model.message_timeout_secs,
                 mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
                 proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
+                request_timeout_secs: cfg
+                    .provider_request_timeout_secs
+                    .get(agent_provider)
+                    .copied(),
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
@@ -10949,6 +11024,10 @@ system_prompt = "You are a helpful assistant."
                     skip_permissions: true,
                     message_timeout_secs: cfg.default_model.message_timeout_secs,
                     proxy_url: cfg.provider_proxy_urls.get(&fb_provider).cloned(),
+                    request_timeout_secs: cfg
+                        .provider_request_timeout_secs
+                        .get(&fb_provider)
+                        .copied(),
                 };
                 match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
@@ -11024,6 +11103,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11172,6 +11252,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            taint_policy: server_config.taint_policy.clone(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -11295,6 +11376,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
+                taint_policy: server_config.taint_policy.clone(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11440,6 +11522,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
+            taint_policy: server_config.taint_policy.clone(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -12981,6 +13064,78 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
     // UTF-8-safe truncation: keep chars, not bytes.
     let truncated: String = out.chars().take(max_chars.saturating_sub(14)).collect();
     format!("{truncated} …[truncated]")
+}
+
+/// Run a cron job's pre-check script and parse the wake gate from its output.
+///
+/// Returns `true` if the agent should be woken (normal path), `false` to skip.
+///
+/// Rules (mirrors Hermes `_parse_wake_gate`):
+/// - Script must exit 0; on any error we default to waking the agent.
+/// - Find the last non-empty stdout line and try to parse it as JSON.
+/// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
+/// - Everything else (non-JSON, missing key, null, 0, "") → return true.
+async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+    use tokio::process::Command;
+
+    // Hard cap: pre-check scripts must complete within 30 s.
+    // A hung script would otherwise block the cron dispatcher indefinitely.
+    let run = async { Command::new(script_path).output().await };
+
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+        Err(_elapsed) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                "cron: pre-check script timed out after 30s, waking agent"
+            );
+            return true;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                error = %e,
+                "cron: pre-check script failed to launch, waking agent"
+            );
+            return true;
+        }
+        Ok(Ok(o)) => o,
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            job = %job_name,
+            script = %script_path,
+            code = ?output.status.code(),
+            "cron: pre-check script exited non-zero, waking agent"
+        );
+        return true;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_wake_gate(&stdout)
+}
+
+/// Parse the wake gate from script stdout.
+///
+/// Finds the last non-empty line, tries JSON-decode, checks `wakeAgent`.
+/// Returns `true` (wake) unless `wakeAgent` is strictly `false`.
+fn parse_wake_gate(script_output: &str) -> bool {
+    let last_line = script_output.lines().rfind(|l| !l.trim().is_empty());
+
+    let last_line = match last_line {
+        Some(l) => l.trim(),
+        None => return true,
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(last_line) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+
+    // Only `{"wakeAgent": false}` (strict bool false) skips the agent.
+    value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.

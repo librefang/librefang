@@ -21,6 +21,9 @@ use zeroize::Zeroizing;
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const SLACK_MSG_LIMIT: usize = 3000;
 
+/// Key for pending reaction tracking: (channel_id, message_ts).
+type ReactionKey = (String, String);
+
 /// Slack Socket Mode adapter.
 pub struct SlackAdapter {
     /// SECURITY: Tokens are zeroized on drop to prevent memory disclosure.
@@ -43,11 +46,23 @@ pub struct SlackAdapter {
     bot_user_id: Arc<RwLock<Option<String>>>,
     /// When true, replies are posted as top-level channel messages instead of threads.
     force_flat_replies: bool,
+    /// Whether to add/remove reaction emojis to indicate processing state.
+    /// Controlled by the `SLACK_REACTIONS` env var (overrides config field).
+    /// Defaults to `true` if neither env var nor constructor sets it.
+    reactions_enabled: bool,
+    /// Tracks pending "eyes" reactions so they can be removed before replying.
+    /// Key: (channel_id, message_ts), Value: emoji name added.
+    pending_reactions: Arc<RwLock<HashMap<ReactionKey, String>>>,
 }
 
 impl SlackAdapter {
     pub fn new(app_token: String, bot_token: String, allowed_channels: Vec<String>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Read SLACK_REACTIONS env var; fallback to true.
+        let reactions_enabled = std::env::var("SLACK_REACTIONS")
+            .ok()
+            .map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no" | "off"))
+            .unwrap_or(true);
         Self {
             app_token: Zeroizing::new(app_token),
             bot_token: Zeroizing::new(bot_token),
@@ -61,7 +76,19 @@ impl SlackAdapter {
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
             force_flat_replies: false,
+            reactions_enabled,
+            pending_reactions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Override the reactions_enabled setting (e.g., from a config struct field).
+    /// The `SLACK_REACTIONS` env var takes precedence over this if set.
+    pub fn with_reactions_enabled(mut self, enabled: bool) -> Self {
+        // Only apply if env var is not explicitly set
+        if std::env::var("SLACK_REACTIONS").is_err() {
+            self.reactions_enabled = enabled;
+        }
+        self
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -257,6 +284,92 @@ impl SlackAdapter {
         }
         Ok(())
     }
+
+    /// Add a reaction emoji to a message. Fail-open: errors are only warned.
+    async fn api_add_reaction(&self, channel: &str, timestamp: &str, emoji: &str) {
+        if !self.reactions_enabled {
+            return;
+        }
+        let body = serde_json::json!({
+            "channel": channel,
+            "timestamp": timestamp,
+            "name": emoji,
+        });
+        match self
+            .client
+            .post(format!("{SLACK_API_BASE}/reactions.add"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.bot_token.as_str()),
+            )
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) if v["ok"].as_bool() != Some(true) => {
+                    let err = v["error"].as_str().unwrap_or("unknown");
+                    // already_reacted is benign — skip warn
+                    if err != "already_reacted" {
+                        warn!("Slack reactions.add failed: {err}");
+                    }
+                }
+                Err(e) => warn!("Slack reactions.add parse error: {e}"),
+                _ => {}
+            },
+            Err(e) => warn!("Slack reactions.add request error: {e}"),
+        }
+    }
+
+    /// Remove a reaction emoji from a message. Fail-open: errors are only warned.
+    async fn api_remove_reaction(&self, channel: &str, timestamp: &str, emoji: &str) {
+        if !self.reactions_enabled {
+            return;
+        }
+        let body = serde_json::json!({
+            "channel": channel,
+            "timestamp": timestamp,
+            "name": emoji,
+        });
+        match self
+            .client
+            .post(format!("{SLACK_API_BASE}/reactions.remove"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.bot_token.as_str()),
+            )
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) if v["ok"].as_bool() != Some(true) => {
+                    let err = v["error"].as_str().unwrap_or("unknown");
+                    // no_reaction is benign — message already had no reaction
+                    if err != "no_reaction" {
+                        warn!("Slack reactions.remove failed: {err}");
+                    }
+                }
+                Err(e) => warn!("Slack reactions.remove parse error: {e}"),
+                _ => {}
+            },
+            Err(e) => warn!("Slack reactions.remove request error: {e}"),
+        }
+    }
+
+    /// Remove the processing reaction and add a success checkmark.
+    ///
+    /// Should be called after a reply has been sent successfully.
+    async fn reaction_processing_done(&self, channel: &str, ts: &str) {
+        if !self.reactions_enabled {
+            return;
+        }
+        let key = (channel.to_string(), ts.to_string());
+        if let Some(emoji) = self.pending_reactions.write().await.remove(&key) {
+            self.api_remove_reaction(channel, ts, &emoji).await;
+        }
+        self.api_add_reaction(channel, ts, "white_check_mark").await;
+    }
 }
 
 #[async_trait]
@@ -283,6 +396,7 @@ impl ChannelAdapter for SlackAdapter {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
 
         let app_token = self.app_token.clone();
+        let bot_token = self.bot_token.clone();
         let bot_user_id = self.bot_user_id.clone();
         let allowed_channels = self.allowed_channels.clone();
         let account_id = self.account_id.clone();
@@ -290,6 +404,8 @@ impl ChannelAdapter for SlackAdapter {
         let mut shutdown = self.shutdown_rx.clone();
         let initial_backoff = self.initial_backoff;
         let max_backoff = self.max_backoff;
+        let reactions_enabled = self.reactions_enabled;
+        let pending_reactions = self.pending_reactions.clone();
 
         tokio::spawn(async move {
             let mut backoff = initial_backoff;
@@ -409,6 +525,53 @@ impl ChannelAdapter for SlackAdapter {
                                     "Slack message from {}: {:?}",
                                     msg.sender.display_name, msg.content
                                 );
+                                // Add "eyes" reaction to indicate processing start (fail-open)
+                                if reactions_enabled {
+                                    let rx_client = client.clone();
+                                    let rx_token = bot_token.clone();
+                                    let rx_channel = msg.sender.platform_id.clone();
+                                    let rx_ts = msg.platform_message_id.clone();
+                                    let rx_pending = pending_reactions.clone();
+                                    tokio::spawn(async move {
+                                        let key = (rx_channel.clone(), rx_ts.clone());
+                                        rx_pending.write().await.insert(key, "eyes".to_string());
+                                        let body = serde_json::json!({
+                                            "channel": rx_channel,
+                                            "timestamp": rx_ts,
+                                            "name": "eyes",
+                                        });
+                                        match rx_client
+                                            .post(format!("{SLACK_API_BASE}/reactions.add"))
+                                            .header(
+                                                "Authorization",
+                                                format!("Bearer {}", rx_token.as_str()),
+                                            )
+                                            .json(&body)
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                if let Ok(v) =
+                                                    resp.json::<serde_json::Value>().await
+                                                {
+                                                    if v["ok"].as_bool() != Some(true) {
+                                                        let err = v["error"]
+                                                            .as_str()
+                                                            .unwrap_or("unknown");
+                                                        if err != "already_reacted" {
+                                                            warn!(
+                                                                "Slack reactions.add (eyes) failed: {err}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Slack reactions.add request error: {e}")
+                                            }
+                                        }
+                                    });
+                                }
                                 if tx.send(msg).await.is_err() {
                                     return;
                                 }
@@ -500,6 +663,20 @@ impl ChannelAdapter for SlackAdapter {
                     .await?;
             }
         }
+        // After sending, clear the processing reaction for this channel (non-thread path).
+        // Find the pending reaction keyed to this channel (DM or single-message context).
+        if self.reactions_enabled {
+            let maybe_ts = {
+                let mut map = self.pending_reactions.write().await;
+                let key = map.keys().find(|(ch, _)| ch == channel_id).cloned();
+                key.and_then(|k| map.remove(&k).map(|emoji| (k.1, emoji)))
+            };
+            if let Some((ts, emoji)) = maybe_ts {
+                self.api_remove_reaction(channel_id, &ts, &emoji).await;
+                self.api_add_reaction(channel_id, &ts, "white_check_mark")
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -533,6 +710,10 @@ impl ChannelAdapter for SlackAdapter {
 
         self.api_send_message_opts(&user.platform_id, &text, ts)
             .await?;
+        // After sending, clear the processing reaction and add success checkmark.
+        // In Slack, thread_id is the parent message ts, which is the message we reacted to.
+        self.reaction_processing_done(&user.platform_id, thread_id)
+            .await;
         Ok(())
     }
 

@@ -1,9 +1,11 @@
 //! Plugin lifecycle hooks — intercept points at key moments in agent execution.
 //!
 //! Provides a callback-based hook system (not dynamic loading) for safe extensibility.
-//! Four hook types:
+//! Five hook types:
 //! - `BeforeToolCall`: Fires before tool execution. Can block the call by returning Err.
 //! - `AfterToolCall`: Fires after tool execution. Observe-only.
+//! - `TransformToolResult`: Fires after tool execution to rewrite the result string.
+//!   The first handler returning `Ok(Some(s))` wins and replaces the result.
 //! - `BeforePromptBuild`: Fires before system prompt construction. Observe-only.
 //! - `AgentLoopEnd`: Fires after the agent loop completes. Observe-only.
 
@@ -30,6 +32,17 @@ pub trait HookHandler: Send + Sync {
     /// For `BeforeToolCall`: returning `Err(reason)` blocks the tool call.
     /// For all other events: return value is ignored (observe-only).
     fn on_event(&self, ctx: &HookContext) -> Result<(), String>;
+
+    /// Called for `TransformToolResult` hooks to optionally rewrite the tool result.
+    ///
+    /// Return `Ok(Some(new_result))` to replace the result string.
+    /// Return `Ok(None)` to leave the result unchanged and let later handlers run.
+    /// Return `Err(reason)` to signal a failure; the error is logged and this handler is skipped.
+    ///
+    /// Default implementation returns `Ok(None)` (no transformation).
+    fn transform(&self, _ctx: &HookContext) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 /// Registry of hook handlers, keyed by event type.
@@ -74,6 +87,30 @@ impl HookRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Fire `TransformToolResult` handlers in registration order.
+    ///
+    /// Returns the first `Ok(Some(s))` result, replacing the tool output.
+    /// Handlers returning `Err` are warned and skipped (fail-open).
+    /// Returns `None` if no handler produces a replacement.
+    pub fn fire_transform(&self, ctx: &HookContext) -> Option<String> {
+        if let Some(handlers) = self.handlers.get(&HookEvent::TransformToolResult) {
+            for handler in handlers.iter() {
+                match handler.transform(ctx) {
+                    Ok(Some(new_result)) => return Some(new_result),
+                    Ok(None) => continue,
+                    Err(reason) => {
+                        tracing::warn!(
+                            agent = ctx.agent_name,
+                            error = %reason,
+                            "TransformToolResult hook handler returned error (skipping)"
+                        );
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Check if any handlers are registered for a given event.

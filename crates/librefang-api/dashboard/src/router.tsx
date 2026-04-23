@@ -138,9 +138,12 @@ const channelsRoute = createRoute({
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/chat",
-  validateSearch: (search: Record<string, unknown>) => ({
-    agentId: search.agentId as string | undefined
-  }),
+  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string } => {
+    const out: { agentId?: string; sessionId?: string } = {};
+    if (typeof search.agentId === "string") out.agentId = search.agentId;
+    if (typeof search.sessionId === "string") out.sessionId = search.sessionId;
+    return out;
+  },
   component: () => <L><ChatPage /></L>
 });
 

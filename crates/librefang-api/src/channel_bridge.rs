@@ -1261,6 +1261,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         message: message.clone(),
                         model_override: None,
                         timeout_secs: None,
+                        pre_check_script: None,
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
                     peer_id: None,
@@ -3120,7 +3121,8 @@ pub async fn start_channel_bridge_with_config(
                     wh_config.listen_port,
                     wh_config.callback_url.clone(),
                 )
-                .with_account_id(wh_config.account_id.clone()),
+                .with_account_id(wh_config.account_id.clone())
+                .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
             );
             adapters.push((
                 adapter,

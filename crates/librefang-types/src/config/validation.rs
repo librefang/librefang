@@ -535,6 +535,21 @@ impl KernelConfig {
                     wh.secret_env
                 ));
             }
+            if wh.deliver_only {
+                match wh.deliver.as_deref() {
+                    None => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but no deliver channel is configured — \
+                         set deliver = \"<channel>\" (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some("log") => warnings.push(format!(
+                        "Webhook (port {}) has deliver_only = true but deliver = \"log\" is not a valid \
+                         delivery channel — use a real channel name (e.g. \"telegram\")",
+                        wh.listen_port
+                    )),
+                    Some(_) => {}
+                }
+            }
         }
         for li in self.channels.linkedin.iter() {
             if std::env::var(&li.access_token_env)

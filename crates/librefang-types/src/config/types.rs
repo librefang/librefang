@@ -2168,6 +2168,16 @@ pub struct KernelConfig {
     /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
     #[serde(default)]
     pub provider_proxy_urls: HashMap<String, String>,
+    /// Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).
+    ///
+    /// Overrides the HTTP client's default read timeout for LLM API requests to the
+    /// specified provider. Useful for slower providers or long-context workloads.
+    /// e.g. `ollama = 300`, `anthropic = 120`
+    ///
+    /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.).
+    /// CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.
+    #[serde(default)]
+    pub provider_request_timeout_secs: HashMap<String, u64>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
@@ -3551,6 +3561,42 @@ fn default_prompt_caching() -> bool {
     true
 }
 
+/// Taint skip rules for a single argument path within a tool.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintPathPolicy {
+    /// Rule IDs to skip when scanning this path.  An empty list means
+    /// all rules apply (no exemption).
+    #[serde(default)]
+    pub skip_rules: Vec<crate::taint::TaintRuleId>,
+}
+
+/// Per-tool taint policy for an MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintToolPolicy {
+    /// Per-path exemptions.  The key is a minimal JSONPath expression
+    /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
+    /// listed here have all rules applied.
+    #[serde(default)]
+    pub paths: HashMap<String, McpTaintPathPolicy>,
+}
+
+/// Per-server taint policy that lets operators disable specific taint
+/// rules for known-safe fields rather than turning off all scanning.
+///
+/// Example config.toml:
+/// ```toml
+/// [mcp_servers.my_firefox.taint_policy.tools.navigate.paths]
+/// "$.tabId"     = { skip_rules = ["opaque_token"] }
+/// "$.sessionId" = { skip_rules = ["opaque_token"] }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpTaintPolicy {
+    /// Per-tool exemptions.  The key is the tool name as it appears in
+    /// the MCP server's tool list (without the `mcp_<server>_` prefix).
+    #[serde(default)]
+    pub tools: HashMap<String, McpTaintToolPolicy>,
+}
+
 /// Configuration entry for an MCP server.
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
@@ -3597,6 +3643,13 @@ pub struct McpServerConfigEntry {
     /// trip the scanner. Key-name blocking remains active regardless.
     #[serde(default = "default_taint_scanning")]
     pub taint_scanning: bool,
+    /// Fine-grained taint exemptions per tool and per argument path.
+    ///
+    /// When `taint_scanning = true` (the default), specific rules can be
+    /// disabled for known-safe fields here rather than disabling all scanning.
+    /// When `taint_scanning = false`, this field is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint_policy: Option<McpTaintPolicy>,
 }
 
 fn default_taint_scanning() -> bool {
@@ -3859,6 +3912,7 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             provider_proxy_urls: HashMap::new(),
+            provider_request_timeout_secs: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
@@ -6061,6 +6115,15 @@ pub struct WebhookConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// When true, incoming POST bodies are forwarded directly to the delivery
+    /// target channel without invoking the LLM or any agent. Requires
+    /// `deliver` to be set to a valid channel name (not "log").
+    #[serde(default)]
+    pub deliver_only: bool,
+    /// Target channel name for direct delivery (e.g. "telegram", "discord").
+    /// Required when `deliver_only` is true.
+    #[serde(default)]
+    pub deliver: Option<String>,
 }
 
 impl Default for WebhookConfig {
@@ -6072,6 +6135,8 @@ impl Default for WebhookConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            deliver_only: false,
+            deliver: None,
         }
     }
 }
