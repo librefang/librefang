@@ -19,16 +19,16 @@ export function NodeEditor({ node, onUpdate }: NodeEditorProps) {
       <h3 className="text-[10px] font-black uppercase tracking-widest text-text-dim mb-6">{t("common.properties")}</h3>
       <div className="space-y-4">
         <div>
-          <label htmlFor="node-label" className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.label")}</label>
+          <label htmlFor="node-label" className="text-[10px] font-black uppercase text-primary mb-1.5 block">{t("common.label")}</label>
           <input
             id="node-label"
             value={node.data?.label ?? ""}
             onChange={(e) => onUpdate(node.id, { label: e.target.value })}
-            className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors"
+            className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-primary outline-none transition-colors"
           />
         </div>
         <div>
-          <label htmlFor="node-type" className="text-[10px] font-black uppercase text-brand mb-1.5 block">{t("common.type")}</label>
+          <label htmlFor="node-type" className="text-[10px] font-black uppercase text-primary mb-1.5 block">{t("common.type")}</label>
           <input
             id="node-type"
             value={node.type}

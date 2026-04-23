@@ -58,15 +58,15 @@ interface ChannelCardProps {
 function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex items-center gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      <Card hover padding="sm" className={`flex items-center gap-4 group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
         <button
           onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
-          className="shrink-0 text-text-dim hover:text-brand transition-colors"
+          className="shrink-0 text-text-dim hover:text-primary transition-colors"
         >
-          {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
+          {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
         </button>
 
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${c.configured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${c.configured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
           {getChannelIcon(c.name)}
         </div>
 
@@ -106,7 +106,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
 
   // Grid view
   return (
-    <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+    <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
       <div className={`h-1.5 bg-linear-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
@@ -114,15 +114,15 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
-              className="shrink-0 text-text-dim hover:text-brand transition-colors"
+              className="shrink-0 text-text-dim hover:text-primary transition-colors"
             >
-              {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
+              {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-primary/20"}`}>
               {getChannelIcon(c.name)}
             </div>
             <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${c.configured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{c.display_name || c.name}</h2>
+              <h2 className={`text-base font-black truncate transition-colors ${c.configured ? "group-hover:text-success" : "group-hover:text-primary"}`}>{c.display_name || c.name}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{c.category || c.name}</p>
             </div>
           </div>
@@ -183,7 +183,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
         <div className="p-6 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${channel.configured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+              <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${channel.configured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
                 {getChannelIcon(channel.name)}
               </div>
               <div>
@@ -243,8 +243,8 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
           {channel.webhook_endpoint && (
             <div className="space-y-2">
               <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">Webhook Endpoint</h3>
-              <div className="p-3 rounded-lg bg-brand/5 border border-brand/20">
-                <code className="text-xs font-mono text-brand break-all select-all">{channel.webhook_endpoint}</code>
+              <div className="p-3 rounded-lg bg-primary/5 border border-primary/20">
+                <code className="text-xs font-mono text-primary break-all select-all">{channel.webhook_endpoint}</code>
                 <p className="text-[10px] text-text-dim mt-1">Configure this path on the external platform. Port is the API listen port (default 4545).</p>
               </div>
             </div>
@@ -257,7 +257,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
               <div className="space-y-2">
                 {channel.setup_steps.map((step, idx) => (
                   <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-main/20">
-                    <span className="w-5 h-5 rounded-full bg-brand/20 text-brand text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
+                    <span className="w-5 h-5 rounded-full bg-primary/20 text-primary text-xs font-bold flex items-center justify-center shrink-0">{idx + 1}</span>
                     <p className="text-xs text-text-main">{step}</p>
                   </div>
                 ))}
@@ -374,8 +374,8 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
-                <Settings className="w-5 h-5 text-brand" />
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                <Settings className="w-5 h-5 text-primary" />
               </div>
               <div>
                 <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
@@ -409,7 +409,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                         const ok = await copyToClipboard(field.value || field.placeholder || "");
                         addToast(ok ? t("common.copied") : t("common.copy_failed"), ok ? "success" : "error");
                       }}
-                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
+                      className="px-3 py-2 rounded-lg bg-primary/10 text-primary text-xs hover:bg-primary/20 transition-colors shrink-0"
                       title={t("common.copy")}
                     >
                       {t("common.copy")}
@@ -419,7 +419,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                   <select
                     value={values[field.key] || ""}
                     onChange={(e) => setValue(field.key, e.target.value)}
-                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none"
                   >
                     {field.options.map((opt) => (
                       <option key={opt} value={opt}>{opt}</option>
@@ -431,7 +431,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
                     value={values[field.key] || ""}
                     onChange={(e) => setValue(field.key, e.target.value)}
                     placeholder={field.has_value ? "••••••••  (leave empty to keep)" : (field.placeholder || field.env_var || field.key)}
-                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none"
                   />
                 )}
               </div>
@@ -546,7 +546,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center text-brand text-sm font-bold">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary text-sm font-bold">
                 {channel.icon || "QR"}
               </div>
               <div>
@@ -561,7 +561,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
         <div className="p-6 flex flex-col items-center gap-4">
           {phase === "loading" && (
             <div className="w-64 h-64 flex items-center justify-center bg-main/30 rounded-xl">
-              <div className="animate-spin w-8 h-8 border-2 border-brand border-t-transparent rounded-full" />
+              <div className="animate-spin w-8 h-8 border-2 border-primary border-t-transparent rounded-full" />
             </div>
           )}
 
@@ -785,12 +785,12 @@ export function ChannelsPage() {
           <button
             onClick={() => handleTabChange("unconfigured")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-              activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+              activeTab === "unconfigured" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"
             }`}
           >
             <XCircle className="w-4 h-4" />
             {t("channels.unconfigured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-primary/20 text-primary" : "bg-border-subtle text-text-dim"}`}>
               {unconfiguredCount}
             </span>
           </button>
@@ -813,7 +813,7 @@ export function ChannelsPage() {
               onClick={handleSelectAll}
               className="flex items-center gap-2 text-xs font-bold text-text-dim hover:text-text-main transition-colors"
             >
-              {allSelected ? <CheckSquare className="w-4 h-4 text-brand" /> : <Square className="w-4 h-4" />}
+              {allSelected ? <CheckSquare className="w-4 h-4 text-primary" /> : <Square className="w-4 h-4" />}
               {t("channels.select_all")}
             </button>
             {search && (

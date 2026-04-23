@@ -502,7 +502,7 @@ export function AgentManifestForm({
               ],
             })
           }
-          className="flex items-center gap-1 text-xs text-brand hover:underline"
+          className="flex items-center gap-1 text-xs text-primary hover:underline"
         >
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_fallback")}
@@ -747,7 +747,7 @@ export function AgentManifestForm({
               ],
             })
           }
-          className="flex items-center gap-1 text-xs text-brand hover:underline"
+          className="flex items-center gap-1 text-xs text-primary hover:underline"
         >
           <Plus className="w-3.5 h-3.5" />
           {t("agents.form.add_injection")}
@@ -927,7 +927,7 @@ export function AgentManifestForm({
 }
 
 const inputClass =
-  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+  "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
 
 const textareaClass = `${inputClass} resize-y font-mono text-xs`;
 
@@ -1055,7 +1055,7 @@ function TagInput({
     onChange([...value, cleaned]);
   };
   return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-brand">
+    <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-primary">
       {value.map((tag) => (
         <span
           key={tag}

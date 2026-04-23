@@ -45,7 +45,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
               onChange={(e) => setContent(e.target.value)}
               placeholder={t("memory.content_placeholder")}
               rows={4}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none resize-none"
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none resize-none"
             />
           </div>
 
@@ -54,7 +54,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
             <select
               value={level}
               onChange={(e) => setLevel(e.target.value)}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none"
             >
               <option value="user">{t("memory.user", { defaultValue: "user" })}</option>
               <option value="session">{t("memory.session", { defaultValue: "session" })}</option>
@@ -69,7 +69,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
               value={agentId}
               onChange={(e) => setAgentId(e.target.value)}
               placeholder={t("memory.agent_optional")}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none"
             />
           </div>
         </div>
@@ -109,7 +109,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
             value={content}
             onChange={(e) => setContent(e.target.value)}
             rows={6}
-            className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none resize-none"
+            className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none resize-none"
           />
         </div>
 
@@ -129,7 +129,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   const { t } = useTranslation();
 
   const kpis = useMemo(() => [
-    { icon: Database, label: t("memory.total_memories"), value: stats?.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
+    { icon: Database, label: t("memory.total_memories"), value: stats?.total ?? 0, color: "text-primary", bg: "bg-primary/10" },
     { icon: Sparkles, label: t("memory.user", { defaultValue: "User" }), value: stats?.user_count ?? 0, color: "text-success", bg: "bg-success/10" },
     { icon: Clock, label: t("memory.session", { defaultValue: "Session" }), value: stats?.session_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
     { icon: Zap, label: t("memory.agent", { defaultValue: "Agent" }), value: stats?.agent_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
@@ -214,7 +214,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
   const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
 
   return (
@@ -264,7 +264,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                 <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
                   <span className="text-xs font-medium">{opt.label}</span>
                   <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key as keyof MemoryConfigForm] })}
-                    className={`w-10 h-5 rounded-full transition-colors ${form[opt.key as keyof MemoryConfigForm] ? "bg-brand" : "bg-border-subtle"}`}>
+                    className={`w-10 h-5 rounded-full transition-colors ${form[opt.key as keyof MemoryConfigForm] ? "bg-primary" : "bg-border-subtle"}`}>
                     <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key as keyof MemoryConfigForm] ? "translate-x-5" : "translate-x-0.5"}`} />
                   </button>
                 </label>

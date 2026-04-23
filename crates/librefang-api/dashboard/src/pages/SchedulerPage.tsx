@@ -35,7 +35,7 @@ const TRIGGER_PATTERN_PRESETS = [
   { label: "custom JSON…", value: "custom" },
 ] as const;
 
-const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
 
 const cronHint = (expr: string, t: TFunction) => {
   if (!expr) return "";
@@ -244,10 +244,10 @@ export function SchedulerPage() {
               const agent = agentMap.get(s.agent_id || "");
               const isEnabled = s.enabled !== false;
               return (
-                <div key={s.id} className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-colors space-y-1.5 ${isEnabled ? "border-border-subtle hover:border-brand/30" : "border-border-subtle/50 opacity-50"}`}>
+                <div key={s.id} className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-colors space-y-1.5 ${isEnabled ? "border-border-subtle hover:border-primary/30" : "border-border-subtle/50 opacity-50"}`}>
                   <div className="flex items-center gap-2 sm:gap-3">
-                    <div className={`w-7 h-7 sm:w-8 sm:h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10" : "bg-main"}`}>
-                      <Clock className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isEnabled ? "text-brand" : "text-text-dim/30"}`} />
+                    <div className={`w-7 h-7 sm:w-8 sm:h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-primary/10" : "bg-main"}`}>
+                      <Clock className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isEnabled ? "text-primary" : "text-text-dim/30"}`} />
                     </div>
                     <h3 className="text-xs sm:text-sm font-bold truncate flex-1 min-w-0">{s.name || s.description || truncateId(s.id)}</h3>
                     <button
@@ -277,7 +277,7 @@ export function SchedulerPage() {
                     <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
                     <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "", t)}</span>
                     <span className="text-text-dim/40">{s.tz || "UTC"}</span>
-                    {agent && <span className="font-bold text-brand truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
+                    {agent && <span className="font-bold text-primary truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {s.next_run && <span className="text-text-dim/40">{t("scheduler.next_run", { defaultValue: "Next" })}: {new Date(s.next_run).toLocaleString()}</span>}
                   </div>
                 </div>
@@ -319,7 +319,7 @@ export function SchedulerPage() {
                       {isEnabled ? t("common.active") : t("common.disabled", { defaultValue: "OFF" })}
                     </button>
                     <div className="flex items-center gap-1 shrink-0">
-                      <button onClick={() => openEditTrigger(tr)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-brand hover:bg-brand/10 transition-colors">
+                      <button onClick={() => openEditTrigger(tr)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-primary hover:bg-primary/10 transition-colors">
                         <Pencil className="w-3.5 h-3.5" />
                       </button>
                       {isConfirmingDelete("trigger", tr.id) ? (
@@ -350,7 +350,7 @@ export function SchedulerPage() {
                       <span className="font-mono">session: {tr.session_mode}</span>
                     )}
                     {targetAgent && (
-                      <span className="font-bold text-brand">→ {targetAgent.name}</span>
+                      <span className="font-bold text-primary">→ {targetAgent.name}</span>
                     )}
                   </div>
                 </div>
@@ -367,7 +367,7 @@ export function SchedulerPage() {
           <button
             type="button"
             onClick={() => setCreateMode("schedule")}
-            className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex items-center justify-center gap-1 ${createMode === "schedule" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+            className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors flex items-center justify-center gap-1 ${createMode === "schedule" ? "bg-primary text-white" : "bg-main text-text-dim"}`}
           >
             <Clock className="w-3.5 h-3.5" /> {t("scheduler.schedules")}
           </button>
@@ -391,7 +391,7 @@ export function SchedulerPage() {
               <button
                 type="button"
                 onClick={() => setShowCronPicker(true)}
-                className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+                className="w-full flex items-center justify-between px-3 py-2 rounded-xl border border-border-subtle bg-main hover:border-primary transition-colors text-left"
               >
                 <div>
                   <p className="text-sm">{cronHint(cron, t)}{cronTz && cronTz !== "UTC" ? ` (${cronTz.split("/").pop()?.replace(/_/g, " ")})` : ""}</p>
@@ -414,11 +414,11 @@ export function SchedulerPage() {
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target", { defaultValue: "Target" })}</label>
               <div className="flex gap-1 mb-2">
                 <button type="button" onClick={() => setTargetType("agent")}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "agent" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "agent" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
                   {t("scheduler.target_agent")}
                 </button>
                 <button type="button" onClick={() => setTargetType("workflow")}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "workflow" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${targetType === "workflow" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
                   {t("scheduler.target_workflow", { defaultValue: "Workflow" })}
                 </button>
               </div>

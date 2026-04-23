@@ -169,7 +169,7 @@ function MetricCard({ label, icon, value, variant }: {
   value: ReactNode;
   variant: "success" | "brand" | "accent" | "warning" | "error";
 }) {
-  const bgClass = { success: "bg-success/10", brand: "bg-brand/10", accent: "bg-accent/10", warning: "bg-warning/10", error: "bg-error/10" }[variant];
+  const bgClass = { success: "bg-success/10", brand: "bg-primary/10", accent: "bg-accent/10", warning: "bg-warning/10", error: "bg-error/10" }[variant];
   return (
     <Card hover padding="md">
       <div className="flex items-center justify-between">
@@ -234,7 +234,7 @@ export function TelemetryPage() {
         <>
           {/* ── System Health ── */}
           <div className="flex items-center gap-2 mt-2">
-            <Cpu className="h-4 w-4 text-brand" />
+            <Cpu className="h-4 w-4 text-primary" />
             <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.system_health")}</h2>
             {parsed.system.version ? (
               <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge>
@@ -249,7 +249,7 @@ export function TelemetryPage() {
             />
             <MetricCard
               label={t("telemetry.agents_active")}
-              icon={<Bot className="w-3.5 h-3.5 text-brand" />}
+              icon={<Bot className="w-3.5 h-3.5 text-primary" />}
               value={
                 <p className="text-xl font-black tracking-tight">
                   <AnimatedNumber value={parsed.system.agentsActive} />
@@ -272,7 +272,7 @@ export function TelemetryPage() {
             />
             <MetricCard
               label={t("telemetry.total_requests")}
-              icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
+              icon={<BarChart3 className="w-3.5 h-3.5 text-primary" />}
               value={<p className="text-xl font-black tracking-tight" title={totalRequests.toLocaleString()}>{formatCompact(totalRequests)}</p>}
               variant="brand"
             />
@@ -313,8 +313,8 @@ export function TelemetryPage() {
           <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5 stagger-children">
             <MetricCard
               label={t("telemetry.total_tokens")}
-              icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
-              value={<p className="text-2xl font-black tracking-tight text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
+              icon={<BarChart3 className="w-3.5 h-3.5 text-primary" />}
+              value={<p className="text-2xl font-black tracking-tight text-primary" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
               variant="brand"
             />
             <MetricCard
@@ -337,7 +337,7 @@ export function TelemetryPage() {
             />
             <MetricCard
               label={t("telemetry.tool_calls")}
-              icon={<Wrench className="w-3.5 h-3.5 text-brand" />}
+              icon={<Wrench className="w-3.5 h-3.5 text-primary" />}
               value={<p className="text-2xl font-black tracking-tight" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>}
               variant="brand"
             />
@@ -348,7 +348,7 @@ export function TelemetryPage() {
             {/* Per-Agent Token Usage */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Bot className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Bot className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.per_agent")}</h2>
               </div>
               {parsed.agents.length === 0 ? (
@@ -359,7 +359,7 @@ export function TelemetryPage() {
                       <div key={a.agent} className="flex items-center gap-3">
                         <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
                         <Badge variant="default" className="font-mono text-xs">{a.provider}/{a.model}</Badge>
-                        <span className="text-sm font-black text-brand w-20 text-right" title={a.tokens.toLocaleString()}>{formatCompact(a.tokens)}<span className="text-xs font-normal text-text-dim"> tok</span></span>
+                        <span className="text-sm font-black text-primary w-20 text-right" title={a.tokens.toLocaleString()}>{formatCompact(a.tokens)}<span className="text-xs font-normal text-text-dim"> tok</span></span>
                       </div>
                     ))}
                 </div>
@@ -369,7 +369,7 @@ export function TelemetryPage() {
             {/* Top HTTP Endpoints */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Globe className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Globe className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.top_endpoints")}</h2>
               </div>
               {parsed.requests.length === 0 ? (
@@ -383,7 +383,7 @@ export function TelemetryPage() {
                         <Badge variant={r.status.startsWith("2") ? "success" : r.status.startsWith("3") ? "default" : r.status.startsWith("4") ? "warning" : "error"} className="w-12 justify-center">
                           {r.status}
                         </Badge>
-                        <span className="text-sm font-black text-brand w-16 text-right" title={r.count.toLocaleString()}>{formatCompact(r.count)}</span>
+                        <span className="text-sm font-black text-primary w-16 text-right" title={r.count.toLocaleString()}>{formatCompact(r.count)}</span>
                       </div>
                     ))}
                 </div>
@@ -395,14 +395,14 @@ export function TelemetryPage() {
           <Card padding="lg">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><ExternalLink className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><ExternalLink className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.prometheus_endpoint")}</h2>
               </div>
               <a
                 href="/api/metrics"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs text-brand hover:underline"
+                className="text-xs text-primary hover:underline"
               >
                 {t("telemetry.view_raw")}
               </a>

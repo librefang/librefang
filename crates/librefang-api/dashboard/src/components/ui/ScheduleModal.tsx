@@ -157,8 +157,8 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
     [t],
   );
 
-  const sel = "h-9 rounded-lg border border-border-subtle bg-main px-2 text-sm outline-none focus:border-brand transition-colors";
-  const num = "h-9 w-16 rounded-lg border border-border-subtle bg-main px-2 text-sm font-mono text-center outline-none focus:border-brand transition-colors";
+  const sel = "h-9 rounded-lg border border-border-subtle bg-main px-2 text-sm outline-none focus:border-primary transition-colors";
+  const num = "h-9 w-16 rounded-lg border border-border-subtle bg-main px-2 text-sm font-mono text-center outline-none focus:border-primary transition-colors";
 
   const timeSelect = (
     <div className="flex items-center gap-0.5">
@@ -227,7 +227,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
               <button key={tp.key} onClick={() => setScheduleType(tp.key)}
                 className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors duration-200 ${
                   scheduleType === tp.key
-                    ? "bg-surface text-brand shadow-sm"
+                    ? "bg-surface text-primary shadow-sm"
                     : "text-text-dim/60 hover:text-text-dim"
                 }`}>
                 {tp.label}
@@ -266,7 +266,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
                 {wdShort.map((d, i) => (
                   <button key={i} onClick={() => setWeekday(i + 1)}
                     className={`w-8 h-8 rounded-full text-[11px] font-bold transition-colors ${
-                      weekday === i + 1 ? "bg-brand text-white" : "text-text-dim hover:bg-main"
+                      weekday === i + 1 ? "bg-primary text-white" : "text-text-dim hover:bg-main"
                     }`}>{d}</button>
                 ))}
               </div>
@@ -298,7 +298,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
                   <div key={i}>
                     <p className="text-[9px] font-bold text-text-dim/50 text-center mb-1">{h}</p>
                     <select value={fields[i] || "*"} onChange={e => updateField(i, e.target.value)}
-                      className="w-full h-9 rounded-lg border border-border-subtle bg-main text-xs font-mono text-center outline-none focus:border-brand transition-colors">
+                      className="w-full h-9 rounded-lg border border-border-subtle bg-main text-xs font-mono text-center outline-none focus:border-primary transition-colors">
                       {CUSTOM_CRON_OPTS[i].map(v => <option key={v} value={v}>{v}</option>)}
                     </select>
                   </div>
@@ -312,7 +312,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
         <div className="mx-5 mt-1 mb-2 flex items-center gap-2">
           <label className="text-[10px] font-bold text-text-dim/50 uppercase shrink-0">{t("scheduler.timezone", { defaultValue: "Timezone" })}</label>
           <select value={timezone} onChange={e => setTimezone(e.target.value)}
-            className="flex-1 h-8 rounded-lg border border-border-subtle bg-main px-2 text-xs outline-none focus:border-brand transition-colors">
+            className="flex-1 h-8 rounded-lg border border-border-subtle bg-main px-2 text-xs outline-none focus:border-primary transition-colors">
             {timezoneOptions.map(tz => <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>)}
           </select>
         </div>
@@ -323,7 +323,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
             {describeCron(previewCron)}{timezone !== "UTC" ? ` (${timezone.split("/").pop()?.replace(/_/g, " ")})` : " (UTC)"}
           </span>
           <code className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-md ${
-            cronValid ? "bg-brand/10 text-brand" : "bg-error/10 text-error"
+            cronValid ? "bg-primary/10 text-primary" : "bg-error/10 text-error"
           }`}>{previewCron}</code>
         </div>
 

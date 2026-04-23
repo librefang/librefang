@@ -148,7 +148,7 @@
     "unknown": "Unknown"
   },
   "overview": {
-    "welcome": "Welcome to LibreFang",
+    "welcome": "Welcome to BossFang",
     "description": "Manage your autonomous agent infrastructure and multi-channel workflows.",
     "system_overview": "System Overview",
     "operational": "Operational",
@@ -191,7 +191,7 @@
   },
   "agents": {
     "title": "Agents",
-    "subtitle": "Active autonomous units managed by the LibreFang kernel.",
+    "subtitle": "Active autonomous units managed by the BossFang kernel.",
     "model": "Model",
     "provider": "Provider",
     "max_tokens": "Max Tokens",
@@ -2078,7 +2078,7 @@
     "totpLabel": "TOTP"
   },
   "wizard": {
-    "welcome": "Welcome to LibreFang",
+    "welcome": "Welcome to BossFang",
     "subtitle": "Connect a model provider and you're ready to chat, code, and orchestrate agents.",
     "step_1": "Step 1",
     "connect_provider": "Connect a Provider",
@@ -2102,9 +2102,9 @@
     "step_3_hint": "The starter agent uses a balanced model and safe defaults. You can tune everything from the Agents and Settings pages afterwards.",
     "summary_provider": "Provider",
     "summary_status": "Status",
-    "finish_action": "Launch LibreFang",
+    "finish_action": "Launch BossFang",
     "finalize_failed": "Setup failed: {{message}}",
-    "done_title": "LibreFang is ready",
+    "done_title": "BossFang is ready",
     "done_desc": "Your default provider is configured and a starter agent has been created. You can now chat or jump into the dashboard.",
     "go_overview": "Go to Overview",
     "start_chat": "Start Chatting",

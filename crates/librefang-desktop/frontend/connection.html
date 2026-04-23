@@ -3,13 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LibreFang — Connect</title>
+<title>BossFang — Connect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
-    background: #0f1117;
-    color: #e4e4e7;
+    font-family: 'Roboto', system-ui, sans-serif;
+    background: #0B0F14;
+    color: #E8EDF3;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -18,8 +21,8 @@
   .container {
     width: 420px;
     max-width: 90vw;
-    background: #1a1b23;
-    border: 1px solid #2a2b35;
+    background: #0F1620;
+    border: 1px solid #233041;
     border-radius: 16px;
     padding: 40px 36px 36px;
   }
@@ -27,40 +30,42 @@
     text-align: center;
     margin-bottom: 32px;
   }
-  .logo h1 {
-    font-size: 28px;
-    font-weight: 700;
-    color: #f4f4f5;
-    letter-spacing: -0.5px;
+  .logo img {
+    height: 48px;
+    width: auto;
+    margin-bottom: 12px;
   }
   .logo p {
+    font-family: 'Space Grotesk', sans-serif;
     font-size: 14px;
-    color: #71717a;
+    color: #A7B0BC;
     margin-top: 6px;
   }
   label {
     display: block;
     font-size: 13px;
     font-weight: 500;
-    color: #a1a1aa;
+    color: #A7B0BC;
     margin-bottom: 6px;
   }
   input[type="text"] {
     width: 100%;
     padding: 10px 14px;
     font-size: 14px;
-    background: #0f1117;
-    border: 1px solid #2a2b35;
+    font-family: 'JetBrains Mono', monospace;
+    background: #0B0F14;
+    border: 1px solid #233041;
     border-radius: 8px;
-    color: #f4f4f5;
+    color: #E8EDF3;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
   input[type="text"]:focus {
-    border-color: #6366f1;
+    border-color: #E04E28;
+    box-shadow: 0 0 0 3px rgba(224, 78, 40, 0.25);
   }
   input[type="text"]::placeholder {
-    color: #52525b;
+    color: #4B5563;
   }
   .btn-row {
     display: flex;
@@ -72,6 +77,7 @@
     padding: 10px 16px;
     font-size: 14px;
     font-weight: 500;
+    font-family: 'Roboto', sans-serif;
     border: none;
     border-radius: 8px;
     cursor: pointer;
@@ -82,47 +88,49 @@
     cursor: not-allowed;
   }
   .btn-test {
-    background: #27272a;
-    color: #d4d4d8;
+    background: #1A2432;
+    color: #E8EDF3;
+    border: 1px solid #233041;
   }
   .btn-test:hover:not(:disabled) {
-    background: #3f3f46;
+    background: #233041;
   }
   .btn-connect {
-    background: #6366f1;
+    background: #E04E28;
     color: #fff;
   }
   .btn-connect:hover:not(:disabled) {
-    background: #4f46e5;
+    background: #c94220;
   }
   .divider {
     display: flex;
     align-items: center;
     gap: 16px;
     margin: 24px 0;
-    color: #52525b;
+    color: #4B5563;
     font-size: 13px;
   }
   .divider::before, .divider::after {
     content: '';
     flex: 1;
     height: 1px;
-    background: #27272a;
+    background: #233041;
   }
   .btn-local {
     width: 100%;
     padding: 10px 16px;
     font-size: 14px;
     font-weight: 500;
-    background: #27272a;
-    color: #d4d4d8;
-    border: 1px solid #3f3f46;
+    font-family: 'Roboto', sans-serif;
+    background: #1A2432;
+    color: #E8EDF3;
+    border: 1px solid #233041;
     border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s;
   }
   .btn-local:hover:not(:disabled) {
-    background: #3f3f46;
+    background: #233041;
   }
   .remember-row {
     display: flex;
@@ -131,12 +139,12 @@
     margin-top: 20px;
   }
   .remember-row input[type="checkbox"] {
-    accent-color: #6366f1;
+    accent-color: #E04E28;
   }
   .remember-row label {
     margin: 0;
     font-size: 13px;
-    color: #a1a1aa;
+    color: #A7B0BC;
     cursor: pointer;
   }
   .status {
@@ -146,15 +154,15 @@
     text-align: center;
     transition: color 0.2s;
   }
-  .status.error { color: #ef4444; }
-  .status.success { color: #22c55e; }
-  .status.info { color: #6366f1; }
+  .status.error   { color: #EF4444; }
+  .status.success { color: #22C55E; }
+  .status.info    { color: #FF6A3D; }
 </style>
 </head>
 <body>
 <div class="container">
   <div class="logo">
-    <h1>LibreFang</h1>
+    <img src="boss-libre.png" alt="BossFang" />
     <p>Agent Operating System</p>
   </div>
 

@@ -127,7 +127,7 @@ export function PluginsPage() {
     });
   }, [confirmDelete, uninstallMutation.mutate, addToast, t]);
 
-  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20";
+  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/20";
 
   return (
     <div className="flex flex-col gap-6">
@@ -152,13 +152,13 @@ export function PluginsPage() {
       {/* Tabs */}
       <div className="flex gap-4 border-b border-border-subtle">
         <button onClick={() => startTransition(() => setTab("installed"))}
-          className={`pb-2 text-sm font-bold transition-colors ${tab === "installed" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
+          className={`pb-2 text-sm font-bold transition-colors ${tab === "installed" ? "text-primary border-b-2 border-primary" : "text-text-dim hover:text-text"}`}>
           <Package className="w-4 h-4 inline mr-1.5" />
           {t("plugins.installed_tab")}
           {plugins.length > 0 && <Badge variant="default" className="ml-2">{plugins.length}</Badge>}
         </button>
         <button onClick={() => startTransition(() => setTab("registry"))}
-          className={`pb-2 text-sm font-bold transition-colors ${tab === "registry" ? "text-brand border-b-2 border-brand" : "text-text-dim hover:text-text"}`}>
+          className={`pb-2 text-sm font-bold transition-colors ${tab === "registry" ? "text-primary border-b-2 border-primary" : "text-text-dim hover:text-text"}`}>
           <FolderOpen className="w-4 h-4 inline mr-1.5" />
           {t("plugins.registry_tab")}
         </button>
@@ -178,9 +178,9 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
-                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                    <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
+                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-primary/30 transition-colors">
+                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                    <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-primary" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
@@ -246,7 +246,7 @@ export function PluginsPage() {
                       href={`https://github.com/${reg.github_repo}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-[10px] text-text-dim font-mono hover:text-brand transition-colors"
+                      className="text-[10px] text-text-dim font-mono hover:text-primary transition-colors"
                     >
                       {reg.github_repo}
                     </a>
@@ -263,11 +263,11 @@ export function PluginsPage() {
                         <Card
                           key={rp.name}
                           padding="md"
-                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors"
+                          className="flex flex-col gap-3 hover:border-primary/30 transition-colors"
                         >
                           <div className="flex items-start gap-3">
-                            <div className="w-9 h-9 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                              <Puzzle className="w-4 h-4 text-brand" />
+                            <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                              <Puzzle className="w-4 h-4 text-primary" />
                             </div>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
@@ -339,7 +339,7 @@ export function PluginsPage() {
                 <div className="flex gap-2 mt-1">
                   {(["registry", "local", "git"] as const).map(s => (
                     <button key={s} onClick={() => setInstallSource(s)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${installSource === s ? "bg-brand text-white" : "bg-main text-text-dim hover:text-text"}`}>
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${installSource === s ? "bg-primary text-white" : "bg-main text-text-dim hover:text-text"}`}>
                       {s === "registry" && <FolderOpen className="w-3 h-3 inline mr-1" />}
                       {s === "local" && <Package className="w-3 h-3 inline mr-1" />}
                       {s === "git" && <GitBranch className="w-3 h-3 inline mr-1" />}

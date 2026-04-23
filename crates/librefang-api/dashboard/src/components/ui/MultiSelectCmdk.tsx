@@ -111,8 +111,8 @@ export function MultiSelectCmdk({
         className={`
           flex flex-wrap items-center gap-1 rounded-xl border border-border-subtle
           bg-surface p-1.5 transition-colors duration-200
-          hover:border-brand/20
-          focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/10
+          hover:border-primary/20
+          focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/10
           ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-text"}
         `}
         onClick={focusInput}
@@ -120,7 +120,7 @@ export function MultiSelectCmdk({
         {value.map((item) => (
           <span
             key={item}
-            className="flex items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-[11px] font-mono text-brand"
+            className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-[11px] font-mono text-primary"
           >
             {item}
             <button
@@ -130,7 +130,7 @@ export function MultiSelectCmdk({
                 e.stopPropagation();
                 remove(item);
               }}
-              className="rounded-sm p-0.5 transition-colors hover:bg-brand/20"
+              className="rounded-sm p-0.5 transition-colors hover:bg-primary/20"
             >
               <X className="h-3 w-3" />
             </button>
@@ -167,7 +167,7 @@ export function MultiSelectCmdk({
                   role="option"
                   aria-selected={false}
                   onSelect={select}
-                  className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-brand/5 data-[selected=true]:bg-brand/10 data-[selected=true]:text-brand"
+                  className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-text-dim transition-colors hover:bg-primary/5 data-[selected=true]:bg-primary/10 data-[selected=true]:text-primary"
                 >
                   <span className="truncate">{option}</span>
                 </Command.Item>

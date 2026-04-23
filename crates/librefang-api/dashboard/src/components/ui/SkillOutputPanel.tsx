@@ -22,11 +22,11 @@ export function SkillOutputPanel() {
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-border-subtle/50">
             <button
               onClick={() => setCollapsed(c => !c)}
-              className="flex items-center gap-2 text-xs font-bold text-brand"
+              className="flex items-center gap-2 text-xs font-bold text-primary"
             >
               <Sparkles className="w-3.5 h-3.5" />
               {t("skills.outputs", { defaultValue: "Skill Outputs" })}
-              <span className="px-1.5 py-0.5 rounded-full bg-brand/10 text-[10px]">
+              <span className="px-1.5 py-0.5 rounded-full bg-primary/10 text-[10px]">
                 {skillOutputs.length}
               </span>
               {collapsed ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
@@ -50,7 +50,7 @@ export function SkillOutputPanel() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="text-[10px] font-bold text-brand uppercase tracking-wider">
+                      <span className="text-[10px] font-bold text-primary uppercase tracking-wider">
                         {output.skillName}
                       </span>
                       {output.agentName && (

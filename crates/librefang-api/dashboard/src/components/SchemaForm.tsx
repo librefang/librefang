@@ -242,7 +242,7 @@ function SchemaField({
             onClick={() => onChange(!value)}
             className={`
               relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0
-              ${value ? "bg-brand" : "bg-main border border-border-subtle"}
+              ${value ? "bg-primary" : "bg-main border border-border-subtle"}
             `}
           >
             <span

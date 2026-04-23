@@ -194,14 +194,14 @@ function SkillCard({
       ? "bg-success/10 border-success/20 text-success"
       : isAccentSource
         ? "bg-accent/10 border-accent/20 text-accent"
-        : "bg-brand/10 border-brand/20 text-brand";
+        : "bg-primary/10 border-primary/20 text-primary";
 
   const hoverTextClass =
     variant === "installed"
       ? "group-hover:text-success"
       : isAccentSource
         ? "group-hover:text-accent"
-        : "group-hover:text-brand";
+        : "group-hover:text-primary";
 
   const icon =
     variant === "installed" ? (
@@ -391,8 +391,8 @@ function CategoryChips({
         onClick={() => onChange(null)}
         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
           !selected
-            ? "bg-brand text-white shadow-sm"
-            : "bg-surface border border-border-subtle text-text-dim hover:text-text-main hover:border-brand/30"
+            ? "bg-primary text-white shadow-sm"
+            : "bg-surface border border-border-subtle text-text-dim hover:text-text-main hover:border-primary/30"
         }`}
       >
         {t("common.all")}
@@ -403,8 +403,8 @@ function CategoryChips({
           onClick={() => onChange(selected === cat.id ? null : cat.id)}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
             selected === cat.id
-              ? "bg-brand text-white shadow-sm"
-              : "bg-surface border border-border-subtle text-text-dim hover:text-text-main hover:border-brand/30"
+              ? "bg-primary text-white shadow-sm"
+              : "bg-surface border border-border-subtle text-text-dim hover:text-text-main hover:border-primary/30"
           }`}
         >
           {cat.icon}
@@ -468,7 +468,7 @@ function MarketplaceDetailModal({
                 className={`px-2 py-1 rounded-lg text-xs font-bold ${
                   source === "skillhub"
                     ? "bg-accent/10 text-accent"
-                    : "bg-brand/10 text-brand"
+                    : "bg-primary/10 text-primary"
                 }`}
               >
                 {tag}
@@ -1377,7 +1377,7 @@ function SkillDetailModal({
                           className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface-2 text-xs font-mono group"
                         >
                           <button
-                            className="hover:text-brand"
+                            className="hover:text-primary"
                             onClick={() => setViewingFile(rel)}
                           >
                             {f}
@@ -1685,13 +1685,13 @@ export function SkillsPage() {
               href="https://librefang.ai/skills"
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden md:flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
+              className="hidden md:flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-primary hover:border-primary/30 transition-colors"
             >
               <Globe className="h-3.5 w-3.5" />
               <span>{t("skills.browse_registry", { defaultValue: "Registry" })}</span>
             </a>
             <button
-              className="flex h-8 items-center gap-1.5 rounded-xl border border-brand/30 bg-brand/10 px-3 text-xs font-bold text-brand hover:bg-brand/20 transition-colors"
+              className="flex h-8 items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/10 px-3 text-xs font-bold text-primary hover:bg-primary/20 transition-colors"
               onClick={() => setShowCreateModal(true)}
             >
               <Plus className="h-3.5 w-3.5" />
@@ -1718,7 +1718,7 @@ export function SkillsPage() {
               mode: "browse" as const,
               icon: <Sparkles className="w-4 h-4" />,
               label: t("skills.browse", { defaultValue: "Browse" }),
-              activeColor: "text-brand",
+              activeColor: "text-primary",
             },
           ]
         ).map((tab) => {

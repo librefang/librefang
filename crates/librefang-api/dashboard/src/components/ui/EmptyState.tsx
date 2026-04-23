@@ -12,10 +12,10 @@ export function EmptyState({ icon, title, description, action }: EmptyStateProps
     <div role="status" aria-live="polite" className="col-span-full flex flex-col items-center justify-center py-20 border border-dashed border-border-subtle rounded-3xl bg-linear-to-b from-surface/50 to-transparent">
       {icon ? (
         <div className="relative mb-5">
-          <div className="h-16 w-16 rounded-2xl bg-brand/5 flex items-center justify-center text-brand">
+          <div className="h-16 w-16 rounded-2xl bg-primary/5 flex items-center justify-center text-primary">
             {icon}
           </div>
-          <span className="absolute inset-0 rounded-2xl bg-brand/5 animate-pulse duration-[3000ms]" />
+          <span className="absolute inset-0 rounded-2xl bg-primary/5 animate-pulse duration-[3000ms]" />
         </div>
       ) : null}
       <h3 className="text-lg font-black tracking-tight">{title}</h3>

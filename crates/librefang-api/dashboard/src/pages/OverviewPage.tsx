@@ -109,7 +109,7 @@ export function OverviewPage() {
       {/* Header */}
       <header className="flex flex-col justify-between gap-3 sm:gap-4 md:flex-row md:items-end">
         <div>
-          <div className="hidden sm:flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+          <div className="hidden sm:flex items-center gap-2 text-primary font-bold uppercase tracking-widest text-[10px]">
             <Home className="h-4 w-4" />
             {t("overview.system_overview")}
           </div>
@@ -134,7 +134,7 @@ export function OverviewPage() {
           <button
             onClick={() => void snapshotQuery.refetch()}
             title={snapshotQuery.dataUpdatedAt ? `${t("overview.last_updated", { defaultValue: "Last updated" })}: ${formatRelativeTime(snapshotQuery.dataUpdatedAt)}` : undefined}
-            className="flex h-9 items-center gap-2 rounded-full border border-border-subtle bg-surface px-3 text-text-dim hover:text-brand transition-colors shadow-sm"
+            className="flex h-9 items-center gap-2 rounded-full border border-border-subtle bg-surface px-3 text-text-dim hover:text-primary transition-colors shadow-sm"
           >
             <RefreshCw className={`h-4 w-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
             {snapshotQuery.dataUpdatedAt > 0 ? (
@@ -146,10 +146,10 @@ export function OverviewPage() {
 
       {/* Setup Banner */}
       {needsInit ? (
-        <Card padding="lg" className="border-brand/30 bg-linear-to-r from-brand/5 via-brand/10 to-brand/5">
+        <Card padding="lg" className="border-primary/30 bg-linear-to-r from-brand/5 via-brand/10 to-brand/5">
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand/15">
-              <Rocket className="h-6 w-6 text-brand" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary/15">
+              <Rocket className="h-6 w-6 text-primary" />
             </div>
             <div className="flex-1 min-w-0">
               <h3 className="text-sm font-bold">{t("overview.setup_title")}</h3>
@@ -158,14 +158,14 @@ export function OverviewPage() {
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => navigate({ to: "/wizard" })}
-                className="rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-xs font-bold text-text-main hover:border-brand/30 hover:text-brand transition-all"
+                className="rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-xs font-bold text-text-main hover:border-primary/30 hover:text-primary transition-all"
               >
                 {t("overview.setup_wizard", { defaultValue: "Use Wizard" })}
               </button>
               <button
                 onClick={() => quickInitMutation.mutateAsync().catch(() => {})}
                 disabled={quickInitMutation.isPending}
-                className="rounded-xl bg-brand px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-brand/20 transition-all hover:shadow-xl hover:shadow-brand/30 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {quickInitMutation.isPending ? t("overview.setup_running") : t("overview.setup_button")}
               </button>
@@ -192,7 +192,7 @@ export function OverviewPage() {
               className="cursor-pointer relative overflow-hidden group"
               onClick={() => navigate({ to: stat.link as any })}
             >
-              <div className="absolute right-2 top-2 text-brand/30 transition-transform group-hover:scale-110 group-hover:text-brand/40">
+              <div className="absolute right-2 top-2 text-primary/30 transition-transform group-hover:scale-110 group-hover:text-primary/40">
                 <stat.icon className="h-5 w-5" />
               </div>
               <p className="text-[9px] sm:text-[10px] font-bold uppercase tracking-widest text-text-dim relative z-10">{stat.title}</p>
@@ -203,7 +203,7 @@ export function OverviewPage() {
               {stat.progress !== undefined ? (
                 <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800 relative z-10">
                   <div
-                    className="h-full bg-brand shadow-[0_0_8px_var(--brand-color)] transition-all duration-500"
+                    className="h-full bg-primary shadow-[0_0_8px_var(--brand-color)] transition-all duration-500"
                     style={{ width: `${stat.progress}%` }}
                   />
                 </div>
@@ -229,12 +229,12 @@ export function OverviewPage() {
                   onClick={() => navigate({ to: action.to as any })}
                   className={`group flex flex-col items-center gap-2 sm:gap-3 rounded-2xl border p-3 sm:p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
                     action.primary
-                      ? "border-brand/20 bg-linear-to-b from-brand/5 to-brand/10 text-brand hover:shadow-brand/15"
-                      : "border-border-subtle bg-surface text-text-dim hover:border-brand/30 hover:text-brand"
+                      ? "border-primary/20 bg-linear-to-b from-brand/5 to-brand/10 text-primary hover:shadow-brand/15"
+                      : "border-border-subtle bg-surface text-text-dim hover:border-primary/30 hover:text-primary"
                   }`}
                 >
                   <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
-                    action.primary ? "bg-brand/15" : "bg-main group-hover:bg-brand/10"
+                    action.primary ? "bg-primary/15" : "bg-main group-hover:bg-primary/10"
                   }`}>
                     <action.icon className="h-4 w-4 sm:h-5 sm:w-5" />
                   </div>
@@ -250,7 +250,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.recent_agents")}</h3>
               <button
                 onClick={() => navigate({ to: "/agents" })}
-                className="text-xs font-bold text-brand hover:underline transition-colors"
+                className="text-xs font-bold text-primary hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>
@@ -266,7 +266,7 @@ export function OverviewPage() {
                 {snapshot.agents.filter(a => !a.is_hand && !a.name.includes(":")).slice(0, 4).map(agent => (
                   <div
                     key={agent.id}
-                    className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface p-3 shadow-sm hover:border-brand/30 transition-colors cursor-pointer"
+                    className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface p-3 shadow-sm hover:border-primary/30 transition-colors cursor-pointer"
                     onClick={() => navigate({ to: "/agents" })}
                   >
                     <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${
@@ -300,7 +300,7 @@ export function OverviewPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("nav.sessions")}</h3>
               <button
                 onClick={() => navigate({ to: "/sessions" })}
-                className="text-xs font-bold text-brand hover:underline transition-colors"
+                className="text-xs font-bold text-primary hover:underline transition-colors"
               >
                 {t("overview.view_all")} →
               </button>
@@ -317,8 +317,8 @@ export function OverviewPage() {
               </div>
               <div className="h-10 w-px bg-border-subtle hidden sm:block" />
               <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-brand/10">
-                  <Shield className="h-5 w-5 sm:h-6 sm:w-6 text-brand" />
+                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-primary/10">
+                  <Shield className="h-5 w-5 sm:h-6 sm:w-6 text-primary" />
                 </div>
                 <div>
                   <p className="text-xl sm:text-2xl font-black">{skillsCount}</p>
@@ -341,17 +341,17 @@ export function OverviewPage() {
                 <span className="text-sm font-mono font-black">{formatUptime(snapshot?.status?.uptime_seconds)}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><HardDrive className="w-4 h-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0"><HardDrive className="w-4 h-4 text-primary" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.memory_usage")}</span>
                 <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb != null ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
                 <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.version")}</span>
-                <span className="text-sm font-mono font-black text-brand">{versionInfo?.version || snapshot?.status?.version || "-"}</span>
+                <span className="text-sm font-mono font-black text-primary">{versionInfo?.version || snapshot?.status?.version || "-"}</span>
               </div>
               <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0"><Globe className="w-4 h-4 text-primary" /></div>
                 <span className="text-xs text-text-dim flex-1">{t("overview.hostname")}</span>
                 {/* `/api/version` is public and deliberately omits
                     hostname (per-machine identifier). Read from the
@@ -406,10 +406,10 @@ export function OverviewPage() {
       </div>
 
       {/* Pro Tip */}
-      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-brand/10 bg-linear-to-r from-brand/5 to-transparent px-4 py-3">
-        <Sparkles className="h-4 w-4 text-brand shrink-0" />
+      <div className="hidden sm:flex items-center gap-3 rounded-xl border border-primary/10 bg-linear-to-r from-brand/5 to-transparent px-4 py-3">
+        <Sparkles className="h-4 w-4 text-primary shrink-0" />
         <span className="text-xs text-text-dim flex-1">
-          <span className="font-bold text-brand">{t("overview.pro_tip")}</span> — {t("overview.pro_tip_shortcut")}
+          <span className="font-bold text-primary">{t("overview.pro_tip")}</span> — {t("overview.pro_tip_shortcut")}
         </span>
         <div className="flex items-center gap-1.5 shrink-0">
           <kbd className="inline-flex h-5 min-w-[20px] items-center justify-center rounded border border-border-subtle bg-main px-1 text-[9px] font-mono font-semibold text-text-dim">⌘K</kbd>

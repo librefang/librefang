@@ -524,14 +524,14 @@ export function AgentsPage() {
         </div>
         <div className="space-y-2.5 mb-5">
           <div className="flex items-center gap-3 text-xs">
-            <div className="w-5 h-5 rounded bg-brand/10 flex items-center justify-center shrink-0"><Cpu className="w-3 h-3 text-brand" /></div>
+            <div className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center shrink-0"><Cpu className="w-3 h-3 text-primary" /></div>
             <span className="text-text-dim flex-1">{t("agents.model")}</span>
             <span className="font-black text-sm">{agent.model_name || t("common.unknown")}</span>
           </div>
           <div className="flex items-center gap-3 text-xs">
             <div className="w-5 h-5 rounded bg-success/10 flex items-center justify-center shrink-0"><Shield className="w-3 h-3 text-success" /></div>
             <span className="text-text-dim flex-1">{t("agents.provider")}</span>
-            <span className="font-black text-brand text-sm">{agent.model_provider || t("common.local")}</span>
+            <span className="font-black text-primary text-sm">{agent.model_provider || t("common.local")}</span>
           </div>
           <div className="flex items-center gap-3 text-xs">
             <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center shrink-0"><Clock className="w-3 h-3 text-warning" /></div>
@@ -608,8 +608,8 @@ export function AgentsPage() {
           aria-pressed={showHandAgents}
           className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
             showHandAgents
-              ? "border-brand/30 bg-brand/10 text-brand"
-              : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+              ? "border-primary/30 bg-primary/10 text-primary"
+              : "border-border-subtle bg-surface text-text-dim hover:border-primary/20 hover:text-primary"
           }`}
         >
           <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
@@ -626,14 +626,14 @@ export function AgentsPage() {
               onClick={() => setStateFilter(key)}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
                 isActive
-                  ? "border-brand/30 bg-brand/10 text-brand"
-                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-primary/20 hover:text-primary"
               }`}
             >
               <span>{label}</span>
               <span
                 className={`inline-flex items-center justify-center rounded-full px-1.5 min-w-[18px] h-[18px] text-[9px] font-mono ${
-                  isActive ? "bg-brand/20" : "bg-main"
+                  isActive ? "bg-primary/20" : "bg-main"
                 }`}
               >
                 {count}
@@ -648,7 +648,7 @@ export function AgentsPage() {
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-            className="rounded-full border border-border-subtle bg-surface px-3 py-1 text-[11px] font-bold text-text-dim outline-none focus:border-brand hover:border-brand/20 cursor-pointer"
+            className="rounded-full border border-border-subtle bg-surface px-3 py-1 text-[11px] font-bold text-text-dim outline-none focus:border-primary hover:border-primary/20 cursor-pointer"
           >
             <option value="name">{t("common.sort_name", { defaultValue: "Name" })}</option>
             <option value="last_active">{t("common.sort_last_active", { defaultValue: "Last active" })}</option>
@@ -759,14 +759,14 @@ export function AgentsPage() {
                               cancelNameEdit();
                             }
                           }}
-                          className="px-2 py-1 rounded-lg border border-brand bg-main text-lg font-black tracking-tight outline-none focus:ring-2 focus:ring-brand/30 min-w-0 flex-1"
+                          className="px-2 py-1 rounded-lg border border-primary bg-main text-lg font-black tracking-tight outline-none focus:ring-2 focus:ring-primary/30 min-w-0 flex-1"
                           aria-label={t("agents.edit_name", { defaultValue: "Agent name" })}
                           maxLength={64}
                         />
                         <button
                           onClick={saveName}
                           disabled={patchAgentMutation.isPending || !nameDraft.trim() || nameDraft.trim() === detailAgent.name}
-                          className="px-3 py-1 rounded-lg text-xs font-bold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                          className="px-3 py-1 rounded-lg text-xs font-bold bg-primary text-white hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                         >
                           {patchAgentMutation.isPending ? t("common.saving") : t("common.save")}
                         </button>
@@ -782,7 +782,7 @@ export function AgentsPage() {
                         type="button"
                         onClick={lockRename ? undefined : startNameEdit}
                         disabled={lockRename}
-                        className={`group flex items-center gap-2 text-left max-w-full ${lockRename ? "cursor-default" : "cursor-text hover:text-brand transition-colors"}`}
+                        className={`group flex items-center gap-2 text-left max-w-full ${lockRename ? "cursor-default" : "cursor-text hover:text-primary transition-colors"}`}
                         title={lockRename
                           ? t("agents.rename_hand_disabled", { defaultValue: "Hand-managed agents cannot be renamed" })
                           : t("agents.rename_hint", { defaultValue: "Click to rename" })}
@@ -817,12 +817,12 @@ export function AgentsPage() {
               {detailAgent.model && (
                 <div>
                   <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <div className="w-5 h-5 rounded bg-brand/10 flex items-center justify-center"><Cpu className="w-3 h-3 text-brand" /></div>
+                    <div className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center"><Cpu className="w-3 h-3 text-primary" /></div>
                     {t("agents.model")}
                   </h4>
                   <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
                     {detailAgent.is_hand && (
-                      <p className="rounded-lg border border-brand/15 bg-brand/5 px-3 py-2 text-[11px] leading-relaxed text-text-dim">
+                      <p className="rounded-lg border border-primary/15 bg-primary/5 px-3 py-2 text-[11px] leading-relaxed text-text-dim">
                         {t("agents.hand_agent_hint", { defaultValue: "You are editing the active runtime agent created by a hand." })}
                       </p>
                     )}
@@ -833,7 +833,7 @@ export function AgentsPage() {
                           <select
                             value={modelDraft.provider}
                             onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value, model: "" }))}
-                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                             disabled={providersQuery.isLoading}
                           >
                             {providersQuery.isLoading && <option value="">Loading...</option>}
@@ -852,7 +852,7 @@ export function AgentsPage() {
                           <select
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
-                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                             disabled={modelsQuery.isLoading || !modelDraft.provider.trim()}
                           >
                             {!modelDraft.provider.trim() && <option value="">Select provider first</option>}
@@ -874,7 +874,7 @@ export function AgentsPage() {
                             max={200000}
                             value={modelDraft.max_tokens}
                             onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
-                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                           />
                         </div>
                         <div className="flex justify-between items-center gap-2">
@@ -886,7 +886,7 @@ export function AgentsPage() {
                             step={0.1}
                             value={modelDraft.temperature}
                             onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
-                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                            className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                           />
                         </div>
                         <div className="flex justify-end gap-1 pt-1">
@@ -899,7 +899,7 @@ export function AgentsPage() {
                           <button
                             onClick={saveModelEdit}
                             disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0 || isNaN(parseFloat(modelDraft.temperature)) || parseFloat(modelDraft.temperature) < 0 || parseFloat(modelDraft.temperature) > 2}
-                            className="px-3 py-1 rounded text-xs font-bold bg-brand hover:bg-brand/90 text-white disabled:opacity-50"
+                            className="px-3 py-1 rounded text-xs font-bold bg-primary hover:bg-primary/90 text-white disabled:opacity-50"
                           >
                             {patchAgentConfigMutation.isPending ? t("common.saving") : t("common.save")}
                           </button>
@@ -907,14 +907,14 @@ export function AgentsPage() {
                       </>
                     ) : (
                       <>
-                        <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
+                        <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-primary">{detailAgent.model.provider}</span></div>
                         <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
                         <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.max_tokens")}</span><span className="font-black">{(detailAgent.model.max_tokens ?? 4096).toLocaleString()}</span></div>
                         {detailAgent.model.temperature != null && (
                           <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.temperature")}</span><span className="font-black">{detailAgent.model.temperature}</span></div>
                         )}
                         <div className="flex justify-end pt-1">
-                          <button onClick={startModelEdit} className="px-3 py-1 rounded text-xs font-bold bg-brand/10 hover:bg-brand/20 text-brand">{t("common.edit")}</button>
+                          <button onClick={startModelEdit} className="px-3 py-1 rounded text-xs font-bold bg-primary/10 hover:bg-primary/20 text-primary">{t("common.edit")}</button>
                         </div>
                       </>
                     )}
@@ -944,7 +944,7 @@ export function AgentsPage() {
                           },
                         );
                       }}
-                      className="w-28 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
+                      className="w-28 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                     >
                       <option value="off">{t("common.off", { defaultValue: "Off" })}</option>
                       <option value="auto">{t("common.auto", { defaultValue: "Auto" })}</option>
@@ -981,7 +981,7 @@ export function AgentsPage() {
                           setShowToolsEditor(true);
                         }}
                       >
-                        <Badge variant="brand" dot className="hover:bg-brand/20 transition-colors">
+                        <Badge variant="brand" dot className="hover:bg-primary/20 transition-colors">
                           {`${t("agents.tools_cap")} ✎`}
                         </Badge>
                       </button>
@@ -1273,15 +1273,15 @@ export function AgentsPage() {
               actually differs, so re-clicking the same tab is a no-op. */}
           <div className="flex gap-2">
             <button onClick={() => switchCreateMode("form")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_form")}
             </button>
             <button onClick={() => switchCreateMode("template")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_template")}
             </button>
             <button onClick={() => switchCreateMode("toml")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_toml")}
             </button>
           </div>
@@ -1312,7 +1312,7 @@ export function AgentsPage() {
                       onClick={() => setPreviewTab("toml")}
                       className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                         previewTab === "toml"
-                          ? "bg-brand text-white"
+                          ? "bg-primary text-white"
                           : "text-text-dim hover:text-text"
                       }`}
                     >
@@ -1323,7 +1323,7 @@ export function AgentsPage() {
                       onClick={() => setPreviewTab("markdown")}
                       className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                         previewTab === "markdown"
-                          ? "bg-brand text-white"
+                          ? "bg-primary text-white"
                           : "text-text-dim hover:text-text"
                       }`}
                     >
@@ -1340,7 +1340,7 @@ export function AgentsPage() {
                           addToast(t("agents.form.copied"), "success"),
                         );
                       }}
-                      className="text-[10px] font-bold text-text-dim hover:text-brand"
+                      className="text-[10px] font-bold text-text-dim hover:text-primary"
                       title={t("agents.form.copy")}
                     >
                       <Copy className="w-3.5 h-3.5" />
@@ -1349,7 +1349,7 @@ export function AgentsPage() {
                       <button
                         type="button"
                         onClick={() => switchCreateMode("toml")}
-                        className="text-[10px] font-bold text-brand hover:underline"
+                        className="text-[10px] font-bold text-primary hover:underline"
                       >
                         {t("agents.form.switch_to_toml")}
                       </button>
@@ -1367,7 +1367,7 @@ export function AgentsPage() {
                 <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
                 <select value={templateName}
                   onChange={e => setTemplateName(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary">
                   <option value="">{t("agents.template_placeholder")}</option>
                   {localizedTemplates.map(tmpl => (
                     <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
@@ -1394,7 +1394,7 @@ export function AgentsPage() {
                       defaultValue: "Leave blank to use template default",
                     })
                   }
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand"
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary"
                 />
                 <p className="text-[10px] text-text-dim mt-1">
                   {t("agents.template_custom_name_hint", {
@@ -1433,7 +1433,7 @@ export function AgentsPage() {
                     setTemplateTomlLoading(false);
                   }
                 }}
-                className="text-[10px] font-bold text-brand hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
+                className="text-[10px] font-bold text-primary hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
               >
                 {templateTomlLoading ? (
                   <span className="inline-flex items-center gap-1">
@@ -1459,7 +1459,7 @@ export function AgentsPage() {
                 }}
                 placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
                 rows={12}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-primary resize-none" />
               <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
                 <Brain className="w-3 h-3" />
                 {t("agents.thinking_toml_hint")}
@@ -1584,10 +1584,10 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
         </div>
         
         <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
-          <button onClick={() => setActiveTab("versions")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+          <button onClick={() => setActiveTab("versions")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
             <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
           </button>
-          <button onClick={() => setActiveTab("experiments")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+          <button onClick={() => setActiveTab("experiments")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-primary text-white" : "bg-main text-text-dim"}`}>
             <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
           </button>
         </div>
@@ -1751,7 +1751,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         ) : (
                           <div className="space-y-1 max-h-40 overflow-y-auto">
                             {versions.map((v: PromptVersion) => (
-                              <label key={v.id} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs ${selectedVariantIds.includes(v.id) ? "bg-brand/10 border border-brand" : "bg-main/30 border border-border-subtle"}`}>
+                              <label key={v.id} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer text-xs ${selectedVariantIds.includes(v.id) ? "bg-primary/10 border border-primary" : "bg-main/30 border border-border-subtle"}`}>
                                 <input type="checkbox" checked={selectedVariantIds.includes(v.id)}
                                   onChange={e => {
                                     if (e.target.checked) setSelectedVariantIds([...selectedVariantIds, v.id]);

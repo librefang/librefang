@@ -48,7 +48,7 @@ function EventItem({ event }: { event: CommsEventItem }) {
 
   return (
     <div className="flex items-start gap-3 p-3 hover:bg-surface-hover rounded-lg transition-colors">
-      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${event.kind?.includes("error") ? "bg-error/10" : "bg-brand/10"}`}>
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${event.kind?.includes("error") ? "bg-error/10" : "bg-primary/10"}`}>
         {getEventIcon()}
       </div>
       <div className="min-w-0 flex-1">
@@ -79,7 +79,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
   return (
     <div
       onClick={onClick}
-      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
+      className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-primary transition-colors cursor-pointer"
     >
       <div className={`w-12 h-12 rounded-xl bg-linear-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
@@ -170,7 +170,7 @@ export function CommsPage() {
         <button
           onClick={() => setActiveTab("channels")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
-            activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+            activeTab === "channels" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
           <Radio className="w-4 h-4" />
@@ -179,7 +179,7 @@ export function CommsPage() {
         <button
           onClick={() => setActiveTab("topology")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
-            activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+            activeTab === "topology" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
           <Zap className="w-4 h-4" />
@@ -188,7 +188,7 @@ export function CommsPage() {
         <button
           onClick={() => setActiveTab("events")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
-            activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
+            activeTab === "events" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
           <Activity className="w-4 h-4" />
@@ -216,7 +216,7 @@ export function CommsPage() {
           {/* Stats Grid */}
           <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
-              { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
+              { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-primary", bg: "bg-primary/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
               { icon: Activity, label: t("comms.events_today"), value: events.length, color: "text-warning", bg: "bg-warning/10" },
               { icon: Clock, label: t("comms.uptime"), value: "99.9%", color: "text-accent", bg: "bg-accent/10" },
@@ -270,7 +270,7 @@ export function CommsPage() {
                 <Card key={c.name} hover padding="md">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${c.configured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${c.configured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
                         {getChannelIcon(c.name)}
                       </div>
                       <div>
@@ -300,7 +300,7 @@ export function CommsPage() {
 
           {topologyQuery.isLoading ? (
             <div className="py-12 text-center">
-              <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin mx-auto" />
+              <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
             </div>
           ) : topology ? (
             <div className="space-y-6">
@@ -321,7 +321,7 @@ export function CommsPage() {
                   <div className="space-y-2">
                     {topology.edges.map((conn, i) => (
                       <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-main/30">
-                        <span className="text-xs font-bold text-brand">{conn.from || "-"}</span>
+                        <span className="text-xs font-bold text-primary">{conn.from || "-"}</span>
                         <ChevronRight className="w-4 h-4 text-text-dim" />
                         <span className="text-xs font-bold text-success">{conn.to || "-"}</span>
                         <Badge variant="default" className="ml-auto">

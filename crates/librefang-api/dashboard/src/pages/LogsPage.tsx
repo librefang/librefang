@@ -14,7 +14,7 @@ import type { AuditEntry } from "../api";
 const REFRESH_MS = 5000;
 
 const LOG_LEVELS = {
-  info: { color: "text-brand", bg: "bg-brand/10" },
+  info: { color: "text-primary", bg: "bg-primary/10" },
   warn: { color: "text-warning", bg: "bg-warning/10" },
   error: { color: "text-error", bg: "bg-error/10" },
   debug: { color: "text-text-dim", bg: "bg-text-dim/10" },
@@ -94,7 +94,7 @@ export function LogsPage() {
           <select
             value={moduleFilter || ""}
             onChange={(e) => setModuleFilter(e.target.value || null)}
-            className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-xs font-medium focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+            className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-xs font-medium focus:border-primary focus:ring-1 focus:ring-primary/20 outline-none"
           >
             <option value="">{t("logs.all_modules")}</option>
             {modules.map(m => <option key={m} value={m}>{m}</option>)}
@@ -139,7 +139,7 @@ export function LogsPage() {
                   <div className="flex items-center gap-2 sm:contents">
                     <span className="text-text-dim/40 shrink-0 sm:w-16 text-[10px]">{time}</span>
                     <span className="shrink-0 sm:w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
-                    <span className="text-brand font-bold shrink-0 sm:w-28 truncate text-[10px]">{logModule(l) || "-"}</span>
+                    <span className="text-primary font-bold shrink-0 sm:w-28 truncate text-[10px]">{logModule(l) || "-"}</span>
                     <span className="text-text-dim/40 font-mono shrink-0 sm:w-16 text-[9px] hidden sm:inline">{agentId || "-"}</span>
                   </div>
                   <div className="min-w-0 flex-1">

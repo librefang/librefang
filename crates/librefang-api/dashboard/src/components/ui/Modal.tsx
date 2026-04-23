@@ -110,7 +110,7 @@ export const Modal = memo(function Modal({
             {!hideCloseButton && (
               <button
                 onClick={onClose}
-                className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
                 aria-label={t("common.close", { defaultValue: "Close" })}
               >
                 <X className="h-3.5 w-3.5" />

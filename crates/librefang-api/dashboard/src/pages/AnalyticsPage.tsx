@@ -96,7 +96,7 @@ export function AnalyticsPage() {
   };
 
   const kpis = useMemo(() => [
-    { icon: Zap, label: t("analytics.total_calls"), value: formatCompact(usage?.call_count ?? 0), color: "text-brand", bg: "bg-brand/10" },
+    { icon: Zap, label: t("analytics.total_calls"), value: formatCompact(usage?.call_count ?? 0), color: "text-primary", bg: "bg-primary/10" },
     { icon: Cpu, label: t("analytics.total_tokens_label"), value: formatCompact((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)), color: "text-purple-500", bg: "bg-purple-500/10" },
     { icon: DollarSign, label: t("analytics.total_cost"), value: formatCost(usage?.total_cost_usd ?? 0), color: "text-success", bg: "bg-success/10" },
     { icon: TrendingUp, label: t("analytics.today_cost"), value: formatCost(daily?.today_cost_usd ?? 0), color: "text-warning", bg: "bg-warning/10" },
@@ -154,7 +154,7 @@ export function AnalyticsPage() {
             <button
               onClick={handleExportCsv}
               title={t("analytics.export_csv", { defaultValue: "Export CSV" })}
-              className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-colors duration-200"
+              className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-primary hover:border-primary/30 hover:shadow-sm transition-colors duration-200"
             >
               <Download className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">CSV</span>
@@ -186,7 +186,7 @@ export function AnalyticsPage() {
           <div className="grid gap-6 md:grid-cols-2">
             <Card padding="lg" hover>
               <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
+                <Users className="w-4 h-4 text-primary" /> {t("analytics.usage_by_agent")}
               </h2>
               {usageByAgent.length === 0 ? (
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
@@ -316,7 +316,7 @@ export function AnalyticsPage() {
               {/* Model Performance Table */}
               <Card padding="lg" hover>
                 <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-brand" /> {t("analytics.model_performance_table") || "Model Performance Details"}
+                  <Cpu className="w-4 h-4 text-primary" /> {t("analytics.model_performance_table") || "Model Performance Details"}
                 </h2>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
@@ -333,7 +333,7 @@ export function AnalyticsPage() {
                     </thead>
                     <tbody>
                       {modelPerformance.map((m, i) => (
-                        <tr key={m.model ?? i} className="border-b border-border-subtle/50 hover:bg-brand/5">
+                        <tr key={m.model ?? i} className="border-b border-border-subtle/50 hover:bg-primary/5">
                           <td className="py-2 px-3 font-mono font-medium">{m.model?.slice(0, 25)}</td>
                           <td className="py-2 px-3 text-right">{m.call_count ?? 0}</td>
                           <td className="py-2 px-3 text-right font-mono">${(m.total_cost_usd ?? 0).toFixed(4)}</td>
@@ -354,7 +354,7 @@ export function AnalyticsPage() {
           <Card padding="lg" hover>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-bold flex items-center gap-2">
-                <Shield className="w-4 h-4 text-brand" /> {t("analytics.budget_title")}
+                <Shield className="w-4 h-4 text-primary" /> {t("analytics.budget_title")}
               </h2>
               <Button variant="primary" size="sm"
                 onClick={() => {
@@ -401,7 +401,7 @@ export function AnalyticsPage() {
                       value={budgetForm[f.key] ?? (f.current !== undefined ? String(f.current) : "")}
                       onChange={e => setBudgetForm(prev => ({ ...prev, [f.key]: e.target.value }))}
                       placeholder={f.current !== undefined ? String(f.current) : "-"}
-                      className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs font-mono outline-none focus:border-brand" />
+                      className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs font-mono outline-none focus:border-primary" />
                     <span className="text-[8px] text-text-dim/40 shrink-0">{f.unit}</span>
                   </div>
                 </div>

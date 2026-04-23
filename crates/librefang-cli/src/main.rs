@@ -1,4 +1,4 @@
-//! LibreFang CLI — command-line interface for the LibreFang Agent OS.
+//! BossFang CLI — command-line interface for the BossFang Agent OS.
 //!
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
@@ -87,7 +87,7 @@ const AFTER_HELP: &str = "\
   librefang doctor               Run diagnostic health checks
   librefang channel setup        Interactive channel setup wizard
   librefang cron list            List scheduled jobs
-  librefang uninstall            Completely remove LibreFang from your system
+  librefang uninstall            Completely remove BossFang from your system
 
 \x1b[1;36mQuick Start:\x1b[0m
   1. librefang init              Set up config + API key
@@ -98,13 +98,13 @@ const AFTER_HELP: &str = "\
   Docs:       https://github.com/librefang/librefang
   Dashboard:  http://127.0.0.1:4545/ (when daemon is running)";
 
-/// LibreFang — the open-source Agent Operating System.
+/// BossFang — the open-source Agent Operating System.
 #[derive(Parser)]
 #[command(
     name = "librefang",
     version,
-    about = "\u{1F40D} LibreFang \u{2014} Open-source Agent Operating System",
-    long_about = "\u{1F40D} LibreFang \u{2014} Open-source Agent Operating System\n\n\
+    about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System",
+    long_about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System\n\n\
                   Deploy, manage, and orchestrate AI agents from your terminal.\n\
                   40 channels \u{00b7} 60 skills \u{00b7} 50+ models \u{00b7} infinite possibilities.",
     after_help = AFTER_HELP,
@@ -120,9 +120,9 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize LibreFang (create ~/.librefang/ and default config).
+    /// Initialize BossFang (create ~/.librefang/ and default config).
     #[command(
-        long_about = "Initialize LibreFang by creating the ~/.librefang/ directory and a default config.toml.\n\nThis is the first command you should run after installing LibreFang. It sets up\nthe data directory, writes a default configuration, and optionally prompts for\nan API key.\n\nExamples:\n  librefang init              # Interactive setup with prompts\n  librefang init --quick      # Non-interactive, just write defaults (CI/scripts)"
+        long_about = "Initialize BossFang by creating the ~/.librefang/ directory and a default config.toml.\n\nThis is the first command you should run after installing BossFang. It sets up\nthe data directory, writes a default configuration, and optionally prompts for\nan API key.\n\nExamples:\n  librefang init              # Interactive setup with prompts\n  librefang init --quick      # Non-interactive, just write defaults (CI/scripts)"
     )]
     Init {
         /// Quick mode: no prompts, just write config + .env (for CI/scripts).
@@ -132,9 +132,9 @@ enum Commands {
         #[arg(long, conflicts_with = "quick")]
         upgrade: bool,
     },
-    /// Start the LibreFang kernel daemon (API server + kernel).
+    /// Start the BossFang kernel daemon (API server + kernel).
     #[command(
-        long_about = "Start the LibreFang kernel daemon, which runs the API server and agent runtime.\n\nBy default the daemon detaches into the background. Use --foreground to keep it\nattached to the current terminal, or --tail to detach but stream logs.\n\nThe bind address is resolved in priority order:\n  --bind flag > LIBREFANG_LISTEN env var > api_listen in config.toml > compiled default (0.0.0.0:4545)\n\nExamples:\n  librefang start                              # Start daemon in the background\n  librefang start --tail                       # Start and follow log output\n  librefang start --foreground                 # Run in the foreground (Ctrl+C to stop)\n  librefang start --bind 127.0.0.1:4545        # Loopback only\n  librefang start --bind 0.0.0.0:9000          # All interfaces, custom port"
+        long_about = "Start the BossFang kernel daemon, which runs the API server and agent runtime.\n\nBy default the daemon detaches into the background. Use --foreground to keep it\nattached to the current terminal, or --tail to detach but stream logs.\n\nThe bind address is resolved in priority order:\n  --bind flag > LIBREFANG_LISTEN env var > api_listen in config.toml > compiled default (0.0.0.0:4545)\n\nExamples:\n  librefang start                              # Start daemon in the background\n  librefang start --tail                       # Start and follow log output\n  librefang start --foreground                 # Run in the foreground (Ctrl+C to stop)\n  librefang start --bind 127.0.0.1:4545        # Loopback only\n  librefang start --bind 0.0.0.0:9000          # All interfaces, custom port"
     )]
     Start {
         /// Follow the daemon log after launching it in the background.
@@ -187,7 +187,7 @@ enum Commands {
     },
     /// Update the CLI to the latest published release.
     #[command(
-        long_about = "Update the LibreFang CLI binary to the latest published GitHub release.\n\nBy default, downloads and installs the latest release for your configured\nupdate channel. Use --check to see if an update is available without\ninstalling, --version to pin a specific tag, or --channel to override.\n\nChannels (like Apple software updates):\n  stable  — only stable releases (default)\n  beta    — stable + beta releases\n  rc      — all releases including release candidates\n\nSet a persistent default in config.toml:\n  update_channel = \"rc\"\n\nExamples:\n  librefang update                   # Install latest for your channel\n  librefang update --check           # Check for updates only\n  librefang update --channel rc      # Use rc channel for this update\n  librefang update --version v0.4.0  # Install a specific version"
+        long_about = "Update the BossFang CLI binary to the latest published GitHub release.\n\nBy default, downloads and installs the latest release for your configured\nupdate channel. Use --check to see if an update is available without\ninstalling, --version to pin a specific tag, or --channel to override.\n\nChannels (like Apple software updates):\n  stable  — only stable releases (default)\n  beta    — stable + beta releases\n  rc      — all releases including release candidates\n\nSet a persistent default in config.toml:\n  update_channel = \"rc\"\n\nExamples:\n  librefang update                   # Install latest for your channel\n  librefang update --check           # Check for updates only\n  librefang update --channel rc      # Use rc channel for this update\n  librefang update --version v0.4.0  # Install a specific version"
     )]
     Update {
         /// Check whether a newer release exists without installing it.
@@ -203,7 +203,7 @@ enum Commands {
     },
     /// Stop the running daemon.
     #[command(
-        long_about = "Stop the running LibreFang daemon.\n\nSends a shutdown signal to the background daemon process. If no daemon is\nrunning, this is a no-op.\n\nExamples:\n  librefang stop"
+        long_about = "Stop the running BossFang daemon.\n\nSends a shutdown signal to the background daemon process. If no daemon is\nrunning, this is a no-op.\n\nExamples:\n  librefang stop"
     )]
     Stop,
     /// Manage agents (new, list, chat, kill, spawn) [*].
@@ -224,9 +224,9 @@ enum Commands {
         long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '\"lifecycle\"' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
     )]
     Trigger(TriggerCommands),
-    /// Migrate from another agent framework to LibreFang.
+    /// Migrate from another agent framework to BossFang.
     #[command(
-        long_about = "Migrate agents and configuration from another framework to LibreFang.\n\nSupported sources: openclaw, langchain, autogpt.\n\nExamples:\n  librefang migrate --from langchain\n  librefang migrate --from autogpt --source-dir ./my-agents\n  librefang migrate --from openclaw --dry-run  # Preview changes"
+        long_about = "Migrate agents and configuration from another framework to BossFang.\n\nSupported sources: openclaw, langchain, autogpt.\n\nExamples:\n  librefang migrate --from langchain\n  librefang migrate --from autogpt --source-dir ./my-agents\n  librefang migrate --from openclaw --dry-run  # Preview changes"
     )]
     Migrate(MigrateArgs),
     /// Manage skills (install, list, search, create, remove) [*].
@@ -250,7 +250,7 @@ enum Commands {
     /// Show or edit configuration (show, edit, get, set, keys) [*].
     #[command(
         subcommand,
-        long_about = "Show, edit, and manage the LibreFang configuration.\n\nExamples:\n  librefang config show                           # Print current config\n  librefang config edit                           # Open in $EDITOR\n  librefang config get default_model.provider     # Get a value\n  librefang config set api_listen 0.0.0.0:8080    # Set a value\n  librefang config unset api.cors_origin          # Remove a key\n  librefang config set-key groq                   # Save API key interactively\n  librefang config delete-key groq                # Remove an API key\n  librefang config test-key groq                  # Test connectivity"
+        long_about = "Show, edit, and manage the BossFang configuration.\n\nExamples:\n  librefang config show                           # Print current config\n  librefang config edit                           # Open in $EDITOR\n  librefang config get default_model.provider     # Get a value\n  librefang config set api_listen 0.0.0.0:8080    # Set a value\n  librefang config unset api.cors_origin          # Remove a key\n  librefang config set-key groq                   # Save API key interactively\n  librefang config delete-key groq                # Remove an API key\n  librefang config test-key groq                  # Test connectivity"
     )]
     Config(ConfigCommands),
     /// Quick chat with the default agent.
@@ -263,7 +263,7 @@ enum Commands {
     },
     /// Show kernel status.
     #[command(
-        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, version, default provider/model, health checks, and (when an\n`api_key` is configured) agent list, sessions, and memory usage. Without a key\nthe command still works — only the protected detail section is hidden.\n\nExit codes:\n  0  daemon running and healthy\n  1  daemon not running (in-process fallback)\n  2  daemon running but reporting a degraded status\n  3  daemon port claims to be open but /api/health is unreachable\n\nExamples:\n  librefang status             # Pretty-printed status\n  librefang status --json      # JSON output for scripting\n  librefang status -v          # Verbose: config warnings, auth, MCP, peers\n  librefang status -q          # Quiet: one-line summary\n  librefang status --watch 2   # Refresh every 2 seconds (Ctrl+C to stop)"
+        long_about = "Show the current status of the BossFang kernel daemon.\n\nDisplays uptime, version, default provider/model, health checks, and (when an\n`api_key` is configured) agent list, sessions, and memory usage. Without a key\nthe command still works — only the protected detail section is hidden.\n\nExit codes:\n  0  daemon running and healthy\n  1  daemon not running (in-process fallback)\n  2  daemon running but reporting a degraded status\n  3  daemon port claims to be open but /api/health is unreachable\n\nExamples:\n  librefang status             # Pretty-printed status\n  librefang status --json      # JSON output for scripting\n  librefang status -v          # Verbose: config warnings, auth, MCP, peers\n  librefang status -q          # Quiet: one-line summary\n  librefang status --watch 2   # Refresh every 2 seconds (Ctrl+C to stop)"
     )]
     Status {
         /// Output as JSON for scripting.
@@ -281,7 +281,7 @@ enum Commands {
     },
     /// Run diagnostic health checks.
     #[command(
-        long_about = "Run diagnostic health checks on your LibreFang installation.\n\nChecks config files, data directories, API keys, daemon connectivity,\nand installed dependencies. Use --repair to auto-fix common issues.\n\nExamples:\n  librefang doctor            # Run all checks\n  librefang doctor --repair   # Auto-fix missing dirs/config\n  librefang doctor --json     # JSON output for CI pipelines"
+        long_about = "Run diagnostic health checks on your BossFang installation.\n\nChecks config files, data directories, API keys, daemon connectivity,\nand installed dependencies. Use --repair to auto-fix common issues.\n\nExamples:\n  librefang doctor            # Run all checks\n  librefang doctor --repair   # Auto-fix missing dirs/config\n  librefang doctor --json     # JSON output for CI pipelines"
     )]
     Doctor {
         /// Output as JSON for scripting.
@@ -293,7 +293,7 @@ enum Commands {
     },
     /// Open the web dashboard in the default browser.
     #[command(
-        long_about = "Open the LibreFang web dashboard in your default browser.\n\nRequires the daemon to be running (serves at http://127.0.0.1:4545/ by default).\n\nExamples:\n  librefang dashboard"
+        long_about = "Open the BossFang web dashboard in your default browser.\n\nRequires the daemon to be running (serves at http://127.0.0.1:4545/ by default).\n\nExamples:\n  librefang dashboard"
     )]
     Dashboard,
     /// Generate shell completion scripts.
@@ -307,7 +307,7 @@ enum Commands {
     },
     /// MCP (Model Context Protocol) server management.
     #[command(
-        long_about = "Manage MCP (Model Context Protocol) servers.\n\nCalled without a subcommand, starts the stdio MCP server that exposes\nLibreFang to MCP-compatible clients (Claude Code, Cursor, ...).\n\nExamples:\n  librefang mcp                    # Start the stdio MCP server\n  librefang mcp list               # List configured MCP servers\n  librefang mcp catalog            # List installable catalog entries\n  librefang mcp add github         # Install the 'github' catalog entry\n  librefang mcp add slack --key xoxb-...  # Provide key inline\n  librefang mcp remove github      # Remove an MCP server by id"
+        long_about = "Manage MCP (Model Context Protocol) servers.\n\nCalled without a subcommand, starts the stdio MCP server that exposes\nBossFang to MCP-compatible clients (Claude Code, Cursor, ...).\n\nExamples:\n  librefang mcp                    # Start the stdio MCP server\n  librefang mcp list               # List configured MCP servers\n  librefang mcp catalog            # List installable catalog entries\n  librefang mcp add github         # Install the 'github' catalog entry\n  librefang mcp add slack --key xoxb-...  # Provide key inline\n  librefang mcp remove github      # Remove an MCP server by id"
     )]
     Mcp {
         #[command(subcommand)]
@@ -374,9 +374,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Tail the LibreFang log file.
+    /// Tail the BossFang log file.
     #[command(
-        long_about = "Tail the LibreFang daemon log file.\n\nShows recent log lines and optionally follows new output in real time.\n\nExamples:\n  librefang logs                  # Show last 50 lines\n  librefang logs --lines 100      # Show last 100 lines\n  librefang logs -f                # Follow log output\n  librefang logs --lines 20 -f    # Show 20 lines then follow"
+        long_about = "Tail the BossFang daemon log file.\n\nShows recent log lines and optionally follows new output in real time.\n\nExamples:\n  librefang logs                  # Show last 50 lines\n  librefang logs --lines 100      # Show last 100 lines\n  librefang logs -f                # Follow log output\n  librefang logs --lines 20 -f    # Show 20 lines then follow"
     )]
     Logs {
         /// Number of lines to show.
@@ -486,7 +486,7 @@ enum Commands {
     /// Manage boot service (systemd/launchd/Windows autostart) [*].
     #[command(
         subcommand,
-        long_about = "Install, remove, or check the status of a system boot service so LibreFang\nstarts automatically on login/boot.\n\nExamples:\n  librefang service install      # Register auto-start service\n  librefang service uninstall    # Remove auto-start service\n  librefang service status       # Check if the service is registered"
+        long_about = "Install, remove, or check the status of a system boot service so BossFang\nstarts automatically on login/boot.\n\nExamples:\n  librefang service install      # Register auto-start service\n  librefang service uninstall    # Remove auto-start service\n  librefang service status       # Check if the service is registered"
     )]
     Service(ServiceCommands),
     /// Reset local config and state.
@@ -498,9 +498,9 @@ enum Commands {
         #[arg(long)]
         confirm: bool,
     },
-    /// Completely uninstall LibreFang from your system.
+    /// Completely uninstall BossFang from your system.
     #[command(
-        long_about = "Completely uninstall LibreFang from your system.\n\nRemoves the binary, data directory, config files, and all related state.\nUse --keep-config to preserve config.toml, .env, and secrets.env.\n\nExamples:\n  librefang uninstall                     # Interactive confirmation\n  librefang uninstall --confirm           # Skip confirmation\n  librefang uninstall --confirm --keep-config  # Keep config files"
+        long_about = "Completely uninstall BossFang from your system.\n\nRemoves the binary, data directory, config files, and all related state.\nUse --keep-config to preserve config.toml, .env, and secrets.env.\n\nExamples:\n  librefang uninstall                     # Interactive confirmation\n  librefang uninstall --confirm           # Skip confirmation\n  librefang uninstall --confirm --keep-config  # Keep config files"
     )]
     Uninstall {
         /// Skip confirmation prompt (also --yes).
@@ -556,7 +556,7 @@ enum VaultCommands {
 enum AuthCommands {
     /// Authenticate with ChatGPT using browser or device auth.
     #[command(
-        long_about = "Authenticate with ChatGPT using the OpenAI Codex login flow.\n\nBy default this opens a browser and waits for the localhost callback.\nUse --device-auth for headless or remote environments. If device auth is\nnot enabled for the current OpenAI account or workspace, LibreFang falls\nback to the standard browser login flow.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
+        long_about = "Authenticate with ChatGPT using the OpenAI Codex login flow.\n\nBy default this opens a browser and waits for the localhost callback.\nUse --device-auth for headless or remote environments. If device auth is\nnot enabled for the current OpenAI account or workspace, BossFang falls\nback to the standard browser login flow.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
     )]
     Chatgpt {
         /// Use the OpenAI device auth flow before falling back to browser auth.
@@ -669,7 +669,7 @@ enum SkillCommands {
     },
     /// List installed skills.
     #[command(
-        long_about = "List all skills currently installed in this LibreFang instance.\n\nExamples:\n  librefang skill list\n  librefang skill list --hand clip"
+        long_about = "List all skills currently installed in this BossFang instance.\n\nExamples:\n  librefang skill list\n  librefang skill list --hand clip"
     )]
     List {
         /// List skills installed in a specific hand's workspace.
@@ -1017,7 +1017,7 @@ enum HandCommands {
 enum ConfigCommands {
     /// Show the current configuration.
     #[command(
-        long_about = "Print the current LibreFang configuration to stdout.\n\nExamples:\n  librefang config show"
+        long_about = "Print the current BossFang configuration to stdout.\n\nExamples:\n  librefang config show"
     )]
     Show,
     /// Open the configuration file in your editor.
@@ -1629,7 +1629,7 @@ enum MemoryCommands {
 enum DevicesCommands {
     /// List paired devices.
     #[command(
-        long_about = "List all devices currently paired with this LibreFang instance.\n\nExamples:\n  librefang devices list\n  librefang devices list --json"
+        long_about = "List all devices currently paired with this BossFang instance.\n\nExamples:\n  librefang devices list\n  librefang devices list --json"
     )]
     List {
         /// Output as JSON for scripting.
@@ -1703,7 +1703,7 @@ enum SystemCommands {
     },
     /// Show version information.
     #[command(
-        long_about = "Show the LibreFang version, build info, and commit hash.\n\nExamples:\n  librefang system version\n  librefang system version --json"
+        long_about = "Show the BossFang version, build info, and commit hash.\n\nExamples:\n  librefang system version\n  librefang system version --json"
     )]
     Version {
         /// Output as JSON for scripting.
@@ -1714,9 +1714,9 @@ enum SystemCommands {
 
 #[derive(Subcommand)]
 enum ServiceCommands {
-    /// Register auto-start service so LibreFang starts on boot/login.
+    /// Register auto-start service so BossFang starts on boot/login.
     #[command(
-        long_about = "Register a system service so LibreFang starts automatically.\n\nOn Linux:   creates a systemd user service (~/.config/systemd/user/librefang.service)\nOn macOS:   creates a LaunchAgent (~/Library/LaunchAgents/ai.librefang.daemon.plist)\nOn Windows: adds a registry entry (HKCU\\...\\Run)\n\nExamples:\n  librefang service install"
+        long_about = "Register a system service so BossFang starts automatically.\n\nOn Linux:   creates a systemd user service (~/.config/systemd/user/librefang.service)\nOn macOS:   creates a LaunchAgent (~/Library/LaunchAgents/ai.librefang.daemon.plist)\nOn Windows: adds a registry entry (HKCU\\...\\Run)\n\nExamples:\n  librefang service install"
     )]
     Install,
     /// Remove the auto-start service.
@@ -1794,7 +1794,7 @@ fn init_tracing_stderr(log_level: &str) {
     registry.with(env_filter).with(fmt_layer).init();
 }
 
-/// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
+/// Get the BossFang home directory, respecting LIBREFANG_HOME env var.
 fn cli_librefang_home() -> std::path::PathBuf {
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {
         return std::path::PathBuf::from(home);
@@ -2472,7 +2472,7 @@ fn cmd_init(quick: bool) {
     }
 }
 
-/// Upgrade an existing LibreFang installation: backup config, sync registry, merge new defaults.
+/// Upgrade an existing BossFang installation: backup config, sync registry, merge new defaults.
 fn cmd_init_upgrade() {
     let librefang_dir = cli_librefang_home();
     let config_path = librefang_dir.join("config.toml");
@@ -2485,7 +2485,7 @@ fn cmd_init_upgrade() {
 
     ui::banner();
     ui::blank();
-    ui::section("Upgrading LibreFang installation");
+    ui::section("Upgrading BossFang installation");
 
     // 2. Backup existing config under backups/ (keep last 3)
     let backups_dir = librefang_dir.join("backups");
@@ -3360,7 +3360,7 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     }
 }
 
-/// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
+/// Ensure BossFang is initialized (config.toml exists). Auto-runs quick init on first run.
 fn ensure_initialized(config: &Option<PathBuf>) {
     match config {
         None => {
@@ -4956,15 +4956,15 @@ fn cmd_doctor(json: bool, repair: bool) {
     if let Some(_h) = &home {
         let librefang_dir = cli_librefang_home();
 
-        // --- Check 1: LibreFang directory ---
+        // --- Check 1: BossFang directory ---
         if librefang_dir.exists() {
             if !json {
-                ui::check_ok(&format!("LibreFang directory: {}", librefang_dir.display()));
+                ui::check_ok(&format!("BossFang directory: {}", librefang_dir.display()));
             }
             checks.push(serde_json::json!({"check": "librefang_dir", "status": "ok", "path": librefang_dir.display().to_string()}));
         } else if repair {
             if !json {
-                ui::check_fail("LibreFang directory not found.");
+                ui::check_fail("BossFang directory not found.");
             }
             let answer = prompt_input("    Create it now? [Y/n] ");
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
@@ -4974,7 +4974,7 @@ fn cmd_doctor(json: bool, repair: bool) {
                     let _ =
                         std::fs::create_dir_all(librefang_dir.join("workspaces").join("agents"));
                     if !json {
-                        ui::check_ok("Created LibreFang directory");
+                        ui::check_ok("Created BossFang directory");
                     }
                     repaired = true;
                 } else {
@@ -4989,7 +4989,7 @@ fn cmd_doctor(json: bool, repair: bool) {
             checks.push(serde_json::json!({"check": "librefang_dir", "status": if repaired { "repaired" } else { "fail" }}));
         } else {
             if !json {
-                ui::check_fail("LibreFang directory not found. Run `librefang init` first.");
+                ui::check_fail("BossFang directory not found. Run `librefang init` first.");
             }
             checks.push(serde_json::json!({"check": "librefang_dir", "status": "fail"}));
             all_ok = false;
@@ -7049,7 +7049,7 @@ capabilities = []
     let entry_content = match runtime.as_str() {
         "python" => format!(
             r#"#!/usr/bin/env python3
-"""LibreFang skill: {name}"""
+"""BossFang skill: {name}"""
 import json
 import sys
 
@@ -9312,7 +9312,7 @@ async fn persist_chatgpt_auth(
 
     let home = librefang_home();
     std::fs::create_dir_all(&home)
-        .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
+        .map_err(|e| format!("Failed to create BossFang home directory: {e}"))?;
 
     let access_token = auth_result.access_token;
     let refresh_token = auth_result.refresh_token;
@@ -11484,7 +11484,7 @@ fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::P
 
     let unit = format!(
         "[Unit]\n\
-         Description=LibreFang Agent OS Daemon\n\
+         Description=BossFang Agent OS Daemon\n\
          Documentation=https://librefang.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
@@ -11618,7 +11618,7 @@ fn service_install_windows(binary: &std::path::Path) {
             "add",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
             "/v",
-            "LibreFang",
+            "BossFang",
             "/t",
             "REG_SZ",
             "/d",
@@ -11683,7 +11683,7 @@ fn cmd_service_uninstall() {
                 "delete",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "LibreFang",
+                "BossFang",
                 "/f",
             ])
             .output();
@@ -11753,7 +11753,7 @@ fn cmd_service_status() {
                 "query",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "LibreFang",
+                "BossFang",
             ])
             .output();
         match output {
@@ -11976,7 +11976,7 @@ fn cmd_update(check: bool, version: Option<String>, channel_override: Option<Str
         match run_official_update(target_version) {
             #[cfg(not(windows))]
             Ok(UpdateLaunch::Completed) => {
-                ui::success("LibreFang CLI updated.");
+                ui::success("BossFang CLI updated.");
                 if let Some(installed) = installed_binary_version(&default_install) {
                     ui::kv("Installed", &installed);
                 }
@@ -12306,7 +12306,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     println!();
     println!(
         "  {}",
-        "This will completely uninstall LibreFang from your system."
+        "This will completely uninstall BossFang from your system."
             .bold()
             .red()
     );
@@ -12438,7 +12438,7 @@ fn remove_autostart_entries(home: &std::path::Path) {
                 "delete",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
                 "/v",
-                "LibreFang",
+                "BossFang",
                 "/f",
             ])
             .output();
@@ -12470,7 +12470,7 @@ fn remove_autostart_entries(home: &std::path::Path) {
 
     #[cfg(target_os = "linux")]
     {
-        let desktop_file = home.join(".config/autostart/LibreFang.desktop");
+        let desktop_file = home.join(".config/autostart/BossFang.desktop");
         if desktop_file.exists() {
             match std::fs::remove_file(&desktop_file) {
                 Ok(()) => ui::success(&i18n::t("uninstall-removed-autostart-linux")),

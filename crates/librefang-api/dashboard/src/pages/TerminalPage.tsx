@@ -541,7 +541,7 @@ export function TerminalPage() {
       )}
       <button
         onClick={toggleFullscreen}
-        className="flex items-center justify-center w-8 h-8 rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors shadow-sm"
+        className="flex items-center justify-center w-8 h-8 rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-primary hover:border-primary/30 transition-colors shadow-sm"
         aria-label={
           isFullscreen ? t("terminal.exit_fullscreen") : t("terminal.enter_fullscreen")
         }
@@ -640,7 +640,7 @@ export function TerminalPage() {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <header className="shrink-0 flex items-center gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
-          <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+          <div className="p-1.5 rounded-lg bg-primary/10 text-primary shrink-0">
             <TerminalIcon className="h-4 w-4" />
           </div>
           <h1 className="text-sm font-extrabold tracking-tight">{t("nav.terminal")}</h1>
@@ -657,7 +657,7 @@ export function TerminalPage() {
   const normalHeader = (
     <header className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-6 py-3 bg-surface border-b border-border-subtle">
       <div className="flex items-center gap-3 min-w-0">
-        <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">
+        <div className="p-1.5 rounded-lg bg-primary/10 text-primary shrink-0">
           <TerminalIcon className="h-4 w-4" />
         </div>
         <div className="min-w-0">

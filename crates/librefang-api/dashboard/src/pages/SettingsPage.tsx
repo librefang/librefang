@@ -55,7 +55,7 @@ function SegmentControl<T extends string>({
             onClick={() => onChange(opt.value)}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all duration-150 ${
               active
-                ? "bg-surface shadow-sm text-brand border border-brand/15"
+                ? "bg-surface shadow-sm text-primary border border-primary/15"
                 : "text-text-dim hover:text-text"
             }`}
           >
@@ -316,7 +316,7 @@ function TotpSection() {
                 value={resetCode}
                 onChange={(e) => setResetCode(e.target.value)}
                 placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
-                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && resetCode && !loading && handleSetup(resetCode)}
               />
               <Button variant="primary" size="sm" onClick={() => handleSetup(resetCode)} disabled={!resetCode || loading} isLoading={loading}>
@@ -333,7 +333,7 @@ function TotpSection() {
                 value={revokeCode}
                 onChange={(e) => setRevokeCode(e.target.value)}
                 placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
-                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors"
                 onKeyDown={(e) => e.key === "Enter" && revokeCode && !loading && handleRevoke()}
               />
               <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
@@ -394,7 +394,7 @@ function TotpSection() {
                   value={confirmCode}
                   onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   placeholder="000000"
-                  className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                  className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors"
                   onKeyDown={(e) => e.key === "Enter" && !loading && handleConfirm()}
                 />
                 <Button variant="primary" size="sm" onClick={handleConfirm} disabled={confirmCode.length !== 6 || loading} isLoading={loading}>
@@ -442,7 +442,7 @@ function ConfigBackupSection() {
           <a
             href="/api/config/export"
             download="librefang-config.toml"
-            className="inline-flex items-center justify-center gap-2 rounded-xl font-bold transition-all duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.96] active:duration-100 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1 border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-brand/20 shadow-sm px-3 py-1.5 text-xs"
+            className="inline-flex items-center justify-center gap-2 rounded-xl font-bold transition-all duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.96] active:duration-100 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:ring-offset-1 border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-primary/20 shadow-sm px-3 py-1.5 text-xs"
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
             {t("settings.export_config_btn", "Download")}
@@ -963,7 +963,7 @@ function StorageSection() {
           <div className="flex items-center gap-1.5">
             <span className="text-text-dim">{t("settings.storage_connection", { defaultValue: "Connected" })}:</span>
             {statusQuery.isLoading ? (
-              <Loader2 className="h-3 w-3 animate-spin text-brand" />
+              <Loader2 className="h-3 w-3 animate-spin text-primary" />
             ) : (
               <Badge variant={status?.connected ? "success" : "error"}>
                 {status?.connected ? t("common.yes", "Yes") : t("common.no", "No")}

@@ -73,7 +73,7 @@ export function TomlViewer({
                 type="button"
                 onClick={() => setTab("toml")}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
-                  tab === "toml" ? "bg-brand text-white" : "text-text-dim hover:text-text"
+                  tab === "toml" ? "bg-primary text-white" : "text-text-dim hover:text-text"
                 }`}
               >
                 {t("toml_viewer.tab_toml")}
@@ -82,7 +82,7 @@ export function TomlViewer({
                 type="button"
                 onClick={() => setTab("markdown")}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
-                  tab === "markdown" ? "bg-brand text-white" : "text-text-dim hover:text-text"
+                  tab === "markdown" ? "bg-primary text-white" : "text-text-dim hover:text-text"
                 }`}
               >
                 {t("toml_viewer.tab_markdown")}
@@ -98,7 +98,7 @@ export function TomlViewer({
               type="button"
               onClick={onCopy}
               disabled={!body}
-              className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
+              className="text-[10px] font-bold text-text-dim hover:text-primary disabled:opacity-40"
               title={t("toml_viewer.copy")}
               aria-label={t("toml_viewer.copy")}
             >
@@ -108,7 +108,7 @@ export function TomlViewer({
               type="button"
               onClick={onDownload}
               disabled={!body}
-              className="text-[10px] font-bold text-text-dim hover:text-brand disabled:opacity-40"
+              className="text-[10px] font-bold text-text-dim hover:text-primary disabled:opacity-40"
               title={t("toml_viewer.download")}
               aria-label={t("toml_viewer.download")}
             >

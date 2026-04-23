@@ -70,8 +70,8 @@ export function NetworkPage() {
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
                   {t("network.node_id")}
                 </span>
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center">
-                  <Hash className="w-4 h-4 text-brand" />
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                  <Hash className="w-4 h-4 text-primary" />
                 </div>
               </div>
               <p className="text-sm font-mono font-bold mt-2 truncate" title={status?.node_id}>
@@ -115,7 +115,7 @@ export function NetworkPage() {
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded-xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center">
-                          <Server className="w-5 h-5 text-brand" />
+                          <Server className="w-5 h-5 text-primary" />
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-bold truncate">{peer.name || peer.id}</p>

@@ -75,7 +75,7 @@ function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unk
       {entries.map(([label, m]) => (
         <span key={label} className="text-[9px] text-text-dim/70 font-mono">
           <span className="text-text-dim/40">{label}:</span>{" "}
-          <span className="text-brand/80">{String(m.value)}</span>
+          <span className="text-primary/80">{String(m.value)}</span>
         </span>
       ))}
     </div>
@@ -134,7 +134,7 @@ function HandDetailPanel({
       ? "bg-warning/15 text-warning"
       : "bg-success/15 text-success"
     : hand.requirements_met
-      ? "bg-brand/10 text-brand"
+      ? "bg-primary/10 text-primary"
       : "bg-warning/10 text-warning";
 
   return (
@@ -203,7 +203,7 @@ function HandDetailPanel({
             <button
               type="button"
               onClick={() => setShowManifest(true)}
-              className="text-[11px] font-bold text-text-dim hover:text-brand inline-flex items-center gap-1"
+              className="text-[11px] font-bold text-text-dim hover:text-primary inline-flex items-center gap-1"
             >
               <FileText className="w-3.5 h-3.5" />
               {t("hands.view_manifest")}
@@ -216,7 +216,7 @@ function HandDetailPanel({
                   <button
                     onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
                     disabled={isPaused}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-brand hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-primary hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
                   >
                     <MessageCircle className="w-4 h-4" />
                     {t("chat.title")}
@@ -254,7 +254,7 @@ function HandDetailPanel({
                   <button
                     onClick={() => onActivate(hand.id)}
                     disabled={isPending || !hand.requirements_met}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-brand hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-main disabled:text-text-dim"
+                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white bg-primary hover:brightness-110 shadow-md shadow-brand/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-main disabled:text-text-dim"
                   >
                     {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
                     {!hand.requirements_met ? t("hands.missing_req") : t("hands.activate")}
@@ -280,7 +280,7 @@ function HandDetailPanel({
                 {metricEntries.map(([label, m]) => (
                   <div key={label} className="p-3 rounded-xl bg-main/50 border border-border-subtle/50">
                     <p className="text-[9px] uppercase tracking-wider font-bold text-text-dim/50 truncate mb-1">{label}</p>
-                    <p className="text-base font-black text-brand tabular-nums truncate">{String(m.value)}</p>
+                    <p className="text-base font-black text-primary tabular-nums truncate">{String(m.value)}</p>
                   </div>
                 ))}
               </div>
@@ -371,7 +371,7 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
                 value={values[r.key!] ?? ""}
                 onChange={(e) => { setValues(prev => ({ ...prev, [r.key!]: e.target.value })); }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleSave(r.key!); } }}
-                className={`flex-1 px-3 py-2 rounded-lg border text-xs font-mono outline-none focus:border-brand placeholder:text-text-dim/30 transition-colors ${
+                className={`flex-1 px-3 py-2 rounded-lg border text-xs font-mono outline-none focus:border-primary placeholder:text-text-dim/30 transition-colors ${
                   r.satisfied ? "border-success/30 bg-success/5 focus:border-success/60" : "border-border-subtle bg-surface"
                 }`}
               />
@@ -379,7 +379,7 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
                 type="button"
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSave(r.key!); }}
                 disabled={!values[r.key!]?.trim() || saving === r.key}
-                className="px-3 py-2 rounded-lg text-xs font-bold text-white bg-brand hover:brightness-110 shadow-sm shadow-brand/20 transition-all disabled:opacity-40 disabled:shadow-none"
+                className="px-3 py-2 rounded-lg text-xs font-bold text-white bg-primary hover:brightness-110 shadow-sm shadow-brand/20 transition-all disabled:opacity-40 disabled:shadow-none"
               >
                 {saving === r.key ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("common.save")}
               </button>
@@ -431,13 +431,13 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
               onClick={() => setActiveTab(tab.id)}
               className={`shrink-0 flex items-baseline gap-1.5 px-3 py-3 -mb-px border-b-2 text-xs font-bold leading-none whitespace-nowrap transition-colors ${
                 isActive
-                  ? "border-brand text-brand"
+                  ? "border-primary text-primary"
                   : "border-transparent text-text-dim/60 hover:text-text"
               }`}
             >
               <span>{tab.label}</span>
               {tab.count !== undefined && tab.count > 0 && (
-                <span className={`text-[10px] font-black tabular-nums ${isActive ? "text-brand/70" : "text-text-dim/40"}`}>
+                <span className={`text-[10px] font-black tabular-nums ${isActive ? "text-primary/70" : "text-text-dim/40"}`}>
                   {tab.count}
                 </span>
               )}
@@ -455,7 +455,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
               <div key={a.role} className="rounded-xl border border-border-subtle bg-main/40 overflow-hidden">
                 <div className="flex items-center gap-3 p-3">
                   <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-black shrink-0 ${
-                    a.coordinator ? "bg-brand/15 text-brand" : "bg-surface text-text-dim/60"
+                    a.coordinator ? "bg-primary/15 text-primary" : "bg-surface text-text-dim/60"
                   }`}>
                     {a.role.charAt(0).toUpperCase()}
                   </div>
@@ -474,7 +474,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
                 {a.steps && a.steps.length > 0 && (
                   <div className="px-3 pb-3 flex flex-wrap gap-1">
                     {a.steps.map((s, i) => (
-                      <span key={i} className="text-[10px] px-2 py-0.5 rounded-md bg-brand/5 text-brand/80 font-semibold border border-brand/10">{s}</span>
+                      <span key={i} className="text-[10px] px-2 py-0.5 rounded-md bg-primary/5 text-primary/80 font-semibold border border-primary/10">{s}</span>
                     ))}
                   </div>
                 )}
@@ -635,7 +635,7 @@ function HandSettingsEditor({
                   value={current}
                   disabled={!canEdit || saveMutation.isPending}
                   onChange={(e) => setDraft(prev => ({ ...prev, [key]: e.target.value }))}
-                  className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-brand"
+                  className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-primary"
                 >
                   {!current && <option value="">—</option>}
                   {s.options!.map((opt) => (
@@ -665,7 +665,7 @@ function HandSettingsEditor({
           type="button"
           disabled={!canEdit || !dirty || saveMutation.isPending}
           onClick={handleSave}
-          className="px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-brand/90 transition-colors flex items-center gap-1.5"
+          className="px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors flex items-center gap-1.5"
         >
           {saveMutation.isPending && <Loader2 className="w-3 h-3 animate-spin" />}
           {t("hands.settings_save", { defaultValue: "Save settings" })}
@@ -766,7 +766,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
     }
   };
 
-  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand transition-colors";
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary transition-colors";
 
   if (isLoading) {
     return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
@@ -777,7 +777,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
       {!showCreate ? (
         <button
           onClick={() => setShowCreate(true)}
-          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand/40 transition-colors"
+          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-primary hover:border-primary/40 transition-colors"
         >
           <Plus className="w-3.5 h-3.5" />
           {t("hands.new_schedule", { defaultValue: "New schedule" })}
@@ -785,7 +785,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
       ) : (
         <form
           onSubmit={(e) => { e.preventDefault(); void handleCreate(); }}
-          className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5"
+          className="rounded-xl border border-primary/30 bg-primary/[0.02] p-3 space-y-2.5"
         >
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name", { defaultValue: "Name" })}</label>
@@ -818,19 +818,19 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
             <button
               type="button"
               onClick={() => setShowCronPicker(true)}
-              className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle bg-main hover:border-primary transition-colors text-left"
             >
               <code className="text-xs font-mono text-text-dim">
                 {cron}{cronTz && cronTz !== "UTC" ? ` · ${cronTz}` : ""}
               </code>
-              <span className="text-[10px] text-brand">{t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}</span>
+              <span className="text-[10px] text-primary">{t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}</span>
             </button>
           </div>
           <div className="flex gap-2">
             <button
               type="submit"
               disabled={!name.trim() || !message.trim() || createScheduleMut.isPending}
-              className="flex-1 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold hover:bg-brand/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="flex-1 px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-bold hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {createScheduleMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mx-auto" /> : t("common.create", { defaultValue: "Create" })}
             </button>
@@ -859,7 +859,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
 
           return (
             <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-primary/10 text-primary" : "bg-main text-text-dim/40"}`}>
                 <Activity className="w-4 h-4" />
               </div>
               <div className="min-w-0 flex-1">
@@ -971,7 +971,7 @@ const ActiveHandChip = React.memo(function ActiveHandChip({
         {!isPaused && (
           <button
             onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-            className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
+            className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
           >
             <MessageCircle className="w-3 h-3" />
             {t("chat.title")}
@@ -1057,7 +1057,7 @@ const HandCard = React.memo(function HandCard({
       : "border-success/40 bg-success/[0.04] hover:border-success/60 hover:shadow-sm"
     : blocked
       ? "border-border-subtle bg-surface opacity-80 hover:border-warning/30"
-      : "border-border-subtle bg-surface hover:border-brand/40 hover:shadow-md";
+      : "border-border-subtle bg-surface hover:border-primary/40 hover:shadow-md";
 
   const iconClasses = isActive
     ? isPaused || isDegraded
@@ -1065,7 +1065,7 @@ const HandCard = React.memo(function HandCard({
       : "bg-success/15 text-success"
     : blocked
       ? "bg-warning/10 text-warning/70"
-      : "bg-brand/10 text-brand";
+      : "bg-primary/10 text-primary";
 
   return (
     <div
@@ -1163,7 +1163,7 @@ const HandCard = React.memo(function HandCard({
             {!isPaused && (
               <button
                 onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
-                className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
               >
                 <MessageCircle className="w-3.5 h-3.5" />
                 {t("chat.title")}
@@ -1185,7 +1185,7 @@ const HandCard = React.memo(function HandCard({
             className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${
               blocked
                 ? "text-text-dim/40 bg-main/50 cursor-not-allowed"
-                : "text-brand bg-brand/10 hover:bg-brand/20"
+                : "text-primary bg-primary/10 hover:bg-primary/20"
             } disabled:opacity-40`}
             title={blocked ? t("hands.missing_req") : t("hands.activate")}
           >
@@ -1451,7 +1451,7 @@ export function HandsPage() {
               onClick={() => setSelectedCategory("all")}
               className={`px-3 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
                 selectedCategory === "all"
-                  ? "bg-brand/15 text-brand border border-brand/30"
+                  ? "bg-primary/15 text-primary border border-primary/30"
                   : "text-text-dim/70 hover:text-text hover:bg-main border border-transparent"
               }`}
             >
@@ -1466,7 +1466,7 @@ export function HandsPage() {
                   onClick={() => setSelectedCategory(selectedCategory === cat ? "all" : cat)}
                   className={`px-3 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors ${
                     selectedCategory === cat
-                      ? "bg-brand/15 text-brand border border-brand/30"
+                      ? "bg-primary/15 text-primary border border-primary/30"
                       : "text-text-dim/70 hover:text-text hover:bg-main border border-transparent"
                   }`}
                 >
@@ -1497,7 +1497,7 @@ export function HandsPage() {
             (search || selectedCategory !== "all") && (
               <button
                 onClick={() => { setSearch(""); setSelectedCategory("all"); }}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-brand bg-brand/10 hover:bg-brand/20 transition-colors"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
               >
                 {t("hands.clear_filters")}
               </button>

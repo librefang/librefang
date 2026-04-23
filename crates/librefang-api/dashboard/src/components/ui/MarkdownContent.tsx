@@ -26,9 +26,9 @@ const defaultComponents: Record<string, ComponentType<any>> = {
   ),
   th: ({ children }: { children: ReactNode }) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
   td: ({ children }: { children: ReactNode }) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
-  blockquote: ({ children }: { children: ReactNode }) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-1.5">{children}</blockquote>,
+  blockquote: ({ children }: { children: ReactNode }) => <blockquote className="border-l-2 border-primary pl-3 italic text-text-dim mb-1.5">{children}</blockquote>,
   strong: ({ children }: { children: ReactNode }) => <strong className="font-bold">{children}</strong>,
-  a: ({ href, children }: { href?: string; children: ReactNode }) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+  a: ({ href, children }: { href?: string; children: ReactNode }) => <a href={href} className="text-primary underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
 // Stable default plugin array — never changes between renders

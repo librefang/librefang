@@ -13,8 +13,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-brand text-white hover:brightness-110 shadow-md shadow-brand/20 hover:shadow-lg hover:shadow-brand/30",
-  secondary: "border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-brand/20 shadow-sm",
+  primary: "bg-primary text-white hover:brightness-110 shadow-md shadow-brand/20 hover:shadow-lg hover:shadow-brand/30",
+  secondary: "border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-primary/20 shadow-sm",
   ghost: "bg-transparent text-text-dim hover:text-text-main hover:bg-main/30",
   danger: "bg-error text-white hover:brightness-110 shadow-md shadow-error/20",
   success: "bg-success text-white hover:brightness-110 shadow-md shadow-success/20",
@@ -50,7 +50,7 @@ export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
           inline-flex items-center justify-center gap-2 rounded-xl font-bold
           transition-colors duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]
           active:scale-[0.96] active:duration-100
-          focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1
+          focus:outline-none focus:ring-2 focus:ring-primary/30 focus:ring-offset-1
           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
           ${variantStyles[variant]}
           ${sizeStyles[size]}

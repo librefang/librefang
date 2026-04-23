@@ -1,10 +1,10 @@
-//! LibreFang Desktop — Native Tauri 2.0 wrapper for the LibreFang Agent OS.
+//! BossFang Desktop — Native Tauri 2.0 wrapper for the BossFang Agent OS.
 //!
 //! Boots the kernel + embedded API server, then opens a native window pointing
 //! at the WebUI. Includes system tray, single-instance enforcement, native OS
 //! notifications, global shortcuts, auto-start, and update checking.
 //!
-//! Supports remote server mode: connect to a running LibreFang instance instead
+//! Supports remote server mode: connect to a running BossFang instance instead
 //! of always starting a local one. Priority: CLI arg > env var > saved pref > connection screen.
 
 mod commands;
@@ -67,7 +67,7 @@ pub async fn forward_kernel_events(
                     ),
                     EventPayload::System(SystemEvent::KernelStopping) => (
                         "Kernel Stopping".to_string(),
-                        "LibreFang kernel is shutting down".to_string(),
+                        "BossFang kernel is shutting down".to_string(),
                     ),
                     EventPayload::System(SystemEvent::QuotaEnforced {
                         agent_id,
@@ -125,7 +125,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         )
         .init();
 
-    info!("Starting LibreFang Desktop...");
+    info!("Starting BossFang Desktop...");
 
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
@@ -163,9 +163,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             (url.clone(), None, true)
         }
         StartupMode::Local => {
-            let handle = server::start_server().expect("Failed to start LibreFang server");
+            let handle = server::start_server().expect("Failed to start BossFang server");
             let port = handle.port;
-            info!("LibreFang server running on port {port}");
+            info!("BossFang server running on port {port}");
             (format!("http://127.0.0.1:{port}"), Some(handle), false)
         }
         StartupMode::ConnectionScreen => {
@@ -275,7 +275,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     "main",
                     WebviewUrl::App("connection.html".into()),
                 )
-                .title("LibreFang — Connect")
+                .title("BossFang — Connect")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(800.0, 600.0)
                 .center()
@@ -288,7 +288,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     "main",
                     WebviewUrl::External(initial_url.parse().expect("Invalid server URL")),
                 )
-                .title("LibreFang")
+                .title("BossFang")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(800.0, 600.0)
                 .center()
@@ -319,7 +319,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             #[cfg(desktop)]
             updater::spawn_startup_check(app.handle().clone());
 
-            info!("LibreFang Desktop window created");
+            info!("BossFang Desktop window created");
             Ok(())
         })
         .on_window_event(|window, event| {

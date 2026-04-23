@@ -21,7 +21,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
     <>
       <header className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">{icon}</div>
+          <div className="p-1.5 rounded-lg bg-primary/10 text-primary shrink-0">{icon}</div>
           <div className="min-w-0">
             <h1 className="text-base font-extrabold tracking-tight">{title}</h1>
             {subtitle && <p className="text-[11px] text-text-dim hidden sm:block">{subtitle}</p>}
@@ -32,7 +32,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
           {helpText && (
             <button
               onClick={() => setShowHelp(true)}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-brand hover:border-brand/30 transition-colors duration-200"
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-border-subtle bg-surface text-text-dim hover:text-primary hover:border-primary/30 transition-colors duration-200"
               title={t("common.help", { defaultValue: "Help" })}
               aria-label={t("common.help", { defaultValue: "Help" })}
             >
@@ -41,7 +41,7 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
           )}
           {onRefresh && (
             <button
-              className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-colors duration-200"
+              className="flex h-8 items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 text-xs font-bold text-text-dim hover:text-primary hover:border-primary/30 hover:shadow-sm transition-colors duration-200"
               onClick={onRefresh}
               aria-label={t("common.refresh")}
               aria-busy={isFetching}

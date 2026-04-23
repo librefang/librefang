@@ -318,23 +318,23 @@ export function WorkflowsPage() {
           onClick={() => setActiveTab("workflows")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "workflows"
-              ? "border-brand text-brand"
-              : "border-transparent text-text-dim hover:text-brand/70"
+              ? "border-primary text-primary"
+              : "border-transparent text-text-dim hover:text-primary/70"
           }`}
         >
           {t("workflows.my_workflows")}
-          {workflows.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{workflows.length}</span>}
+          {workflows.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">{workflows.length}</span>}
         </button>
         <button
           onClick={() => setActiveTab("templates")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "templates"
-              ? "border-brand text-brand"
-              : "border-transparent text-text-dim hover:text-brand/70"
+              ? "border-primary text-primary"
+              : "border-transparent text-text-dim hover:text-primary/70"
           }`}
         >
           {t("workflows.template_library")}
-          {apiTemplates.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{apiTemplates.length}</span>}
+          {apiTemplates.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">{apiTemplates.length}</span>}
         </button>
       </div>
 
@@ -347,18 +347,18 @@ export function WorkflowsPage() {
               const stepCount = tmpl.steps?.length ?? 0;
               return (
                 <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
-                  className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
+                  className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-primary/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
                   <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
-                      <Icon className="w-5 h-5 text-brand" />
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 group-hover:bg-primary/20 transition-colors">
+                      <Icon className="w-5 h-5 text-primary" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
+                      <p className="text-sm font-bold truncate group-hover:text-primary transition-colors">{tmplName(tmpl)}</p>
                       <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
                       <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
                         {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
                         {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
-                        <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+                        <ArrowRight className="w-3 h-3 text-primary/50 group-hover:translate-x-0.5 transition-transform" />
                       </div>
                     </div>
                   </div>
@@ -403,12 +403,12 @@ export function WorkflowsPage() {
                 onDoubleClick={() => openWorkflow(wf.id)}
                 className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-colors ${
                   selectedWorkflowId === wf.id
-                    ? "border-brand bg-brand/5 shadow-sm"
-                    : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
+                    ? "border-primary bg-primary/5 shadow-sm"
+                    : "border-border-subtle bg-surface hover:border-primary/30 hover:shadow-sm"
                 }`}>
                 {/* Icon */}
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                  selectedWorkflowId === wf.id ? "bg-brand text-white" : "bg-main text-brand"
+                  selectedWorkflowId === wf.id ? "bg-primary text-white" : "bg-main text-primary"
                 }`}>
                   <Layers className="w-5 h-5" />
                 </div>
@@ -443,12 +443,12 @@ export function WorkflowsPage() {
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                   <button onClick={() => { setScheduleWorkflowId(wf.id); }}
-                    className={`p-2 rounded-lg transition-colors ${getWorkflowSchedule(wf) ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                    className={`p-2 rounded-lg transition-colors ${getWorkflowSchedule(wf) ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-primary hover:bg-primary/10"}`}
                     title={t("nav.scheduler")}>
                     <Calendar className="w-3.5 h-3.5" />
                   </button>
                   <button onClick={() => openWorkflow(wf.id)}
-                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors"
+                    className="p-2 rounded-lg text-text-dim/40 hover:text-primary hover:bg-primary/10 transition-colors"
                     title={t("canvas.ctx_edit")}>
                     <ChevronRight className="w-4 h-4" />
                   </button>
@@ -476,7 +476,7 @@ export function WorkflowsPage() {
                 <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_workflow")}</h3>
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
                   placeholder={t("canvas.run_input_placeholder")} rows={4}
-                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm outline-none focus:border-brand resize-none" />
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm outline-none focus:border-primary resize-none" />
                 <div className="flex gap-2">
                   <Button variant="primary" className="flex-1" disabled={runMutation.isPending || dryRunMutation.isPending} onClick={handleRun}>
                     {runMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
@@ -620,7 +620,7 @@ export function WorkflowsPage() {
                           <button
                             className={`w-full flex items-center gap-3 p-2.5 rounded-xl border text-left transition-colors ${
                               isSelected
-                                ? "border-brand bg-brand/5"
+                                ? "border-primary bg-primary/5"
                                 : "border-border-subtle bg-main hover:bg-surface"
                             }`}
                             onClick={() => {
@@ -630,7 +630,7 @@ export function WorkflowsPage() {
                             <div className={`w-2 h-2 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success" :
                               state === "failed" ? "bg-error" :
-                              state === "running" ? "bg-brand animate-pulse" : "bg-text-dim/30"
+                              state === "running" ? "bg-primary animate-pulse" : "bg-text-dim/30"
                             }`} />
                             <div className="flex-1 min-w-0">
                               <p className="text-[10px] font-bold truncate">{run.workflow_name}</p>

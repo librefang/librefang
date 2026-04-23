@@ -1380,7 +1380,7 @@ export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail
   return get<ClawHubSkillDetail>(`/api/skillhub/skill/${encodeURIComponent(slug)}`);
 }
 
-// ── FangHub (official LibreFang registry skills) ──────
+// ── FangHub (official BossFang registry skills) ──────
 
 export interface FangHubSkill {
   name: string;

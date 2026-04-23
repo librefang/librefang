@@ -23,9 +23,9 @@ const mdComponents = {
   table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
   th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
   td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
-  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
+  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-primary pl-3 italic text-text-dim mb-2">{children}</blockquote>,
   strong: ({ children }: any) => <strong className="font-bold">{children}</strong>,
-  a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+  a: ({ href, children }: any) => <a href={href} className="text-primary underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
 export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: number }) {

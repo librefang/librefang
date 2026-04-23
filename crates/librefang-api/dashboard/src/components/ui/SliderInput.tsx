@@ -48,7 +48,7 @@ export function SliderInput({
             max={max}
             step={step}
             disabled={!enabled}
-            className="w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed"
+            className="w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-primary disabled:cursor-not-allowed"
           />
           {onToggle ? (
             <button
@@ -58,7 +58,7 @@ export function SliderInput({
               aria-label={label}
               onClick={() => onToggle(!enabled)}
               className={`relative w-8 h-[18px] rounded-full transition-colors ${
-                enabled ? "bg-brand" : "bg-border-subtle"
+                enabled ? "bg-primary" : "bg-border-subtle"
               }`}
             >
               <span

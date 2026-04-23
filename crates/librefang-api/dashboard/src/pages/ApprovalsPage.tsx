@@ -37,7 +37,7 @@ type PendingTarget = { kind: "item"; id: string } | { kind: "batch" } | null;
 function tabClass(_tab: Tab, isActive: boolean) {
   return `px-4 py-2 text-sm font-bold rounded-lg transition-colors ${
     isActive
-      ? "bg-brand/10 text-brand border border-brand/20"
+      ? "bg-primary/10 text-primary border border-primary/20"
       : "text-text-dim hover:text-text-main hover:bg-surface-hover border border-transparent"
   }`;
 }
@@ -129,7 +129,7 @@ function ModifyForm({
         onChange={(e) => setFeedback(e.target.value)}
         placeholder={t("approvals.modifyPlaceholder")}
         rows={3}
-        className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors resize-none"
+        className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors resize-none"
       />
       <div className="flex gap-2 justify-end">
         <Button variant="ghost" size="sm" onClick={onDone}>
@@ -391,7 +391,7 @@ export function ApprovalsPage() {
                   type="checkbox"
                   checked={selected.size === pendingApprovals.length && pendingApprovals.length > 0}
                   onChange={toggleSelectAll}
-                  className="h-4 w-4 rounded border-border-subtle text-brand focus:ring-brand/30 accent-[var(--color-brand)]"
+                  className="h-4 w-4 rounded border-border-subtle text-primary focus:ring-primary/30 accent-[var(--color-brand)]"
                 />
                 {t("approvals.selectAll")}
               </label>
@@ -451,7 +451,7 @@ export function ApprovalsPage() {
                             type="checkbox"
                             checked={selected.has(a.id)}
                             onChange={() => toggleSelect(a.id)}
-                            className="h-4 w-4 rounded border-border-subtle text-brand focus:ring-brand/30 shrink-0 accent-[var(--color-brand)]"
+                            className="h-4 w-4 rounded border-border-subtle text-primary focus:ring-primary/30 shrink-0 accent-[var(--color-brand)]"
                           />
                         )}
                         <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${statusIconBg(a.status)}`}>
@@ -494,7 +494,7 @@ export function ApprovalsPage() {
                           value={totpInput}
                           onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
                           placeholder={t("approvals.totpPlaceholder", { defaultValue: "000000 / 0000-0000" })}
-                          className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                          className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors"
                           autoFocus
                           onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
                         />

@@ -53,14 +53,14 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
       >
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="h-8 w-8 rounded-xl bg-brand/10 flex items-center justify-center text-brand">
+            <div className="h-8 w-8 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
               <Keyboard className="h-4 w-4" />
             </div>
             <h2 id="shortcuts-help-title" className="text-sm font-black tracking-tight">Keyboard shortcuts</h2>
           </div>
           <button
             onClick={onClose}
-            className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
             aria-label={t("common.close")}
           >
             <X className="h-3.5 w-3.5" />

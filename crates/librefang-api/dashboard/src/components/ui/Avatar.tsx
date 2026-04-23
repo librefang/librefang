@@ -39,7 +39,7 @@ export const Avatar = memo(function Avatar({
       aria-label={fallback}
       className={`
         relative flex shrink-0 items-center justify-center
-        rounded-full bg-brand/10 text-brand font-black
+        rounded-full bg-primary/10 text-primary font-black
         overflow-hidden
         ${sizeStyles[size]}
         ${className}

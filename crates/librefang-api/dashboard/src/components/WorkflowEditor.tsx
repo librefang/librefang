@@ -106,11 +106,11 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
               </button>
             </>
           ) : (
-            <button onClick={() => setShowClearConfirm(true)} className="px-4 py-2 rounded-xl border border-border-subtle text-sm font-bold text-text-dim hover:text-brand transition-colors">
+            <button onClick={() => setShowClearConfirm(true)} className="px-4 py-2 rounded-xl border border-border-subtle text-sm font-bold text-text-dim hover:text-primary transition-colors">
               {t("common.clear")}
             </button>
           )}
-          <button onClick={() => onSave?.(nodes, edges)} className="px-8 py-2 rounded-xl bg-brand text-white text-sm font-black shadow-lg shadow-brand/20 hover:opacity-90 transition-opacity">
+          <button onClick={() => onSave?.(nodes, edges)} className="px-8 py-2 rounded-xl bg-primary text-white text-sm font-black shadow-lg shadow-brand/20 hover:opacity-90 transition-opacity">
             {t("common.save")}
           </button>
         </div>
@@ -121,23 +121,23 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
           <h3 className="text-[10px] font-black uppercase text-text-dim/60 mb-6">{t("canvas.node_library")}</h3>
           <div className="space-y-6">
             <section>
-              <p className="text-[10px] font-bold text-brand uppercase mb-3">{t("canvas.triggers")}</p>
+              <p className="text-[10px] font-bold text-primary uppercase mb-3">{t("canvas.triggers")}</p>
               <div className="grid gap-2">
                 {triggerTypes.map(n => (
-                  <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-brand transition-colors text-left group">
+                  <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-primary transition-colors text-left group">
                     <div className="h-8 w-8 rounded-lg flex items-center justify-center text-white text-xs font-black shadow-sm" style={{ backgroundColor: n.color }}>{n.icon}</div>
-                    <span className="text-xs font-bold group-hover:text-brand">{t(`canvas.nodes.${n.type}`)}</span>
+                    <span className="text-xs font-bold group-hover:text-primary">{t(`canvas.nodes.${n.type}`)}</span>
                   </button>
                 ))}
               </div>
             </section>
             <section>
-              <p className="text-[10px] font-bold text-brand uppercase mb-3">{t("canvas.logic_actions")}</p>
+              <p className="text-[10px] font-bold text-primary uppercase mb-3">{t("canvas.logic_actions")}</p>
               <div className="grid gap-2">
                 {logicTypes.map(n => (
-                  <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-brand transition-colors text-left group">
+                  <button key={n.type} onClick={() => addNode(n.type)} className="flex items-center gap-3 p-3 rounded-xl border border-border-subtle bg-main/50 hover:border-primary transition-colors text-left group">
                     <div className="h-8 w-8 rounded-lg flex items-center justify-center text-white text-xs font-black shadow-sm" style={{ backgroundColor: n.color }}>{n.icon}</div>
-                    <span className="text-xs font-bold group-hover:text-brand">{t(`canvas.nodes.${n.type}`)}</span>
+                    <span className="text-xs font-bold group-hover:text-primary">{t(`canvas.nodes.${n.type}`)}</span>
                   </button>
                 ))}
               </div>

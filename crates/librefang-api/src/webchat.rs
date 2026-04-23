@@ -27,7 +27,7 @@ const LOCALE_EN: &str = include_str!("../static/locales/en.json");
 const LOCALE_ZH_CN: &str = include_str!("../static/locales/zh-CN.json");
 const LOCALE_JA: &str = include_str!("../static/locales/ja.json");
 
-/// GET /logo.png — Serve the LibreFang logo.
+/// GET /logo.png — Serve the BossFang logo.
 pub async fn logo_png() -> impl IntoResponse {
     (
         [
@@ -38,7 +38,7 @@ pub async fn logo_png() -> impl IntoResponse {
     )
 }
 
-/// GET /favicon.ico — Serve the LibreFang favicon.
+/// GET /favicon.ico — Serve the BossFang favicon.
 pub async fn favicon_ico() -> impl IntoResponse {
     (
         [

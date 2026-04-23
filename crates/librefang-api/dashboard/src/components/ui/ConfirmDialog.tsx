@@ -62,7 +62,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   const isDestructive = tone === "destructive";
   const confirmBtnClass = isDestructive
     ? "bg-error text-white hover:bg-error/90 shadow-lg shadow-error/20"
-    : "bg-brand text-white hover:bg-brand/90 shadow-lg shadow-brand/20";
+    : "bg-primary text-white hover:bg-primary/90 shadow-lg shadow-brand/20";
 
   return (
     <div
@@ -80,7 +80,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
       >
         <button
           onClick={onClose}
-          className="absolute right-3 top-3 h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+          className="absolute right-3 top-3 h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
           aria-label={t("common.close", { defaultValue: "Close" })}
         >
           <X className="h-3.5 w-3.5" />
@@ -88,7 +88,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
         <div className="flex items-start gap-4 p-5 pr-12">
           <div
             className={`h-10 w-10 shrink-0 rounded-xl flex items-center justify-center ${
-              isDestructive ? "bg-error/10 text-error" : "bg-brand/10 text-brand"
+              isDestructive ? "bg-error/10 text-error" : "bg-primary/10 text-primary"
             }`}
           >
             <AlertTriangle className="h-5 w-5" />

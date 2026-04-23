@@ -1,11 +1,11 @@
 {
-  "name": "LibreFang Dashboard",
-  "short_name": "LibreFang",
+  "name": "BossFang Dashboard",
+  "short_name": "BossFang",
   "description": "Autonomous Agent Operating System Dashboard",
   "start_url": "/dashboard/#/overview",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#0284c7",
+  "background_color": "#0B0F14",
+  "theme_color": "#0B0F14",
   "orientation": "any",
   "icons": [
     {

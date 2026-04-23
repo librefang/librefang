@@ -6,7 +6,7 @@ import { CheckCircle, XCircle, AlertCircle, X } from "lucide-react";
 const TOAST_STYLES: Record<"success" | "error" | "info", string> = {
   success: "border-success/30 bg-success/10 text-success",
   error: "border-error/30 bg-error/10 text-error",
-  info: "border-brand/30 bg-brand/10 text-brand",
+  info: "border-primary/30 bg-primary/10 text-primary",
 };
 
 const TOAST_ICONS: Record<"success" | "error" | "info", React.ReactNode> = {

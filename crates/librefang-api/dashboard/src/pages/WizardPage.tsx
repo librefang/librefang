@@ -187,7 +187,7 @@ export function WizardPage() {
   return (
     <div className={containerClass}>
       <div className="flex flex-col items-center mb-12">
-        <div className="h-16 w-16 rounded-3xl bg-brand flex items-center justify-center text-white shadow-2xl shadow-brand/40 mb-6">
+        <div className="h-16 w-16 rounded-3xl bg-primary flex items-center justify-center text-white shadow-2xl shadow-brand/40 mb-6">
           <Zap className="h-10 w-10" />
         </div>
         <h1 className="text-4xl font-black tracking-tight mb-2">{t("wizard.welcome")}</h1>
@@ -198,10 +198,10 @@ export function WizardPage() {
         <div className="flex justify-between items-center mb-8">
           {[1, 2, 3, 4].map((s) => (
             <div key={s} className="flex items-center gap-2 flex-1 last:flex-none">
-              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-colors ${step >= s ? "bg-brand text-white" : "bg-main text-text-dim border border-border-subtle"}`}>
+              <div className={`h-8 w-8 rounded-full flex items-center justify-center text-xs font-black transition-colors ${step >= s ? "bg-primary text-white" : "bg-main text-text-dim border border-border-subtle"}`}>
                 {step > s ? <CheckCircle2 className="h-4 w-4" /> : s}
               </div>
-              {s < 4 && <div className={`h-1 flex-1 rounded-full ${step > s ? "bg-brand" : "bg-border-subtle"}`} />}
+              {s < 4 && <div className={`h-1 flex-1 rounded-full ${step > s ? "bg-primary" : "bg-border-subtle"}`} />}
             </div>
           ))}
         </div>
@@ -213,7 +213,7 @@ export function WizardPage() {
 
             {providersQuery.isLoading ? (
               <div className="flex items-center justify-center py-12">
-                <Loader2 className="h-6 w-6 animate-spin text-brand" />
+                <Loader2 className="h-6 w-6 animate-spin text-primary" />
               </div>
             ) : (
               <div className="space-y-2">
@@ -233,7 +233,7 @@ export function WizardPage() {
                           setStep(2);
                         }
                       }}
-                      className={`w-full flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? "border-brand bg-brand/5" : "border-border-subtle bg-surface hover:border-brand/30"}`}
+                      className={`w-full flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? "border-primary bg-primary/5" : "border-border-subtle bg-surface hover:border-primary/30"}`}
                     >
                       <div className="flex flex-col">
                         <span className="text-sm font-bold text-text-main">{p.display_name || p.id}</span>
@@ -330,18 +330,18 @@ export function WizardPage() {
         {step === 3 && (
           <div className="animate-in fade-in slide-in-from-bottom-4">
             <div className="flex items-center gap-3 mb-2">
-              <div className="h-9 w-9 rounded-xl bg-brand/10 flex items-center justify-center">
-                <Database className="h-5 w-5 text-brand" />
+              <div className="h-9 w-9 rounded-xl bg-primary/10 flex items-center justify-center">
+                <Database className="h-5 w-5 text-primary" />
               </div>
               <h2 className="text-2xl font-black">{t("wizard.storage_title", { defaultValue: "Configure Storage" })}</h2>
             </div>
             <p className="text-text-dim text-sm mb-6">
-              {t("wizard.storage_desc", { defaultValue: "Choose where LibreFang stores agent memory, audit logs, and session data. Embedded is the easiest option — no extra setup needed." })}
+              {t("wizard.storage_desc", { defaultValue: "Choose where BossFang stores agent memory, audit logs, and session data. Embedded is the easiest option — no extra setup needed." })}
             </p>
 
             {storageConfigQuery.isLoading ? (
               <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-5 w-5 animate-spin text-brand" />
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
               </div>
             ) : (
               <div className="space-y-3">
@@ -352,7 +352,7 @@ export function WizardPage() {
                       key={kind}
                       type="button"
                       onClick={() => { setStorageBackend(kind); }}
-                      className={`rounded-xl border px-4 py-3 text-left transition-colors ${storageBackend === kind ? "border-brand bg-brand/5" : "border-border-subtle bg-surface hover:border-brand/30"}`}
+                      className={`rounded-xl border px-4 py-3 text-left transition-colors ${storageBackend === kind ? "border-primary bg-primary/5" : "border-border-subtle bg-surface hover:border-primary/30"}`}
                     >
                       <p className="text-sm font-bold text-text-main capitalize">{kind}</p>
                       <p className="text-[11px] text-text-dim mt-0.5">

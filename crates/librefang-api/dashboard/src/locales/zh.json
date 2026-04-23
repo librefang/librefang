@@ -147,7 +147,7 @@
     "unknown": "未知"
   },
   "overview": {
-    "welcome": "欢迎使用 LibreFang",
+    "welcome": "欢迎使用 BossFang",
     "description": "管理智能体、工作流和多渠道集成。",
     "system_overview": "系统概览",
     "operational": "运行正常",
@@ -2027,7 +2027,7 @@
     "totpLabel": "TOTP"
   },
   "wizard": {
-    "welcome": "欢迎使用 LibreFang",
+    "welcome": "欢迎使用 BossFang",
     "subtitle": "连接一个模型供应商后即可开始聊天、编程和编排 Agent。",
     "step_1": "第一步",
     "connect_provider": "连接模型供应商",
@@ -2051,9 +2051,9 @@
     "step_3_hint": "入门 Agent 使用均衡模型与安全默认配置。之后可在「代理」与「设置」页面自定义。",
     "summary_provider": "供应商",
     "summary_status": "状态",
-    "finish_action": "启动 LibreFang",
+    "finish_action": "启动 BossFang",
     "finalize_failed": "初始化失败：{{message}}",
-    "done_title": "LibreFang 已就绪",
+    "done_title": "BossFang 已就绪",
     "done_desc": "默认供应商已配置，入门 Agent 已创建。现在可以开始聊天或进入控制台。",
     "go_overview": "进入总览",
     "start_chat": "开始聊天",

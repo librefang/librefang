@@ -91,7 +91,7 @@ export function A2APage() {
         actions={
           <button
             onClick={() => setShowDiscover((v) => !v)}
-            className="flex h-9 items-center gap-2 rounded-xl border border-brand/30 bg-brand/10 px-4 text-sm font-bold text-brand hover:bg-brand/20 transition-colors"
+            className="flex h-9 items-center gap-2 rounded-xl border border-primary/30 bg-primary/10 px-4 text-sm font-bold text-primary hover:bg-primary/20 transition-colors"
           >
             <Search className="h-3.5 w-3.5" />
             {t("a2a.discover")}
@@ -109,13 +109,13 @@ export function A2APage() {
               value={discoverUrl}
               onChange={(e) => setDiscoverUrl(e.target.value)}
               placeholder={t("a2a.discover_placeholder")}
-              className="flex-1 rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none"
+              className="flex-1 rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none"
               onKeyDown={(e) => e.key === "Enter" && handleDiscover()}
             />
             <button
               onClick={handleDiscover}
               disabled={discoverMutation.isPending || !discoverUrl.trim()}
-              className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
+              className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-bold text-white hover:bg-primary/90 disabled:opacity-40 transition-colors"
             >
               {discoverMutation.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -150,7 +150,7 @@ export function A2APage() {
                 action={
                   <button
                     onClick={() => setShowDiscover(true)}
-                    className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 transition-colors"
+                    className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-bold text-white hover:bg-primary/90 transition-colors"
                   >
                     <Search className="h-4 w-4" />
                     {t("a2a.discover")}
@@ -193,7 +193,7 @@ export function A2APage() {
                     <div className="mt-3 flex justify-end">
                       <button
                         onClick={() => setTaskAgent(agent)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-brand hover:bg-brand/10 transition-colors"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-primary hover:bg-primary/10 transition-colors"
                       >
                         <Send className="h-3 w-3" />
                         {t("a2a.send_task")}
@@ -212,14 +212,14 @@ export function A2APage() {
                 <Card padding="lg">
                   <h3 className="text-lg font-black mb-1">{t("a2a.send_task")}</h3>
                   <p className="text-xs text-text-dim mb-4">
-                    {t("a2a.send_to")} <span className="font-bold text-brand">{taskAgent.name || taskAgent.url}</span>
+                    {t("a2a.send_to")} <span className="font-bold text-primary">{taskAgent.name || taskAgent.url}</span>
                   </p>
                   <textarea
                     value={taskMessage}
                     onChange={(e) => setTaskMessage(e.target.value)}
                     placeholder={t("a2a.task_placeholder")}
                     rows={4}
-                    className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none"
+                    className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none resize-none"
                   />
                   <div className="flex justify-end gap-3 mt-4">
                     <button
@@ -231,7 +231,7 @@ export function A2APage() {
                     <button
                       onClick={handleSendTask}
                       disabled={isSending || !taskMessage.trim()}
-                      className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
+                      className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2 text-sm font-bold text-white hover:bg-primary/90 disabled:opacity-40 transition-colors"
                     >
                       {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                       {t("a2a.send")}
@@ -256,7 +256,7 @@ export function A2APage() {
                         ) : task.status === "failed" ? (
                           <XCircle className="w-4 h-4 text-error" />
                         ) : (
-                          <Loader2 className="w-4 h-4 text-brand animate-spin" />
+                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
                         )}
                         <span className="text-xs sm:text-sm font-mono font-bold truncate">{task.id}</span>
                         <Badge
@@ -277,7 +277,7 @@ export function A2APage() {
                         )}
                         <button
                           onClick={() => task.id && refreshTaskStatus(task.id)}
-                          className="text-xs font-bold text-brand hover:text-brand/80 transition-colors"
+                          className="text-xs font-bold text-primary hover:text-primary/80 transition-colors"
                         >
                           {t("common.refresh")}
                         </button>

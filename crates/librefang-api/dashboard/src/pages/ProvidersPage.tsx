@@ -134,7 +134,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
         <select
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
-          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
         >
           <option value="">{t("providers.auto_select_model")}</option>
           {models.map(m => (
@@ -147,7 +147,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
           placeholder={t("providers.model_name_placeholder")}
-          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
         />
       )}
       <Button
@@ -308,16 +308,16 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      <Card hover padding="sm" className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
         <div className="flex items-center gap-3 w-full sm:w-auto">
           <button
             onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
-            className="shrink-0 text-text-dim hover:text-brand transition-colors"
+            className="shrink-0 text-text-dim hover:text-primary transition-colors"
           >
-            {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
+            {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
           </button>
 
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
             {getProviderIcon(p.id)}
           </div>
 
@@ -407,7 +407,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   // Grid view
   return (
-    <Card hover padding="none" className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+    <Card hover padding="none" className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
       {isCli && (
         <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
           <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
@@ -422,15 +422,15 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
-              className="shrink-0 text-text-dim hover:text-brand transition-colors"
+              className="shrink-0 text-text-dim hover:text-primary transition-colors"
             >
-              {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
+              {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-primary/20"}`}>
               {getProviderIcon(p.id)}
             </div>
             <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{p.display_name || p.id}</h2>
+              <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-primary"}`}>{p.display_name || p.id}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{p.id}</p>
             </div>
           </div>
@@ -447,7 +447,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
-              <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-brand"}`} />
+              <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-primary"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.models")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{p.model_count ?? 0}</p>
@@ -533,7 +533,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
             </Badge>
           ) : isConfigured ? (
-            <button onClick={() => onSetDefault(p.id)} className="inline-flex items-center gap-1 text-[10px] font-bold text-brand/70 hover:text-brand cursor-pointer transition-colors">
+            <button onClick={() => onSetDefault(p.id)} className="inline-flex items-center gap-1 text-[10px] font-bold text-primary/70 hover:text-primary cursor-pointer transition-colors">
               <Star className="w-3 h-3" />{t("providers.set_as_default")}
             </button>
           ) : null}
@@ -590,7 +590,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
       <div className="p-6 space-y-4">
         {/* Header info */}
         <div className="flex items-center gap-3">
-          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${isConfigured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
             {getProviderIcon(provider.id)}
           </div>
           <div className="flex-1">
@@ -878,7 +878,7 @@ function CreateProviderWizard({
             <button key={i} className="flex items-center gap-1 flex-1 group"
               onClick={() => { if (i < step) setStep(i); }} disabled={i > step}>
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors ${
-                i < step ? "bg-success text-white cursor-pointer" : i === step ? "bg-brand text-white" : "bg-main text-text-dim"
+                i < step ? "bg-success text-white cursor-pointer" : i === step ? "bg-primary text-white" : "bg-main text-text-dim"
               }`}>
                 {i < step ? <Check className="w-3 h-3" /> : i + 1}
               </div>
@@ -938,7 +938,7 @@ function CreateProviderWizard({
               <label className="flex items-center gap-3 cursor-pointer">
                 <button type="button" role="checkbox" aria-checked={keyRequired}
                   onClick={() => { setKeyRequired(!keyRequired); setDerivedOverridden(true); }}
-                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ${keyRequired ? "bg-brand" : "bg-main border border-border-subtle"}`}>
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ${keyRequired ? "bg-primary" : "bg-main border border-border-subtle"}`}>
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${keyRequired ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
                 <span className="text-xs font-bold text-text-main">{t("providers.wizard_key_required_label")}</span>
@@ -979,7 +979,7 @@ function CreateProviderWizard({
               </div>
             ))}
             <button type="button" onClick={() => setModels(prev => [...prev, { ...EMPTY_MODEL }])}
-              className="w-full py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand transition-colors flex items-center justify-center gap-1.5">
+              className="w-full py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-primary hover:border-primary transition-colors flex items-center justify-center gap-1.5">
               <Plus className="w-3.5 h-3.5" />
               {t("schema_form.add_item")}
             </button>
@@ -1247,10 +1247,10 @@ export function ProvidersPage() {
             <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>{configuredCount}</span>
           </button>
           <button onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"}`}>
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"}`}>
             <XCircle className="w-4 h-4" />
             {t("providers.unconfigured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-primary/20 text-primary" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
           </button>
         </div>
 
@@ -1281,7 +1281,7 @@ export function ProvidersPage() {
         <>
           <div className="flex items-center gap-2">
             <button onClick={handleSelectAll} className="flex items-center gap-2 text-xs font-bold text-text-dim hover:text-text-main transition-colors">
-              {allSelected ? <CheckSquare className="w-4 h-4 text-brand" /> : <Square className="w-4 h-4" />}
+              {allSelected ? <CheckSquare className="w-4 h-4 text-primary" /> : <Square className="w-4 h-4" />}
               {t("providers.select_all")}
             </button>
             {(search || filterStatus !== "all") && (
@@ -1326,7 +1326,7 @@ export function ProvidersPage() {
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
-              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
                 {getProviderIcon(config.provider.id)}
               </div>
               <div>
@@ -1343,7 +1343,7 @@ export function ProvidersPage() {
                 <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
                 <input type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
               </div>
             )}
 
@@ -1351,14 +1351,14 @@ export function ProvidersPage() {
               <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
             </div>
 
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
                 placeholder={t("providers.proxy_url_placeholder")}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
             </div>
 
             {config.error && (

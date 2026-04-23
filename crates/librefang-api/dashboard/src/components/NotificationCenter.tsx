@@ -59,7 +59,7 @@ export function NotificationCenter() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="relative flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+        className="relative flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors duration-200"
         aria-label={pendingCount > 0 ? `${t("approvals.pending_review", "Notifications")} (${pendingCount})` : t("approvals.pending_review", "Notifications")}
         aria-expanded={open}
         aria-haspopup="menu"
@@ -91,7 +91,7 @@ export function NotificationCenter() {
                     setOpen(false);
                     navigate({ to: "/approvals" });
                   }}
-                  className="text-xs text-brand hover:underline"
+                  className="text-xs text-primary hover:underline"
                 >
                   {t("common.viewAll", "View all")}
                 </button>
@@ -128,7 +128,7 @@ export function NotificationCenter() {
                         {item.agent_id && (
                           <button
                             onClick={() => goToAgent(item.agent_id!)}
-                            className="flex items-center gap-1 text-xs text-brand hover:underline mt-0.5"
+                            className="flex items-center gap-1 text-xs text-primary hover:underline mt-0.5"
                             title={t("approvals.goToAgent", "Open agent chat")}
                           >
                             <span className="truncate">{item.agent_name ?? item.agent_id}</span>

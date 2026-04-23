@@ -191,7 +191,7 @@ export function GoalsPage() {
   }), [goals]);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
-  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors";
+  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-primary outline-none transition-colors";
 
   const statusLabel = (status: string) => {
     if (status === "in_progress") return t("goals.in_progress");
@@ -216,8 +216,8 @@ export function GoalsPage() {
       ) : goals.length === 0 ? (
         <div className="flex flex-col gap-6">
           <div className="text-center py-8">
-            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-              <Target className="h-7 w-7 text-brand" />
+            <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
+              <Target className="h-7 w-7 text-primary" />
             </div>
             <h3 className="text-lg font-black tracking-tight mb-1">{t("goals.pick_template")}</h3>
             <p className="text-sm text-text-dim">{t("goals.pick_template_desc")}</p>
@@ -229,8 +229,8 @@ export function GoalsPage() {
               return (
                 <Card key={tpl.id} hover padding="lg" className="flex flex-col">
                   <div className="flex items-start gap-3 mb-3">
-                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                      <Icon className="w-5 h-5 text-brand" />
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                      <Icon className="w-5 h-5 text-primary" />
                     </div>
                     <div className="min-w-0">
                       <h4 className="text-sm font-black tracking-tight">{tpl.name}</h4>
@@ -265,7 +265,7 @@ export function GoalsPage() {
           {/* KPI row */}
           <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
-              { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
+              { label: t("goals.total"), value: stats.total, color: "text-primary", bg: "bg-primary/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Clock },
               { label: t("goals.in_progress"), value: stats.inProgress, color: "text-warning", bg: "bg-warning/10", icon: Play },
               { label: t("goals.completed"), value: stats.completed, color: "text-success", bg: "bg-success/10", icon: CheckCircle2 },
@@ -286,7 +286,7 @@ export function GoalsPage() {
           <Card padding="md">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-text-dim">{t("goals.overall_progress")}</span>
-              <span className="text-sm font-black text-brand">{stats.pct}%</span>
+              <span className="text-sm font-black text-primary">{stats.pct}%</span>
             </div>
             <div className="h-2.5 rounded-full bg-main overflow-hidden">
               <div
@@ -314,7 +314,7 @@ export function GoalsPage() {
           <div className="grid gap-6 lg:grid-cols-[320px_1fr] xl:grid-cols-[360px_1fr]">
             <Card padding="lg" hover>
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Plus className="w-4 h-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Plus className="w-4 h-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("goals.create_goal")}</h2>
               </div>
               <form className="flex flex-col gap-4" onSubmit={handleCreate}>
@@ -340,7 +340,7 @@ export function GoalsPage() {
                       ? <Play className="h-4 w-4 text-warning" />
                       : <Clock className="h-4 w-4 text-text-dim/40" />;
                   return (
-                    <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-colors" style={{ marginLeft: `${r.depth * 16}px` }}>
+                    <div key={r.goal.id} className="rounded-xl bg-main/40 border border-border-subtle hover:border-primary/30 transition-colors" style={{ marginLeft: `${r.depth * 16}px` }}>
                       {editingId === r.goal.id ? (
                         <div className="p-3 sm:p-4 flex flex-col gap-2">
                           <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
@@ -369,7 +369,7 @@ export function GoalsPage() {
                           <div className="flex items-center justify-between gap-2 sm:gap-3">
                             <div className="flex items-center gap-2 flex-1 min-w-0">
                               {r.hasChildren && (
-                                <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim hover:text-brand transition-colors shrink-0">
+                                <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim hover:text-primary transition-colors shrink-0">
                                   {expandedById[r.goal.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                                 </button>
                               )}
@@ -388,7 +388,7 @@ export function GoalsPage() {
                               </Badge>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
-                              <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors" title={t("common.edit")}>
+                              <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-primary/10 text-text-dim hover:text-primary transition-colors" title={t("common.edit")}>
                                 <Edit2 className="h-3.5 w-3.5" />
                               </button>
                               <button onClick={() => setConfirmDeleteId(r.goal.id)} className="p-1.5 rounded-lg hover:bg-error/10 text-text-dim hover:text-error transition-colors" title={t("common.delete")}>
@@ -406,7 +406,7 @@ export function GoalsPage() {
                               <div className="flex items-center gap-2">
                                 <div className="flex-1 h-1.5 rounded-full bg-main overflow-hidden">
                                   <div
-                                    className={`h-full rounded-full transition-all duration-500 ${status === "in_progress" ? "bg-warning" : "bg-brand"}`}
+                                    className={`h-full rounded-full transition-all duration-500 ${status === "in_progress" ? "bg-warning" : "bg-primary"}`}
                                     style={{ width: `${progress}%` }}
                                   />
                                 </div>

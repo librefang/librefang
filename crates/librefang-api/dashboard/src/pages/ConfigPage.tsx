@@ -84,7 +84,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="bg-brand/20 text-brand rounded-sm not-italic">{text.slice(idx, idx + query.length)}</mark>
+      <mark className="bg-primary/20 text-primary rounded-sm not-italic">{text.slice(idx, idx + query.length)}</mark>
       {text.slice(idx + query.length)}
     </>
   );
@@ -183,7 +183,7 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
         rows={Math.min(Math.max(text.split("\n").length, 3), 12)}
         spellCheck={false}
         className={`w-full px-3 py-2 rounded-xl border bg-main text-[11px] font-mono outline-none transition-colors resize-y ${
-          error ? "border-danger" : "border-border-subtle focus:border-brand"
+          error ? "border-danger" : "border-border-subtle focus:border-primary"
         }`}
       />
       {error && <p className="text-[10px] text-danger">{error}</p>}
@@ -207,7 +207,7 @@ function ConfigFieldInput({
 }) {
   const { t } = useTranslation();
   const inputClass =
-    "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
+    "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary transition-colors";
 
   if (fieldType === "boolean") {
     // Wrap in a fixed-height container so it aligns with other input rows
@@ -215,7 +215,7 @@ function ConfigFieldInput({
       <div className="flex items-center h-[30px]">
         <button
           onClick={() => onChange(!value)}
-          className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-brand" : "bg-border-subtle"}`}
+          className={`relative w-10 h-5 rounded-full transition-colors ${value ? "bg-primary" : "bg-border-subtle"}`}
         >
           <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "left-5" : "left-0.5"}`} />
         </button>
@@ -638,7 +638,7 @@ export function ConfigPage({ category }: { category: string }) {
                 disabled={isSearching}
                 className={`relative px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap flex items-center gap-1.5 ${
                   isActive
-                    ? "border-brand text-brand"
+                    ? "border-primary text-primary"
                     : isSearching
                       ? "border-transparent text-text-dim/40 cursor-not-allowed"
                       : "border-transparent text-text-dim hover:text-text hover:border-border-subtle"
@@ -668,7 +668,7 @@ export function ConfigPage({ category }: { category: string }) {
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           placeholder={t("config.search_placeholder", "Search fields…  (/)")}
-          className="w-full pl-9 pr-8 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-brand transition-colors"
+          className="w-full pl-9 pr-8 py-2 rounded-xl border border-border-subtle bg-surface text-xs outline-none focus:border-primary transition-colors"
         />
         {isSearching && (
           <button

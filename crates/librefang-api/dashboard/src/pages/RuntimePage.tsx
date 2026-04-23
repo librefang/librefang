@@ -158,7 +158,7 @@ export function RuntimePage() {
 
   const kpiCards = [
     { icon: Timer, label: t("runtime.system_uptime"), value: uptimeStr, color: "text-success", bg: "bg-success/10" },
-    { icon: Layers, label: t("runtime.active_agents"), value: `${status?.active_agent_count ?? 0} / ${status?.agent_count ?? 0}`, color: "text-brand", bg: "bg-brand/10" },
+    { icon: Layers, label: t("runtime.active_agents"), value: `${status?.active_agent_count ?? 0} / ${status?.agent_count ?? 0}`, color: "text-primary", bg: "bg-primary/10" },
     { icon: Monitor, label: t("runtime.sessions"), value: String(status?.session_count ?? 0), color: "text-purple-500", bg: "bg-purple-500/10" },
     { icon: HardDrive, label: t("runtime.memory_used"), value: status?.memory_used_mb ? `${status.memory_used_mb} MB` : "-", color: "text-warning", bg: "bg-warning/10" },
   ];
@@ -168,7 +168,7 @@ export function RuntimePage() {
   const channelsCount = snapshot?.channels?.length ?? 0;
   const configuredChannels = snapshot?.channels?.filter(c => c.configured).length ?? 0;
   const resourceSummary = [
-    { label: t("runtime.providers"), value: providersCount, sub: `${configuredProviders} ${t("status.configured").toLowerCase()}`, color: "text-brand" },
+    { label: t("runtime.providers"), value: providersCount, sub: `${configuredProviders} ${t("status.configured").toLowerCase()}`, color: "text-primary" },
     { label: t("runtime.channels"), value: channelsCount, sub: `${configuredChannels} ${t("status.configured").toLowerCase()}`, color: "text-purple-500" },
     { label: t("runtime.skills"), value: snapshot?.skillCount ?? 0, sub: t("status.active").toLowerCase(), color: "text-success" },
     { label: t("runtime.workflows"), value: snapshot?.workflowCount ?? 0, sub: t("common.config").toLowerCase(), color: "text-warning" },
@@ -177,7 +177,7 @@ export function RuntimePage() {
   const taskStats = taskStatus ? [
       { label: t("runtime.total_tasks"), value: taskStatus.total ?? 0, color: "text-text" },
       { label: t("runtime.pending_count"), value: taskStatus.pending ?? 0, color: "text-warning" },
-      { label: t("runtime.in_progress_count"), value: taskStatus.in_progress ?? 0, color: "text-brand" },
+      { label: t("runtime.in_progress_count"), value: taskStatus.in_progress ?? 0, color: "text-primary" },
       { label: t("runtime.completed_count"), value: taskStatus.completed ?? 0, color: "text-success" },
       { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
     ] : [];
@@ -250,11 +250,11 @@ export function RuntimePage() {
           <div className="grid gap-3 sm:gap-6 md:grid-cols-2 stagger-children">
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Cpu className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Cpu className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.engine")}</h2>
               </div>
               <div className="space-y-3">
-                <InfoRow icon={Activity} label={t("runtime.engine_version")} value={version?.version || status?.version || t("common.unknown")} mono color="font-bold text-brand" />
+                <InfoRow icon={Activity} label={t("runtime.engine_version")} value={version?.version || status?.version || t("common.unknown")} mono color="font-bold text-primary" />
                 <InfoRow icon={GitCommit} label={t("runtime.git_hash")} value={version?.git_sha ? version.git_sha.slice(0, 12) : "-"} mono />
                 <InfoRow icon={Calendar} label={t("runtime.build_time")} value={version?.build_date || "-"} />
                 <InfoRow icon={FileText} label={t("runtime.rust_version")} value={version?.rust_version || "-"} mono />
@@ -346,7 +346,7 @@ export function RuntimePage() {
             {/* Security Posture */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Shield className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Shield className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.security")}</h2>
                 {security?.total_features != null && (
                   <Badge variant="brand" className="ml-auto">{t("runtime.features_enabled", { count: security.total_features })}</Badge>
@@ -455,7 +455,7 @@ export function RuntimePage() {
                     const active = lane.active ?? 0;
                     const capacity = lane.capacity ?? 1;
                     const pct = capacity > 0 ? Math.min((active / capacity) * 100, 100) : 0;
-                    const color = pct >= 80 ? "bg-error" : pct >= 50 ? "bg-warning" : "bg-brand";
+                    const color = pct >= 80 ? "bg-error" : pct >= 50 ? "bg-warning" : "bg-primary";
                     return (
                       <div key={lane.lane ?? "default"}>
                         <div className="flex items-center justify-between mb-1">
@@ -482,7 +482,7 @@ export function RuntimePage() {
                         </Badge>
                         <span className="flex-1 truncate font-mono text-[10px]">{taskId?.slice(0, 12)}</span>
                         {task.status === "failed" && taskId && (
-                          <button onClick={() => retryTaskMutation.mutate(taskId)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
+                          <button onClick={() => retryTaskMutation.mutate(taskId)} className="text-primary hover:text-primary/80 text-[10px] font-bold">{t("runtime.retry")}</button>
                         )}
                         {(task.status === "pending" || task.status === "in_progress") && taskId && (
                           <button onClick={() => deleteTaskMutation.mutate(taskId)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
@@ -500,15 +500,15 @@ export function RuntimePage() {
                   <p className="text-[10px] font-bold uppercase tracking-wider text-text-dim/50 mb-2">{t("runtime.queue_config")}</p>
                   <div className="grid grid-cols-3 gap-2 text-center">
                     <div>
-                      <p className="text-lg font-black text-brand">{queueConfig.max_depth_per_agent ?? "-"}</p>
+                      <p className="text-lg font-black text-primary">{queueConfig.max_depth_per_agent ?? "-"}</p>
                       <p className="text-[9px] text-text-dim uppercase">{t("runtime.max_depth_agent")}</p>
                     </div>
                     <div>
-                      <p className="text-lg font-black text-brand">{queueConfig.max_depth_global ?? "-"}</p>
+                      <p className="text-lg font-black text-primary">{queueConfig.max_depth_global ?? "-"}</p>
                       <p className="text-[9px] text-text-dim uppercase">{t("runtime.max_depth_global")}</p>
                     </div>
                     <div>
-                      <p className="text-lg font-black text-brand">{queueConfig.task_ttl_secs ? `${queueConfig.task_ttl_secs}s` : "-"}</p>
+                      <p className="text-lg font-black text-primary">{queueConfig.task_ttl_secs ? `${queueConfig.task_ttl_secs}s` : "-"}</p>
                       <p className="text-[9px] text-text-dim uppercase">{t("runtime.task_ttl")}</p>
                     </div>
                   </div>
@@ -519,7 +519,7 @@ export function RuntimePage() {
             {/* Audit Trail */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Eye className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Eye className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.audit")}</h2>
                 {auditValid !== undefined && (
                   <Badge variant={auditValid ? "success" : "error"} className="ml-auto">
@@ -632,7 +632,7 @@ export function RuntimePage() {
             {/* Backup Management */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Archive className="h-4 w-4 text-brand" /></div>
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center"><Archive className="h-4 w-4 text-primary" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.backups")}</h2>
                 <div className="ml-auto">
                   <Button variant="secondary" size="sm" leftIcon={<Download className="w-3 h-3" />} isLoading={backupMutation.isPending} onClick={() => backupMutation.mutate()}>
@@ -664,7 +664,7 @@ export function RuntimePage() {
                             setBackupConfirm({ type: "restore", filename: b.filename });
                           }
                         }}
-                        className="text-brand hover:text-brand/80 text-[10px] font-bold shrink-0"
+                        className="text-primary hover:text-primary/80 text-[10px] font-bold shrink-0"
                         disabled={restoreMutation.isPending}
                       >
                         {t("runtime.restore")}

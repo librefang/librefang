@@ -41,7 +41,7 @@ function SortHeader({ field, active, dir, onToggle, children, className = "" }: 
       className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
       {children}
       {active
-        ? <ArrowUpDown className={`w-3 h-3 text-brand ${dir === "desc" ? "rotate-180" : ""}`} />
+        ? <ArrowUpDown className={`w-3 h-3 text-primary ${dir === "desc" ? "rotate-180" : ""}`} />
         : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
     </button>
   );
@@ -261,7 +261,7 @@ export function ModelsPage() {
 
 
 
-  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
+  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
 
   const providerSummary = (models: ModelItem[]) => {
     const tierSet = new Set<string>();
@@ -306,7 +306,7 @@ export function ModelsPage() {
           </button>
           <div className="flex items-center gap-1 shrink-0">
             <button onClick={() => setSettingsModel(m)}
-              className="p-1 rounded text-text-dim/40 hover:text-brand" title={t("models.settings_title")}><Settings className="w-3.5 h-3.5" /></button>
+              className="p-1 rounded text-text-dim/40 hover:text-primary" title={t("models.settings_title")}><Settings className="w-3.5 h-3.5" /></button>
             {showHidden ? (
               <button onClick={() => { unhideModelAction(modelKey(m)); addToast(t("models.model_unhidden"), "success"); }}
                 className="p-1 rounded text-text-dim/40 hover:text-success" title={t("models.unhide_model")}><Eye className="w-3.5 h-3.5" /></button>
@@ -391,7 +391,7 @@ export function ModelsPage() {
           <span className="text-center">{m.supports_thinking ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
           <span className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
             <button onClick={() => setSettingsModel(m)}
-              className="p-1 rounded text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors" title={t("models.settings_title")} aria-label={t("models.settings_title")}>
+              className="p-1 rounded text-text-dim/40 hover:text-primary hover:bg-primary/10 transition-colors" title={t("models.settings_title")} aria-label={t("models.settings_title")}>
               <Settings className="w-3.5 h-3.5" />
             </button>
             {showHidden ? (
@@ -508,7 +508,7 @@ export function ModelsPage() {
         </div>
 
         <select value={providerFilter} onChange={e => setProviderFilter(e.target.value)}
-          className="rounded-xl border border-border-subtle bg-surface px-3 py-2.5 text-xs outline-none focus:border-brand">
+          className="rounded-xl border border-border-subtle bg-surface px-3 py-2.5 text-xs outline-none focus:border-primary">
           {providers.map(p => <option key={p} value={p}>{p === "all" ? t("models.all_providers") : p}</option>)}
         </select>
 
@@ -516,7 +516,7 @@ export function ModelsPage() {
           {tiers.map(tier => (
             <button key={tier} onClick={() => setTierFilter(tier || "all")}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
-                tierFilter === tier ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
+                tierFilter === tier ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
               }`}>
               {t(`models.tier_${tier}`, { defaultValue: tier })}
             </button>
@@ -525,7 +525,7 @@ export function ModelsPage() {
 
         <button onClick={() => setAvailableOnly(!availableOnly)}
           className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-bold transition-colors ${
-            availableOnly ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim hover:border-brand/30"
+            availableOnly ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim hover:border-primary/30"
           }`}>
           <Check className="w-3 h-3" />
           {t("models.available_only")}
@@ -533,7 +533,7 @@ export function ModelsPage() {
 
         <button onClick={() => setShowHidden(!showHidden)}
           className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-bold transition-colors ${
-            showHidden ? "border-warning bg-warning/10 text-warning" : "border-border-subtle text-text-dim hover:border-brand/30"
+            showHidden ? "border-warning bg-warning/10 text-warning" : "border-border-subtle text-text-dim hover:border-primary/30"
           }`}>
           <EyeOff className="w-3 h-3" />
           {t("models.show_hidden")}
@@ -544,7 +544,7 @@ export function ModelsPage() {
 
         {grouped && allGroupedProviders.length > 1 && (
           <button onClick={toggleAllProviders}
-            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-border-subtle text-xs font-bold text-text-dim hover:border-brand/30 transition-colors">
+            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-border-subtle text-xs font-bold text-text-dim hover:border-primary/30 transition-colors">
             <ChevronsUpDown className="w-3 h-3" />
             {allExpanded ? t("models.collapse_all") : t("models.expand_all")}
           </button>
@@ -582,7 +582,7 @@ export function ModelsPage() {
                     ? <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
                     : <ChevronDown className="w-4 h-4 text-text-dim shrink-0" />}
                   <span className="text-sm font-bold text-text">{provider}</span>
-                  <span className="px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[11px] font-bold">{models.length}</span>
+                  <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-bold">{models.length}</span>
                   {availCount > 0 && availCount < models.length && (
                     <span className="text-[11px] text-text-dim">{availCount} {t("models.available")}</span>
                   )}
@@ -693,7 +693,7 @@ function SettingsToggle({ value, onChange, label }: { value: boolean; onChange: 
     <label className="flex items-center justify-between gap-2 py-1.5 cursor-pointer">
       <span className="text-xs text-text">{label}</span>
       <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-brand" : "bg-border-subtle"}`}>
+        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-primary" : "bg-border-subtle"}`}>
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "translate-x-4.5" : "translate-x-0.5"}`} />
       </button>
     </label>
@@ -792,7 +792,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     return (
       <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
         <div className="flex items-center justify-center p-12">
-          <Loader2 className="w-6 h-6 animate-spin text-brand" />
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
         </div>
       </Modal>
     );
@@ -803,7 +803,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
       <div className="p-5 space-y-5 max-h-[75vh] overflow-y-auto">
         {/* Model header */}
         <div className="flex items-center gap-3">
-          <Cpu className="w-5 h-5 text-brand" />
+          <Cpu className="w-5 h-5 text-primary" />
           <div>
             <p className="text-sm font-bold">{model.display_name || model.id}</p>
             <p className="text-[10px] text-text-dim font-mono">{model.provider}:{model.id}</p>
@@ -817,7 +817,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             {(["chat", "speech", "embedding"] as const).map((mt) => (
               <button key={mt} type="button" onClick={() => setModelType(mt)}
                 className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                  modelType === mt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
+                  modelType === mt ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
                 }`}>
                 {t(`models.type_${mt}`)}
               </button>
@@ -901,7 +901,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-text-dim">{t("models.reasoning_effort")}</label>
             <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value)}
-              className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand">
+              className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-primary">
               <option value="">—</option>
               <option value="low">{t("models.effort_low")}</option>
               <option value="medium">{t("models.effort_medium")}</option>

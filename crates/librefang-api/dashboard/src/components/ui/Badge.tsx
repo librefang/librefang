@@ -14,7 +14,7 @@ const variantStyles: Record<BadgeVariant, string> = {
   warning: "bg-warning/10 text-warning border-warning/20",
   error: "bg-error/10 text-error border-error/20",
   info: "bg-info/10 text-info border-info/20",
-  brand: "bg-brand/10 text-brand border-brand/20",
+  brand: "bg-primary/10 text-primary border-primary/20",
 };
 
 const dotColors: Record<BadgeVariant, string> = {
@@ -23,7 +23,7 @@ const dotColors: Record<BadgeVariant, string> = {
   warning: "bg-warning",
   error: "bg-error",
   info: "bg-info",
-  brand: "bg-brand",
+  brand: "bg-primary",
 };
 
 export function Badge({

@@ -187,31 +187,31 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   const expanded = data._expanded !== false;
   return (
     <div
-      className={`rounded-2xl border-2 border-dashed transition-colors ${expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
+      className={`rounded-2xl border-2 border-dashed transition-colors ${expanded ? "border-primary/30 bg-primary/5" : "border-primary bg-surface shadow-lg"
         }`}
       style={expanded
         ? { width: "100%", height: "100%", pointerEvents: "none" }
         : { width: 180 }}
     >
-      <Handle type="target" position={Position.Top} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
+      <Handle type="target" position={Position.Top} className="w-3! h-3! rounded-full! bg-primary! border-2! border-surface!" />
       <div
-        className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
+        className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
       >
         <div className="flex items-center gap-2 flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}>
           {expanded
-            ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
-            : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
-          <Group className="w-3.5 h-3.5 text-brand shrink-0" />
-          <span className="text-xs font-bold text-brand truncate">{data.label || t("canvas.group")}</span>
+            ? <ChevronDown className="w-3.5 h-3.5 text-primary shrink-0" />
+            : <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0" />}
+          <Group className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span className="text-xs font-bold text-primary truncate">{data.label || t("canvas.group")}</span>
           {!expanded && data._childCount > 0 && (
-            <span className="text-[9px] text-brand/50">{data._childCount}</span>
+            <span className="text-[9px] text-primary/50">{data._childCount}</span>
           )}
         </div>
         {/* Ungroup (keep child nodes) */}
         <button onClick={(e) => { e.stopPropagation(); data._onUngroup?.(id); }}
           title={t("canvas.ungroup")}
-          className="p-0.5 rounded hover:bg-brand/20 text-brand/50 hover:text-brand shrink-0">
+          className="p-0.5 rounded hover:bg-primary/20 text-primary/50 hover:text-primary shrink-0">
           <X className="w-3 h-3" />
         </button>
         {/* Delete group + child nodes */}
@@ -226,7 +226,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
           <p className="text-[9px] text-text-dim">Click to expand</p>
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
+      <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-primary! border-2! border-surface!" />
     </div>
   );
 }
@@ -252,7 +252,7 @@ function WorkflowList({
         ) : (
           workflows.map(w => (
             <div key={w.id} onClick={() => onSelect(w)}
-              className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
+              className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-primary bg-primary/5" : "border-border-subtle hover:border-primary/50 bg-surface"
                 }`}>
               {confirmId === w.id ? (
                 <div className="flex items-center justify-between gap-2">
@@ -336,7 +336,7 @@ function TemplateBrowser({
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
           <div className="flex items-center gap-2">
-            <LayoutTemplate className="w-4 h-4 text-brand" />
+            <LayoutTemplate className="w-4 h-4 text-primary" />
             <h3 className="text-sm font-bold">{t("canvas.browse_templates")}</h3>
           </div>
           <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
@@ -345,7 +345,7 @@ function TemplateBrowser({
         {selectedTemplate ? (
           /* Template detail + params form */
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
-            <button onClick={() => setSelectedTemplate(null)} className="text-xs text-brand hover:underline flex items-center gap-1">
+            <button onClick={() => setSelectedTemplate(null)} className="text-xs text-primary hover:underline flex items-center gap-1">
               <ArrowLeft className="w-3 h-3" /> {t("common.back")}
             </button>
             <div>
@@ -373,7 +373,7 @@ function TemplateBrowser({
                       type={p.param_type === "number" ? "number" : "text"}
                       value={String(paramValues[p.name] ?? "")}
                       onChange={e => setParamValues(prev => ({ ...prev, [p.name]: p.param_type === "number" ? Number(e.target.value) : e.target.value }))}
-                      className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand"
+                      className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-primary"
                       placeholder={p.description || p.name}
                     />
                   </div>
@@ -401,14 +401,14 @@ function TemplateBrowser({
                   type="text" value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   placeholder={t("canvas.template_search")}
-                  className="w-full rounded-xl border border-border-subtle bg-main pl-8 pr-3 py-2 text-xs outline-none focus:border-brand"
+                  className="w-full rounded-xl border border-border-subtle bg-main pl-8 pr-3 py-2 text-xs outline-none focus:border-primary"
                 />
               </div>
             </div>
 
             {loading ? (
               <div className="flex items-center justify-center py-12">
-                <Loader2 className="w-5 h-5 animate-spin text-brand" />
+                <Loader2 className="w-5 h-5 animate-spin text-primary" />
               </div>
             ) : templates.length === 0 ? (
               <InlineEmpty
@@ -421,13 +421,13 @@ function TemplateBrowser({
                   <button
                     key={tmpl.id}
                     onClick={() => handleSelect(tmpl)}
-                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-sm transition-colors text-left"
+                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-primary/50 hover:shadow-sm transition-colors text-left"
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-bold truncate">{tmpl.name}</span>
                       <div className="flex gap-1 shrink-0">
                         {tmpl.category && (
-                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{tmpl.category}</span>
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">{tmpl.category}</span>
                         )}
                       </div>
                     </div>
@@ -453,7 +453,7 @@ function TemplateBrowser({
 }
 
 // Node configuration panel
-const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
+const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-primary";
 const labelClass = "text-[10px] font-bold text-text-dim uppercase";
 
 function NodeConfigPanel({
@@ -631,7 +631,7 @@ function NodeConfigPanel({
                   </label>
                   <div className="mt-1 space-y-1 max-h-28 overflow-y-auto rounded-lg border border-border-subtle bg-main p-1.5">
                     {siblingSteps.map(s => (
-                      <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-brand/5 cursor-pointer">
+                      <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-primary/5 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={dependsOn.includes(s.label)}
@@ -1910,10 +1910,10 @@ function CanvasPageInner() {
           <div className="absolute top-3 left-3 right-3 z-10 flex gap-2">
             <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
               placeholder={t("workflows.workflow_name")}
-              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
+              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none shadow-sm" />
             <input type="text" value={workflowDescription} onChange={(e) => setWorkflowDescription(e.target.value)}
               placeholder={t("workflows.description")}
-              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
+              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-dim focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none shadow-sm" />
           </div>
 
           {/* Node configuration panel */}
@@ -1932,12 +1932,12 @@ function CanvasPageInner() {
           {/* Run / Dry-run input dialog */}
           {showRunInput && (
             <div className="absolute top-3 right-3 z-20 w-80 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
-              <div className={`flex items-center justify-between px-3 py-2 border-b border-border-subtle ${showRunInput === "dry" ? "bg-brand/10" : "bg-success/10"}`}>
+              <div className={`flex items-center justify-between px-3 py-2 border-b border-border-subtle ${showRunInput === "dry" ? "bg-primary/10" : "bg-success/10"}`}>
                 <div className="flex items-center gap-2">
                   {showRunInput === "dry"
-                    ? <FlaskConical className="w-3.5 h-3.5 text-brand" />
+                    ? <FlaskConical className="w-3.5 h-3.5 text-primary" />
                     : <Play className="w-3.5 h-3.5 text-success" />}
-                  <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-brand" : "text-success"}`}>
+                  <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-primary" : "text-success"}`}>
                     {showRunInput === "dry" ? "Dry Run" : t("canvas.run_input_title")}
                   </span>
                 </div>
@@ -1952,7 +1952,7 @@ function CanvasPageInner() {
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
                   placeholder={t("canvas.run_input_placeholder")}
                   rows={4} autoFocus
-                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand resize-none"
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-primary resize-none"
                   onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) showRunInput === "dry" ? handleDryRun() : handleRunConfirm(); }}
                 />
                 <div className="flex gap-2">
@@ -2035,8 +2035,8 @@ function CanvasPageInner() {
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div className="text-center pointer-events-auto">
-                <div className="w-12 h-12 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-3">
-                  <Plus className="w-6 h-6 text-brand" />
+                <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-3">
+                  <Plus className="w-6 h-6 text-primary" />
                 </div>
                 <p className="text-sm font-bold text-text-dim">{t("canvas.empty_title")}</p>
                 <p className="text-xs text-text-dim/60 mt-1">{t("canvas.empty_hint")}</p>
@@ -2097,10 +2097,10 @@ function CanvasPageInner() {
           {/* Dry-run result panel */}
           {dryRunResult && !runResult && (
             <div className="absolute bottom-3 left-3 right-3 z-20 max-h-64 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
-              <div className="flex items-center justify-between px-3 py-2 bg-brand/10 border-b border-border-subtle shrink-0">
+              <div className="flex items-center justify-between px-3 py-2 bg-primary/10 border-b border-border-subtle shrink-0">
                 <div className="flex items-center gap-2">
-                  <FlaskConical className="w-3.5 h-3.5 text-brand" />
-                  <span className="text-xs font-bold text-brand">Dry Run</span>
+                  <FlaskConical className="w-3.5 h-3.5 text-primary" />
+                  <span className="text-xs font-bold text-primary">Dry Run</span>
                   {dryRunResult.valid
                     ? <Badge variant="success">valid</Badge>
                     : <Badge variant="error">issues found</Badge>}

@@ -207,7 +207,7 @@ function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (item
             type="text"
             value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
-            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm"
           />
           <button
             type="button"
@@ -222,7 +222,7 @@ function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (item
       <button
         type="button"
         onClick={addItem}
-        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
+        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-primary transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
         {t("mcp.add_argument")}
@@ -265,7 +265,7 @@ function EnvEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items
             value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
             placeholder={t("mcp.env_placeholder")}
-            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+            className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm"
           />
           <button
             type="button"
@@ -280,7 +280,7 @@ function EnvEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items
       <button
         type="button"
         onClick={addItem}
-        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
+        className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-primary transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
         {t("mcp.add_variable")}
@@ -492,13 +492,13 @@ function ServerCard({
             <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
               isConnected
                 ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
-                : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
+                : "bg-linear-to-br from-brand/10 to-brand/5 border border-primary/20"
             }`}>
-              <Plug className={`w-5 h-5 ${isConnected ? "text-success" : "text-brand"}`} />
+              <Plug className={`w-5 h-5 ${isConnected ? "text-success" : "text-primary"}`} />
             </div>
             <div className="min-w-0">
               <h2 className={`text-base font-black truncate transition-colors ${
-                isConnected ? "group-hover:text-success" : "group-hover:text-brand"
+                isConnected ? "group-hover:text-success" : "group-hover:text-primary"
               }`}>{server.name}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
                 {transportType}
@@ -517,7 +517,7 @@ function ServerCard({
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
-              <Wrench className={`w-3 h-3 ${isConnected ? "text-success" : "text-brand"}`} />
+              <Wrench className={`w-3 h-3 ${isConnected ? "text-success" : "text-primary"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.tools")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{toolsCount}</p>
@@ -553,7 +553,7 @@ function ServerCard({
         <>
           <button
             onClick={onToggleTools}
-            className="flex items-center justify-center gap-1.5 py-2.5 border-t border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            className="flex items-center justify-center gap-1.5 py-2.5 border-t border-border-subtle text-xs font-bold text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
             aria-expanded={isExpanded}
             aria-label={isExpanded ? t("mcp.hide_tools") : t("mcp.show_tools")}
           >
@@ -573,7 +573,7 @@ function ServerCard({
               {hiddenCount > 0 && (
                 <button
                   onClick={() => setShowAllTools(true)}
-                  className="w-full text-center text-[10px] font-bold text-brand hover:text-brand/80 py-1.5 transition-colors"
+                  className="w-full text-center text-[10px] font-bold text-primary hover:text-primary/80 py-1.5 transition-colors"
                 >
                   {t("mcp.show_more_tools", { count: hiddenCount })}
                 </button>
@@ -587,7 +587,7 @@ function ServerCard({
       <div className="flex border-t border-border-subtle">
         <button
           onClick={onEdit}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors rounded-bl-xl sm:rounded-bl-2xl"
+          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-primary hover:bg-surface-hover transition-colors rounded-bl-xl sm:rounded-bl-2xl"
           aria-label={t("mcp.edit_server")}
         >
           <Settings className="h-3.5 w-3.5" />
@@ -859,13 +859,13 @@ export function McpServersPage() {
         <button
           onClick={() => setTab("servers")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-            tab === "servers" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
+            tab === "servers" ? "bg-primary/10 text-primary shadow-sm" : "text-text-dim hover:text-text"
           }`}
         >
           <Plug className="h-3.5 w-3.5" />
           {t("mcp.tab_my_servers")}
           {configured.length > 0 && (
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${tab === "servers" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${tab === "servers" ? "bg-primary/20 text-primary" : "bg-border-subtle text-text-dim"}`}>
               {configured.length}
             </span>
           )}
@@ -873,7 +873,7 @@ export function McpServersPage() {
         <button
           onClick={() => setTab("catalog")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-            tab === "catalog" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
+            tab === "catalog" ? "bg-primary/10 text-primary shadow-sm" : "text-text-dim hover:text-text"
           }`}
         >
           <Store className="h-3.5 w-3.5" />
@@ -894,7 +894,7 @@ export function McpServersPage() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder={t("mcp.search_placeholder")}
-                  className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+                  className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm"
                 />
               </div>
               {/* Status filter */}
@@ -909,14 +909,14 @@ export function McpServersPage() {
                     onClick={() => setStatusFilter(value)}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
                       statusFilter === value
-                        ? "bg-brand/10 text-brand shadow-sm"
+                        ? "bg-primary/10 text-primary shadow-sm"
                         : "text-text-dim hover:text-text"
                     }`}
                   >
                     <Filter className="h-3 w-3" />
                     {label}
                     <span className={`px-1 py-0.5 rounded-full text-[8px] font-bold ${
-                      statusFilter === value ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"
+                      statusFilter === value ? "bg-primary/20 text-primary" : "bg-border-subtle text-text-dim"
                     }`}>
                       {count}
                     </span>
@@ -999,7 +999,7 @@ export function McpServersPage() {
                 value={catalogSearch}
                 onChange={(e) => setCatalogSearch(e.target.value)}
                 placeholder={t("mcp.catalog_search_placeholder")}
-                className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+                className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm"
               />
             </div>
           )}
@@ -1035,16 +1035,16 @@ export function McpServersPage() {
                           <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
                             alreadyAdded
                               ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
-                              : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
+                              : "bg-linear-to-br from-brand/10 to-brand/5 border border-primary/20"
                           }`}>
                             {tpl.icon
-                              ? <CatalogIcon icon={tpl.icon} className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
-                              : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
+                              ? <CatalogIcon icon={tpl.icon} className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-primary"}`} />
+                              : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-primary"}`} />
                             }
                           </div>
                           <div className="min-w-0 flex-1">
                             <h3 className={`text-sm font-black truncate transition-colors ${
-                              alreadyAdded ? "" : "group-hover:text-brand"
+                              alreadyAdded ? "" : "group-hover:text-primary"
                             }`}>{tpl.name}</h3>
                             {tpl.category && (
                               <span className="block truncate text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
@@ -1066,7 +1066,7 @@ export function McpServersPage() {
                       {(tpl.tags ?? []).length > 0 && (
                         <div className="flex flex-wrap gap-1 mb-3">
                           {tpl.tags!.slice(0, 4).map(tag => (
-                            <span key={tag} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-brand/8 text-brand/70">{tag}</span>
+                            <span key={tag} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-primary/8 text-primary/70">{tag}</span>
                           ))}
                         </div>
                       )}
@@ -1079,7 +1079,7 @@ export function McpServersPage() {
                               <Key className="w-3 h-3 text-text-dim/50 shrink-0" />
                               <span className="font-mono font-bold text-text-dim">{e.name}</span>
                               {e.get_url && (
-                                <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline ml-auto">
+                                <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline ml-auto">
                                   <ExternalLink className="h-3 w-3" />
                                 </a>
                               )}
@@ -1097,7 +1097,7 @@ export function McpServersPage() {
                         className={`w-full flex items-center justify-center gap-1.5 py-3 text-xs font-bold transition-colors rounded-b-xl sm:rounded-b-2xl ${
                           alreadyAdded
                             ? "text-text-dim/30 cursor-not-allowed"
-                            : "text-brand hover:bg-brand/5"
+                            : "text-primary hover:bg-primary/5"
                         }`}
                       >
                         {alreadyAdded
@@ -1143,8 +1143,8 @@ export function McpServersPage() {
                   onClick={() => updateField("transportType", tt)}
                   className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors ${
                     form.transportType === tt
-                      ? "border-brand bg-brand/10 text-brand"
-                      : "border-border-subtle bg-surface text-text-dim hover:border-brand/20"
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border-subtle bg-surface text-text-dim hover:border-primary/20"
                   }`}
                 >
                   <TransportIcon type={tt} />
@@ -1201,7 +1201,7 @@ export function McpServersPage() {
                   onChange={(e) => updateField("headers", e.target.value)}
                   placeholder={t("mcp.headers_placeholder")}
                   rows={2}
-                  className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm resize-none"
+                  className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm resize-none"
                 />
               </div>
             </div>
@@ -1262,7 +1262,7 @@ export function McpServersPage() {
                   {e.label || e.name}
                 </label>
                 {e.get_url && (
-                  <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
+                  <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 )}
@@ -1273,7 +1273,7 @@ export function McpServersPage() {
                 value={envInputs[e.name] ?? ""}
                 onChange={(ev) => setEnvInputs(prev => ({ ...prev, [e.name]: ev.target.value }))}
                 placeholder={e.label || e.name}
-                className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
+                className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/10 hover:border-primary/20 transition-colors duration-200 shadow-sm"
               />
             </div>
           ))}

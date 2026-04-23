@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>travisjames.ai â€” Brand Guide</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #F7F7F8;
+    --fg: #0B0F14;
+    --card: #FFFFFF;
+    --card-fg: #0B0F14;
+    --muted: #EEF0F3;
+    --muted-fg: #4B5563;
+    --border: #D8DEE6;
+    --primary: #E04E28;
+    --primary-fg: #FFFFFF;
+    --secondary: #111827;
+    --secondary-fg: #FFFFFF;
+    --accent: #F2D6CF;
+    --accent-fg: #3B1410;
+    --destructive: #DC2626;
+    --success: #16A34A;
+    --warning: #D97706;
+    --info: #2563EB;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Roboto', sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.7;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- NAV ---- */
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: rgba(255,255,255,.88);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    padding: .7rem 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .nav-brand {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700; font-size: .95rem; letter-spacing: -.02em;
+  }
+  .nav-brand span { color: var(--primary); }
+  .nav-links { display: flex; gap: 1.5rem; }
+  .nav-links a {
+    font-family: 'Inter', sans-serif;
+    font-size: .72rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted-fg);
+    text-decoration: none; transition: color .2s;
+  }
+  .nav-links a:hover { color: var(--primary); }
+
+  /* ---- HERO ---- */
+  .hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center;
+    position: relative; overflow: hidden;
+    background: var(--secondary);
+    padding: 2rem;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse 80% 60% at 20% 40%, rgba(224,78,40,.12) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 50% at 80% 60%, rgba(255,106,61,.08) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .hero::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%23233041' stroke-width='.5'%3E%3Cpath d='M0 30h60M30 0v60'/%3E%3C/g%3E%3C/svg%3E");
+    opacity: .35; pointer-events: none;
+  }
+  .hero-content { position: relative; z-index: 2; }
+  .hero-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .7rem; font-weight: 500;
+    color: var(--primary); letter-spacing: .15em;
+    text-transform: uppercase; margin-bottom: 1.5rem;
+    opacity: 0; animation: fadeUp .8s .2s forwards;
+  }
+  .hero h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: clamp(2.8rem, 7vw, 5.5rem);
+    font-weight: 700; letter-spacing: -.04em;
+    color: #E8EDF3; line-height: 1.05;
+    margin-bottom: .5rem;
+    opacity: 0; animation: fadeUp .8s .35s forwards;
+  }
+  .hero h1 em {
+    font-style: normal;
+    background: linear-gradient(135deg, #E04E28, #FF6A3D);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero-sub {
+    font-family: 'Inter', sans-serif;
+    font-size: 1.05rem; font-weight: 400;
+    color: #A7B0BC; max-width: 520px; margin: 1rem auto 2rem;
+    line-height: 1.65;
+    opacity: 0; animation: fadeUp .8s .5s forwards;
+  }
+  .hero-version {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .65rem; color: #4B5563;
+    border: 1px solid #233041; border-radius: 999px;
+    padding: .3rem .8rem;
+    opacity: 0; animation: fadeUp .8s .65s forwards;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---- SECTIONS ---- */
+  .section {
+    padding: 5rem 2rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  .section-dark {
+    background: var(--secondary);
+    max-width: 100%;
+    padding: 5rem 2rem;
+  }
+  .section-dark .inner { max-width: 1100px; margin: 0 auto; }
+  .section-muted {
+    background: var(--muted);
+    max-width: 100%;
+    padding: 5rem 2rem;
+  }
+  .section-muted .inner { max-width: 1100px; margin: 0 auto; }
+
+  .section-number {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .65rem; font-weight: 600;
+    color: var(--primary); letter-spacing: .12em;
+    text-transform: uppercase; margin-bottom: .5rem;
+  }
+  .section-dark .section-number { color: #FF6A3D; }
+
+  .section-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 2rem; font-weight: 700;
+    letter-spacing: -.03em; margin-bottom: .5rem;
+    line-height: 1.15;
+  }
+  .section-dark .section-title { color: #E8EDF3; }
+
+  .section-lead {
+    font-family: 'Inter', sans-serif;
+    font-size: .95rem; color: var(--muted-fg);
+    max-width: 600px; line-height: 1.7;
+    margin-bottom: 2.5rem;
+  }
+  .section-dark .section-lead { color: #A7B0BC; }
+
+  .divider {
+    width: 48px; height: 3px;
+    background: var(--primary);
+    border-radius: 2px;
+    margin-bottom: 2rem;
+  }
+  .section-dark .divider { background: #FF6A3D; }
+
+  /* ---- BRAND OVERVIEW ---- */
+  .brand-pillars {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5rem;
+    margin-top: 2rem;
+  }
+  .pillar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .pillar::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary), #FF6A3D);
+  }
+  .pillar-num {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 2.5rem; font-weight: 700;
+    color: var(--accent); line-height: 1;
+    margin-bottom: .5rem;
+  }
+  .pillar h3 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.05rem; font-weight: 700;
+    letter-spacing: -.02em;
+    margin-bottom: .4rem;
+  }
+  .pillar p {
+    font-size: .82rem; color: var(--muted-fg);
+    line-height: 1.6;
+  }
+
+  /* ---- VOICE ---- */
+  .voice-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-top: 2rem;
+  }
+  .voice-card {
+    border: 1px solid #233041;
+    border-radius: 12px;
+    padding: 1.5rem;
+    background: rgba(15,22,32,.6);
+  }
+  .voice-card h4 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: .95rem; font-weight: 700;
+    color: #E8EDF3; margin-bottom: .3rem;
+  }
+  .voice-card p {
+    font-size: .82rem; color: #A7B0BC;
+    line-height: 1.6;
+  }
+  .voice-card .tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; font-weight: 600;
+    color: #FF6A3D; letter-spacing: .08em;
+    text-transform: uppercase;
+    border: 1px solid rgba(255,106,61,.3);
+    border-radius: 4px;
+    padding: .15rem .45rem;
+    margin-bottom: .6rem;
+  }
+
+  /* ---- COLORS ---- */
+  .color-section-label {
+    font-family: 'Inter', sans-serif;
+    font-size: .7rem; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted-fg);
+    margin-bottom: .75rem;
+    margin-top: 2rem;
+  }
+  .color-section-label:first-of-type { margin-top: 0; }
+
+  .color-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: .75rem;
+  }
+  .color-chip {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--card);
+    transition: transform .2s;
+  }
+  .color-chip:hover { transform: translateY(-2px); }
+  .color-chip-swatch {
+    height: 64px;
+    position: relative;
+  }
+  .color-chip-swatch.has-border {
+    box-shadow: inset 0 0 0 1px rgba(128,128,128,.15);
+  }
+  .color-chip-info {
+    padding: .6rem .7rem;
+  }
+  .color-chip-token {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem; font-weight: 600;
+    margin-bottom: .1rem;
+  }
+  .color-chip-hex {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; color: var(--muted-fg);
+  }
+
+  /* Wide swatches for primary anchors */
+  .anchor-swatches {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .anchor-swatch {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .anchor-swatch-color {
+    height: 120px;
+    display: flex; align-items: flex-end; padding: 1rem;
+  }
+  .anchor-swatch-label {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: .85rem; font-weight: 700;
+  }
+  .anchor-swatch-meta {
+    padding: .75rem 1rem;
+    background: var(--card);
+  }
+  .anchor-swatch-meta span {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .68rem;
+    color: var(--muted-fg);
+  }
+
+  /* ---- TYPOGRAPHY ---- */
+  .type-specimen {
+    margin-bottom: 2.5rem;
+    padding-bottom: 2.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .type-specimen:last-child { border-bottom: none; }
+
+  .type-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: .5rem;
+    flex-wrap: wrap;
+    gap: .5rem;
+  }
+  .type-name {
+    font-family: 'Inter', sans-serif;
+    font-size: .7rem; font-weight: 700;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--primary);
+  }
+  .type-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; color: var(--muted-fg);
+  }
+  .type-role {
+    font-family: 'Inter', sans-serif;
+    font-size: .78rem; color: var(--muted-fg);
+    margin-bottom: 1rem;
+    max-width: 520px;
+    line-height: 1.6;
+  }
+
+  .type-sample-display {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: clamp(2rem, 4vw, 3.2rem);
+    font-weight: 700;
+    letter-spacing: -.03em;
+    line-height: 1.1;
+    margin-bottom: .75rem;
+  }
+  .type-sample-body {
+    font-family: 'Roboto', sans-serif;
+    font-size: 1rem;
+    line-height: 1.75;
+    max-width: 600px;
+    color: var(--fg);
+  }
+  .type-sample-ui {
+    font-family: 'Inter', sans-serif;
+    font-size: .88rem;
+    font-weight: 500;
+    line-height: 1.5;
+  }
+  .type-sample-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .82rem;
+    line-height: 1.7;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    color: var(--fg);
+    overflow-x: auto;
+  }
+  .type-sample-code .kw { color: var(--primary); }
+  .type-sample-code .str { color: var(--info); }
+  .type-sample-code .cmt { color: var(--muted-fg); }
+
+  .type-scale {
+    display: grid; gap: .6rem;
+    margin-top: 1rem;
+  }
+  .type-scale-row {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .type-scale-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; color: var(--muted-fg);
+    min-width: 110px;
+    flex-shrink: 0;
+  }
+
+  /* ---- USAGE TABLE ---- */
+  .usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1.5rem;
+  }
+  .usage-table th {
+    font-family: 'Inter', sans-serif;
+    font-size: .65rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted-fg);
+    text-align: left;
+    padding: .6rem .75rem;
+    border-bottom: 2px solid var(--border);
+  }
+  .usage-table td {
+    font-size: .82rem;
+    padding: .65rem .75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .usage-table tr:last-child td { border-bottom: none; }
+  .usage-table .font-label {
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .usage-table .context {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .7rem;
+    color: var(--primary);
+    background: var(--accent);
+    padding: .1rem .4rem;
+    border-radius: 4px;
+    display: inline-block;
+    margin: .1rem .2rem .1rem 0;
+  }
+
+  /* ---- MOOD BOARD ---- */
+  .mood-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 240px 240px;
+    gap: 1rem;
+  }
+  .mood-tile {
+    border-radius: 12px;
+    overflow: hidden;
+    position: relative;
+    display: flex; align-items: flex-end;
+    padding: 1rem;
+  }
+  .mood-tile-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: .2rem .5rem;
+    border-radius: 4px;
+    position: relative; z-index: 2;
+  }
+  .mood-1 {
+    grid-column: 1; grid-row: 1 / 3;
+    background: linear-gradient(180deg, #D8DEE6 0%, #EEF0F3 100%);
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+  }
+  .mood-2 {
+    background: var(--secondary);
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+  }
+  .mood-3 {
+    background: linear-gradient(135deg, #E04E28, #FF6A3D);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .mood-4 {
+    background: #0F1620;
+    border: 1px solid #233041;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .mood-5 {
+    grid-column: 3; grid-row: 1 / 3;
+    background:
+      linear-gradient(135deg, rgba(11,15,20,.95), rgba(15,22,32,.9)),
+      repeating-linear-gradient(0deg, transparent, transparent 29px, #233041 29px, #233041 30px),
+      repeating-linear-gradient(90deg, transparent, transparent 29px, #233041 29px, #233041 30px);
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+  }
+  .mood-arch-text {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.4rem; font-weight: 700;
+    letter-spacing: -.02em;
+  }
+  .mood-arch-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; letter-spacing: .1em;
+    text-transform: uppercase; margin-top: .4rem;
+  }
+  .mood-ember-big {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 3rem; font-weight: 700;
+    color: white; letter-spacing: -.04em;
+    text-align: center; line-height: 1;
+  }
+  .mood-code-block {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .65rem; color: #A7B0BC;
+    line-height: 1.8; text-align: left;
+  }
+  .mood-code-block .h { color: #FF6A3D; }
+  .mood-blueprint {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.2rem; font-weight: 700;
+    color: #A7B0BC; letter-spacing: .06em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+  .mood-blueprint-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .55rem; color: #4B5563;
+    margin-top: .5rem; letter-spacing: .1em;
+  }
+
+  /* ---- DO/DON'T ---- */
+  .dos-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-top: 2rem;
+  }
+  .dos-card {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .dos-card-header {
+    padding: .6rem 1rem;
+    font-family: 'Inter', sans-serif;
+    font-size: .7rem; font-weight: 700;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .dos-card-header.do { background: #ECFDF5; color: #065F46; border-bottom: 2px solid var(--success); }
+  .dos-card-header.dont { background: #FEF2F2; color: #991B1B; border-bottom: 2px solid var(--destructive); }
+  .dos-card-body {
+    padding: 1rem;
+    background: var(--card);
+  }
+  .dos-card-body ul {
+    list-style: none;
+    display: flex; flex-direction: column; gap: .5rem;
+  }
+  .dos-card-body li {
+    font-size: .82rem;
+    padding-left: 1.2rem;
+    position: relative;
+    line-height: 1.55;
+  }
+  .dos-card-body li::before {
+    content: '';
+    position: absolute; left: 0; top: .45rem;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+  }
+  .do + .dos-card-body li::before { background: var(--success); }
+  .dont + .dos-card-body li::before { background: var(--destructive); }
+
+  /* ---- COMPONENT PREVIEWS ---- */
+  .component-row {
+    display: flex; gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .comp-btn {
+    display: inline-flex; align-items: center; gap: .5rem;
+    padding: .6rem 1.25rem;
+    border-radius: 8px;
+    font-family: 'Inter', sans-serif;
+    font-size: .82rem; font-weight: 600;
+    border: none; cursor: pointer;
+    transition: all .2s;
+  }
+  .comp-btn.primary { background: var(--primary); color: var(--primary-fg); }
+  .comp-btn.primary:hover { background: #c94220; }
+  .comp-btn.secondary { background: var(--secondary); color: var(--secondary-fg); }
+  .comp-btn.outline {
+    background: transparent; color: var(--fg);
+    border: 1.5px solid var(--border);
+  }
+  .comp-btn.outline:hover { border-color: var(--primary); color: var(--primary); }
+  .comp-btn.ghost {
+    background: transparent; color: var(--muted-fg);
+  }
+  .comp-btn.ghost:hover { color: var(--primary); background: var(--accent); }
+
+  .comp-badge {
+    display: inline-flex;
+    font-family: 'Inter', sans-serif;
+    font-size: .68rem; font-weight: 600;
+    padding: .2rem .55rem;
+    border-radius: 999px;
+  }
+  .comp-badge.success { background: #ECFDF5; color: #065F46; }
+  .comp-badge.warning { background: #FFFBEB; color: #92400E; }
+  .comp-badge.error { background: #FEF2F2; color: #991B1B; }
+  .comp-badge.info { background: #EFF6FF; color: #1E40AF; }
+
+  .comp-input-wrap {
+    display: flex; flex-direction: column; gap: .3rem;
+    max-width: 320px;
+  }
+  .comp-input-label {
+    font-family: 'Inter', sans-serif;
+    font-size: .75rem; font-weight: 600;
+  }
+  .comp-input {
+    font-family: 'Roboto', sans-serif;
+    font-size: .88rem;
+    padding: .55rem .75rem;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--fg);
+    outline: none;
+    transition: border-color .2s;
+  }
+  .comp-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(224,78,40,.12); }
+  .comp-input::placeholder { color: var(--muted-fg); }
+
+  .comp-card-preview {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    max-width: 360px;
+  }
+  .comp-card-preview h4 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1rem; font-weight: 700;
+    letter-spacing: -.02em;
+    margin-bottom: .3rem;
+  }
+  .comp-card-preview p {
+    font-family: 'Roboto', sans-serif;
+    font-size: .82rem; color: var(--muted-fg);
+    line-height: 1.55;
+    margin-bottom: .75rem;
+  }
+  .comp-card-preview .tag-row {
+    display: flex; gap: .4rem;
+  }
+
+  /* ---- CSS REF ---- */
+  .css-ref {
+    background: #0B0F14;
+    border: 1px solid #233041;
+    border-radius: 12px;
+    padding: 1.5rem;
+    overflow-x: auto;
+    margin-top: 1.5rem;
+  }
+  .css-ref pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .7rem; line-height: 1.8;
+    color: #A7B0BC;
+  }
+  .css-ref .sel { color: #FF6A3D; font-weight: 600; }
+  .css-ref .prop { color: #60A5FA; }
+  .css-ref .val { color: #E8EDF3; }
+  .css-ref .cmt { color: #4B5563; }
+
+  /* ---- FOOTER ---- */
+  .footer {
+    text-align: center;
+    padding: 3rem 2rem;
+    border-top: 1px solid var(--border);
+  }
+  .footer-brand {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.1rem; font-weight: 700;
+    letter-spacing: -.02em;
+    margin-bottom: .4rem;
+  }
+  .footer-brand span { color: var(--primary); }
+  .footer-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; color: var(--muted-fg);
+    letter-spacing: .05em;
+  }
+
+  /* ---- RESPONSIVE ---- */
+  @media (max-width: 768px) {
+    .brand-pillars { grid-template-columns: 1fr; }
+    .voice-grid { grid-template-columns: 1fr; }
+    .anchor-swatches { grid-template-columns: 1fr; }
+    .mood-grid {
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: auto;
+    }
+    .mood-1, .mood-5 { grid-column: auto; grid-row: auto; min-height: 200px; }
+    .dos-grid { grid-template-columns: 1fr; }
+    .nav-links { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- â”â”â” NAV â”â”â” -->
+<nav class="nav">
+  <div class="nav-brand">travisjames<span>.ai</span></div>
+  <div class="nav-links">
+    <a href="#philosophy">Philosophy</a>
+    <a href="#colors">Colors</a>
+    <a href="#typography">Typography</a>
+    <a href="#mood">Mood</a>
+    <a href="#components">Components</a>
+    <a href="#reference">Reference</a>
+  </div>
+</nav>
+
+<!-- â”â”â” HERO â”â”â” -->
+<section class="hero">
+  <div class="hero-content">
+    <div class="hero-eyebrow">// Brand System v1.0</div>
+    <h1>travisjames<em>.ai</em></h1>
+    <p class="hero-sub">Complete brand guide for the visual identity system. The artistic soul of technology architecture, expressed with precision and elegance.</p>
+    <span class="hero-version">Last Updated â€” Feb 2026</span>
+  </div>
+</section>
+
+<!-- â”â”â” 01 â€” PHILOSOPHY â”â”â” -->
+<section class="section" id="philosophy">
+  <div class="section-number">01 â€” Brand Philosophy</div>
+  <h2 class="section-title">The Artistic Soul of<br>Technology Architecture</h2>
+  <div class="divider"></div>
+  <p class="section-lead">
+    travisjames.ai communicates at the intersection of deep technical mastery and aesthetic refinement. Every visual choice signals that infrastructure and architecture are not merely functional â€” they possess an inherent beauty that deserves elegant expression.
+  </p>
+
+  <div class="brand-pillars">
+    <div class="pillar">
+      <div class="pillar-num">01</div>
+      <h3>Architectural Precision</h3>
+      <p>Clean lines, deliberate spacing, structural grids. Every element is placed with the intentionality of a well-designed system. Nothing is accidental.</p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-num">02</div>
+      <h3>Ember Signature</h3>
+      <p>A single, muted ember accent against vast neutral space. The restraint makes it powerful â€” like a single lit terminal in a darkened server room.</p>
+    </div>
+    <div class="pillar">
+      <div class="pillar-num">03</div>
+      <h3>Technical Elegance</h3>
+      <p>Monospace type, code aesthetics, and infrastructure references â€” but always refined, never raw. Think polished concrete, not construction site.</p>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 02 â€” VOICE â”â”â” -->
+<section class="section-dark" id="voice">
+  <div class="inner">
+    <div class="section-number">02 â€” Brand Voice</div>
+    <h2 class="section-title">How We Sound</h2>
+    <div class="divider"></div>
+    <p class="section-lead">The voice is authoritative without being cold, technical without being exclusionary, and elegant without being pretentious.</p>
+
+    <div class="voice-grid">
+      <div class="voice-card">
+        <div class="tag">We Are</div>
+        <h4>Precisely Confident</h4>
+        <p>We speak with the quiet authority of someone who has built the systems they describe. No hedging, no hype â€” just clear, informed perspective.</p>
+      </div>
+      <div class="voice-card">
+        <div class="tag">We Are</div>
+        <h4>Elegantly Technical</h4>
+        <p>Complex ideas rendered beautifully simple. We reach for the metaphor that makes architecture tangible â€” concrete, steel, light, space.</p>
+      </div>
+      <div class="voice-card">
+        <div class="tag">We Avoid</div>
+        <h4>Hype & Buzzwords</h4>
+        <p>No "game-changing" or "revolutionary." The work speaks for itself. We let depth do the convincing, not volume.</p>
+      </div>
+      <div class="voice-card">
+        <div class="tag">We Avoid</div>
+        <h4>Cold Sterility</h4>
+        <p>Technology has soul. We write with warmth and conviction â€” opinionated, human, and grounded in real craft.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 03 â€” COLORS â”â”â” -->
+<section class="section" id="colors">
+  <div class="section-number">03 â€” Color System</div>
+  <h2 class="section-title">Deep Charcoal Meets<br>Muted Ember</h2>
+  <div class="divider"></div>
+  <p class="section-lead">
+    Two anchors define the palette: deep charcoal for structure and authority, muted ember for signature warmth. Everything else is restrained neutral ramp and standard UI semantics.
+  </p>
+
+  <!-- Anchor Colors -->
+  <div class="color-section-label">Brand Anchors</div>
+  <div class="anchor-swatches">
+    <div class="anchor-swatch">
+      <div class="anchor-swatch-color" style="background:#0B0F14;">
+        <span class="anchor-swatch-label" style="color:#E8EDF3;">Deep Charcoal</span>
+      </div>
+      <div class="anchor-swatch-meta">
+        <span>#0B0F14 â€” Background (dark), foreground (light), authority anchor</span>
+      </div>
+    </div>
+    <div class="anchor-swatch">
+      <div class="anchor-swatch-color" style="background:#E04E28;">
+        <span class="anchor-swatch-label" style="color:#FFF;">Muted Ember</span>
+      </div>
+      <div class="anchor-swatch-meta">
+        <span>#E04E28 â€” Primary actions, CTAs, focus rings (light mode)</span>
+      </div>
+    </div>
+    <div class="anchor-swatch">
+      <div class="anchor-swatch-color" style="background:linear-gradient(135deg,#E04E28,#FF6A3D);">
+        <span class="anchor-swatch-label" style="color:#FFF;">Ember Gradient</span>
+      </div>
+      <div class="anchor-swatch-meta">
+        <span>#E04E28 â†’ #FF6A3D â€” Hero accents, logo highlight, special moments only</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Light Mode -->
+  <div class="color-section-label">Light Mode â€” Neutrals</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#F7F7F8"></div><div class="color-chip-info"><div class="color-chip-token">background</div><div class="color-chip-hex">#F7F7F8</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#0B0F14"></div><div class="color-chip-info"><div class="color-chip-token">foreground</div><div class="color-chip-hex">#0B0F14</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#FFFFFF"></div><div class="color-chip-info"><div class="color-chip-token">card</div><div class="color-chip-hex">#FFFFFF</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#EEF0F3"></div><div class="color-chip-info"><div class="color-chip-token">muted</div><div class="color-chip-hex">#EEF0F3</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#4B5563"></div><div class="color-chip-info"><div class="color-chip-token">muted-fg</div><div class="color-chip-hex">#4B5563</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#D8DEE6"></div><div class="color-chip-info"><div class="color-chip-token">border</div><div class="color-chip-hex">#D8DEE6</div></div></div>
+  </div>
+
+  <div class="color-section-label">Light Mode â€” Brand & Accent</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#E04E28"></div><div class="color-chip-info"><div class="color-chip-token">primary</div><div class="color-chip-hex">#E04E28</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#FFFFFF"></div><div class="color-chip-info"><div class="color-chip-token">primary-fg</div><div class="color-chip-hex">#FFFFFF</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#111827"></div><div class="color-chip-info"><div class="color-chip-token">secondary</div><div class="color-chip-hex">#111827</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#F2D6CF"></div><div class="color-chip-info"><div class="color-chip-token">accent</div><div class="color-chip-hex">#F2D6CF</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#3B1410"></div><div class="color-chip-info"><div class="color-chip-token">accent-fg</div><div class="color-chip-hex">#3B1410</div></div></div>
+  </div>
+
+  <div class="color-section-label">Light Mode â€” Semantic States</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#DC2626"></div><div class="color-chip-info"><div class="color-chip-token">destructive</div><div class="color-chip-hex">#DC2626</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#16A34A"></div><div class="color-chip-info"><div class="color-chip-token">success</div><div class="color-chip-hex">#16A34A</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#D97706"></div><div class="color-chip-info"><div class="color-chip-token">warning</div><div class="color-chip-hex">#D97706</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#2563EB"></div><div class="color-chip-info"><div class="color-chip-token">info</div><div class="color-chip-hex">#2563EB</div></div></div>
+  </div>
+
+  <div class="color-section-label" style="margin-top:2.5rem;">Dark Mode â€” Neutrals</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#0B0F14"></div><div class="color-chip-info"><div class="color-chip-token">background</div><div class="color-chip-hex">#0B0F14</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch has-border" style="background:#E8EDF3"></div><div class="color-chip-info"><div class="color-chip-token">foreground</div><div class="color-chip-hex">#E8EDF3</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#0F1620"></div><div class="color-chip-info"><div class="color-chip-token">card</div><div class="color-chip-hex">#0F1620</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#141C26"></div><div class="color-chip-info"><div class="color-chip-token">muted</div><div class="color-chip-hex">#141C26</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#A7B0BC"></div><div class="color-chip-info"><div class="color-chip-token">muted-fg</div><div class="color-chip-hex">#A7B0BC</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#233041"></div><div class="color-chip-info"><div class="color-chip-token">border</div><div class="color-chip-hex">#233041</div></div></div>
+  </div>
+
+  <div class="color-section-label">Dark Mode â€” Brand & Accent</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#FF6A3D"></div><div class="color-chip-info"><div class="color-chip-token">primary</div><div class="color-chip-hex">#FF6A3D</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#0B0F14"></div><div class="color-chip-info"><div class="color-chip-token">primary-fg</div><div class="color-chip-hex">#0B0F14</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#1A2432"></div><div class="color-chip-info"><div class="color-chip-token">secondary</div><div class="color-chip-hex">#1A2432</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#2A1B17"></div><div class="color-chip-info"><div class="color-chip-token">accent</div><div class="color-chip-hex">#2A1B17</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#FFB199"></div><div class="color-chip-info"><div class="color-chip-token">accent-fg</div><div class="color-chip-hex">#FFB199</div></div></div>
+  </div>
+
+  <div class="color-section-label">Dark Mode â€” Semantic States</div>
+  <div class="color-grid">
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#EF4444"></div><div class="color-chip-info"><div class="color-chip-token">destructive</div><div class="color-chip-hex">#EF4444</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#22C55E"></div><div class="color-chip-info"><div class="color-chip-token">success</div><div class="color-chip-hex">#22C55E</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#F59E0B"></div><div class="color-chip-info"><div class="color-chip-token">warning</div><div class="color-chip-hex">#F59E0B</div></div></div>
+    <div class="color-chip"><div class="color-chip-swatch" style="background:#60A5FA"></div><div class="color-chip-info"><div class="color-chip-token">info</div><div class="color-chip-hex">#60A5FA</div></div></div>
+  </div>
+
+  <!-- Color Usage Rules -->
+  <div class="color-section-label" style="margin-top:2.5rem;">Color Usage Rules</div>
+  <div class="dos-grid">
+    <div class="dos-card">
+      <div class="dos-card-header do">Do</div>
+      <div class="dos-card-body">
+        <ul>
+          <li>Use <strong>primary (ember)</strong> sparingly â€” only for CTAs, active states, and key highlights. Restraint is what makes it powerful.</li>
+          <li>Keep 90%+ of your UI in the <strong>neutral ramp</strong> (background, card, muted, border). Let the neutrals do the heavy lifting.</li>
+          <li>Use <strong>accent</strong> (soft ember tint) for hover states, selected rows, and subtle emphasis â€” never as a primary surface.</li>
+          <li>Use semantic colors <strong>only for their intended state</strong> (success = success, not "go" or "positive").</li>
+          <li>In dark mode, use the <strong>brighter ember</strong> (#FF6A3D) â€” the light-mode muted ember lacks contrast on dark backgrounds.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="dos-card">
+      <div class="dos-card-header dont">Don't</div>
+      <div class="dos-card-body">
+        <ul>
+          <li>Never use ember as a large surface fill (full-width banners, entire card backgrounds). It overwhelms the palette.</li>
+          <li>Never use pure black (#000000) or pure white (#FFFFFF) for backgrounds. Always use the designated off-tones.</li>
+          <li>Don't mix semantic colors with brand colors â€” no ember-tinted error states, no green primary buttons.</li>
+          <li>Avoid ember text on light backgrounds below 16px â€” it fails WCAG AA contrast at small sizes.</li>
+          <li>Don't introduce new accent hues. The palette is intentionally single-accent. New hues dilute the brand.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 04 â€” TYPOGRAPHY â”â”â” -->
+<section class="section-muted" id="typography">
+  <div class="inner">
+    <div class="section-number">04 â€” Typography System</div>
+    <h2 class="section-title">Four Fonts, Four Roles</h2>
+    <div class="divider"></div>
+    <p class="section-lead">
+      Each typeface has a precise role. No font does double duty. This discipline creates hierarchy that feels engineered â€” because it is.
+    </p>
+
+    <!-- Space Grotesk -->
+    <div class="type-specimen">
+      <div class="type-header">
+        <span class="type-name">Space Grotesk â€” Display & Headlines</span>
+        <span class="type-meta">Google Fonts Â· Geometric Sans Â· Weights 400â€“700</span>
+      </div>
+      <p class="type-role">
+        The architectural headline font. Its geometric letterforms evoke precision engineering â€” the kind of type you'd find etched into a building facade. Use for all display-sized text: page titles, hero headlines, section headers, card titles, and feature callouts.
+      </p>
+      <div class="type-sample-display">
+        Precision Engineered<br>
+        <span style="color:var(--primary);">Systems That Scale</span>
+      </div>
+      <div class="type-scale">
+        <div class="type-scale-row">
+          <span class="type-scale-label">H1 Â· 48â€“56px Â· 700</span>
+          <span style="font-family:'Space Grotesk'; font-size:2rem; font-weight:700; letter-spacing:-.03em;">Page Hero Headlines</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">H2 Â· 32â€“36px Â· 700</span>
+          <span style="font-family:'Space Grotesk'; font-size:1.5rem; font-weight:700; letter-spacing:-.02em;">Section Titles</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">H3 Â· 22â€“26px Â· 700</span>
+          <span style="font-family:'Space Grotesk'; font-size:1.15rem; font-weight:700; letter-spacing:-.02em;">Card & Feature Titles</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">H4 Â· 18â€“20px Â· 600</span>
+          <span style="font-family:'Space Grotesk'; font-size:1rem; font-weight:600; letter-spacing:-.01em;">Sub-section Headers</span>
+        </div>
+      </div>
+      <table class="usage-table" style="margin-top:1rem;">
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td class="font-label">Letter-spacing</td><td><code>-0.03em</code> (H1), <code>-0.02em</code> (H2â€“H3), <code>-0.01em</code> (H4)</td></tr>
+          <tr><td class="font-label">Line-height</td><td><code>1.05â€“1.15</code> â€” tight for display</td></tr>
+          <tr><td class="font-label">Text-transform</td><td>Never uppercase. The geometry speaks for itself.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Inter -->
+    <div class="type-specimen">
+      <div class="type-header">
+        <span class="type-name">Inter â€” UI & Interface</span>
+        <span class="type-meta">Google Fonts Â· Humanist Sans Â· Weights 300â€“900</span>
+      </div>
+      <p class="type-role">
+        The UI workhorse. Inter is optimized for screen legibility at small sizes, making it perfect for navigation, buttons, labels, form elements, badges, tabs, and all interactive text. It bridges the gap between the architectural headlines and the readable body copy.
+      </p>
+      <div class="type-sample-ui">
+        <span style="display:flex;gap:2rem;flex-wrap:wrap;align-items:baseline;">
+          <span style="font-weight:700;font-size:.95rem;">Navigation Items</span>
+          <span style="font-weight:600;font-size:.82rem;">Button Labels</span>
+          <span style="font-weight:500;font-size:.75rem;">Form Labels & Captions</span>
+          <span style="font-weight:600;font-size:.65rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-fg);">OVERLINE TEXT</span>
+        </span>
+      </div>
+      <div class="type-scale" style="margin-top:1rem;">
+        <div class="type-scale-row">
+          <span class="type-scale-label">Nav Â· 13px Â· 600</span>
+          <span style="font-family:'Inter'; font-size:.82rem; font-weight:600;">Dashboard &nbsp; Projects &nbsp; Analytics &nbsp; Settings</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Button Â· 14px Â· 600</span>
+          <span style="font-family:'Inter'; font-size:.88rem; font-weight:600;">Deploy System</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Label Â· 12px Â· 600</span>
+          <span style="font-family:'Inter'; font-size:.75rem; font-weight:600;">Email Address</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Overline Â· 11px Â· 700</span>
+          <span style="font-family:'Inter'; font-size:.68rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted-fg);">SECTION LABEL</span>
+        </div>
+      </div>
+      <table class="usage-table" style="margin-top:1rem;">
+        <thead><tr><th>Context</th><th>Spec</th></tr></thead>
+        <tbody>
+          <tr><td class="font-label">Buttons / CTAs</td><td>14px, weight 600, no letter-spacing</td></tr>
+          <tr><td class="font-label">Navigation</td><td>13px, weight 600</td></tr>
+          <tr><td class="font-label">Form labels</td><td>12px, weight 600</td></tr>
+          <tr><td class="font-label">Overlines / section labels</td><td>11px, weight 700, <code>letter-spacing: 0.08â€“0.12em</code>, <code>text-transform: uppercase</code></td></tr>
+          <tr><td class="font-label">Badges / tags</td><td>11px, weight 600</td></tr>
+          <tr><td class="font-label">Captions / metadata</td><td>12px, weight 400â€“500, muted-foreground color</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Roboto -->
+    <div class="type-specimen">
+      <div class="type-header">
+        <span class="type-name">Roboto â€” Body & Long-Form</span>
+        <span class="type-meta">Google Fonts Â· Neo-Grotesque Sans Â· Weights 300â€“700</span>
+      </div>
+      <p class="type-role">
+        The readable companion for paragraphs, articles, descriptions, and any text meant to be read at length. Roboto's open letterforms and generous x-height make it comfortable for sustained reading â€” the content behind the architecture.
+      </p>
+      <div class="type-sample-body">
+        Modern AI systems are not just tools â€” they are architectural works. Every well-designed agent framework reflects the same structural discipline found in the best-engineered buildings: clear load paths, elegant interfaces between components, and an obsessive attention to the connections that hold everything together.
+      </div>
+      <div class="type-scale" style="margin-top:1rem;">
+        <div class="type-scale-row">
+          <span class="type-scale-label">Body Â· 16px Â· 400</span>
+          <span style="font-family:'Roboto'; font-size:1rem; font-weight:400; color:var(--fg);">Primary body text for articles and descriptions.</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Body sm Â· 14px Â· 400</span>
+          <span style="font-family:'Roboto'; font-size:.88rem; font-weight:400; color:var(--fg);">Card descriptions and secondary content.</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Lead Â· 18px Â· 300</span>
+          <span style="font-family:'Roboto'; font-size:1.1rem; font-weight:300; color:var(--muted-fg);">Section introductions and sub-headlines.</span>
+        </div>
+      </div>
+      <table class="usage-table" style="margin-top:1rem;">
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td class="font-label">Line-height</td><td><code>1.7â€“1.75</code> for paragraphs (generous for readability)</td></tr>
+          <tr><td class="font-label">Max-width</td><td><code>65ch</code> â€” never let body text span full viewport</td></tr>
+          <tr><td class="font-label">Paragraph spacing</td><td><code>1em</code> margin-bottom between paragraphs</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- JetBrains Mono -->
+    <div class="type-specimen">
+      <div class="type-header">
+        <span class="type-name">JetBrains Mono â€” Code & Technical</span>
+        <span class="type-meta">Google Fonts Â· Monospace Â· Weights 400â€“700</span>
+      </div>
+      <p class="type-role">
+        The infrastructure font. Use for all code blocks, terminal output, technical metadata, version numbers, hex values, timestamps, and any text that signals "this is data" or "this is a system." Also used for decorative eyebrow text and overline accents that reinforce the technical brand identity.
+      </p>
+      <div class="type-sample-code">
+        <span class="cmt">// Architectural Infra Vibe</span>
+<span class="kw">const</span> brand = {
+  name: <span class="str">"travisjames.ai"</span>,
+  primary: <span class="str">"#E04E28"</span>,
+  mode: <span class="str">"precision-engineered"</span>,
+};
+
+<span class="kw">export default</span> brand;
+      </div>
+      <div class="type-scale" style="margin-top:1rem;">
+        <div class="type-scale-row">
+          <span class="type-scale-label">Code block Â· 13px Â· 400</span>
+          <span style="font-family:'JetBrains Mono'; font-size:.82rem;">console.log("deploy");</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Inline code Â· 13px Â· 500</span>
+          <span style="font-family:'JetBrains Mono'; font-size:.82rem; font-weight:500; background:var(--muted); padding:.1rem .4rem; border-radius:4px;">--primary: #E04E28</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Eyebrow Â· 11px Â· 600</span>
+          <span style="font-family:'JetBrains Mono'; font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--primary);">// SECTION LABEL</span>
+        </div>
+        <div class="type-scale-row">
+          <span class="type-scale-label">Meta Â· 10px Â· 400</span>
+          <span style="font-family:'JetBrains Mono'; font-size:.62rem; color:var(--muted-fg);">v2.1.0 Â· Last updated Feb 2026 Â· #FF6A3D</span>
+        </div>
+      </div>
+      <table class="usage-table" style="margin-top:1rem;">
+        <thead><tr><th>Context</th><th>Spec</th></tr></thead>
+        <tbody>
+          <tr><td class="font-label">Code blocks</td><td>13px, weight 400, <code>line-height: 1.7</code>, muted bg + border</td></tr>
+          <tr><td class="font-label">Inline code</td><td>13px, weight 500, muted bg, 4px border-radius</td></tr>
+          <tr><td class="font-label">Decorative eyebrows</td><td>11px, weight 600, <code>letter-spacing: 0.12em</code>, uppercase, primary color</td></tr>
+          <tr><td class="font-label">Hex values / metadata</td><td>10â€“11px, weight 400, muted-foreground color</td></tr>
+          <tr><td class="font-label">Version badges</td><td>10px, weight 500, pill border, muted-foreground</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Font Pairing Summary -->
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-top:1rem;">
+      <div style="font-family:'Inter';font-size:.7rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin-bottom:.75rem;">Quick Reference â€” Font Roles</div>
+      <table class="usage-table">
+        <thead><tr><th>Font</th><th>Role</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="font-label" style="font-family:'Space Grotesk'">Space Grotesk</td>
+            <td>Display & Headlines</td>
+            <td><span class="context">H1â€“H4</span> <span class="context">Hero</span> <span class="context">Card titles</span> <span class="context">Feature names</span></td>
+          </tr>
+          <tr>
+            <td class="font-label" style="font-family:'Inter'">Inter</td>
+            <td>UI & Interface</td>
+            <td><span class="context">Buttons</span> <span class="context">Nav</span> <span class="context">Labels</span> <span class="context">Badges</span> <span class="context">Tabs</span></td>
+          </tr>
+          <tr>
+            <td class="font-label" style="font-family:'Roboto'">Roboto</td>
+            <td>Body & Long-form</td>
+            <td><span class="context">Paragraphs</span> <span class="context">Articles</span> <span class="context">Descriptions</span> <span class="context">Blog posts</span></td>
+          </tr>
+          <tr>
+            <td class="font-label" style="font-family:'JetBrains Mono'">JetBrains Mono</td>
+            <td>Code & Technical</td>
+            <td><span class="context">Code blocks</span> <span class="context">Eyebrows</span> <span class="context">Metadata</span> <span class="context">Hex values</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 05 â€” MOOD BOARD â”â”â” -->
+<section class="section" id="mood">
+  <div class="section-number">05 â€” Mood & Atmosphere</div>
+  <h2 class="section-title">Visual References</h2>
+  <div class="divider"></div>
+  <p class="section-lead">
+    The brand lives at the intersection of minimalist architecture, infrastructure aesthetics, and warm light against cool concrete. Think: a server room photographed by an architect.
+  </p>
+
+  <div class="mood-grid">
+    <!-- Tile 1: Architectural light -->
+    <div class="mood-tile mood-1">
+      <div class="mood-arch-text" style="color:var(--fg);">Concrete</div>
+      <div class="mood-arch-sub" style="color:var(--muted-fg);">Light Â· Structure Â· Space</div>
+      <div style="position:absolute;bottom:.75rem;left:.75rem;">
+        <span class="mood-tile-label" style="background:var(--card);color:var(--muted-fg);">Light Mode Feeling</span>
+      </div>
+    </div>
+
+    <!-- Tile 2: Dark card -->
+    <div class="mood-tile mood-2">
+      <div style="text-align:center;">
+        <div style="font-family:'JetBrains Mono';font-size:.6rem;color:#FF6A3D;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.5rem;">// Terminal</div>
+        <div style="font-family:'Space Grotesk';font-size:1.5rem;font-weight:700;color:#E8EDF3;letter-spacing:-.02em;">Dark Mode</div>
+        <div style="font-family:'Roboto';font-size:.75rem;color:#A7B0BC;margin-top:.3rem;">Authority Â· Depth Â· Focus</div>
+      </div>
+    </div>
+
+    <!-- Tile 3: Ember -->
+    <div class="mood-tile mood-3">
+      <div class="mood-ember-big">
+        .ai
+      </div>
+    </div>
+
+    <!-- Tile 4: Code aesthetic -->
+    <div class="mood-tile mood-4">
+      <div class="mood-code-block">
+        <span class="h">const</span> system = {<br>
+        &nbsp;&nbsp;architect: <span class="h">"Travis"</span>,<br>
+        &nbsp;&nbsp;aesthetic: <span class="h">"elegant"</span>,<br>
+        };
+      </div>
+    </div>
+
+    <!-- Tile 5: Blueprint grid -->
+    <div class="mood-tile mood-5">
+      <div class="mood-blueprint">
+        Infrastructure<br>as Aesthetic
+      </div>
+      <div class="mood-blueprint-sub">Grids Â· Precision Â· Blueprint Thinking</div>
+    </div>
+  </div>
+
+  <div style="margin-top:2rem; display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem;">
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;">
+      <div style="font-family:'JetBrains Mono';font-size:.6rem;font-weight:600;color:var(--primary);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem;">Photography Style</div>
+      <div style="font-family:'Roboto';font-size:.78rem;color:var(--muted-fg);line-height:1.55;">Minimalist architectural photography. Concrete surfaces, glass, clean geometry. Warm light cutting through cool structures. Server rooms, data centers, cable management as art.</div>
+    </div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;">
+      <div style="font-family:'JetBrains Mono';font-size:.6rem;font-weight:600;color:var(--primary);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem;">Illustration Style</div>
+      <div style="font-family:'Roboto';font-size:.78rem;color:var(--muted-fg);line-height:1.55;">Line drawings, wireframe diagrams, architectural blueprints. Monochrome with ember accent highlights. System diagrams rendered as elegant compositions rather than technical docs.</div>
+    </div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;">
+      <div style="font-family:'JetBrains Mono';font-size:.6rem;font-weight:600;color:var(--primary);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem;">Texture & Pattern</div>
+      <div style="font-family:'Roboto';font-size:.78rem;color:var(--muted-fg);line-height:1.55;">Subtle grids, graph paper overlays, noise grain. Blueprint-style dotted lines. Cross-hatching for depth. All at very low opacity â€” atmosphere, not distraction.</div>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 06 â€” COMPONENTS â”â”â” -->
+<section class="section-dark" id="components">
+  <div class="inner">
+    <div class="section-number">06 â€” Component Examples</div>
+    <h2 class="section-title">UI In Practice</h2>
+    <div class="divider"></div>
+    <p class="section-lead">Live examples of how the brand system comes together in actual interface elements.</p>
+
+    <div style="color:#A7B0BC;">
+      <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#FF6A3D;margin-bottom:.75rem;">Buttons</div>
+      <div class="component-row">
+        <button class="comp-btn primary">Deploy System</button>
+        <button class="comp-btn secondary">View Docs</button>
+        <button class="comp-btn outline" style="color:#E8EDF3;border-color:#233041;">Configure</button>
+        <button class="comp-btn ghost" style="color:#A7B0BC;">Cancel</button>
+      </div>
+
+      <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#FF6A3D;margin-bottom:.75rem;margin-top:1.5rem;">Badges</div>
+      <div class="component-row">
+        <span class="comp-badge success">Active</span>
+        <span class="comp-badge warning">Pending</span>
+        <span class="comp-badge error">Failed</span>
+        <span class="comp-badge info">In Review</span>
+      </div>
+
+      <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#FF6A3D;margin-bottom:.75rem;margin-top:1.5rem;">Input</div>
+      <div class="comp-input-wrap">
+        <label class="comp-input-label" style="color:#E8EDF3;">Project Name</label>
+        <input class="comp-input" style="background:#0F1620;border-color:#233041;color:#E8EDF3;" placeholder="e.g., prometheus-agent-v2" />
+      </div>
+
+      <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#FF6A3D;margin-bottom:.75rem;margin-top:1.5rem;">Card</div>
+      <div class="comp-card-preview" style="background:#0F1620;border-color:#233041;">
+        <h4 style="color:#E8EDF3;">Agentic Workflow Engine</h4>
+        <p style="color:#A7B0BC;">Multi-agent orchestration framework with streaming tool calls and hybrid RAG architecture.</p>
+        <div class="tag-row">
+          <span class="comp-badge info">Mastra</span>
+          <span class="comp-badge" style="background:#2A1B17;color:#FFB199;">TypeScript</span>
+          <span class="comp-badge success">Production</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- â”â”â” 07 â€” CSS REFERENCE â”â”â” -->
+<section class="section" id="reference">
+  <div class="section-number">07 â€” CSS Variables Reference</div>
+  <h2 class="section-title">Drop-In Token Set</h2>
+  <div class="divider"></div>
+  <p class="section-lead">
+    shadcn/ui compatible CSS custom properties. Copy directly into your global stylesheet. Uses RGB channel format for Tailwind's opacity modifier syntax.
+  </p>
+
+  <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin-bottom:.5rem;">Google Fonts Import</div>
+  <div class="css-ref" style="margin-top:.5rem;margin-bottom:1.5rem;">
+    <pre><span class="sel">@import</span> <span class="val">url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap')</span>;</pre>
+  </div>
+
+  <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin-bottom:.5rem;">Light Mode Variables (:root)</div>
+  <div class="css-ref">
+    <pre><span class="sel">:root</span> {
+  <span class="cmt">/* Neutrals */</span>
+  <span class="prop">--background</span>: <span class="val">247 247 248</span>;   <span class="cmt">/* #F7F7F8 */</span>
+  <span class="prop">--foreground</span>: <span class="val">11 15 20</span>;      <span class="cmt">/* #0B0F14 */</span>
+  <span class="prop">--card</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--card-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--popover</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--popover-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--muted</span>: <span class="val">238 240 243</span>;      <span class="cmt">/* #EEF0F3 */</span>
+  <span class="prop">--muted-foreground</span>: <span class="val">75 85 99</span>;
+  <span class="prop">--border</span>: <span class="val">216 222 230</span>;     <span class="cmt">/* #D8DEE6 */</span>
+  <span class="prop">--input</span>: <span class="val">216 222 230</span>;
+  <span class="prop">--ring</span>: <span class="val">224 78 40</span>;        <span class="cmt">/* #E04E28 */</span>
+
+  <span class="cmt">/* Brand */</span>
+  <span class="prop">--primary</span>: <span class="val">224 78 40</span>;
+  <span class="prop">--primary-foreground</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--secondary</span>: <span class="val">17 24 39</span>;
+  <span class="prop">--secondary-foreground</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--accent</span>: <span class="val">242 214 207</span>;     <span class="cmt">/* #F2D6CF */</span>
+  <span class="prop">--accent-foreground</span>: <span class="val">59 20 16</span>;
+
+  <span class="cmt">/* Semantic */</span>
+  <span class="prop">--destructive</span>: <span class="val">220 38 38</span>;
+  <span class="prop">--destructive-foreground</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--success</span>: <span class="val">22 163 74</span>;
+  <span class="prop">--success-foreground</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--warning</span>: <span class="val">217 119 6</span>;
+  <span class="prop">--warning-foreground</span>: <span class="val">255 255 255</span>;
+  <span class="prop">--info</span>: <span class="val">37 99 235</span>;
+  <span class="prop">--info-foreground</span>: <span class="val">255 255 255</span>;
+}</pre>
+  </div>
+
+  <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin-bottom:.5rem;margin-top:1.5rem;">Dark Mode Variables (.dark)</div>
+  <div class="css-ref">
+    <pre><span class="sel">.dark</span> {
+  <span class="cmt">/* Neutrals */</span>
+  <span class="prop">--background</span>: <span class="val">11 15 20</span>;       <span class="cmt">/* #0B0F14 */</span>
+  <span class="prop">--foreground</span>: <span class="val">232 237 243</span>;    <span class="cmt">/* #E8EDF3 */</span>
+  <span class="prop">--card</span>: <span class="val">15 22 32</span>;
+  <span class="prop">--card-foreground</span>: <span class="val">232 237 243</span>;
+  <span class="prop">--popover</span>: <span class="val">15 22 32</span>;
+  <span class="prop">--popover-foreground</span>: <span class="val">232 237 243</span>;
+  <span class="prop">--muted</span>: <span class="val">20 28 38</span>;          <span class="cmt">/* #141C26 */</span>
+  <span class="prop">--muted-foreground</span>: <span class="val">167 176 188</span>;
+  <span class="prop">--border</span>: <span class="val">35 48 65</span>;         <span class="cmt">/* #233041 */</span>
+  <span class="prop">--input</span>: <span class="val">35 48 65</span>;
+  <span class="prop">--ring</span>: <span class="val">255 106 61</span>;        <span class="cmt">/* #FF6A3D */</span>
+
+  <span class="cmt">/* Brand */</span>
+  <span class="prop">--primary</span>: <span class="val">255 106 61</span>;
+  <span class="prop">--primary-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--secondary</span>: <span class="val">26 36 50</span>;
+  <span class="prop">--secondary-foreground</span>: <span class="val">232 237 243</span>;
+  <span class="prop">--accent</span>: <span class="val">42 27 23</span>;         <span class="cmt">/* #2A1B17 */</span>
+  <span class="prop">--accent-foreground</span>: <span class="val">255 177 153</span>;
+
+  <span class="cmt">/* Semantic */</span>
+  <span class="prop">--destructive</span>: <span class="val">239 68 68</span>;
+  <span class="prop">--destructive-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--success</span>: <span class="val">34 197 94</span>;
+  <span class="prop">--success-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--warning</span>: <span class="val">245 158 11</span>;
+  <span class="prop">--warning-foreground</span>: <span class="val">11 15 20</span>;
+  <span class="prop">--info</span>: <span class="val">96 165 250</span>;
+  <span class="prop">--info-foreground</span>: <span class="val">11 15 20</span>;
+}</pre>
+  </div>
+
+  <div style="font-family:'Inter';font-size:.65rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);margin-bottom:.5rem;margin-top:1.5rem;">Tailwind Config (fonts)</div>
+  <div class="css-ref">
+    <pre><span class="cmt">// tailwind.config.js</span>
+<span class="sel">module.exports</span> = {
+  theme: {
+    extend: {
+      fontFamily: {
+        <span class="prop">display</span>: [<span class="val">'Space Grotesk'</span>, <span class="val">'sans-serif'</span>],
+        <span class="prop">ui</span>:      [<span class="val">'Inter'</span>, <span class="val">'sans-serif'</span>],
+        <span class="prop">body</span>:    [<span class="val">'Roboto'</span>, <span class="val">'sans-serif'</span>],
+        <span class="prop">mono</span>:    [<span class="val">'JetBrains Mono'</span>, <span class="val">'monospace'</span>],
+      },
+    },
+  },
+};</pre>
+  </div>
+</section>
+
+<!-- â”â”â” FOOTER â”â”â” -->
+<footer class="footer">
+  <div class="footer-brand">travisjames<span>.ai</span></div>
+  <div class="footer-sub">Brand Guide v1.0 Â· Precision Engineered Â· Feb 2026</div>
+</footer>
+
+</body>
+</html>
