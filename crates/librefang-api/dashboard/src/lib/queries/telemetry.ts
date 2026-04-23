@@ -4,7 +4,7 @@ import { telemetryKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
 const STALE_MS = 5_000;
-const REFRESH_MS = 10_000; // intentionally aggressive: live metrics dashboard
+const REFRESH_MS = 10_000; // live metrics: 10 s refetch (stale at 5 s to catch tab-switch refreshes)
 
 export const telemetryQueryOptions = () =>
   queryOptions({
