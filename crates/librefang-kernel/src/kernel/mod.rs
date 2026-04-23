@@ -10917,7 +10917,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.mcp_roots_for_server(server_config),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -11185,7 +11185,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.mcp_roots_for_server(server_config),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
