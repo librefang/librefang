@@ -124,9 +124,10 @@ impl WhatsAppAdapter {
     ///
     /// - `is_group`: whether the message came from a group/community chat.
     /// - `text`: the raw message text (used for mention detection under `MentionOnly`).
+    /// - `sender_phone`: the sender's phone number (used for `DmPolicy::AllowedOnly`).
     ///
     /// Returns `true` if the adapter should process and respond to the message.
-    pub fn should_handle_message(&self, is_group: bool, text: &str) -> bool {
+    pub fn should_handle_message(&self, is_group: bool, text: &str, sender_phone: &str) -> bool {
         if is_group {
             match self.group_policy {
                 GroupPolicy::All => true,
@@ -137,7 +138,7 @@ impl WhatsAppAdapter {
         } else {
             match self.dm_policy {
                 DmPolicy::Respond => true,
-                DmPolicy::AllowedOnly => false, // allowed list checked separately via is_allowed()
+                DmPolicy::AllowedOnly => self.is_allowed(sender_phone),
                 DmPolicy::Ignore => false,
             }
         }
@@ -675,7 +676,7 @@ mod tests {
             vec![],
         );
         // Default DmPolicy is Respond
-        assert!(adapter.should_handle_message(false, "hello"));
+        assert!(adapter.should_handle_message(false, "hello", "+1234567890"));
     }
 
     #[test]
@@ -688,7 +689,23 @@ mod tests {
             vec![],
         )
         .with_dm_policy(DmPolicy::Ignore);
-        assert!(!adapter.should_handle_message(false, "hello"));
+        assert!(!adapter.should_handle_message(false, "hello", "+1234567890"));
+    }
+
+    #[test]
+    fn test_dm_policy_allowed_only() {
+        let adapter = WhatsAppAdapter::new(
+            "12345".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            8443,
+            vec!["+1234567890".to_string()],
+        )
+        .with_dm_policy(DmPolicy::AllowedOnly);
+        // Allowed sender → handle
+        assert!(adapter.should_handle_message(false, "hello", "+1234567890"));
+        // Unknown sender → reject
+        assert!(!adapter.should_handle_message(false, "hello", "+9999999999"));
     }
 
     #[test]
@@ -701,7 +718,7 @@ mod tests {
             vec![],
         )
         .with_group_policy(GroupPolicy::All);
-        assert!(adapter.should_handle_message(true, "any group message"));
+        assert!(adapter.should_handle_message(true, "any group message", ""));
     }
 
     #[test]
@@ -718,11 +735,11 @@ mod tests {
         .with_bot_phone(Some("+15551234567".to_string()));
 
         // Without mention — should not handle
-        assert!(!adapter.should_handle_message(true, "what time is it?"));
+        assert!(!adapter.should_handle_message(true, "what time is it?", ""));
         // With bot name mention
-        assert!(adapter.should_handle_message(true, "@HermesBot what time is it?"));
+        assert!(adapter.should_handle_message(true, "@HermesBot what time is it?", ""));
         // With bot phone mention
-        assert!(adapter.should_handle_message(true, "+15551234567 hello"));
+        assert!(adapter.should_handle_message(true, "+15551234567 hello", ""));
     }
 
     #[test]
@@ -735,8 +752,8 @@ mod tests {
             vec![],
         )
         .with_group_policy(GroupPolicy::CommandsOnly);
-        assert!(!adapter.should_handle_message(true, "hello everyone"));
-        assert!(adapter.should_handle_message(true, "/help"));
+        assert!(!adapter.should_handle_message(true, "hello everyone", ""));
+        assert!(adapter.should_handle_message(true, "/help", ""));
     }
 
     #[test]
@@ -749,6 +766,6 @@ mod tests {
             vec![],
         )
         .with_group_policy(GroupPolicy::Ignore);
-        assert!(!adapter.should_handle_message(true, "/help"));
+        assert!(!adapter.should_handle_message(true, "/help", ""));
     }
 }
