@@ -32,7 +32,10 @@ pub struct ModelCatalog {
 fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, bool) {
     let lower = name.to_lowercase();
 
-    // Embedding models are not chat models — tools and thinking don't apply.
+    // Embedding check runs first and short-circuits the rest.
+    // A vision-encoder used for embeddings (e.g. a hypothetical "clip-embed")
+    // is still not a chat vision model, so the families check is intentionally
+    // skipped for embedding models.
     let is_embed = lower.contains("embed") || lower.contains("embedding");
     if is_embed {
         return (false, false, false);
@@ -42,7 +45,9 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
         .map(|fs| fs.iter().any(|f| f.to_lowercase() == "clip"))
         .unwrap_or(false);
 
-    // Heuristic for known thinking/reasoning model families.
+    // Name-based heuristics for thinking/reasoning models.
+    // Note: `qwen3` matches all Qwen3 variants, including non-thinking ones —
+    // Ollama does not distinguish thinking vs standard mode in `families`.
     let supports_thinking = lower.contains("qwq")
         || lower.contains("deepseek-r1")
         || lower.contains("/r1")
@@ -2354,6 +2359,96 @@ supports_streaming = true
                 model.id
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for infer_capabilities
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod infer_capabilities_tests {
+    use super::infer_capabilities;
+
+    fn families(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn embedding_model_has_no_capabilities() {
+        assert_eq!(
+            infer_capabilities("nomic-embed-text:latest", None),
+            (false, false, false)
+        );
+        assert_eq!(
+            infer_capabilities("bge-embedding:latest", None),
+            (false, false, false)
+        );
+        // embedding check wins even when families contains "clip"
+        assert_eq!(
+            infer_capabilities("clip-embed:latest", Some(&families(&["clip"]))),
+            (false, false, false)
+        );
+    }
+
+    #[test]
+    fn vision_model_detected_via_clip_family() {
+        assert_eq!(
+            infer_capabilities("llava:latest", Some(&families(&["llama", "clip"]))),
+            (true, true, false)
+        );
+        assert_eq!(
+            infer_capabilities("moondream:latest", Some(&families(&["clip"]))),
+            (true, true, false)
+        );
+        // clip family match is case-insensitive
+        assert_eq!(
+            infer_capabilities("llava:7b", Some(&families(&["CLIP"]))),
+            (true, true, false)
+        );
+    }
+
+    #[test]
+    fn plain_chat_model_gets_tools_only() {
+        assert_eq!(
+            infer_capabilities("llama3.2:latest", Some(&families(&["llama"]))),
+            (false, true, false)
+        );
+        assert_eq!(infer_capabilities("mistral:7b", None), (false, true, false));
+    }
+
+    #[test]
+    fn thinking_models_detected_by_name() {
+        assert_eq!(
+            infer_capabilities("deepseek-r1:8b", None),
+            (false, true, true)
+        );
+        assert_eq!(infer_capabilities("qwq:32b", None), (false, true, true));
+        assert_eq!(infer_capabilities("qwen3:8b", None), (false, true, true));
+        assert_eq!(
+            infer_capabilities("marco-o1:latest", None),
+            (false, true, true)
+        );
+        // :r1 tag variant
+        assert_eq!(
+            infer_capabilities("some-model:r1", None),
+            (false, true, true)
+        );
+        // /r1 path variant
+        assert_eq!(
+            infer_capabilities("vendor/r1:latest", None),
+            (false, true, true)
+        );
+    }
+
+    #[test]
+    fn vision_and_thinking_can_combine() {
+        // hypothetical future model that is both vision + thinking
+        let fs = families(&["llama", "clip"]);
+        let (vision, tools, thinking) = infer_capabilities("deepseek-r1-vision:latest", Some(&fs));
+        assert!(vision);
+        assert!(tools);
+        assert!(thinking);
     }
 }
 
