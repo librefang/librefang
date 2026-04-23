@@ -259,6 +259,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             commands::install_update,
             commands::open_config_dir,
             commands::open_logs_dir,
+            commands::uninstall_app,
             connection::test_connection,
             connection::connect_remote,
             connection::start_local,

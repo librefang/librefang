@@ -678,6 +678,31 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Build the roots list for a specific MCP server config.
+    ///
+    /// Starts with the default roots (workspaces directory) and, for stdio
+    /// servers, appends any absolute-path arguments the user configured.
+    /// This ensures that filesystem-aware MCP servers (e.g.
+    /// `@modelcontextprotocol/server-filesystem`) receive the directories
+    /// explicitly passed in their args — such as `/mnt/obsidian` — rather
+    /// than being silently restricted to the agent workspace.
+    fn mcp_roots_for_server(
+        &self,
+        server_config: &librefang_types::config::McpServerConfigEntry,
+    ) -> Vec<String> {
+        use librefang_types::config::McpTransportEntry;
+        let mut roots = self.default_mcp_roots();
+        if let Some(McpTransportEntry::Stdio { args, .. }) = &server_config.transport {
+            for arg in args {
+                let p = std::path::Path::new(arg.as_str());
+                if p.is_absolute() && !roots.contains(arg) {
+                    roots.push(arg.clone());
+                }
+            }
+        }
+        roots
+    }
+
     /// Build the default list of root directories to advertise to MCP servers
     /// via the MCP Roots capability.
     ///
@@ -789,6 +814,14 @@ impl LibreFangKernel {
                 },
             };
 
+            // Merge agent workspace into server-specific roots.
+            let mut server_roots = self.mcp_roots_for_server(server_config);
+            for r in &roots {
+                if !server_roots.contains(r) {
+                    server_roots.push(r.clone());
+                }
+            }
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
@@ -798,7 +831,7 @@ impl LibreFangKernel {
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: roots.clone(),
+                roots: server_roots,
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -9638,10 +9671,27 @@ system_prompt = "You are a helpful assistant."
                                 librefang_types::model_catalog::AuthStatus::NotRequired,
                             );
                             if !result.discovered_models.is_empty() {
-                                catalog.merge_discovered_models(
-                                    provider_id,
-                                    &result.discovered_models,
-                                );
+                                // Use enriched metadata when available (Ollama populates
+                                // discovered_model_info; other providers leave it empty).
+                                let info: Vec<_> = if result.discovered_model_info.is_empty() {
+                                    result
+                                        .discovered_models
+                                        .iter()
+                                        .map(|name| {
+                                            librefang_runtime::provider_health::DiscoveredModelInfo {
+                                                name: name.clone(),
+                                                parameter_size: None,
+                                                quantization_level: None,
+                                                family: None,
+                                                families: None,
+                                                size: None,
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    result.discovered_model_info.clone()
+                                };
+                                catalog.merge_discovered_models(provider_id, &info);
                             }
                         }
                     } else {
@@ -10736,7 +10786,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: self.default_mcp_roots(),
+                roots: self.mcp_roots_for_server(server_config),
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -10884,7 +10934,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.default_mcp_roots(),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -11007,7 +11057,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_provider: Some(self.oauth_provider_ref()),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
-                roots: self.default_mcp_roots(),
+                roots: self.mcp_roots_for_server(server_config),
             };
 
             self.mcp_health.register(&server_config.name);
@@ -11152,7 +11202,7 @@ system_prompt = "You are a helpful assistant."
             oauth_provider: Some(self.oauth_provider_ref()),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
-            roots: self.default_mcp_roots(),
+            roots: self.mcp_roots_for_server(&server_config),
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -14530,6 +14580,27 @@ impl KernelHandle for LibreFangKernel {
 
     fn tool_timeout_secs(&self) -> u64 {
         let cfg = self.config.load();
+        cfg.tool_timeout_secs
+    }
+
+    fn tool_timeout_secs_for(&self, tool_name: &str) -> u64 {
+        let cfg = self.config.load();
+        // 1. Exact match
+        if let Some(&t) = cfg.tool_timeouts.get(tool_name) {
+            return t;
+        }
+        // 2. Best glob match — longest pattern wins (most specific first).
+        // HashMap iteration is unordered; picking the longest matching pattern
+        // gives deterministic resolution when multiple globs match.
+        let best = cfg
+            .tool_timeouts
+            .iter()
+            .filter(|(pattern, _)| librefang_types::capability::glob_matches(pattern, tool_name))
+            .max_by_key(|(pattern, _)| pattern.len());
+        if let Some((_, &timeout)) = best {
+            return timeout;
+        }
+        // 3. Global fallback
         cfg.tool_timeout_secs
     }
 

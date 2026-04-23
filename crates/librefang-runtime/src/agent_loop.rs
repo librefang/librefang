@@ -745,10 +745,9 @@ async fn execute_single_tool_call(
     }
 
     let effective_exec_policy = ctx.manifest.exec_policy.as_ref();
-    let tool_timeout = ctx
-        .kernel
-        .as_ref()
-        .map_or(TOOL_TIMEOUT_SECS, |k| k.tool_timeout_secs());
+    let tool_timeout = ctx.kernel.as_ref().map_or(TOOL_TIMEOUT_SECS, |k| {
+        k.tool_timeout_secs_for(&tool_call.name)
+    });
     let trace_start = Instant::now();
     let trace_timestamp = chrono::Utc::now();
     let result = match tokio::time::timeout(

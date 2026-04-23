@@ -196,3 +196,97 @@ pub fn open_logs_dir() -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create logs dir: {e}"))?;
     open::that(&dir).map_err(|e| format!("Failed to open directory: {e}"))
 }
+
+/// Launch the platform uninstaller and exit the app.
+///
+/// - **Windows**: reads `UninstallString` from the NSIS registry key and runs it.
+/// - **macOS**: moves the `.app` bundle to Trash via `osascript` + Finder.
+/// - **Linux/AppImage**: deletes the AppImage binary directly.
+/// - **Linux/system package**: returns a hint to run the distro uninstall command.
+#[tauri::command]
+pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // `reg query` is a built-in Windows tool — no extra deps required.
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                "/f",
+                "LibreFang",
+                "/s",
+            ])
+            .output()
+            .map_err(|e| format!("Failed to query registry: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("UninstallString") {
+                // reg output columns are space-separated: Name    REG_SZ    Value
+                if let Some(value) = trimmed.splitn(3, "    ").nth(2) {
+                    let cmd = value.trim().to_string();
+                    std::process::Command::new("cmd")
+                        .args(["/C", &cmd])
+                        .spawn()
+                        .map_err(|e| format!("Failed to launch uninstaller: {e}"))?;
+                    app.exit(0);
+                    return Ok(());
+                }
+            }
+        }
+        Err("Uninstaller not found in registry. The app may have been installed without the NSIS installer.".to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Walk up from the executable to find the enclosing .app bundle.
+        let exe = std::env::current_exe().map_err(|e| format!("Cannot locate executable: {e}"))?;
+        let bundle = exe
+            .ancestors()
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("app"))
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| {
+                "App bundle (.app) not found — was LibreFang installed from a .dmg?".to_string()
+            })?;
+
+        let path = bundle.to_string_lossy().replace('"', "\\\"");
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(r#"tell application "Finder" to move POSIX file "{path}" to trash"#),
+            ])
+            .spawn()
+            .map_err(|e| format!("Failed to move app to Trash: {e}"))?;
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("Cannot locate executable: {e}"))?;
+        let exe_str = exe.to_string_lossy();
+
+        // AppImage: the executable IS the package — just remove it.
+        if exe_str.ends_with(".AppImage") || std::env::var("APPIMAGE").is_ok() {
+            let target = std::env::var("APPIMAGE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(exe.clone());
+            std::fs::remove_file(&target).map_err(|e| format!("Failed to remove AppImage: {e}"))?;
+            app.exit(0);
+            return Ok(());
+        }
+
+        // System package: we can't elevate from inside the app, so surface the command.
+        let hint = if std::path::Path::new("/usr/bin/apt").exists() {
+            "sudo apt remove librefang"
+        } else if std::path::Path::new("/usr/bin/dnf").exists() {
+            "sudo dnf remove librefang"
+        } else if std::path::Path::new("/usr/bin/pacman").exists() {
+            "sudo pacman -R librefang"
+        } else {
+            "use your distro's package manager to remove librefang"
+        };
+        Err(format!("To uninstall, run in a terminal: {hint}"))
+    }
+}
