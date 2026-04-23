@@ -248,6 +248,147 @@ impl MediaDriver for OpenAIMediaDriver {
     }
 }
 
+/// Generic OpenAI-compatible media driver for user-defined providers.
+///
+/// Users configure a custom provider via `provider_urls` in `config.toml`:
+/// ```toml
+/// [provider_urls]
+/// volcengine = "https://open.volcengineapi.com/v1"
+/// ```
+/// and set the corresponding API key env var:
+/// ```sh
+/// VOLCENGINE_API_KEY=sk-...
+/// ```
+/// The driver advertises `ImageGeneration` capability and delegates to the
+/// OpenAI-compatible `/images/generations` endpoint.
+pub struct GenericOpenAICompatMediaDriver {
+    provider: String,
+    base_url: String,
+    api_key_env: String,
+}
+
+impl GenericOpenAICompatMediaDriver {
+    pub fn new(provider: &str, base_url: &str) -> Self {
+        let api_key_env = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+        Self {
+            provider: provider.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key_env,
+        }
+    }
+
+    fn api_key(&self) -> Result<String, MediaError> {
+        std::env::var(&self.api_key_env).map_err(|_| {
+            MediaError::MissingKey(format!(
+                "{} not set. Set this environment variable to use the {} provider for media generation.",
+                self.api_key_env, self.provider
+            ))
+        })
+    }
+}
+
+#[async_trait]
+impl MediaDriver for GenericOpenAICompatMediaDriver {
+    fn capabilities(&self) -> Vec<MediaCapability> {
+        vec![MediaCapability::ImageGeneration]
+    }
+
+    fn is_configured(&self) -> bool {
+        self.api_key().is_ok()
+    }
+
+    fn provider_name(&self) -> &str {
+        &self.provider
+    }
+
+    async fn generate_image(
+        &self,
+        request: &MediaImageRequest,
+    ) -> Result<MediaImageResult, MediaError> {
+        request.validate().map_err(MediaError::InvalidRequest)?;
+
+        let api_key = self.api_key()?;
+        let model = request.model.as_deref().unwrap_or("default");
+
+        let size = if let (Some(w), Some(h)) = (request.width, request.height) {
+            format!("{w}x{h}")
+        } else {
+            "1024x1024".to_string()
+        };
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "prompt": request.prompt,
+            "n": request.count,
+            "size": size,
+            "response_format": "b64_json",
+        });
+        if let Some(ref q) = request.quality {
+            body["quality"] = serde_json::json!(q);
+        }
+
+        let url = format!("{}/images/generations", self.base_url);
+        let client = crate::http_client::proxied_client();
+        let response = client
+            .post(&url)
+            .bearer_auth(&api_key)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| MediaError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let err = response.text().await.unwrap_or_default();
+            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            return Err(MediaError::Api {
+                status,
+                message: truncated.to_string(),
+            });
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| MediaError::Http(format!("Failed to parse response: {e}")))?;
+
+        let mut images = Vec::new();
+        let mut revised_prompt = None;
+        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+            for item in data {
+                let b64 = item
+                    .get("b64_json")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let url_str = item.get("url").and_then(|v| v.as_str()).map(str::to_string);
+                if revised_prompt.is_none() {
+                    revised_prompt = item
+                        .get("revised_prompt")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                images.push(GeneratedImage {
+                    data_base64: b64,
+                    url: url_str,
+                });
+            }
+        }
+
+        if images.is_empty() {
+            return Err(MediaError::Other("No images returned by provider".into()));
+        }
+
+        Ok(MediaImageResult {
+            images,
+            model: model.to_string(),
+            provider: self.provider.clone(),
+            revised_prompt,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +415,15 @@ mod tests {
     fn test_driver_custom_base_url() {
         let driver = OpenAIMediaDriver::new(Some("https://custom.api.com/v1/"));
         assert_eq!(driver.base_url, "https://custom.api.com/v1");
+    }
+
+    #[test]
+    fn test_generic_driver_key_lookup() {
+        // Key env var for a custom provider is {PROVIDER_UPPER}_API_KEY
+        let driver =
+            GenericOpenAICompatMediaDriver::new("volcengine", "https://api.example.com/v1");
+        // Without the env var set, is_configured() returns false
+        assert!(!driver.is_configured());
     }
 
     #[tokio::test]
