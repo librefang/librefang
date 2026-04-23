@@ -355,33 +355,36 @@ impl BrowserSession {
     /// Attach to an existing browser via a remote CDP endpoint.
     ///
     /// `endpoint` may be:
-    /// - `ws://host:port/devtools/browser/<id>` — connect directly
-    /// - `ws://host:port` — discover a page via `/json/list`
-    /// - `http://host:port` — discover the browser WS via `/json/version`,
-    ///   then find a page via `/json/list`
+    /// - `ws://host:port/devtools/browser/<id>` — create a new tab via `Target.createTarget`
+    /// - `ws://host:port/devtools/page/<id>` — use the given page directly
+    /// - `ws://host:port` — discover browser WS via `/json/version`, then create a new tab
+    /// - `http://host:port` — discover browser WS via `/json/version`, then create a new tab
     ///
-    /// A new blank tab is created so each agent session gets its own isolated
-    /// browsing context. The browser process is never killed on drop.
+    /// A new blank tab is created (except for explicit page URLs) so each agent
+    /// session gets its own isolated browsing context. The browser process is
+    /// never killed on drop.
     async fn attach(endpoint: &str) -> Result<Self, String> {
         info!(endpoint, "Attaching to remote CDP endpoint");
 
         // Resolve the page WebSocket URL from the given endpoint.
         let page_ws = if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
-            // Already a WS URL — try it directly first; if it looks like a
-            // browser-level URL (no `/devtools/page/`) try /json/list instead.
-            if endpoint.contains("/devtools/page/") || endpoint.contains("/devtools/browser/") {
-                // Fully qualified page or browser WS — use it as-is, but we
-                // still need a page target. Open a new tab via Target.createTarget.
+            if endpoint.contains("/devtools/page/") {
+                // Already a specific page WS URL — use it directly.
+                endpoint.to_string()
+            } else if endpoint.contains("/devtools/browser/") {
+                // Browser-level WS — create a new isolated tab.
                 Self::attach_via_browser_ws(endpoint).await?
             } else {
-                // Bare ws://host:port — derive HTTP base and use /json/list.
+                // Bare ws://host:port — discover browser WS via /json/version
+                // then create a new tab so each agent gets its own context.
                 let http_base = endpoint
                     .replacen("wss://", "https://", 1)
                     .replacen("ws://", "http://", 1)
                     .trim_end_matches('/')
                     .to_string();
-                let list_url = format!("{http_base}/json/list");
-                Self::find_page_ws(&list_url).await?
+                let version_url = format!("{http_base}/json/version");
+                let browser_ws = Self::fetch_browser_ws(&version_url).await?;
+                Self::attach_via_browser_ws(&browser_ws).await?
             }
         } else {
             // http:// or https:// — discover browser WS via /json/version first.
