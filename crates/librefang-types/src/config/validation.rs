@@ -90,11 +90,14 @@ impl KernelConfig {
             "rate_limit",
             "tool_timeout_secs",
             "tool_timeouts",
+            "cron_session_max_tokens",
+            "cron_session_max_messages",
             "max_upload_size_bytes",
             "max_concurrent_bg_llm",
             "max_agent_call_depth",
             "max_request_body_bytes",
             "terminal",
+            "task_board",
         ]
     }
 
