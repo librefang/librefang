@@ -4624,6 +4624,35 @@ system_prompt = "You are a helpful assistant."
         .await
     }
 
+    /// Streaming entry point that combines a sender context with a per-request
+    /// `session_id_override` (multi-tab WebSocket UIs, issue #2959). The
+    /// override wins over channel-derived session resolution. When `None`,
+    /// behavior is identical to
+    /// [`Self::send_message_streaming_with_sender_context_routing_and_thinking`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_streaming_with_sender_context_routing_thinking_and_session(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            kernel_handle,
+            Some(sender),
+            thinking_override,
+            session_id_override,
+        )
+        .await
+    }
+
     /// Send a message to an agent with streaming responses.
     ///
     /// Returns a receiver for incremental `StreamEvent`s and a `JoinHandle`
