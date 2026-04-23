@@ -1027,11 +1027,12 @@ impl LibreFangKernel {
         handle.spawn(async move {
             loop {
                 // Read sweeper knobs live — hot reload takes effect on next tick.
-                let (interval_secs, ttl_secs) = {
+                let (interval_secs, ttl_secs, max_retries) = {
                     let cfg = kernel.config.load();
                     (
                         cfg.task_board.sweep_interval_secs.max(1),
                         cfg.task_board.claim_ttl_secs,
+                        cfg.task_board.max_retries,
                     )
                 };
 
@@ -1051,7 +1052,7 @@ impl LibreFangKernel {
                     continue;
                 }
 
-                match kernel.memory.task_reset_stuck(ttl_secs).await {
+                match kernel.memory.task_reset_stuck(ttl_secs, max_retries).await {
                     Ok(reset) if !reset.is_empty() => {
                         warn!(
                             count = reset.len(),
@@ -13361,6 +13362,24 @@ impl KernelHandle for LibreFangKernel {
             .task_retry(task_id)
             .await
             .map_err(|e| format!("Task retry failed: {e}"))
+    }
+
+    pub async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
+        self.memory
+            .task_get(task_id)
+            .await
+            .map_err(|e| format!("Task get failed: {e}"))
+    }
+
+    pub async fn task_update_status(
+        &self,
+        task_id: &str,
+        new_status: &str,
+    ) -> Result<bool, String> {
+        self.memory
+            .task_update_status(task_id, new_status)
+            .await
+            .map_err(|e| format!("Task update status failed: {e}"))
     }
 
     async fn publish_event(

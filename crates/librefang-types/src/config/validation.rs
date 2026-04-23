@@ -94,6 +94,7 @@ impl KernelConfig {
             "max_agent_call_depth",
             "max_request_body_bytes",
             "terminal",
+            "task_board",
         ]
     }
 

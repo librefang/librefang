@@ -1783,6 +1783,9 @@ pub struct TaskBoardConfig {
     pub claim_ttl_secs: u64,
     /// How often the sweeper scans for stuck tasks. Default: 30 s.
     pub sweep_interval_secs: u64,
+    /// Maximum number of auto-resets before a stuck task is marked `failed`.
+    /// Default: 0 = no limit (retry indefinitely).
+    pub max_retries: u32,
 }
 
 impl Default for TaskBoardConfig {
@@ -1790,6 +1793,7 @@ impl Default for TaskBoardConfig {
         Self {
             claim_ttl_secs: 600,
             sweep_interval_secs: 30,
+            max_retries: 0,
         }
     }
 }
