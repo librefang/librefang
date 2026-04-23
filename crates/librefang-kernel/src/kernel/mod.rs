@@ -9843,6 +9843,7 @@ system_prompt = "You are a helpful assistant."
                                                 family: None,
                                                 families: None,
                                                 size: None,
+                                                capabilities: vec![],
                                             }
                                         })
                                         .collect()
