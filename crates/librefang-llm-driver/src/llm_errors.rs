@@ -217,6 +217,21 @@ const TIMEOUT_PATTERNS: &[&str] = &[
     "fetch failed",
 ];
 
+/// SSL/TLS transient error patterns — these indicate a mid-stream record-layer
+/// failure that is safe to retry (the server dropped the connection cleanly).
+const SSL_TRANSIENT_PATTERNS: &[&str] = &[
+    "bad record mac",
+    "ssl alert",
+    "tls alert",
+    "ssl handshake failure",
+    "tlsv1 alert",
+    "sslv3 alert",
+    "bad_record_mac",
+    "ssl_alert",
+    "tls_alert",
+    "[ssl:",
+];
+
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
@@ -717,6 +732,7 @@ pub fn is_transient(message: &str) -> bool {
     matches_any(&lower, TIMEOUT_PATTERNS)
         || matches_any(&lower, OVERLOADED_PATTERNS)
         || matches_any(&lower, RATE_LIMIT_PATTERNS)
+        || matches_any(&lower, SSL_TRANSIENT_PATTERNS)
 }
 
 // ---------------------------------------------------------------------------
