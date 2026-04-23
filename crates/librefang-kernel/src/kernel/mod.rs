@@ -13055,10 +13055,7 @@ async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
 /// Finds the last non-empty line, tries JSON-decode, checks `wakeAgent`.
 /// Returns `true` (wake) unless `wakeAgent` is strictly `false`.
 fn parse_wake_gate(script_output: &str) -> bool {
-    let last_line = script_output
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .last();
+    let last_line = script_output.lines().rfind(|l| !l.trim().is_empty());
 
     let last_line = match last_line {
         Some(l) => l.trim(),
