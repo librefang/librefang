@@ -1055,25 +1055,19 @@ pub async fn get_tool(
 /// POST /api/tools/{name}/invoke — Invoke a kernel tool directly.
 ///
 /// External integrations (MCP bridges, scripts, automations) can call kernel
-/// tools without going through an agent loop.
-#[utoipa::path(
-    post,
-    path = "/api/tools/{name}/invoke",
-    tag = "tools",
-    params(("name" = String, Path, description = "Tool name")),
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "Tool execution result", body = serde_json::Value),
-        (status = 404, description = "Tool not found"),
-        (status = 400, description = "Tool invocation failed")
-    )
-)]
+/// tools without going through an agent loop. Pass `?agent_id=<uuid>` when
+/// invoking approval-gated tools so the approval callback can resolve the
+/// correct agent.
+#[utoipa::path(post, path = "/api/tools/{name}/invoke", tag = "skills", responses((status = 200, description = "Tool result")))]
 pub async fn invoke_tool(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(input): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let caller_agent_id: Option<String> = params.get("agent_id").cloned();
+
     let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
 
     let result = execute_tool(
@@ -1082,7 +1076,7 @@ pub async fn invoke_tool(
         &input,
         Some(&kernel),
         None, // allowed_tools
-        None, // caller_agent_id
+        caller_agent_id.as_deref(),
         None, // skill_registry
         None, // allowed_skills
         Some(state.kernel.mcp_connections_ref()),

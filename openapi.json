@@ -6647,6 +6647,39 @@
         }
       }
     },
+    "/api/tools/{name}/invoke": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/tools/{name}/invoke — Invoke a kernel tool directly.",
+        "description": "External integrations (MCP bridges, scripts, automations) can call kernel\ntools without going through an agent loop. Pass `?agent_id=<uuid>` when\ninvoking approval-gated tools so the approval callback can resolve the\ncorrect agent.",
+        "operationId": "invoke_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Tool result"
+          }
+        }
+      }
+    },
     "/api/triggers": {
       "get": {
         "tags": [
