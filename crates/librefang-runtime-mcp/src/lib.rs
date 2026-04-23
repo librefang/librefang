@@ -159,7 +159,7 @@ fn resolve_skip_rules(
 /// Non-string leaves (numbers, bools, null) are skipped.
 ///
 /// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
     scan_mcp_arguments_for_taint_with_policy(value, None, "")
 }
@@ -215,11 +215,15 @@ fn walk_taint(
         serde_json::Value::Object(obj) => {
             for (k, val) in obj {
                 let child = format!("{path}.{k}");
+                // SensitiveKeyName is a property of the key's own path (child),
+                // not the parent path, so resolve skip rules against `child`.
+                let child_skip = resolve_skip_rules(policy, tool_name, &child);
                 // Credential-shaped object key with a non-empty string value
                 // is an unambiguous outbound credential, regardless of the
                 // value shape (e.g. `"Authorization": "Bearer sk-…"` has
                 // whitespace and wouldn't trip the text heuristic alone).
-                if is_sensitive_key_name(k) && !skip.contains(&TaintRuleId::SensitiveKeyName) {
+                if is_sensitive_key_name(k) && !child_skip.contains(&TaintRuleId::SensitiveKeyName)
+                {
                     if let serde_json::Value::String(s) = val {
                         if !s.trim().is_empty() {
                             return Some(format!(
@@ -1943,6 +1947,142 @@ mod tests {
             scan_mcp_arguments_for_taint(&args).is_some(),
             "real credential under session-like key must still be blocked"
         );
+    }
+
+    // ── per-path policy tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_policy_skip_opaque_token_allows_tab_id() {
+        use librefang_types::config::{McpTaintPathPolicy, McpTaintPolicy, McpTaintToolPolicy};
+        use librefang_types::taint::TaintRuleId;
+
+        let mut paths = std::collections::HashMap::new();
+        paths.insert(
+            "$.tabId".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![TaintRuleId::OpaqueToken],
+            },
+        );
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("navigate".to_string(), McpTaintToolPolicy { paths });
+        let policy = McpTaintPolicy { tools };
+
+        // Opaque-looking tab handle — blocked without policy, allowed with it.
+        let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_some(),
+            "must block without policy"
+        );
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "navigate").is_none(),
+            "OpaqueToken skip must allow browser tab ID under navigate.tabId"
+        );
+    }
+
+    #[test]
+    fn test_policy_skip_sensitive_key_name_uses_child_path() {
+        use librefang_types::config::{McpTaintPathPolicy, McpTaintPolicy, McpTaintToolPolicy};
+        use librefang_types::taint::TaintRuleId;
+
+        // Configure skip for the child path "$.authorization", NOT the parent "$".
+        // This verifies the bug fix: SensitiveKeyName resolution must use child path.
+        let mut paths = std::collections::HashMap::new();
+        paths.insert(
+            "$.authorization".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![TaintRuleId::SensitiveKeyName],
+            },
+        );
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("send_request".to_string(), McpTaintToolPolicy { paths });
+        let policy = McpTaintPolicy { tools };
+
+        let args = serde_json::json!({ "authorization": "some-non-empty-value" });
+
+        // Without policy: blocked because "authorization" is a sensitive key name.
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_some(),
+            "must block sensitive key without policy"
+        );
+
+        // With SensitiveKeyName skipped for "$.authorization": allowed.
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "send_request")
+                .is_none(),
+            "SensitiveKeyName skip at child path must allow the key"
+        );
+
+        // Policy on different tool must NOT apply.
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "other_tool").is_some(),
+            "skip for send_request must not affect other_tool"
+        );
+    }
+
+    #[test]
+    fn test_policy_non_skipped_rules_still_fire() {
+        use librefang_types::config::{McpTaintPathPolicy, McpTaintPolicy, McpTaintToolPolicy};
+        use librefang_types::taint::TaintRuleId;
+
+        // Skip OpaqueToken for "$.token", but the value contains "api_key=secret"
+        // which trips KeyValueSecret — that rule is NOT skipped.
+        let mut paths = std::collections::HashMap::new();
+        paths.insert(
+            "$.token".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![TaintRuleId::OpaqueToken],
+            },
+        );
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("call".to_string(), McpTaintToolPolicy { paths });
+        let policy = McpTaintPolicy { tools };
+
+        let args = serde_json::json!({ "token": "api_key=sk-not-real" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "call").is_some(),
+            "non-skipped KeyValueSecret must still fire even when OpaqueToken is skipped"
+        );
+    }
+
+    // ── JSONPath matcher unit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_jsonpath_exact_match() {
+        assert!(jsonpath_matches("$.a.b", "$.a.b"));
+        assert!(jsonpath_matches("$", "$"));
+        assert!(!jsonpath_matches("$.a.b", "$.a.c"));
+        assert!(!jsonpath_matches("$.a.b", "$.a"));
+    }
+
+    #[test]
+    fn test_jsonpath_star_wildcard() {
+        assert!(jsonpath_matches("$.*", "$.foo"));
+        assert!(jsonpath_matches("$.*", "$.bar"));
+        assert!(
+            !jsonpath_matches("$.*", "$.foo.child"),
+            "star must not cross depth"
+        );
+        // star must not match array-index segments
+        assert!(!jsonpath_matches("$.*", "$.items[0]"));
+    }
+
+    #[test]
+    fn test_jsonpath_array_wildcard() {
+        assert!(jsonpath_matches("$.items[*]", "$.items[0]"));
+        assert!(jsonpath_matches("$.items[*]", "$.items[99]"));
+        assert!(!jsonpath_matches("$.items[*]", "$.other[0]"));
+        assert!(
+            !jsonpath_matches("$.items[*]", "$.items[0].name"),
+            "must not match deeper path"
+        );
+    }
+
+    #[test]
+    fn test_jsonpath_nested_star() {
+        assert!(jsonpath_matches("$.a.*", "$.a.x"));
+        assert!(jsonpath_matches("$.a.*", "$.a.y"));
+        assert!(!jsonpath_matches("$.a.*", "$.b.x"));
+        assert!(!jsonpath_matches("$.a.*", "$.a.x.z"));
     }
 
     #[test]
