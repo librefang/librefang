@@ -5896,6 +5896,18 @@ mod tests {
             Err("not used".to_string())
         }
 
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -7839,6 +7851,18 @@ mod tests {
         }
 
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
             Err("not used".to_string())
         }
 
