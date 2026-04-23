@@ -10078,8 +10078,9 @@ system_prompt = "You are a helpful assistant."
                                         {
                                             // Prune by message count first.
                                             if let Some(max_msgs) = max_messages {
-                                                while session.messages.len() > max_msgs {
-                                                    session.messages.remove(0);
+                                                if session.messages.len() > max_msgs {
+                                                    let excess = session.messages.len() - max_msgs;
+                                                    session.messages.drain(0..excess);
                                                 }
                                             }
                                             // Prune by token count.
