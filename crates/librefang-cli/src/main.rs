@@ -3,6 +3,10 @@
 //! When a daemon is running (`librefang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod desktop_install;
 mod http_client;
 pub mod i18n;
@@ -76,7 +80,7 @@ const AFTER_HELP: &str = "\
   librefang chat                 Quick chat with the default agent
   librefang agent new coder      Spawn a new agent from a template
   librefang models list          Browse available LLM models
-  librefang add github           Install the GitHub integration
+  librefang mcp add github       Install the GitHub MCP server
   librefang doctor               Run diagnostic health checks
   librefang channel setup        Interactive channel setup wizard
   librefang cron list            List scheduled jobs
@@ -102,7 +106,7 @@ const AFTER_HELP: &str = "\
                   40 channels \u{00b7} 60 skills \u{00b7} 50+ models \u{00b7} infinite possibilities.",
     after_help = AFTER_HELP,
 )]
-struct Cli {
+pub(crate) struct Cli {
     /// Path to config file.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -252,12 +256,21 @@ enum Commands {
     },
     /// Show kernel status.
     #[command(
-        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, active agents, loaded skills, and resource usage.\n\nExamples:\n  librefang status          # Pretty-printed status\n  librefang status --json   # JSON output for scripting"
+        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, version, default provider/model, health checks, and (when an\n`api_key` is configured) agent list, sessions, and memory usage. Without a key\nthe command still works — only the protected detail section is hidden.\n\nExit codes:\n  0  daemon running and healthy\n  1  daemon not running (in-process fallback)\n  2  daemon running but reporting a degraded status\n  3  daemon port claims to be open but /api/health is unreachable\n\nExamples:\n  librefang status             # Pretty-printed status\n  librefang status --json      # JSON output for scripting\n  librefang status -v          # Verbose: config warnings, auth, MCP, peers\n  librefang status -q          # Quiet: one-line summary\n  librefang status --watch 2   # Refresh every 2 seconds (Ctrl+C to stop)"
     )]
     Status {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Verbose mode: include config warnings, auth mode, MCP server list, peers.
+        #[arg(long, short = 'v', conflicts_with_all = ["quiet", "json"])]
+        verbose: bool,
+        /// Quiet mode: single-line summary, no section layout.
+        #[arg(long, short = 'q', conflicts_with_all = ["verbose", "json"])]
+        quiet: bool,
+        /// Refresh every N seconds until Ctrl+C. Conflicts with --json / --quiet.
+        #[arg(long, value_name = "SECS", conflicts_with_all = ["json", "quiet"])]
+        watch: Option<u64>,
     },
     /// Run diagnostic health checks.
     #[command(
@@ -285,37 +298,13 @@ enum Commands {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Start MCP (Model Context Protocol) server over stdio.
+    /// MCP (Model Context Protocol) server management.
     #[command(
-        long_about = "Start the MCP (Model Context Protocol) server over stdio.\n\nThis exposes LibreFang capabilities to MCP-compatible clients such as\nClaude Code, Cursor, and other AI editors.\n\nExamples:\n  librefang mcp   # Start MCP server (communicates over stdin/stdout)"
+        long_about = "Manage MCP (Model Context Protocol) servers.\n\nCalled without a subcommand, starts the stdio MCP server that exposes\nLibreFang to MCP-compatible clients (Claude Code, Cursor, ...).\n\nExamples:\n  librefang mcp                    # Start the stdio MCP server\n  librefang mcp list               # List configured MCP servers\n  librefang mcp catalog            # List installable catalog entries\n  librefang mcp add github         # Install the 'github' catalog entry\n  librefang mcp add slack --key xoxb-...  # Provide key inline\n  librefang mcp remove github      # Remove an MCP server by id"
     )]
-    Mcp,
-    /// Add an integration (one-click MCP server setup).
-    #[command(
-        long_about = "Add an integration by name with one-click setup.\n\nInstalls and configures an MCP server integration. Optionally provide\nan API key inline.\n\nExamples:\n  librefang add github                    # Interactive key prompt\n  librefang add slack --key xoxb-...      # Provide key inline\n  librefang add notion"
-    )]
-    Add {
-        /// Integration name (e.g., "github", "slack", "notion").
-        name: String,
-        /// API key or token to store in the vault.
-        #[arg(long)]
-        key: Option<String>,
-    },
-    /// Remove an installed integration.
-    #[command(
-        long_about = "Remove a previously installed integration.\n\nExamples:\n  librefang remove github\n  librefang remove slack"
-    )]
-    Remove {
-        /// Integration name.
-        name: String,
-    },
-    /// List or search integrations.
-    #[command(
-        long_about = "List all available integrations, or search by keyword.\n\nExamples:\n  librefang integrations            # List all integrations\n  librefang integrations \"code\"     # Search for code-related integrations"
-    )]
-    Integrations {
-        /// Search query (optional — lists all if omitted).
-        query: Option<String>,
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommands>,
     },
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
@@ -329,9 +318,9 @@ enum Commands {
         long_about = "Manage the encrypted credential vault for storing API keys and tokens.\n\nExamples:\n  librefang vault init            # Initialize the vault\n  librefang vault set GROQ_API_KEY  # Store a credential (prompts for value)\n  librefang vault list            # List stored keys (values hidden)\n  librefang vault remove GROQ_API_KEY  # Remove a credential"
     )]
     Vault(VaultCommands),
-    /// Scaffold a new skill or integration template.
+    /// Scaffold a new skill or MCP server template.
     #[command(
-        long_about = "Scaffold a new skill or integration from a template.\n\nCreates boilerplate files for developing a custom skill or integration.\n\nExamples:\n  librefang new skill         # Scaffold a new skill\n  librefang new integration   # Scaffold a new integration"
+        long_about = "Scaffold a new skill or MCP server template.\n\nCreates boilerplate files for developing a custom skill or MCP server.\n\nExamples:\n  librefang new skill   # Scaffold a new skill\n  librefang new mcp     # Scaffold a new MCP server"
     )]
     New {
         /// What to scaffold.
@@ -561,7 +550,42 @@ enum AuthCommands {
 #[derive(Clone, clap::ValueEnum)]
 enum ScaffoldKind {
     Skill,
-    Integration,
+    Mcp,
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// List configured MCP servers (reads config.toml).
+    #[command(long_about = "List every MCP server currently in config.toml with its status.")]
+    List,
+    /// List or search the catalog of installable MCP templates.
+    #[command(
+        long_about = "List or search the read-only MCP catalog.\n\nExamples:\n  librefang mcp catalog           # List all catalog entries\n  librefang mcp catalog \"code\"   # Search"
+    )]
+    Catalog {
+        /// Search query.
+        query: Option<String>,
+    },
+    /// Install a catalog entry as a new MCP server.
+    #[command(
+        long_about = "Install a catalog entry as a new MCP server. Writes a new \
+[[mcp_servers]] entry to config.toml. If the daemon is running, it hot-reloads.\n\nExamples:\n  librefang mcp add github\n  librefang mcp add slack --key xoxb-..."
+    )]
+    Add {
+        /// Catalog id.
+        name: String,
+        /// API key or token to store in the vault.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Remove a configured MCP server by id.
+    #[command(
+        long_about = "Remove a configured MCP server by id.\n\nExamples:\n  librefang mcp remove github"
+    )]
+    Remove {
+        /// MCP server id.
+        name: String,
+    },
 }
 
 #[derive(clap::Args)]
@@ -692,6 +716,116 @@ enum SkillCommands {
         long_about = "Scaffold a new skill project with boilerplate files.\n\nCreates a skill.toml, SKILL.md, and starter tool implementation.\n\nExamples:\n  librefang skill create"
     )]
     Create,
+    /// Agent-driven skill evolution — create/update/patch/rollback installed skills.
+    #[command(
+        subcommand,
+        long_about = "Manually invoke the skill evolution pipeline that agents use internally.\n\nOperates on the globally-installed skill directory (~/.librefang/skills).\nAll mutations go through the same validation, security scan, file locking,\nand version-history bookkeeping as the agent tools.\n\nExamples:\n  librefang skill evolve create --name my-skill --description ... --context-file prompt.md\n  librefang skill evolve update my-skill prompt.md --changelog \"tightened wording\"\n  librefang skill evolve patch my-skill --old-file a.txt --new-file b.txt --changelog \"fix typo\"\n  librefang skill evolve rollback my-skill\n  librefang skill evolve history my-skill"
+    )]
+    Evolve(EvolveCommands),
+}
+
+#[derive(Subcommand)]
+enum EvolveCommands {
+    /// Create a new prompt-only skill from a Markdown file.
+    Create {
+        /// Skill name (lowercase alphanumeric + hyphens).
+        #[arg(long)]
+        name: String,
+        /// One-line description (≤1024 chars).
+        #[arg(long)]
+        description: String,
+        /// File containing the Markdown prompt_context. Use "-" for stdin.
+        #[arg(long = "context-file")]
+        context_file: PathBuf,
+        /// Comma-separated tags (e.g., "data,csv,analysis").
+        #[arg(long, default_value = "")]
+        tags: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Fully rewrite a skill's prompt_context from a file.
+    Update {
+        /// Skill name.
+        name: String,
+        /// File containing the new prompt_context. Use "-" for stdin.
+        context_file: PathBuf,
+        /// Brief description of what changed and why.
+        #[arg(long)]
+        changelog: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Find-and-replace patch a skill's prompt_context (fuzzy-matched).
+    Patch {
+        /// Skill name.
+        name: String,
+        /// File containing the text to find.
+        #[arg(long = "old-file")]
+        old_file: PathBuf,
+        /// File containing the replacement text.
+        #[arg(long = "new-file")]
+        new_file: PathBuf,
+        /// Brief description of what changed and why.
+        #[arg(long)]
+        changelog: String,
+        /// Replace every occurrence (default: require unique match).
+        #[arg(long)]
+        replace_all: bool,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Delete a locally-evolved skill.
+    Delete {
+        /// Skill name.
+        name: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Roll back the most recent evolution of a skill.
+    Rollback {
+        /// Skill name.
+        name: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Add a supporting file to a skill (under references/, templates/, scripts/, or assets/).
+    WriteFile {
+        /// Skill name.
+        name: String,
+        /// Relative path under the skill directory (e.g., references/api.md).
+        path: String,
+        /// Source file whose contents will be copied. Use "-" for stdin.
+        source: PathBuf,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Remove a supporting file from a skill.
+    RemoveFile {
+        /// Skill name.
+        name: String,
+        /// Relative path of the file to remove.
+        path: String,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
+    /// Print the version history and usage counters for a skill.
+    History {
+        /// Skill name.
+        name: String,
+        /// Emit JSON instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+        /// Target a specific hand's workspace instead of the global skills dir.
+        #[arg(long)]
+        hand: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1017,9 +1151,17 @@ enum TriggerCommands {
         #[arg(long)]
         agent_id: Option<String>,
     },
+    /// Show details of a single trigger.
+    #[command(
+        long_about = "Show full details of a trigger by its UUID.\n\nExamples:\n  librefang trigger get <TRIGGER_ID>"
+    )]
+    Get {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+    },
     /// Create a trigger for an agent.
     #[command(
-        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
+        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10\n  librefang trigger create <OWNER_ID> '\"task_posted\"' --target-agent <WORKER_ID>"
     )]
     Create {
         /// Agent ID (UUID) that owns the trigger.
@@ -1032,6 +1174,69 @@ enum TriggerCommands {
         /// Maximum number of times to fire (0 = unlimited).
         #[arg(long, default_value = "0")]
         max_fires: u64,
+        /// Route triggered messages to this agent instead of the owner (cross-session wake).
+        #[arg(long)]
+        target_agent: Option<String>,
+        /// Cooldown in seconds before this trigger can fire again (0 = no cooldown).
+        #[arg(long)]
+        cooldown: Option<u64>,
+        /// Session mode override: "persistent" or "new".
+        #[arg(long)]
+        session_mode: Option<String>,
+    },
+    /// Update fields of an existing trigger.
+    #[command(
+        long_about = "Update one or more fields of a trigger. Only supplied flags are changed.\n\nExamples:\n  librefang trigger update <ID> --prompt \"New prompt: {{event}}\"\n  librefang trigger update <ID> --max-fires 5 --cooldown 30\n  librefang trigger update <ID> --enabled false"
+    )]
+    Update {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+        /// New pattern JSON.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// New prompt template.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Enable or disable the trigger.
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// New maximum fires limit (0 = unlimited).
+        #[arg(long)]
+        max_fires: Option<u64>,
+        /// New cooldown in seconds between fires.
+        #[arg(long)]
+        cooldown: Option<u64>,
+        /// Remove the cooldown limit entirely.
+        #[arg(long)]
+        clear_cooldown: bool,
+        /// Override session mode for this trigger (persistent|new).
+        #[arg(long)]
+        session_mode: Option<String>,
+        /// Remove the session mode override (revert to agent default).
+        #[arg(long)]
+        clear_session_mode: bool,
+        /// Set the cross-session wake target agent ID (UUID).
+        #[arg(long)]
+        target_agent: Option<String>,
+        /// Clear the target agent (revert to owner routing).
+        #[arg(long)]
+        clear_target_agent: bool,
+    },
+    /// Enable a trigger.
+    #[command(
+        long_about = "Enable a previously disabled trigger.\n\nExamples:\n  librefang trigger enable <TRIGGER_ID>"
+    )]
+    Enable {
+        /// Trigger ID (UUID).
+        trigger_id: String,
+    },
+    /// Disable a trigger without deleting it.
+    #[command(
+        long_about = "Disable a trigger without removing it.\n\nExamples:\n  librefang trigger disable <TRIGGER_ID>"
+    )]
+    Disable {
+        /// Trigger ID (UUID).
+        trigger_id: String,
     },
     /// Delete a trigger by ID.
     #[command(
@@ -1236,6 +1441,19 @@ enum SecurityCommands {
         long_about = "Verify the integrity of the audit trail using its Merkle chain.\n\nReports whether the chain is intact or has been tampered with.\n\nExamples:\n  librefang security verify"
     )]
     Verify,
+    /// Reset the audit trail: truncate `audit_entries` and remove the anchor file.
+    ///
+    /// Destructive. Use only when the chain is already broken (tampering, manual
+    /// DB edits, partial restore) and you want to start a fresh chain. Requires
+    /// `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
+    )]
+    AuditReset {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1398,27 +1616,63 @@ fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    // One-shot CLI commands (status, stop, doctor, …) load config.toml as a
+    // side effect. librefang_kernel::config emits INFO on every load and WARN
+    // for every unknown field; in a CLI context those lines leak into the
+    // user's stdout flow and make basic commands look broken. Keep them out
+    // of the default stderr budget — users who set RUST_LOG explicitly still
+    // see everything, and daemon/foreground boots route through a different
+    // initialiser where the full log is expected.
+    let user_set_rust_log = std::env::var("RUST_LOG").is_ok();
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+    let env_filter = if user_set_rust_log {
+        env_filter
+    } else {
+        // For one-shot CLI commands, downgrade library-level chatter so the
+        // user sees only their command's own output. WARN and above still
+        // surface everywhere — the filter is per-target verbosity, not a
+        // global mute. Setting RUST_LOG restores full detail.
+        env_filter
+            .add_directive("librefang_kernel=warn".parse().expect("static directive"))
+            .add_directive("librefang_runtime=warn".parse().expect("static directive"))
+            .add_directive(
+                "librefang_extensions=warn"
+                    .parse()
+                    .expect("static directive"),
+            )
+            .add_directive(
+                "librefang_kernel::config=error"
+                    .parse()
+                    .expect("static directive"),
+            )
+            .add_directive(
+                "librefang_runtime::registry_sync=error"
+                    .parse()
+                    .expect("static directive"),
+            )
+    };
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    // Compact stderr format: in a one-shot CLI context the user cares about
+    // the WARN/ERROR text, not the timestamp or the fully-qualified target.
+    // One-shot CLI runs are transient — stderr is the only sink; the daemon
+    // has its own file appender under `logs/daemon.log`.
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .without_time()
+        .with_target(false)
+        .compact();
 
-    // Also write logs to ~/.librefang/daemon.log
-    let log_dir = cli_librefang_home();
-    let _ = std::fs::create_dir_all(&log_dir);
-    let file_layer = std::fs::File::create(log_dir.join("daemon.log"))
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-        });
+    // Register a no-op reload slot so `init_otel_tracing` can swap a real
+    // OTel layer in later without needing to claim the global dispatcher.
+    // The slot is stacked **first** (directly on Registry) so its boxed
+    // `Layer<Registry>` trait object matches the innermost subscriber type.
+    #[cfg(feature = "telemetry")]
+    let registry =
+        tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
+    #[cfg(not(feature = "telemetry"))]
+    let registry = tracing_subscriber::registry();
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(file_layer)
-        .init();
+    registry.with(env_filter).with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -1457,9 +1711,11 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
 fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) {
+    // `custom_log_dir` is already a log directory (typically `daemon.log_dir`
+    // from config); use it as-is. Otherwise default to `<home>/logs/`.
     let log_dir = custom_log_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(cli_librefang_home);
+        .unwrap_or_else(|| cli_librefang_home().join("logs"));
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
 
@@ -1638,12 +1894,51 @@ fn main() {
         },
         Some(Commands::Trigger(sub)) => match sub {
             TriggerCommands::List { agent_id } => cmd_trigger_list(agent_id.as_deref()),
+            TriggerCommands::Get { trigger_id } => cmd_trigger_get(&trigger_id),
             TriggerCommands::Create {
                 agent_id,
                 pattern_json,
                 prompt,
                 max_fires,
-            } => cmd_trigger_create(&agent_id, &pattern_json, &prompt, max_fires),
+                target_agent,
+                cooldown,
+                session_mode,
+            } => cmd_trigger_create(
+                &agent_id,
+                &pattern_json,
+                &prompt,
+                max_fires,
+                target_agent.as_deref(),
+                cooldown,
+                session_mode.as_deref(),
+            ),
+            TriggerCommands::Update {
+                trigger_id,
+                pattern,
+                prompt,
+                enabled,
+                max_fires,
+                cooldown,
+                clear_cooldown,
+                session_mode,
+                clear_session_mode,
+                target_agent,
+                clear_target_agent,
+            } => cmd_trigger_update(
+                &trigger_id,
+                pattern.as_deref(),
+                prompt.as_deref(),
+                enabled,
+                max_fires,
+                cooldown,
+                clear_cooldown,
+                session_mode.as_deref(),
+                clear_session_mode,
+                target_agent.as_deref(),
+                clear_target_agent,
+            ),
+            TriggerCommands::Enable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, true),
+            TriggerCommands::Disable { trigger_id } => cmd_trigger_set_enabled(&trigger_id, false),
             TriggerCommands::Delete { trigger_id } => cmd_trigger_delete(&trigger_id),
         },
         Some(Commands::Migrate(args)) => cmd_migrate(args),
@@ -1661,6 +1956,7 @@ fn main() {
                 dry_run,
             } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
+            SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
         },
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
@@ -1701,14 +1997,22 @@ fn main() {
             ConfigCommands::TestKey { provider } => cmd_config_test_key(&provider),
         },
         Some(Commands::Chat { agent }) => cmd_quick_chat(cli.config, agent),
-        Some(Commands::Status { json }) => cmd_status(cli.config, json),
+        Some(Commands::Status {
+            json,
+            verbose,
+            quiet,
+            watch,
+        }) => cmd_status(cli.config, json, verbose, quiet, watch),
         Some(Commands::Doctor { json, repair }) => cmd_doctor(json, repair),
         Some(Commands::Dashboard) => cmd_dashboard(),
         Some(Commands::Completion { shell }) => cmd_completion(shell),
-        Some(Commands::Mcp) => mcp::run_mcp_server(cli.config),
-        Some(Commands::Add { name, key }) => cmd_integration_add(&name, key.as_deref()),
-        Some(Commands::Remove { name }) => cmd_integration_remove(&name),
-        Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
+        Some(Commands::Mcp { command }) => match command {
+            None => mcp::run_mcp_server(cli.config),
+            Some(McpCommands::List) => cmd_mcp_list(),
+            Some(McpCommands::Catalog { query }) => cmd_mcp_catalog(query.as_deref()),
+            Some(McpCommands::Add { name, key }) => cmd_mcp_add(&name, key.as_deref()),
+            Some(McpCommands::Remove { name }) => cmd_mcp_remove(&name),
+        },
         Some(Commands::Auth(sub)) => match sub {
             AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
@@ -1734,7 +2038,7 @@ fn main() {
                 cmd_restart(cli.config, tail, foreground)
             }
             GatewayCommands::Stop => cmd_stop(cli.config),
-            GatewayCommands::Status { json } => cmd_status(cli.config, json),
+            GatewayCommands::Status { json } => cmd_status(cli.config, json, false, false, None),
         },
         Some(Commands::Approvals(sub)) => match sub {
             ApprovalsCommands::List { json } => cmd_approvals_list(json),
@@ -1760,6 +2064,7 @@ fn main() {
             SecurityCommands::Status { json } => cmd_security_status(json),
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
+            SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
@@ -2021,15 +2326,21 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading LibreFang installation");
 
-    // 2. Backup existing config with timestamp
-    let backup_name = format!("config.toml.bak.{}", format_local_timestamp());
-    let backup_path = librefang_dir.join(&backup_name);
+    // 2. Backup existing config under backups/ (keep last 3)
+    let backups_dir = librefang_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backups_dir) {
+        ui::error(&format!("Failed to create backups dir: {e}"));
+        std::process::exit(1);
+    }
+    let backup_name = format!("config-{}.toml", format_local_timestamp());
+    let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
         ui::error(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
-    ui::success(&format!("Backed up config to {backup_name}"));
+    prune_old_config_backups(&backups_dir, 3);
+    ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     ui::hint("Syncing registry...");
@@ -2047,12 +2358,12 @@ fn cmd_init_upgrade() {
     init_vault_if_missing(&librefang_dir);
     init_git_if_missing(&librefang_dir);
 
-    // Ensure .gitignore excludes backup files (may be missing in older installations)
+    // Ensure .gitignore excludes the backups/ directory (may be missing in older installations)
     let gitignore = librefang_dir.join(".gitignore");
     if gitignore.exists() {
         if let Ok(content) = std::fs::read_to_string(&gitignore) {
-            if !content.contains("*.bak.*") {
-                let _ = std::fs::write(&gitignore, format!("{content}*.bak.*\n"));
+            if !content.lines().any(|l| l.trim() == "backups/") {
+                let _ = std::fs::write(&gitignore, format!("{content}backups/\n"));
             }
         }
     }
@@ -2070,7 +2381,9 @@ fn cmd_init_upgrade() {
         Ok(v) => v,
         Err(e) => {
             ui::error(&format!("Failed to parse config.toml: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
     };
@@ -2142,7 +2455,9 @@ fn cmd_init_upgrade() {
 
         if let Err(e) = std::fs::write(&config_path, &content) {
             ui::error(&format!("Failed to write config: {e}"));
-            ui::hint(&format!("Your original config was saved to {backup_name}"));
+            ui::hint(&format!(
+                "Your original config was saved to backups/{backup_name}"
+            ));
             std::process::exit(1);
         }
         restrict_file_permissions(&config_path);
@@ -2191,11 +2506,38 @@ fn cmd_init_upgrade() {
     // 8. Summary
     ui::blank();
     ui::success("Upgrade complete!");
-    ui::kv("Backup", &backup_name);
+    ui::kv("Backup", &format!("backups/{backup_name}"));
     if !added.is_empty() {
         ui::kv("New fields", &added.len().to_string());
     }
     ui::blank();
+}
+
+/// Keep only the `keep` most recent `config-*.toml` backups under `backups_dir`.
+/// The embedded `YYYYMMDD-HHMMSS` timestamp sorts lexicographically, so a
+/// filename sort gives the same order as a chronological sort.
+fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config-") && name.ends_with(".toml") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort();
+    if files.len() > keep {
+        for old in &files[..files.len() - keep] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
 }
 
 /// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
@@ -2320,7 +2662,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     }
 
     let Ok(status) = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(librefang_dir)
         .status()
     else {
@@ -2337,7 +2679,7 @@ fn init_git_if_missing(librefang_dir: &std::path::Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\n*.db\n*.db-shm\n*.db-wal\n*.bak.*\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\nbackups/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
 
@@ -2659,11 +3001,22 @@ fn spawn_detached_daemon(
 
 /// Ensure LibreFang is initialized (config.toml exists). Auto-runs quick init on first run.
 fn ensure_initialized(config: &Option<PathBuf>) {
-    if config.is_none() {
-        let home = cli_librefang_home();
-        if !home.join("config.toml").exists() {
-            ui::hint("First run detected — running quick setup...");
-            cmd_init(true);
+    match config {
+        None => {
+            let home = cli_librefang_home();
+            if !home.join("config.toml").exists() {
+                ui::hint("First run detected — running quick setup...");
+                cmd_init(true);
+            }
+        }
+        Some(path) => {
+            if !path.exists() {
+                ui::error_with_fix(
+                    &format!("Config file not found: {}", path.display()),
+                    "Run `librefang init` to create a default config at ~/.librefang/config.toml, or check the --config path.",
+                );
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -2759,7 +3112,11 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
     println!("  {}", i18n::t("daemon-starting"));
     ui::blank();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let kernel = match LibreFangKernel::boot(config.as_deref()) {
             Ok(k) => k,
@@ -3456,109 +3813,746 @@ fn spawn_template_agent(
     }
 }
 
-fn cmd_status(config: Option<PathBuf>, json: bool) {
+/// Render the daemon status page.
+///
+/// Layered data model:
+/// - **Local** (always available): `daemon.json` + `config.toml` fields the
+///   CLI reads directly, so we never show `?` for information we already have.
+/// - **Public** (daemon alive, no auth): `/api/health` for liveness.
+/// - **Authenticated** (requires `api_key`): `/api/status` for agent list,
+///   session count, and memory usage. When the key is missing we show a
+///   locked section with a one-line fix hint instead of leaking empty fields.
+fn cmd_status(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool, watch: Option<u64>) {
+    if let Some(secs) = watch {
+        let interval = std::time::Duration::from_secs(secs.max(1));
+        // Watch mode: redraw indefinitely. A non-zero exit code from a single
+        // iteration just means "daemon is currently down or degraded" — we
+        // don't bail out of the watch loop for that, the whole point is to
+        // keep watching. Ctrl+C (handled upstream in main) is the exit.
+        loop {
+            // ANSI: clear screen + home cursor. Falls back to ugly output on
+            // terminals that don't speak ANSI, which is acceptable for a
+            // mode the user explicitly opted into.
+            print!("\x1b[2J\x1b[H");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = render_status_once(config.clone(), false, verbose, false);
+            ui::blank();
+            println!(
+                "  {} (refreshing every {}s, Ctrl+C to exit)",
+                "hint:".dimmed(),
+                secs.max(1),
+            );
+            std::thread::sleep(interval);
+        }
+    }
+
+    let code = render_status_once(config, json, verbose, quiet);
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+fn render_status_once(config: Option<PathBuf>, json: bool, verbose: bool, quiet: bool) -> i32 {
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
-        let client = daemon_client_with_api_key(daemon.api_key.as_deref());
-        let body = daemon_json(client.get(format!("{base}/api/status")).send());
+        render_status_daemon(config.as_deref(), &base, &daemon, json, verbose, quiet)
+    } else {
+        render_status_inprocess(config, json, quiet)
+    }
+}
 
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&body).unwrap_or_default()
-            );
-            return;
-        }
+fn render_status_daemon(
+    config: Option<&std::path::Path>,
+    base: &str,
+    daemon: &DaemonConfigContext,
+    json: bool,
+    verbose: bool,
+    quiet: bool,
+) -> i32 {
+    let info = read_daemon_info(&daemon.home_dir);
+    let (health, health_latency) = fetch_health_timed(base);
+    let detail = daemon
+        .api_key
+        .as_deref()
+        .and_then(|k| fetch_status_detail(base, k));
+    let cfg = load_config(config);
 
-        ui::section(&i18n::t("section-daemon-status"));
-        ui::blank();
-        ui::kv_ok(
-            &i18n::t("label-status"),
-            body["status"].as_str().unwrap_or("?"),
+    let exit_code = classify_exit(health.as_ref());
+    let is_public_bind = info
+        .as_ref()
+        .map(|i| listener_is_public(&i.listen_addr))
+        .unwrap_or(false);
+    let (key_env, key_present, key_required) = provider_key_state(&cfg);
+    let uptime = uptime_secs(info.as_ref(), detail.as_ref());
+
+    if quiet {
+        return render_status_quiet_daemon(
+            base,
+            info.as_ref(),
+            health.as_ref(),
+            detail.as_ref(),
+            uptime,
+            exit_code,
         );
-        ui::kv(
-            &i18n::t("label-agents"),
-            &body["agent_count"].as_u64().unwrap_or(0).to_string(),
+    }
+
+    if json {
+        let merged = serde_json::json!({
+            "daemon": true,
+            "api": base,
+            "dashboard": format!("{base}/"),
+            "home": daemon.home_dir.display().to_string(),
+            "daemon_info": info.as_ref().map(|i| serde_json::json!({
+                "pid": i.pid,
+                "listen_addr": i.listen_addr,
+                "started_at": i.started_at,
+                "version": i.version,
+                "platform": i.platform,
+                "publicly_bound": listener_is_public(&i.listen_addr),
+            })),
+            "health": health,
+            "health_latency_ms": health_latency.map(|d| d.as_millis() as u64),
+            "default_provider": cfg.default_model.provider,
+            "default_model": cfg.default_model.model,
+            "default_model_api_key_env": key_env,
+            "default_model_api_key_present": key_present,
+            "default_model_api_key_required": key_required,
+            "detail": detail,
+            "uptime_seconds": uptime_secs(info.as_ref(), detail.as_ref()),
+            "authenticated": detail.is_some(),
+            "exit_code": exit_code,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&merged).unwrap_or_default()
         );
-        ui::kv(
+        return exit_code;
+    }
+
+    // --- Overview -----------------------------------------------------------
+    ui::section(&i18n::t("section-daemon-status"));
+    ui::blank();
+
+    let (status_label, status_good) = match health.as_ref() {
+        Some(h) => match h["status"].as_str() {
+            Some("ok") => ("ok".to_string(), true),
+            Some(other) => (other.to_string(), false),
+            None => ("unreachable".to_string(), false),
+        },
+        None => ("unreachable".to_string(), false),
+    };
+    if status_good {
+        ui::kv_ok(&i18n::t("label-status"), &status_label);
+    } else {
+        ui::kv_warn(&i18n::t("label-status"), &status_label);
+    }
+
+    if let Some(v) = info
+        .as_ref()
+        .map(|i| i.version.as_str())
+        .or_else(|| health.as_ref().and_then(|h| h["version"].as_str()))
+    {
+        ui::kv(&i18n::t("label-version"), v);
+    }
+    if let Some(info) = info.as_ref() {
+        ui::kv(&i18n::t("label-pid"), &info.pid.to_string());
+    }
+    if let Some(u) = uptime_secs(info.as_ref(), detail.as_ref()) {
+        ui::kv(&i18n::t("label-uptime"), &format_uptime(u));
+    }
+    if let Some(lat) = health_latency {
+        ui::kv(&i18n::t("label-response"), &format_latency(lat));
+    }
+    // (B) 0.0.0.0 listener: surface the risk inline on the API row so the
+    // user sees the bind scope without having to cross-reference anything.
+    if is_public_bind {
+        ui::kv_warn(
+            &i18n::t("label-api"),
+            &format!("{base}  \u{26A0} {}", i18n::t("warn-public-bind")),
+        );
+    } else {
+        ui::kv(&i18n::t("label-api"), base);
+    }
+    ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
+    ui::kv(
+        &i18n::t("label-home"),
+        &daemon.home_dir.display().to_string(),
+    );
+    if let Some(info) = info.as_ref() {
+        ui::kv(&i18n::t("label-platform"), &info.platform);
+    }
+    if let Some(bytes) = dir_size_bytes(&daemon.home_dir.join("data")) {
+        ui::kv(&i18n::t("label-data-dir"), &format_bytes(bytes));
+    }
+
+    // --- Default model ------------------------------------------------------
+    ui::blank();
+    // (D) Missing provider key: show the concrete env-var name so the user
+    // knows exactly which one to set.
+    if key_required && !key_present {
+        ui::kv_warn(
             &i18n::t("label-provider"),
-            body["default_provider"].as_str().unwrap_or("?"),
+            &format!(
+                "{}  \u{26A0} {} {}",
+                cfg.default_model.provider,
+                key_env,
+                i18n::t("warn-key-missing"),
+            ),
         );
-        ui::kv(
-            &i18n::t("label-model"),
-            body["default_model"].as_str().unwrap_or("?"),
-        );
-        ui::kv(&i18n::t("label-api"), &base);
-        ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
-        ui::kv(
-            &i18n::t("label-data-dir"),
-            body["data_dir"].as_str().unwrap_or("?"),
-        );
-        ui::kv(
-            &i18n::t("label-uptime"),
-            &format!("{}s", body["uptime_seconds"].as_u64().unwrap_or(0)),
-        );
+    } else {
+        ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
+    }
+    ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
 
-        if let Some(agents) = body["agents"].as_array() {
-            if !agents.is_empty() {
+    // --- Health checks (C: always list all, not just degraded) --------------
+    if let Some(h) = health.as_ref() {
+        if let Some(checks) = h["checks"].as_array() {
+            if !checks.is_empty() {
                 ui::blank();
-                ui::section(&i18n::t("section-active-agents"));
-                for a in agents {
-                    println!(
-                        "    {} ({}) -- {} [{}:{}]",
-                        a["name"].as_str().unwrap_or("?"),
-                        a["id"].as_str().unwrap_or("?"),
-                        a["state"].as_str().unwrap_or("?"),
-                        a["model_provider"].as_str().unwrap_or("?"),
-                        a["model_name"].as_str().unwrap_or("?"),
-                    );
+                ui::section(&i18n::t("label-checks"));
+                for c in checks {
+                    let name = c["name"].as_str().unwrap_or("?");
+                    let st = c["status"].as_str().unwrap_or("?");
+                    if st == "ok" {
+                        ui::kv_ok(name, st);
+                    } else {
+                        ui::kv_warn(name, st);
+                    }
                 }
             }
         }
-    } else {
-        let kernel = boot_kernel(config);
-        let agent_count = kernel.agent_registry().count();
-        let cfg = kernel.config_ref();
+    }
 
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "in-process",
-                    "agent_count": agent_count,
-                    "data_dir": cfg.data_dir.display().to_string(),
-                    "default_provider": cfg.default_model.provider,
-                    "default_model": cfg.default_model.model,
-                    "daemon": false,
-                }))
-                .unwrap_or_default()
-            );
-            return;
+    // --- Detail tier --------------------------------------------------------
+    match detail.as_ref() {
+        Some(body) => render_detail_section(body),
+        None => {
+            ui::blank();
+            ui::section(&i18n::t("section-status-locked"));
+            ui::hint(&i18n::t("hint-status-locked"));
         }
+    }
 
-        ui::section(&i18n::t("section-status-inprocess"));
+    // --- Verbose extras -----------------------------------------------------
+    if verbose {
+        render_verbose_section(base, &cfg, detail.is_some(), daemon.api_key.as_deref());
+    }
+
+    // --- Recent errors (always, if any) -------------------------------------
+    let errors = recent_daemon_errors(&daemon.home_dir, 3);
+    if !errors.is_empty() {
         ui::blank();
-        ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
-        ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
-        ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
+        ui::section(&i18n::t("section-recent-errors"));
+        for line in &errors {
+            println!("    {}", line.red());
+        }
+    }
+
+    exit_code
+}
+
+/// Map health response to a semantic exit code.
+///
+/// - `0` — daemon running and `/api/health` reports `ok`.
+/// - `2` — daemon running but `/api/health` reports a non-ok status
+///   (`degraded`, `error`, anything else the handler introduces later).
+/// - `3` — daemon claims to be listening (we got a `/api/health` URL from
+///   `daemon.json`) but the request didn't yield parseable JSON — the
+///   process is unreachable even though the port is.
+fn classify_exit(health: Option<&serde_json::Value>) -> i32 {
+    match health.and_then(|h| h["status"].as_str()) {
+        Some("ok") => 0,
+        Some(_) => 2,
+        None => 3,
+    }
+}
+
+/// Heuristic for "this port is reachable from the internet if the machine
+/// has a public IP." Catches the two common foot-guns: `0.0.0.0` (IPv4 any)
+/// and `::` / `[::]` (IPv6 any). IPv4 loopback, IPv6 loopback, and named
+/// localhost stay quiet.
+fn listener_is_public(listen_addr: &str) -> bool {
+    let host = listen_addr
+        .rsplit_once(':')
+        .map(|(h, _)| h.trim_start_matches('[').trim_end_matches(']'))
+        .unwrap_or(listen_addr);
+    matches!(host, "0.0.0.0" | "::" | "[::]")
+}
+
+/// Compute whether the configured default provider has a usable API key in
+/// the environment (or in `provider_api_keys` in config.toml). Local
+/// providers (ollama/vllm/lmstudio/lemonade) don't need one.
+fn provider_key_state(cfg: &librefang_types::config::KernelConfig) -> (String, bool, bool) {
+    let provider = cfg.default_model.provider.as_str();
+    let key_required = !librefang_runtime::provider_health::is_local_provider(provider);
+    let key_env = if cfg.default_model.api_key_env.trim().is_empty() {
+        format!("{}_API_KEY", provider.to_uppercase())
+    } else {
+        cfg.default_model.api_key_env.clone()
+    };
+    let env_has_key = std::env::var(&key_env)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let config_has_key = cfg
+        .provider_api_keys
+        .get(provider)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    (key_env, env_has_key || config_has_key, key_required)
+}
+
+fn format_latency(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1 {
+        format!("{}µs", d.as_micros())
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Recursively sum file sizes under `dir`. Returns `None` if `dir` does not
+/// exist or cannot be read. Symlinks are followed because the default data
+/// directory may legitimately symlink subdirs onto another disk.
+fn dir_size_bytes(dir: &std::path::Path) -> Option<u64> {
+    if !dir.exists() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if let Ok(md) = entry.metadata() {
+            if md.is_file() {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    Some(total)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[(&str, u64)] = &[
+        ("GiB", 1u64 << 30),
+        ("MiB", 1u64 << 20),
+        ("KiB", 1u64 << 10),
+    ];
+    for (unit, thresh) in UNITS {
+        if bytes >= *thresh {
+            return format!("{:.2} {}", bytes as f64 / *thresh as f64, unit);
+        }
+    }
+    format!("{bytes} B")
+}
+
+/// Scan the last chunk of `daemon.log` for ERROR-level entries. We read a
+/// capped suffix of the file so a multi-GB log doesn't blow up memory, then
+/// walk it backwards and collect the most recent N. An empty result means
+/// either the log is missing or genuinely has no recent errors — the caller
+/// treats both the same way (no section rendered).
+fn recent_daemon_errors(home_dir: &std::path::Path, limit: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = home_dir.join("daemon.log");
+    let mut file = match std::fs::File::open(&log) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    const TAIL_BYTES: u64 = 128 * 1024;
+    let start = len.saturating_sub(TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    buf.lines()
+        .rev()
+        // Match the tracing-subscriber default format. ` ERROR ` with padding
+        // before and after is specific enough to avoid false positives from
+        // log lines that happen to contain the word "error".
+        .filter(|line| line.contains(" ERROR ") || line.starts_with("ERROR "))
+        .take(limit)
+        .map(|l| l.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+/// One-line quiet summary for `librefang status -q`. Stays stable across
+/// releases so scripts can parse it — prefix is always `librefang`, second
+/// token is a state word, remaining tokens are `key=value`.
+fn render_status_quiet_daemon(
+    base: &str,
+    info: Option<&librefang_api::server::DaemonInfo>,
+    health: Option<&serde_json::Value>,
+    detail: Option<&serde_json::Value>,
+    uptime: Option<u64>,
+    exit_code: i32,
+) -> i32 {
+    let state = match health.and_then(|h| h["status"].as_str()) {
+        Some("ok") => "ok",
+        Some(other) => other,
+        None => "unreachable",
+    };
+    let version = info
+        .map(|i| i.version.as_str())
+        .or_else(|| health.and_then(|h| h["version"].as_str()))
+        .unwrap_or("?");
+    let uptime_s = uptime.map(format_uptime).unwrap_or_else(|| "?".to_string());
+    let auth_s = if detail.is_some() {
+        let agents = detail.and_then(|d| d["agent_count"].as_u64()).unwrap_or(0);
+        format!("agents={agents}")
+    } else {
+        "locked".to_string()
+    };
+    println!("librefang {version} {state} uptime={uptime_s} {auth_s} ({base})");
+    exit_code
+}
+
+/// Extra verbose-only section. Everything in here is best-effort: anything
+/// that fails to load just isn't shown — we never stop the main render.
+fn render_verbose_section(
+    base: &str,
+    cfg: &librefang_types::config::KernelConfig,
+    authenticated: bool,
+    api_key: Option<&str>,
+) {
+    ui::blank();
+    ui::section(&i18n::t("section-verbose"));
+
+    // --- Auth mode ----------------------------------------------------------
+    let mut auth_bits: Vec<String> = Vec::new();
+    if !cfg.api_key.trim().is_empty() {
+        auth_bits.push(i18n::t("auth-api-key"));
+    }
+    // Dashboard auth / user keys live under [auth] in config. Detect by
+    // presence of non-empty dashboard credentials so we don't depend on
+    // features that may vary across versions.
+    if !cfg.dashboard_pass_hash.trim().is_empty() || !cfg.dashboard_pass.trim().is_empty() {
+        auth_bits.push(i18n::t("auth-dashboard-login"));
+    }
+    let auth_value = if auth_bits.is_empty() {
+        i18n::t("auth-none")
+    } else {
+        auth_bits.join(" + ")
+    };
+    ui::kv(&i18n::t("label-auth"), &auth_value);
+
+    // --- MCP server count ---------------------------------------------------
+    let mcp_count = cfg.mcp_servers.len();
+    if mcp_count > 0 {
+        ui::kv(&i18n::t("label-mcp"), &mcp_count.to_string());
+    }
+
+    // --- OFP peers ----------------------------------------------------------
+    // Pass the API key when we have one: `/api/network/status` is in the
+    // dashboard-read allowlist, so it transitions from public to
+    // auth-required the moment `require_auth_for_reads` kicks in (which
+    // happens automatically as soon as *any* auth is configured).
+    if let Some((enabled, connected, total)) = fetch_peer_status(base, api_key) {
+        if enabled {
+            ui::kv(
+                &i18n::t("label-peers"),
+                &format!("{connected} connected / {total} known"),
+            );
+        }
+    }
+
+    // --- Authenticated counts ----------------------------------------------
+    if authenticated {
+        if let Some(key) = api_key {
+            if let Some(n) = fetch_array_count(base, "/api/channels", key) {
+                ui::kv(&i18n::t("label-channels"), &n.to_string());
+            }
+            if let Some(n) = fetch_array_count(base, "/api/skills", key) {
+                ui::kv(&i18n::t("label-skills"), &n.to_string());
+            }
+            if let Some(n) = fetch_array_count(base, "/api/hands", key) {
+                ui::kv(&i18n::t("label-hands"), &n.to_string());
+            }
+        }
+    }
+
+    // --- Config warnings ----------------------------------------------------
+    let warnings = cfg.validate();
+    if !warnings.is_empty() {
+        ui::blank();
+        ui::section(&i18n::t("label-config-warnings"));
+        for w in warnings {
+            ui::check_warn(&w);
+        }
+    }
+}
+
+fn fetch_peer_status(base: &str, api_key: Option<&str>) -> Option<(bool, u64, u64)> {
+    let client = daemon_client_with_api_key(api_key);
+    let resp = client
+        .get(format!("{base}/api/network/status"))
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    let connected = body["connected_peers"].as_u64().unwrap_or(0);
+    let total = body["total_peers"].as_u64().unwrap_or(0);
+    Some((enabled, connected, total))
+}
+
+fn fetch_array_count(base: &str, path: &str, api_key: &str) -> Option<u64> {
+    let client = daemon_client_with_api_key(Some(api_key));
+    let resp = client.get(format!("{base}{path}")).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    // Dashboard endpoints vary: agents/skills/hands/channels each shape
+    // their list differently. Probe in order: bare array → {total} →
+    // common array keys. Whichever matches first wins; if none do we
+    // return None so the caller quietly omits the row.
+    if let Some(a) = body.as_array() {
+        return Some(a.len() as u64);
+    }
+    if let Some(n) = body["total"].as_u64() {
+        return Some(n);
+    }
+    for key in ["items", "channels", "skills", "hands", "agents"] {
+        if let Some(a) = body[key].as_array() {
+            return Some(a.len() as u64);
+        }
+    }
+    None
+}
+
+fn render_detail_section(body: &serde_json::Value) {
+    let total = body["agent_count"].as_u64().unwrap_or(0);
+    let active = body["active_agent_count"].as_u64().unwrap_or(0);
+    let sessions = body["session_count"].as_u64().unwrap_or(0);
+    let memory_mb = body["memory_used_mb"].as_u64();
+
+    ui::blank();
+    ui::kv(
+        &i18n::t("label-agents"),
+        &format!("{active} running / {total} total"),
+    );
+    ui::kv(&i18n::t("label-sessions"), &sessions.to_string());
+    if let Some(mb) = memory_mb {
+        ui::kv(&i18n::t("label-memory"), &format!("{mb} MB"));
+    }
+
+    if let Some(agents) = body["agents"].as_array() {
+        if !agents.is_empty() {
+            ui::blank();
+            ui::section(&i18n::t("section-active-agents"));
+            render_agents_table(agents);
+        }
+    }
+}
+
+/// Render the agent list as a column-aligned table. Empty input is a no-op
+/// so the caller can unconditionally call this after a non-empty check.
+fn render_agents_table(agents: &[serde_json::Value]) {
+    // Compute per-column widths so names and ids line up even when one entry
+    // is much longer than the others. Keep a minimum width so a single-row
+    // table doesn't look squashed against the header.
+    let mut rows: Vec<[String; 4]> = Vec::with_capacity(agents.len());
+    for a in agents {
+        let name = a["name"].as_str().unwrap_or("?").to_string();
+        let id = a["id"].as_str().unwrap_or("?").to_string();
+        let state = a["state"].as_str().unwrap_or("?").to_string();
+        let model = format!(
+            "{}:{}",
+            a["model_provider"].as_str().unwrap_or("?"),
+            a["model_name"].as_str().unwrap_or("?"),
+        );
+        rows.push([name, id, state, model]);
+    }
+    let headers = ["NAME", "ID", "STATE", "MODEL"];
+    let mut widths = [0usize; 4];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.len();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    // Cap ID column at 12 so we don't push the model column off the screen
+    // — users rarely need more than a handful of id bytes for correlation.
+    widths[1] = widths[1].min(12);
+    let id_trim = |s: &str| -> String {
+        if s.len() <= widths[1] {
+            s.to_string()
+        } else {
+            s.chars().take(widths[1]).collect()
+        }
+    };
+    let header_line = format!(
+        "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+    );
+    println!("{}", header_line.dimmed());
+    for row in &rows {
+        println!(
+            "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
+            row[0],
+            id_trim(&row[1]),
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+        );
+    }
+}
+
+fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
+    // Quiet mode short-circuits the kernel boot — we don't need to load 22
+    // workflow templates just to print "daemon down". Pull what we can from
+    // the config file alone.
+    if quiet {
+        let cfg = load_config(config.as_deref());
+        println!(
+            "librefang down home={} default={}/{}",
+            cfg.home_dir.display(),
+            cfg.default_model.provider,
+            cfg.default_model.model,
+        );
+        return 1;
+    }
+
+    let kernel = boot_kernel(config);
+    let agent_count = kernel.agent_registry().count();
+    let cfg = kernel.config_ref();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "in-process",
+                "agent_count": agent_count,
+                "home": cfg.home_dir.display().to_string(),
+                "data_dir": cfg.data_dir.display().to_string(),
+                "data_dir_bytes": dir_size_bytes(&cfg.data_dir),
+                "default_provider": cfg.default_model.provider,
+                "default_model": cfg.default_model.model,
+                "daemon": false,
+                "exit_code": 1,
+            }))
+            .unwrap_or_default()
+        );
+        return 1;
+    }
+
+    ui::section(&i18n::t("section-status-inprocess"));
+    ui::blank();
+    ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
+    ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
+    ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
+    ui::kv(&i18n::t("label-home"), &cfg.home_dir.display().to_string());
+    if let Some(bytes) = dir_size_bytes(&cfg.data_dir) {
+        ui::kv(
+            &i18n::t("label-data-dir"),
+            &format!("{} ({})", cfg.data_dir.display(), format_bytes(bytes)),
+        );
+    } else {
         ui::kv(
             &i18n::t("label-data-dir"),
             &cfg.data_dir.display().to_string(),
         );
-        ui::kv_warn(
-            &i18n::t("label-daemon"),
-            &i18n::t("label-daemon-not-running"),
-        );
-        ui::blank();
-        ui::hint(&i18n::t("hint-run-start"));
+    }
+    ui::kv_warn(
+        &i18n::t("label-daemon"),
+        &i18n::t("label-daemon-not-running"),
+    );
+    ui::blank();
+    ui::hint(&i18n::t("hint-run-start"));
 
-        if agent_count > 0 {
-            ui::blank();
-            ui::section(&i18n::t("section-persisted-agents"));
-            for entry in kernel.agent_registry().list() {
-                println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
-            }
+    if agent_count > 0 {
+        ui::blank();
+        ui::section(&i18n::t("section-persisted-agents"));
+        for entry in kernel.agent_registry().list() {
+            println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
         }
+    }
+
+    1
+}
+
+/// Fetch the public `/api/health` payload along with the round-trip time.
+/// Returns `(None, None)` on network failure and `(None, Some(_))` when the
+/// server responded but the body didn't parse, so the caller can still
+/// surface "responded in 42ms but unreadable" if needed.
+fn fetch_health_timed(base: &str) -> (Option<serde_json::Value>, Option<std::time::Duration>) {
+    let client = daemon_client_with_api_key(None);
+    let start = std::time::Instant::now();
+    let resp = match client.get(format!("{base}/api/health")).send() {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    let elapsed = start.elapsed();
+    if !resp.status().is_success() {
+        return (None, Some(elapsed));
+    }
+    (resp.json::<serde_json::Value>().ok(), Some(elapsed))
+}
+
+/// Fetch the authenticated `/api/status` payload. Returns `None` on any
+/// failure — including 401 — so the renderer falls back to the locked
+/// section rather than printing `?` for every field.
+fn fetch_status_detail(base: &str, api_key: &str) -> Option<serde_json::Value> {
+    let client = daemon_client_with_api_key(Some(api_key));
+    let resp = client.get(format!("{base}/api/status")).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<serde_json::Value>().ok()
+}
+
+/// Prefer authoritative uptime from the daemon; fall back to `now - started_at`
+/// from `daemon.json` when the detail tier is unavailable.
+fn uptime_secs(
+    info: Option<&librefang_api::server::DaemonInfo>,
+    detail: Option<&serde_json::Value>,
+) -> Option<u64> {
+    if let Some(body) = detail {
+        if let Some(u) = body["uptime_seconds"].as_u64() {
+            return Some(u);
+        }
+    }
+    let info = info?;
+    let started = chrono::DateTime::parse_from_rfc3339(&info.started_at).ok()?;
+    let now = chrono::Utc::now();
+    let delta = now.signed_duration_since(started.with_timezone(&chrono::Utc));
+    u64::try_from(delta.num_seconds()).ok()
+}
+
+fn format_uptime(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else {
+        format!(
+            "{}d {}h {}m",
+            secs / 86400,
+            (secs % 86400) / 3600,
+            (secs % 3600) / 60
+        )
     }
 }
 
@@ -4330,27 +5324,40 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
     }
 
-    // --- Check 14: Extension registry health ---
+    // --- Check 14: MCP catalog + configured servers ---
     {
         if !json {
-            println!("\n  Extensions:");
+            println!("\n  MCP servers:");
         }
         let librefang_dir = cli_librefang_home();
-        let mut ext_registry =
-            librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry
-            .load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        let _ = ext_registry.load_installed();
-        let template_count = ext_registry.template_count();
-        let installed_count = ext_registry.installed_count();
+        let mut catalog = librefang_extensions::catalog::McpCatalog::new(&librefang_dir);
+        catalog.load(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        let template_count = catalog.len();
+
+        // Count configured [[mcp_servers]] entries in config.toml (if any).
+        let configured_count = {
+            let config_path = librefang_dir.join("config.toml");
+            if config_path.is_file() {
+                let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+                toml::from_str::<toml::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.as_table().cloned())
+                    .and_then(|t| t.get("mcp_servers").cloned())
+                    .and_then(|v| v.as_array().cloned())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        };
         if !json {
-            ui::check_ok(&format!(
-                "Available integration templates: {template_count}"
-            ));
-            ui::check_ok(&format!("Installed integrations: {installed_count}"));
+            ui::check_ok(&format!("MCP catalog templates: {template_count}"));
+            ui::check_ok(&format!("Configured MCP servers: {configured_count}"));
         }
-        checks.push(serde_json::json!({"check": "extensions_available", "status": "ok", "count": template_count}));
-        checks.push(serde_json::json!({"check": "extensions_installed", "status": "ok", "count": installed_count}));
+        checks.push(
+            serde_json::json!({"check": "mcp_catalog", "status": "ok", "count": template_count}),
+        );
+        checks.push(serde_json::json!({"check": "mcp_servers_configured", "status": "ok", "count": configured_count}));
     }
 
     // --- Check 15: Daemon health detail (if running) ---
@@ -4455,8 +5462,8 @@ fn cmd_doctor(json: bool, repair: bool) {
             _ => {}
         }
 
-        // Check extensions health endpoint
-        match client.get(format!("{base}/api/integrations/health")).send() {
+        // Check MCP health endpoint
+        match client.get(format!("{base}/api/mcp/health")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let entries = body.get("health").and_then(|h| h.as_array());
@@ -4474,15 +5481,15 @@ fn cmd_doctor(json: bool, repair: bool) {
                         if healthy == total {
                             if !json {
                                 ui::check_ok(&format!(
-                                    "Integration health: {healthy}/{total} healthy"
+                                    "MCP server health: {healthy}/{total} healthy"
                                 ));
                             }
                         } else if !json {
                             ui::check_warn(&format!(
-                                "Integration health: {healthy}/{total} healthy"
+                                "MCP server health: {healthy}/{total} healthy"
                             ));
                         }
-                        checks.push(serde_json::json!({"check": "integration_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
+                        checks.push(serde_json::json!({"check": "mcp_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
                     }
                 }
             }
@@ -4883,7 +5890,15 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     }
 }
 
-fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fires: u64) {
+fn cmd_trigger_create(
+    agent_id: &str,
+    pattern_json: &str,
+    prompt: &str,
+    max_fires: u64,
+    target_agent: Option<&str>,
+    cooldown: Option<u64>,
+    session_mode: Option<&str>,
+) {
     let base = require_daemon("trigger create");
     let agent_id = resolve_agent_id(&base, agent_id);
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
@@ -4896,16 +5911,27 @@ fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fire
         std::process::exit(1);
     });
 
+    let mut payload = serde_json::json!({
+        "agent_id": agent_id,
+        "pattern": pattern,
+        "prompt_template": prompt,
+        "max_fires": max_fires,
+    });
+    if let Some(t) = target_agent {
+        payload["target_agent_id"] = serde_json::json!(t);
+    }
+    if let Some(c) = cooldown {
+        payload["cooldown_secs"] = serde_json::json!(c);
+    }
+    if let Some(m) = session_mode {
+        payload["session_mode"] = serde_json::json!(m);
+    }
+
     let client = daemon_client();
     let body = daemon_json(
         client
             .post(format!("{base}/api/triggers"))
-            .json(&serde_json::json!({
-                "agent_id": agent_id,
-                "pattern": pattern,
-                "prompt_template": prompt,
-                "max_fires": max_fires,
-            }))
+            .json(&payload)
             .send(),
     );
 
@@ -4913,6 +5939,9 @@ fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fire
         println!("Trigger created successfully!");
         println!("  Trigger ID: {id}");
         println!("  Agent ID:   {agent_id}");
+        if let Some(t) = target_agent {
+            println!("  Target:     {t}");
+        }
     } else {
         eprintln!(
             "Failed to create trigger: {}",
@@ -4940,6 +5969,155 @@ fn cmd_trigger_delete(trigger_id: &str) {
         );
         std::process::exit(1);
     }
+}
+
+fn cmd_trigger_get(trigger_id: &str) {
+    let base = require_daemon("trigger get");
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/triggers/{trigger_id}"))
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to get trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+
+    println!("Trigger ID:    {}", body["id"].as_str().unwrap_or("-"));
+    println!(
+        "Agent ID:      {}",
+        body["agent_id"].as_str().unwrap_or("-")
+    );
+    println!("Pattern:       {}", body["pattern"]);
+    println!(
+        "Prompt:        {}",
+        body["prompt_template"].as_str().unwrap_or("-")
+    );
+    println!(
+        "Enabled:       {}",
+        body["enabled"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "Fire count:    {}",
+        body["fire_count"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "Max fires:     {}",
+        body["max_fires"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unlimited".to_string())
+    );
+    if let Some(t) = body["target_agent_id"].as_str() {
+        println!("Target agent:  {t}");
+    }
+    if let Some(c) = body["cooldown_secs"].as_u64() {
+        println!("Cooldown:      {c}s");
+    }
+    if let Some(m) = body["session_mode"].as_str() {
+        println!("Session mode:  {m}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_trigger_update(
+    trigger_id: &str,
+    pattern: Option<&str>,
+    prompt: Option<&str>,
+    enabled: Option<bool>,
+    max_fires: Option<u64>,
+    cooldown: Option<u64>,
+    clear_cooldown: bool,
+    session_mode: Option<&str>,
+    clear_session_mode: bool,
+    target_agent: Option<&str>,
+    clear_target_agent: bool,
+) {
+    let base = require_daemon("trigger update");
+    let client = daemon_client();
+
+    let mut payload = serde_json::json!({});
+    if let Some(p) = pattern {
+        let parsed: serde_json::Value = serde_json::from_str(p).unwrap_or_else(|e| {
+            eprintln!("Invalid pattern JSON: {e}");
+            std::process::exit(1);
+        });
+        payload["pattern"] = parsed;
+    }
+    if let Some(t) = prompt {
+        payload["prompt_template"] = serde_json::json!(t);
+    }
+    if let Some(e) = enabled {
+        payload["enabled"] = serde_json::json!(e);
+    }
+    if let Some(m) = max_fires {
+        payload["max_fires"] = serde_json::json!(m);
+    }
+    if clear_cooldown {
+        payload["cooldown_secs"] = serde_json::Value::Null;
+    } else if let Some(c) = cooldown {
+        payload["cooldown_secs"] = serde_json::json!(c);
+    }
+    if clear_session_mode {
+        payload["session_mode"] = serde_json::Value::Null;
+    } else if let Some(m) = session_mode {
+        payload["session_mode"] = serde_json::json!(m);
+    }
+    if clear_target_agent {
+        payload["target_agent_id"] = serde_json::Value::Null;
+    } else if let Some(a) = target_agent {
+        payload["target_agent_id"] = serde_json::json!(a);
+    }
+
+    let body = daemon_json(
+        client
+            .patch(format!("{base}/api/triggers/{trigger_id}"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to update trigger: {}",
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+    println!("Trigger {trigger_id} updated.");
+}
+
+fn cmd_trigger_set_enabled(trigger_id: &str, enabled: bool) {
+    let base = require_daemon(if enabled {
+        "trigger enable"
+    } else {
+        "trigger disable"
+    });
+    let client = daemon_client();
+    let payload = serde_json::json!({ "enabled": enabled });
+    let body = daemon_json(
+        client
+            .patch(format!("{base}/api/triggers/{trigger_id}"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("error").is_some() {
+        eprintln!(
+            "Failed to {} trigger: {}",
+            if enabled { "enable" } else { "disable" },
+            body["error"].as_str().unwrap_or("Unknown error")
+        );
+        std::process::exit(1);
+    }
+    println!(
+        "Trigger {trigger_id} {}.",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 /// Require a running daemon — exit with helpful message if not found.
@@ -5178,12 +6356,12 @@ fn cmd_skill_list(hand: Option<&str>) {
 }
 
 fn cmd_skill_remove(name: &str, hand: Option<&str>) {
+    // Route through the safe uninstall path (lock + path-traversal
+    // guard) instead of `registry.remove()` which calls `remove_dir_all`
+    // with no serialisation against concurrent evolve operations.
     let skills_dir = resolve_skills_dir(hand);
-
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
-    match registry.remove(name) {
-        Ok(()) => {
+    match librefang_skills::evolution::uninstall_skill(&skills_dir, name) {
+        Ok(_) => {
             if let Some(h) = hand {
                 println!("Removed skill '{name}' from hand '{h}'");
             } else {
@@ -5527,6 +6705,241 @@ if __name__ == "__main__":
         "  3. Install: librefang skill install {}",
         skill_dir.display()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Skill evolve commands — thin CLI wrappers over librefang_skills::evolution
+// ---------------------------------------------------------------------------
+
+/// Read a file path, or stdin if path is "-".
+fn read_file_or_stdin(path: &std::path::Path) -> std::io::Result<String> {
+    if path == std::path::Path::new("-") {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(path)
+    }
+}
+
+/// Print an EvolutionResult as a one-line status.
+fn print_evolution_result(result: &librefang_skills::evolution::EvolutionResult) {
+    let marker = if result.success { "OK" } else { "FAIL" };
+    match &result.version {
+        Some(v) => println!("[{marker}] {} (v{v})", result.message),
+        None => println!("[{marker}] {}", result.message),
+    }
+}
+
+/// Resolve a skill by name. Respects `--hand` so evolve operations can
+/// target a per-hand workspace skills dir just like `install`/`list`.
+fn load_installed_skill(
+    name: &str,
+    hand: Option<&str>,
+) -> (PathBuf, librefang_skills::InstalledSkill) {
+    let skills_dir = resolve_skills_dir(hand);
+    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
+    if let Err(e) = registry.load_all() {
+        eprintln!("Error loading skill registry: {e}");
+        std::process::exit(1);
+    }
+    match registry.get(name) {
+        Some(skill) => (skills_dir, skill.clone()),
+        None => {
+            eprintln!("Skill '{name}' not found in {}", skills_dir.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_skill_evolve(sub: EvolveCommands) {
+    match sub {
+        EvolveCommands::Create {
+            name,
+            description,
+            context_file,
+            tags,
+            hand,
+        } => {
+            let prompt_context = match read_file_or_stdin(&context_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", context_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let tag_list: Vec<String> = tags
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .collect();
+            let skills_dir = resolve_skills_dir(hand.as_deref());
+            if let Err(e) = std::fs::create_dir_all(&skills_dir) {
+                eprintln!("Failed to create skills dir: {e}");
+                std::process::exit(1);
+            }
+            match librefang_skills::evolution::create_skill(
+                &skills_dir,
+                &name,
+                &description,
+                &prompt_context,
+                tag_list,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Create failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Update {
+            name,
+            context_file,
+            changelog,
+            hand,
+        } => {
+            let new_ctx = match read_file_or_stdin(&context_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", context_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::update_skill(
+                &skill,
+                &new_ctx,
+                &changelog,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Update failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Patch {
+            name,
+            old_file,
+            new_file,
+            changelog,
+            replace_all,
+            hand,
+        } => {
+            let old_str = match read_file_or_stdin(&old_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", old_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let new_str = match read_file_or_stdin(&new_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", new_file.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::patch_skill(
+                &skill,
+                &old_str,
+                &new_str,
+                &changelog,
+                replace_all,
+                Some("cli"),
+            ) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Patch failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Delete { name, hand } => {
+            let skills_dir = resolve_skills_dir(hand.as_deref());
+            match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Delete failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::Rollback { name, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::rollback_skill(&skill, Some("cli")) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Rollback failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::WriteFile {
+            name,
+            path,
+            source,
+            hand,
+        } => {
+            let content = match read_file_or_stdin(&source) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to read {}: {e}", source.display());
+                    std::process::exit(1);
+                }
+            };
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::write_supporting_file(&skill, &path, &content) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Write-file failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::RemoveFile { name, path, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            match librefang_skills::evolution::remove_supporting_file(&skill, &path) {
+                Ok(r) => print_evolution_result(&r),
+                Err(e) => {
+                    eprintln!("Remove-file failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        EvolveCommands::History { name, json, hand } => {
+            let (_, skill) = load_installed_skill(&name, hand.as_deref());
+            let meta = librefang_skills::evolution::get_evolution_info(&skill);
+            if json {
+                match serde_json::to_string_pretty(&meta) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => {
+                        eprintln!("Failed to serialize history: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            println!("Skill: {}", skill.manifest.skill.name);
+            println!("Current version: {}", skill.manifest.skill.version);
+            println!("Use count: {}", meta.use_count);
+            println!("Evolution count: {}", meta.evolution_count);
+            if meta.versions.is_empty() {
+                println!("\nNo version history recorded.");
+                return;
+            }
+            println!("\n{:<10} {:<25} CHANGELOG", "VERSION", "TIMESTAMP");
+            println!("{}", "-".repeat(70));
+            for v in meta.versions.iter().rev() {
+                println!("{:<10} {:<25} {}", v.version, v.timestamp, v.changelog);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7037,29 +8450,68 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
-// Integration commands (librefang add/remove/integrations)
+// MCP server commands (librefang mcp {add,remove,list,catalog})
 // ---------------------------------------------------------------------------
 
-fn cmd_integration_add(name: &str, key: Option<&str>) {
+fn cmd_mcp_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
     // Check template exists
-    let template = match registry.get_template(name) {
+    let template = match catalog.get(name) {
         Some(t) => t.clone(),
         None => {
-            ui::error(&format!("Unknown integration: '{name}'"));
-            println!("\nAvailable integrations:");
-            for t in registry.list_templates() {
+            ui::error(&format!("Unknown MCP catalog entry: '{name}'"));
+            println!("\nAvailable MCP servers (catalog):");
+            for t in catalog.list() {
                 println!("  {} {} — {}", t.icon, t.id, t.description);
             }
             std::process::exit(1);
         }
     };
 
-    // Set up credential resolver
+    // Reject re-install of an already-configured server by name/template_id.
+    // The API path returns 409 here; the CLI was silently overwriting the
+    // existing [[mcp_servers]] entry (including edited transport/env/oauth)
+    // because upsert_mcp_server_local replaces by name. Users should remove
+    // first if they want to re-install.
+    let config_path = home.join("config.toml");
+    if config_path.is_file() {
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                ui::error(&format!("Failed to read {}: {e}", config_path.display()));
+                std::process::exit(1);
+            }
+        };
+        let parsed: toml::value::Table = match toml::from_str(&content) {
+            Ok(t) => t,
+            Err(e) => {
+                ui::error(&format!("{} is not valid TOML: {e}", config_path.display()));
+                std::process::exit(1);
+            }
+        };
+        if let Some(toml::Value::Array(servers)) = parsed.get("mcp_servers") {
+            let conflict = servers.iter().any(|v| {
+                let t = match v.as_table() {
+                    Some(t) => t,
+                    None => return false,
+                };
+                let matches_field = |k: &str| t.get(k).and_then(|n| n.as_str()) == Some(name);
+                matches_field("name") || matches_field("template_id")
+            });
+            if conflict {
+                ui::error(&format!(
+                    "MCP server '{name}' is already configured. Run \
+                     `librefang mcp remove {name}` first if you want to re-install."
+                ));
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Set up credential resolver (vault + dotenv + interactive prompt fallback)
     let dotenv_path = home.join(".env");
     let vault_path = home.join("vault.enc");
     let vault = if vault_path.exists() {
@@ -7085,92 +8537,135 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
         }
     }
 
-    match librefang_extensions::installer::install_integration(
-        &mut registry,
+    let result = match librefang_extensions::installer::install_integration(
+        &catalog,
         &mut resolver,
         name,
         &provided_keys,
     ) {
-        Ok(result) => {
-            match &result.status {
-                librefang_extensions::IntegrationStatus::Ready => {
-                    ui::success(&result.message);
-                }
-                librefang_extensions::IntegrationStatus::Setup => {
-                    println!("{}", result.message.yellow());
-                    println!("\nTo add credentials:");
-                    for env in &template.required_env {
-                        if env.is_secret {
-                            println!("  librefang vault set {}  # {}", env.name, env.help);
-                            if let Some(ref url) = env.get_url {
-                                println!("  Get it here: {url}");
-                            }
-                        }
+        Ok(r) => r,
+        Err(e) => {
+            ui::error(&e.to_string());
+            std::process::exit(1);
+        }
+    };
+
+    // Persist the new [[mcp_servers]] entry directly into config.toml.
+    let config_path = home.join("config.toml");
+    if let Err(e) = upsert_mcp_server_local(&config_path, &result.server) {
+        ui::error(&format!("Failed to write config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    match &result.status {
+        librefang_extensions::McpStatus::Ready => ui::success(&result.message),
+        librefang_extensions::McpStatus::Setup => {
+            println!("{}", result.message.yellow());
+            println!("\nTo add credentials:");
+            for env in &template.required_env {
+                if env.is_secret {
+                    println!("  librefang vault set {}  # {}", env.name, env.help);
+                    if let Some(ref url) = env.get_url {
+                        println!("  Get it here: {url}");
                     }
                 }
-                _ => println!("{}", result.message),
             }
+        }
+        _ => println!("{}", result.message),
+    }
 
-            // If daemon is running, trigger hot-reload
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
-        }
+    // If daemon is running, trigger hot-reload.
+    if let Some(base_url) = find_daemon() {
+        let client = daemon_client();
+        let _ = client.post(format!("{base_url}/api/mcp/reload")).send();
     }
 }
 
-fn cmd_integration_remove(name: &str) {
+fn cmd_mcp_remove(name: &str) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let config_path = home.join("config.toml");
 
-    match librefang_extensions::installer::remove_integration(&mut registry, name) {
-        Ok(msg) => {
-            ui::success(&msg);
-            // Hot-reload daemon
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
+    // Resolve by template_id first, fall back to server name.
+    let target_name: Option<String> = {
+        let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let doc: toml::Value =
+            toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+        doc.as_table()
+            .and_then(|t| t.get("mcp_servers"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|entry| {
+                    let tbl = entry.as_table()?;
+                    let tid = tbl.get("template_id").and_then(|v| v.as_str());
+                    let nm = tbl.get("name").and_then(|v| v.as_str())?;
+                    if tid == Some(name) || nm == name {
+                        Some(nm.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+    };
+
+    let target_name = match target_name {
+        Some(n) => n,
+        None => {
+            ui::error(&format!("MCP server '{name}' is not configured"));
             std::process::exit(1);
         }
+    };
+
+    if let Err(e) = remove_mcp_server_local(&config_path, &target_name) {
+        ui::error(&format!("Failed to update config.toml: {e}"));
+        std::process::exit(1);
+    }
+
+    ui::success(&format!("{target_name} removed."));
+
+    // Hot-reload daemon
+    if let Some(base_url) = find_daemon() {
+        let client = daemon_client();
+        let _ = client.post(format!("{base_url}/api/mcp/reload")).send();
     }
 }
 
-fn cmd_integrations_list(query: Option<&str>) {
+fn cmd_mcp_catalog(query: Option<&str>) {
     let home = librefang_home();
-    let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_templates(&home);
-    let _ = registry.load_installed();
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
-    let dotenv_path = home.join(".env");
-    let resolver =
-        librefang_extensions::credentials::CredentialResolver::new(None, Some(&dotenv_path));
+    // Installed state comes from config.mcp_servers' template_id field.
+    let installed_template_ids: std::collections::HashSet<String> = {
+        let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+        toml::from_str::<toml::Value>(&raw)
+            .ok()
+            .and_then(|v| v.as_table().cloned())
+            .and_then(|t| t.get("mcp_servers").cloned())
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| {
+                arr.into_iter()
+                    .filter_map(|v| {
+                        v.as_table()
+                            .and_then(|t| t.get("template_id"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
-    let entries = if let Some(q) = query {
-        librefang_extensions::installer::search_integrations(&registry, q)
+    let entries: Vec<_> = if let Some(q) = query {
+        catalog.search(q).into_iter().cloned().collect()
     } else {
-        librefang_extensions::installer::list_integrations(&registry, &resolver)
+        catalog.list().into_iter().cloned().collect()
     };
 
     if entries.is_empty() {
         if let Some(q) = query {
-            println!("No integrations matching '{q}'.");
+            println!("No MCP catalog entries matching '{q}'.");
         } else {
-            println!("No integrations available.");
+            println!("No MCP catalog entries available.");
         }
         return;
     }
@@ -7178,11 +8673,11 @@ fn cmd_integrations_list(query: Option<&str>) {
     // Group by category
     let mut by_category: std::collections::BTreeMap<
         String,
-        Vec<&librefang_extensions::installer::IntegrationListEntry>,
+        Vec<&librefang_extensions::McpCatalogEntry>,
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         by_category
-            .entry(entry.category.clone())
+            .entry(entry.category.to_string())
             .or_default()
             .push(entry);
     }
@@ -7190,39 +8685,175 @@ fn cmd_integrations_list(query: Option<&str>) {
     for (category, items) in &by_category {
         println!("\n{}", format!("  {category}").bold());
         for item in items {
-            let status_badge = match &item.status {
-                librefang_extensions::IntegrationStatus::Ready => "[Ready]".green().to_string(),
-                librefang_extensions::IntegrationStatus::Setup => "[Setup]".yellow().to_string(),
-                librefang_extensions::IntegrationStatus::Available => {
-                    "[Available]".dimmed().to_string()
-                }
-                librefang_extensions::IntegrationStatus::Error(msg) => {
-                    format!("[Error: {msg}]").red().to_string()
-                }
-                librefang_extensions::IntegrationStatus::Disabled => {
-                    "[Disabled]".dimmed().to_string()
-                }
+            let status_badge = if installed_template_ids.contains(&item.id) {
+                "[Installed]".green().to_string()
+            } else {
+                "[Available]".dimmed().to_string()
             };
             println!(
-                "    {} {:<20} {:<12} {}",
+                "    {} {:<20} {:<13} {}",
                 item.icon, item.id, status_badge, item.description
             );
         }
     }
     println!();
     println!(
-        "  {} integrations ({} installed)",
+        "  {} catalog entries ({} installed)",
         entries.len(),
         entries
             .iter()
-            .filter(|e| matches!(
-                e.status,
-                librefang_extensions::IntegrationStatus::Ready
-                    | librefang_extensions::IntegrationStatus::Setup
-            ))
+            .filter(|e| installed_template_ids.contains(&e.id))
             .count()
     );
-    println!("  Use `librefang add <name>` to install an integration.");
+    println!("  Use `librefang mcp add <id>` to install an MCP server.");
+}
+
+fn cmd_mcp_list() {
+    let home = librefang_home();
+    let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let doc: toml::Value = toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+    let servers = doc
+        .as_table()
+        .and_then(|t| t.get("mcp_servers"))
+        .and_then(|v| v.as_array());
+    let Some(servers) = servers else {
+        println!("No MCP servers configured.");
+        return;
+    };
+    if servers.is_empty() {
+        println!("No MCP servers configured.");
+        return;
+    }
+    println!();
+    println!(
+        "  {:<28} {:<14} {:<18} details",
+        "name", "template_id", "transport"
+    );
+    for entry in servers {
+        let Some(tbl) = entry.as_table() else {
+            continue;
+        };
+        let name = tbl.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let tid = tbl
+            .get("template_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let (transport, detail) = match tbl.get("transport").and_then(|v| v.as_table()) {
+            Some(t) => {
+                let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                let detail = match ttype {
+                    "stdio" => t
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    "sse" | "http" => t
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => String::new(),
+                };
+                (ttype.to_string(), detail)
+            }
+            None => ("-".to_string(), String::new()),
+        };
+        println!("  {name:<28} {tid:<14} {transport:<18} {detail}");
+    }
+    println!();
+    println!("  Use `librefang mcp catalog` to list installable entries.");
+}
+
+/// Local upsert helper — mirrors the API's `upsert_mcp_server_config`.
+fn upsert_mcp_server_local(
+    config_path: &std::path::Path,
+    entry: &librefang_types::config::McpServerConfigEntry,
+) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        // Propagate parse errors instead of silently defaulting. A
+        // malformed config.toml would otherwise be overwritten as a new
+        // near-empty file, wiping unrelated sections the user may want
+        // to fix by hand.
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+    } else {
+        toml::value::Table::new()
+    };
+
+    let entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+    let entry_toml = json_to_toml_value_cli(&entry_json);
+
+    let servers = table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+
+    if let toml::Value::Array(ref mut arr) = servers {
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != entry.name)
+                .unwrap_or(true)
+        });
+        arr.push(entry_toml);
+    }
+
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn remove_mcp_server_local(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
+    } else {
+        return Ok(());
+    };
+    if let Some(toml::Value::Array(ref mut arr)) = table.get_mut("mcp_servers") {
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != name)
+                .unwrap_or(true)
+        });
+    }
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// JSON → TOML converter. Duplicates the `json_to_toml_value` helper from
+/// the API crate to avoid a cross-crate dependency.
+fn json_to_toml_value_cli(value: &serde_json::Value) -> toml::Value {
+    match value {
+        serde_json::Value::Null => toml::Value::String(String::new()),
+        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                toml::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                toml::Value::Float(f)
+            } else {
+                toml::Value::String(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => toml::Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            toml::Value::Array(arr.iter().map(json_to_toml_value_cli).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut t = toml::value::Table::new();
+            for (k, v) in map {
+                t.insert(k.clone(), json_to_toml_value_cli(v));
+            }
+            toml::Value::Table(t)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7564,8 +9195,8 @@ fn cmd_scaffold(kind: ScaffoldKind) {
         ScaffoldKind::Skill => {
             librefang_extensions::installer::scaffold_skill(&cwd.join("my-skill"))
         }
-        ScaffoldKind::Integration => {
-            librefang_extensions::installer::scaffold_integration(&cwd.join("my-integration"))
+        ScaffoldKind::Mcp => {
+            librefang_extensions::installer::scaffold_integration(&cwd.join("my-mcp"))
         }
     };
     match result {
@@ -8200,8 +9831,10 @@ fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         return;
     }
 
-    let tui_log_dir = daemon.log_dir.as_deref().unwrap_or(&daemon.home_dir);
-    let tui_log = tui_log_dir.join("tui.log");
+    let tui_log = match daemon.log_dir.as_deref() {
+        Some(dir) => dir.join("tui.log"),
+        None => daemon.home_dir.join("logs").join("tui.log"),
+    };
     if tui_log.exists() {
         ui::hint(&format!(
             "Daemon log not found; showing TUI log at {}",
@@ -8355,6 +9988,108 @@ fn cmd_security_verify() {
         }
         std::process::exit(1);
     }
+}
+
+/// Destructively reset the local audit trail.
+///
+/// Truncates `audit_entries` in SQLite and removes the anchor file so the
+/// next daemon boot seeds a fresh Merkle chain. Refuses to run while the
+/// daemon holds the DB (SQLite WAL mode + writer lock) and without
+/// `--confirm`.
+fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    let kernel_config = load_config(config.as_deref());
+
+    let db_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    let anchor_path = match kernel_config.audit.anchor_path.as_ref() {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => kernel_config.data_dir.join(p),
+        None => kernel_config.data_dir.join("audit.anchor"),
+    };
+
+    if !confirm {
+        ui::error("audit reset is destructive — re-run with `--confirm` to proceed");
+        ui::blank();
+        println!("  Would:");
+        println!(
+            "    1. DELETE all rows from `audit_entries` in {}",
+            db_path.display()
+        );
+        println!("    2. Remove anchor file {}", anchor_path.display());
+        println!("  The Merkle chain will restart from the next audit event.");
+        std::process::exit(1);
+    }
+
+    // Refuse if daemon is running — SQLite writer lock would block or corrupt.
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &format!("daemon is running at {base}; refusing to touch the audit database"),
+            "stop the daemon first: `librefang stop`",
+        );
+        std::process::exit(1);
+    }
+
+    if !db_path.exists() {
+        ui::error(&format!("database not found at {}", db_path.display()));
+        std::process::exit(1);
+    }
+
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::error(&format!("failed to open {}: {e}", db_path.display()));
+            std::process::exit(1);
+        }
+    };
+
+    let rows_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM audit_entries", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    // Remove the anchor FIRST. If the subsequent DB truncation then fails,
+    // the next daemon boot sees `read_anchor = None` and re-seeds from the
+    // current DB tip — a consistent (if still broken) state the user can
+    // retry. The reverse order (DB first, anchor second) would instead
+    // leave an empty table alongside a stale anchor, which produces a
+    // fresh MISMATCH error the user didn't have before calling reset.
+    let anchor_removed = if anchor_path.exists() {
+        match std::fs::remove_file(&anchor_path) {
+            Ok(()) => true,
+            Err(e) => {
+                ui::error(&format!(
+                    "failed to remove anchor {}: {e}",
+                    anchor_path.display()
+                ));
+                std::process::exit(1);
+            }
+        }
+    } else {
+        false
+    };
+
+    if let Err(e) = conn.execute("DELETE FROM audit_entries", []) {
+        ui::error(&format!("failed to truncate audit_entries: {e}"));
+        std::process::exit(1);
+    }
+    drop(conn);
+    // `seq` is `INTEGER PRIMARY KEY` without AUTOINCREMENT, so the next
+    // insert after an empty table naturally gets seq = 1. No sqlite_sequence
+    // fiddling needed.
+
+    ui::success(&format!(
+        "Audit trail reset: removed {rows_before} row(s) from audit_entries{}.",
+        if anchor_removed {
+            format!(", deleted anchor at {}", anchor_path.display())
+        } else {
+            " (no anchor file to remove)".to_string()
+        }
+    ));
+    ui::hint("The next daemon boot will seed a fresh Merkle chain from the current tip.");
 }
 
 fn cmd_memory_list(agent: &str, json: bool) {
@@ -10357,10 +12092,9 @@ mod tests {
     fn test_doctor_extension_registry_loads_templates() {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
-        let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count =
-            ext_reg.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        assert_eq!(ext_reg.template_count(), count);
+        let mut catalog = librefang_extensions::catalog::McpCatalog::new(&tmp);
+        let count = catalog.load(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        assert_eq!(catalog.len(), count);
     }
 
     #[test]

@@ -4,9 +4,10 @@
 //! No external Telegram crate — just `reqwest` for full control over error handling.
 
 use crate::formatter;
+use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
-    split_message, truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType,
-    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction,
+    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    InteractiveButton, InteractiveMessage, LifecycleReaction,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -52,6 +53,67 @@ fn extract_retry_after(body: &str, default: u64) -> u64 {
 
 /// Telegram `parse_mode` for HTML formatting.
 const PARSE_MODE_HTML: &str = "HTML";
+
+/// Returns `true` when `url_str` points at a host that Telegram's public
+/// cloud cannot reach — loopback, RFC1918 private ranges, link-local,
+/// `localhost`, or an unparseable URL. Used to short-circuit URL-based
+/// Bot API calls and fall back to multipart upload from inside the
+/// container, where these addresses are actually routable.
+fn is_private_url(url_str: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url_str) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(addr)) => {
+            addr.is_loopback() || addr.is_private() || addr.is_link_local()
+        }
+        Some(url::Host::Ipv6(addr)) => {
+            addr.is_loopback()
+                || (addr.segments()[0] & 0xfe00) == 0xfc00  // fc00::/7 unique-local
+                || (addr.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+        None => false,
+    }
+}
+
+/// Best-effort filename extracted from the last path segment of `url_str`,
+/// falling back to a generic name if the URL has no usable path.
+fn url_filename(url_str: &str, fallback: &str) -> String {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|mut segs| segs.next_back().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Fetch bytes from an internal-network URL for re-upload via multipart.
+/// Returns the body plus the `Content-Type` header (falling back to
+/// `application/octet-stream` when the origin doesn't announce one).
+async fn fetch_url_bytes(
+    client: &reqwest::Client,
+    url_str: &str,
+) -> Result<(Vec<u8>, String), Box<dyn std::error::Error + Send + Sync>> {
+    let resp = client.get(url_str).send().await?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Failed to fetch {url_str} for multipart fallback: HTTP {}",
+            resp.status()
+        )
+        .into());
+    }
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = resp.bytes().await?.to_vec();
+    Ok((bytes, mime))
+}
 
 /// A Telegram bot command definition for the command menu.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -365,8 +427,11 @@ impl TelegramAdapter {
         // Any other tag (e.g. <name>, <thinking>) causes a 400 Bad Request.
         let sanitized = sanitize_telegram_html(text);
 
-        // Telegram has a 4096 character limit per message — split if needed
-        let chunks = split_message(&sanitized, 4096);
+        // Telegram's 4096-character limit is measured in UTF-16 code units.
+        // Emoji and CJK Extension B characters consume 2 units each, so we
+        // must use `split_to_utf16_chunks` rather than a plain byte/codepoint
+        // split to avoid 400 errors on messages heavy with such characters.
+        let chunks = split_to_utf16_chunks(&sanitized, TELEGRAM_MESSAGE_LIMIT);
         for chunk in chunks {
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
@@ -447,7 +512,7 @@ impl TelegramAdapter {
                 return Ok(());
             }
 
-            warn!("Telegram {endpoint} failed ({status}): {body_text}");
+            return Err(format!("Telegram {endpoint} failed ({status}): {body_text}").into());
         }
         Ok(())
     }
@@ -477,6 +542,29 @@ impl TelegramAdapter {
         filename: &str,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Private-network URLs can't be fetched by Telegram's cloud. We
+        // download them from inside the container (where the address is
+        // routable) and re-upload via multipart, so the agent doesn't need
+        // a public tunnel just to deliver a locally-served file.
+        if is_private_url(document_url) {
+            info!(
+                url = document_url,
+                "Private URL detected on sendDocument, falling back to multipart upload"
+            );
+            let (bytes, mime) = fetch_url_bytes(&self.client, document_url).await?;
+            return self
+                .api_send_media_upload(
+                    "sendDocument",
+                    "document",
+                    chat_id,
+                    bytes,
+                    filename,
+                    &mime,
+                    Some(&[("caption", filename.to_string())]),
+                    thread_id,
+                )
+                .await;
+        }
         let body = serde_json::json!({
             "document": document_url,
             "caption": filename,
@@ -498,62 +586,98 @@ impl TelegramAdapter {
         mime_type: &str,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_media_upload(
+            "sendDocument",
+            "document",
+            chat_id,
+            data,
+            filename,
+            mime_type,
+            None,
+            thread_id,
+        )
+        .await
+    }
+
+    /// Generic multipart upload for any Telegram `send{Media}` endpoint.
+    ///
+    /// `field_name` is the form field the API expects for the payload
+    /// (`document`, `voice`, `audio`, `photo`, `video`, …). `extra` merges
+    /// optional text fields (captions, title, performer) into the form.
+    /// Retries once on HTTP 429 like the URL path.
+    #[allow(clippy::too_many_arguments)]
+    async fn api_send_media_upload(
+        &self,
+        endpoint: &'static str,
+        field_name: &'static str,
+        chat_id: i64,
+        data: Vec<u8>,
+        filename: &str,
+        mime_type: &str,
+        extra: Option<&[(&str, String)]>,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "{}/bot{}/sendDocument",
+            "{}/bot{}/{endpoint}",
             self.api_base_url,
             self.token.as_str()
         );
 
-        // Convert to ref-counted Bytes so cloning is O(1) (atomic ref-count bump)
-        // instead of O(n) Vec deep-copy. Part::stream() accepts Bytes directly
-        // (Into<Body>), unlike Part::bytes() which requires Into<Cow<'static, [u8]>>.
         let data_bytes = bytes::Bytes::from(data);
 
-        let file_part = reqwest::multipart::Part::stream(data_bytes.clone())
-            .file_name(filename.to_string())
-            .mime_str(mime_type)?;
+        let build_form =
+            || -> Result<reqwest::multipart::Form, Box<dyn std::error::Error + Send + Sync>> {
+                let part = reqwest::multipart::Part::stream(data_bytes.clone())
+                    .file_name(filename.to_string())
+                    .mime_str(mime_type)?;
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.to_string())
+                    .part(field_name, part);
+                if let Some(tid) = thread_id {
+                    form = form.text("message_thread_id", tid.to_string());
+                }
+                if let Some(kv) = extra {
+                    for (k, v) in kv {
+                        form = form.text(k.to_string(), v.clone());
+                    }
+                }
+                Ok(form)
+            };
 
-        let mut form = reqwest::multipart::Form::new()
-            .text("chat_id", chat_id.to_string())
-            .part("document", file_part);
-
-        if let Some(tid) = thread_id {
-            form = form.text("message_thread_id", tid.to_string());
-        }
-
-        let resp = self.client.post(&url).multipart(form).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(build_form()?)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
 
             if status.as_u16() == 429 {
                 let retry_after = extract_retry_after(&body_text, RETRY_AFTER_DEFAULT_SECS);
-                warn!("Telegram sendDocument upload rate limited, retrying after {retry_after}s");
+                warn!("Telegram {endpoint} upload rate limited, retrying after {retry_after}s");
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
 
-                // Rebuild the multipart form — Bytes::clone() is O(1)
-                let file_part = reqwest::multipart::Part::stream(data_bytes.clone())
-                    .file_name(filename.to_string())
-                    .mime_str(mime_type)?;
-                let mut retry_form = reqwest::multipart::Form::new()
-                    .text("chat_id", chat_id.to_string())
-                    .part("document", file_part);
-                if let Some(tid) = thread_id {
-                    retry_form = retry_form.text("message_thread_id", tid.to_string());
-                }
-
-                let resp2 = self.client.post(&url).multipart(retry_form).send().await?;
+                let resp2 = self
+                    .client
+                    .post(&url)
+                    .multipart(build_form()?)
+                    .send()
+                    .await?;
                 if !resp2.status().is_success() {
                     let body_text2 = resp2.text().await.unwrap_or_default();
                     return Err(format!(
-                        "Telegram sendDocument upload failed after retry: {body_text2}"
+                        "Telegram {endpoint} upload failed after retry: {body_text2}"
                     )
                     .into());
                 }
                 return Ok(());
             }
 
-            warn!("Telegram sendDocument upload failed ({status}): {body_text}");
+            return Err(
+                format!("Telegram {endpoint} upload failed ({status}): {body_text}").into(),
+            );
         }
         Ok(())
     }
@@ -566,6 +690,31 @@ impl TelegramAdapter {
         caption: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if is_private_url(voice_url) {
+            info!(
+                url = voice_url,
+                "Private URL detected on sendVoice, falling back to multipart upload"
+            );
+            let (bytes, mime) = fetch_url_bytes(&self.client, voice_url).await?;
+            let filename = url_filename(voice_url, "voice.ogg");
+            let mut extra: Vec<(&str, String)> = Vec::new();
+            if let Some(cap) = caption {
+                extra.push(("caption", cap.to_string()));
+                extra.push(("parse_mode", PARSE_MODE_HTML.to_string()));
+            }
+            return self
+                .api_send_media_upload(
+                    "sendVoice",
+                    "voice",
+                    chat_id,
+                    bytes,
+                    &filename,
+                    &mime,
+                    Some(&extra),
+                    thread_id,
+                )
+                .await;
+        }
         let mut body = serde_json::json!({ "voice": voice_url });
         if let Some(cap) = caption {
             body["caption"] = serde_json::Value::String(cap.to_string());
@@ -588,6 +737,37 @@ impl TelegramAdapter {
         performer: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if is_private_url(audio_url) {
+            info!(
+                url = audio_url,
+                "Private URL detected on sendAudio, falling back to multipart upload"
+            );
+            let (bytes, mime) = fetch_url_bytes(&self.client, audio_url).await?;
+            let filename = url_filename(audio_url, "audio.mp3");
+            let mut extra: Vec<(&str, String)> = Vec::new();
+            if let Some(cap) = caption {
+                extra.push(("caption", cap.to_string()));
+                extra.push(("parse_mode", PARSE_MODE_HTML.to_string()));
+            }
+            if let Some(t) = title {
+                extra.push(("title", t.to_string()));
+            }
+            if let Some(p) = performer {
+                extra.push(("performer", p.to_string()));
+            }
+            return self
+                .api_send_media_upload(
+                    "sendAudio",
+                    "audio",
+                    chat_id,
+                    bytes,
+                    &filename,
+                    &mime,
+                    Some(&extra),
+                    thread_id,
+                )
+                .await;
+        }
         let mut body = serde_json::json!({ "audio": audio_url });
         if let Some(cap) = caption {
             body["caption"] = serde_json::Value::String(cap.to_string());
@@ -1947,12 +2127,14 @@ impl ChannelAdapter for TelegramAdapter {
             // Split *before* sanitization — api_edit_message / api_send_message
             // sanitize internally, so pre-sanitizing here would double-escape
             // HTML entities.
-            let chunks = split_message(&formatted, 4096);
+            // Use UTF-16-aware splitting: Telegram's 4096-char limit is in
+            // UTF-16 code units, so emoji-heavy text must use this variant.
+            let chunks = split_to_utf16_chunks(&formatted, TELEGRAM_MESSAGE_LIMIT);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
                 let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;
             } else {
-                // Response exceeds 4096 chars — edit the first chunk in place,
+                // Response exceeds limit — edit the first chunk in place,
                 // then send remaining chunks as new messages.
                 let _ = self.api_edit_message(chat_id, msg_id, chunks[0]).await;
                 for chunk in &chunks[1..] {

@@ -1,20 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatCompact } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { getMetricsText } from "../api";
+import { useTelemetryMetrics } from "../lib/queries/telemetry";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Badge } from "../components/ui/Badge";
 import { AnimatedNumber } from "../components/ui/AnimatedNumber";
+import { ErrorState } from "../components/ui/ErrorState";
 import {
   Activity, BarChart3, Clock, Globe, TrendingUp, Zap, CheckCircle2,
   ExternalLink, Cpu, DollarSign, Bot, Wrench, MessageSquare, AlertTriangle, RotateCcw, Users,
 } from "lucide-react";
-
-const REFRESH_MS = 5000;
 
 // ── Parsed metric types ──────────────────────────────────────────────
 
@@ -55,25 +53,40 @@ interface ParsedMetrics {
 
 // ── Parser ───────────────────────────────────────────────────────────
 
-function parseGauge(lines: string[], name: string): number {
-  for (const line of lines) {
-    if (line.startsWith(name + " ") || line.startsWith(name + "{")) {
-      // Simple gauge without labels: "metric_name 123"
-      if (line.startsWith(name + " ")) {
-        return parseFloat(line.slice(name.length + 1)) || 0;
-      }
-    }
+function ensureAgentEntry(map: Map<string, AgentTokenMetric>, agent: string): AgentTokenMetric {
+  if (!map.has(agent)) {
+    map.set(agent, {
+      agent,
+      provider: "",
+      model: "",
+      tokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      toolCalls: 0,
+      llmCalls: 0,
+    });
   }
-  return 0;
+  return map.get(agent)!;
 }
 
 function parseMetrics(text: string): ParsedMetrics {
   const requests: HttpMetric[] = [];
   const agentMap = new Map<string, AgentTokenMetric>();
+  const gaugeMap = new Map<string, number>();
   const lines = text.split("\n");
+  let version = "";
 
-  // HTTP request metrics
   for (const line of lines) {
+    if (line.startsWith("#")) continue;
+
+    const spaceIdx = line.indexOf(" ");
+    if (spaceIdx > 0) {
+      const namePart = line.slice(0, spaceIdx);
+      if (!namePart.includes("{")) {
+        gaugeMap.set(namePart, parseFloat(line.slice(spaceIdx + 1)) || 0);
+      }
+    }
+
     if (line.startsWith("librefang_http_requests_total{")) {
       const match = line.match(
         /librefang_http_requests_total\{method="([^"]+)",path="([^"]+)",status="([^"]+)"\}\s+(\d+)/
@@ -83,7 +96,6 @@ function parseMetrics(text: string): ParsedMetrics {
       }
     }
 
-    // Per-agent token metrics: librefang_tokens{agent="...",provider="...",model="..."} 123
     if (line.startsWith("librefang_tokens{")) {
       const match = line.match(
         /librefang_tokens\{agent="([^"]+)",provider="([^"]+)",model="([^"]+)"\}\s+([\d.]+)/
@@ -101,70 +113,77 @@ function parseMetrics(text: string): ParsedMetrics {
     }
     if (line.startsWith("librefang_tokens_input{")) {
       const match = line.match(/librefang_tokens_input\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match && agentMap.has(match[1])) {
-        agentMap.get(match[1])!.inputTokens = parseFloat(match[2]);
+      if (match) {
+        ensureAgentEntry(agentMap, match[1]).inputTokens = parseFloat(match[2]);
       }
     }
     if (line.startsWith("librefang_tokens_output{")) {
       const match = line.match(/librefang_tokens_output\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match && agentMap.has(match[1])) {
-        agentMap.get(match[1])!.outputTokens = parseFloat(match[2]);
+      if (match) {
+        ensureAgentEntry(agentMap, match[1]).outputTokens = parseFloat(match[2]);
       }
     }
     if (line.startsWith("librefang_tool_calls{")) {
       const match = line.match(/librefang_tool_calls\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match && agentMap.has(match[1])) {
-        agentMap.get(match[1])!.toolCalls = parseFloat(match[2]);
+      if (match) {
+        ensureAgentEntry(agentMap, match[1]).toolCalls = parseFloat(match[2]);
       }
     }
     if (line.startsWith("librefang_llm_calls{")) {
       const match = line.match(/librefang_llm_calls\{agent="([^"]+)"[^}]*\}\s+([\d.]+)/);
-      if (match && agentMap.has(match[1])) {
-        agentMap.get(match[1])!.llmCalls = parseFloat(match[2]);
+      if (match) {
+        ensureAgentEntry(agentMap, match[1]).llmCalls = parseFloat(match[2]);
       }
     }
-  }
 
-  // Version from librefang_info{version="x.y.z"} 1
-  let version = "";
-  for (const line of lines) {
-    if (line.startsWith("librefang_info{")) {
+    if (!version && line.startsWith("librefang_info{")) {
       const match = line.match(/version="([^"]+)"/);
       if (match) version = match[1];
     }
   }
 
   const system: SystemMetrics = {
-    uptime: parseGauge(lines, "librefang_uptime_seconds"),
-    agentsActive: parseGauge(lines, "librefang_agents_active"),
-    agentsTotal: parseGauge(lines, "librefang_agents_total"),
-    activeSessions: parseGauge(lines, "librefang_active_sessions"),
-    costToday: parseGauge(lines, "librefang_cost_usd_today"),
-    panics: parseGauge(lines, "librefang_panics_total"),
-    restarts: parseGauge(lines, "librefang_restarts_total"),
+    uptime: gaugeMap.get("librefang_uptime_seconds") || 0,
+    agentsActive: gaugeMap.get("librefang_agents_active") || 0,
+    agentsTotal: gaugeMap.get("librefang_agents_total") || 0,
+    activeSessions: gaugeMap.get("librefang_active_sessions") || 0,
+    costToday: gaugeMap.get("librefang_cost_usd_today") || 0,
+    panics: gaugeMap.get("librefang_panics_total") || 0,
+    restarts: gaugeMap.get("librefang_restarts_total") || 0,
     version,
   };
 
-  return { requests, agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")), system };
+  return {
+    requests,
+    // Skip rollup rows emitted for namespace-like aggregate metrics.
+    agents: Array.from(agentMap.values()).filter(a => !a.agent.includes(":")),
+    system,
+  };
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-
 
 // ── Component ────────────────────────────────────────────────────────
 
-async function fetchMetrics(): Promise<string> {
-  return getMetricsText();
+function MetricCard({ label, icon, value, variant }: {
+  label: string;
+  icon: ReactNode;
+  value: ReactNode;
+  variant: "success" | "brand" | "accent" | "warning" | "error";
+}) {
+  const bgClass = { success: "bg-success/10", brand: "bg-brand/10", accent: "bg-accent/10", warning: "bg-warning/10", error: "bg-error/10" }[variant];
+  return (
+    <Card hover padding="md">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{label}</span>
+        <div className={`w-7 h-7 rounded-lg ${bgClass} flex items-center justify-center`}>{icon}</div>
+      </div>
+      <div className="mt-1">{value}</div>
+    </Card>
+  );
 }
 
 export function TelemetryPage() {
   const { t } = useTranslation();
-  const metricsQuery = useQuery({
-    queryKey: ["telemetry", "metrics"],
-    queryFn: fetchMetrics,
-    refetchInterval: REFRESH_MS,
-  });
+  const metricsQuery = useTelemetryMetrics();
 
   const parsed = useMemo(
     () =>
@@ -209,84 +228,80 @@ export function TelemetryPage() {
         <div className="grid gap-4 md:grid-cols-4">
           <CardSkeleton /><CardSkeleton /><CardSkeleton /><CardSkeleton />
         </div>
+      ) : metricsQuery.isError ? (
+        <ErrorState onRetry={() => void metricsQuery.refetch()} />
       ) : (
         <>
           {/* ── System Health ── */}
           <div className="flex items-center gap-2 mt-2">
             <Cpu className="h-4 w-4 text-brand" />
             <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.system_health")}</h2>
-            {parsed.system.version && (
+            {parsed.system.version ? (
               <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge>
-            )}
+            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 xl:grid-cols-8 stagger-children">
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.uptime")}</span>
-                <div className="w-7 h-7 rounded-lg bg-success/10 flex items-center justify-center"><Clock className="w-3.5 h-3.5 text-success" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1">{formatUptime(parsed.system.uptime)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.agents_active")}</span>
-                <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><Bot className="w-3.5 h-3.5 text-brand" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1">
-                <AnimatedNumber value={parsed.system.agentsActive} />
-                <span className="text-sm font-normal text-text-dim"> / {parsed.system.agentsTotal}</span>
-              </p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.active_sessions")}</span>
-                <div className="w-7 h-7 rounded-lg bg-accent/10 flex items-center justify-center"><Users className="w-3.5 h-3.5 text-accent" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1"><AnimatedNumber value={parsed.system.activeSessions} /></p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.cost_today")}</span>
-                <div className="w-7 h-7 rounded-lg bg-warning/10 flex items-center justify-center"><DollarSign className="w-3.5 h-3.5 text-warning" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1">
-                <AnimatedNumber value={parsed.system.costToday} prefix="$" decimals={4} />
-              </p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.total_requests")}</span>
-                <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><BarChart3 className="w-3.5 h-3.5 text-brand" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1" title={totalRequests.toLocaleString()}>{formatCompact(totalRequests)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.panics")}</span>
-                <div className="w-7 h-7 rounded-lg bg-error/10 flex items-center justify-center"><AlertTriangle className="w-3.5 h-3.5 text-error" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1"><AnimatedNumber value={parsed.system.panics} /></p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.restarts")}</span>
-                <div className="w-7 h-7 rounded-lg bg-warning/10 flex items-center justify-center"><RotateCcw className="w-3.5 h-3.5 text-warning" /></div>
-              </div>
-              <p className="text-xl font-black tracking-tight mt-1"><AnimatedNumber value={parsed.system.restarts} /></p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.status")}</span>
-                <div className="w-7 h-7 rounded-lg bg-success/10 flex items-center justify-center"><CheckCircle2 className="w-3.5 h-3.5 text-success" /></div>
-              </div>
-              <div className="mt-1 flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
-                </span>
-                <Badge variant="success">{t("telemetry.collecting")}</Badge>
-              </div>
-            </Card>
+            <MetricCard
+              label={t("telemetry.uptime")}
+              icon={<Clock className="w-3.5 h-3.5 text-success" />}
+              value={<p className="text-xl font-black tracking-tight">{formatUptime(parsed.system.uptime)}</p>}
+              variant="success"
+            />
+            <MetricCard
+              label={t("telemetry.agents_active")}
+              icon={<Bot className="w-3.5 h-3.5 text-brand" />}
+              value={
+                <p className="text-xl font-black tracking-tight">
+                  <AnimatedNumber value={parsed.system.agentsActive} />
+                  <span className="text-sm font-normal text-text-dim"> / {parsed.system.agentsTotal}</span>
+                </p>
+              }
+              variant="brand"
+            />
+            <MetricCard
+              label={t("telemetry.active_sessions")}
+              icon={<Users className="w-3.5 h-3.5 text-accent" />}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.activeSessions} /></span>}
+              variant="accent"
+            />
+            <MetricCard
+              label={t("telemetry.cost_today")}
+              icon={<DollarSign className="w-3.5 h-3.5 text-warning" />}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.costToday} prefix="$" decimals={4} /></span>}
+              variant="warning"
+            />
+            <MetricCard
+              label={t("telemetry.total_requests")}
+              icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
+              value={<p className="text-xl font-black tracking-tight" title={totalRequests.toLocaleString()}>{formatCompact(totalRequests)}</p>}
+              variant="brand"
+            />
+            <MetricCard
+              label={t("telemetry.panics")}
+              icon={<AlertTriangle className="w-3.5 h-3.5 text-error" />}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.panics} /></span>}
+              variant="error"
+            />
+            <MetricCard
+              label={t("telemetry.restarts")}
+              icon={<RotateCcw className="w-3.5 h-3.5 text-warning" />}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.restarts} /></span>}
+              variant="warning"
+            />
+            <MetricCard
+              label={t("telemetry.status")}
+              icon={<CheckCircle2 className="w-3.5 h-3.5 text-success" />}
+              value={
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
+                  </span>
+                  <Badge variant="success">{t("telemetry.collecting")}</Badge>
+                </div>
+              }
+              variant="success"
+            />
           </div>
 
           {/* ── LLM & Token Usage ── */}
@@ -296,41 +311,36 @@ export function TelemetryPage() {
             <Badge variant="default" className="ml-2">{t("telemetry.tokens_1h")}</Badge>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5 stagger-children">
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.total_tokens")}</span>
-                <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><BarChart3 className="w-3.5 h-3.5 text-brand" /></div>
-              </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.input_tokens")}</span>
-                <div className="w-7 h-7 rounded-lg bg-success/10 flex items-center justify-center"><TrendingUp className="w-3.5 h-3.5 text-success" /></div>
-              </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-success" title={totalInput.toLocaleString()}>{formatCompact(totalInput)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.output_tokens")}</span>
-                <div className="w-7 h-7 rounded-lg bg-warning/10 flex items-center justify-center"><TrendingUp className="w-3.5 h-3.5 text-warning" /></div>
-              </div>
-              <p className="text-2xl font-black tracking-tight mt-1 text-warning" title={totalOutput.toLocaleString()}>{formatCompact(totalOutput)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.llm_calls")}</span>
-                <div className="w-7 h-7 rounded-lg bg-accent/10 flex items-center justify-center"><MessageSquare className="w-3.5 h-3.5 text-accent" /></div>
-              </div>
-              <p className="text-2xl font-black tracking-tight mt-1" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>
-            </Card>
-            <Card hover padding="md">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("telemetry.tool_calls")}</span>
-                <div className="w-7 h-7 rounded-lg bg-brand/10 flex items-center justify-center"><Wrench className="w-3.5 h-3.5 text-brand" /></div>
-              </div>
-              <p className="text-2xl font-black tracking-tight mt-1" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>
-            </Card>
+            <MetricCard
+              label={t("telemetry.total_tokens")}
+              icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
+              value={<p className="text-2xl font-black tracking-tight text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
+              variant="brand"
+            />
+            <MetricCard
+              label={t("telemetry.input_tokens")}
+              icon={<TrendingUp className="w-3.5 h-3.5 text-success" />}
+              value={<p className="text-2xl font-black tracking-tight text-success" title={totalInput.toLocaleString()}>{formatCompact(totalInput)}</p>}
+              variant="success"
+            />
+            <MetricCard
+              label={t("telemetry.output_tokens")}
+              icon={<TrendingUp className="w-3.5 h-3.5 text-warning" />}
+              value={<p className="text-2xl font-black tracking-tight text-warning" title={totalOutput.toLocaleString()}>{formatCompact(totalOutput)}</p>}
+              variant="warning"
+            />
+            <MetricCard
+              label={t("telemetry.llm_calls")}
+              icon={<MessageSquare className="w-3.5 h-3.5 text-accent" />}
+              value={<p className="text-2xl font-black tracking-tight" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>}
+              variant="accent"
+            />
+            <MetricCard
+              label={t("telemetry.tool_calls")}
+              icon={<Wrench className="w-3.5 h-3.5 text-brand" />}
+              value={<p className="text-2xl font-black tracking-tight" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>}
+              variant="brand"
+            />
           </div>
 
           {/* ── Per-Agent Table + HTTP Endpoints ── */}
@@ -345,8 +355,8 @@ export function TelemetryPage() {
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
                 <div className="space-y-3">
-                  {agentsByTokens.map((a, i) => (
-                      <div key={i} className="flex items-center gap-3">
+                  {agentsByTokens.map((a) => (
+                      <div key={a.agent} className="flex items-center gap-3">
                         <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
                         <Badge variant="default" className="font-mono text-xs">{a.provider}/{a.model}</Badge>
                         <span className="text-sm font-black text-brand w-20 text-right" title={a.tokens.toLocaleString()}>{formatCompact(a.tokens)}<span className="text-xs font-normal text-text-dim"> tok</span></span>
@@ -366,11 +376,11 @@ export function TelemetryPage() {
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
                 <div className="space-y-3">
-                  {requestsByCount.map((r, i) => (
-                      <div key={i} className="flex items-center gap-3">
+                  {requestsByCount.map((r) => (
+                      <div key={r.method + r.path + r.status} className="flex items-center gap-3">
                         <Badge variant="default" className="font-mono text-xs w-16 justify-center">{r.method}</Badge>
                         <span className="text-sm font-mono flex-1 truncate">{r.path}</span>
-                        <Badge variant={r.status.startsWith("2") ? "success" : r.status.startsWith("4") ? "warning" : "error"} className="w-12 justify-center">
+                        <Badge variant={r.status.startsWith("2") ? "success" : r.status.startsWith("3") ? "default" : r.status.startsWith("4") ? "warning" : "error"} className="w-12 justify-center">
                           {r.status}
                         </Badge>
                         <span className="text-sm font-black text-brand w-16 text-right" title={r.count.toLocaleString()}>{formatCompact(r.count)}</span>
@@ -400,6 +410,9 @@ export function TelemetryPage() {
             <pre className="text-xs font-mono bg-main rounded-lg p-4 overflow-auto max-h-64 text-text-dim">
               {metricsQuery.data?.slice(0, 4000) || ""}
             </pre>
+            {(metricsQuery.data?.length || 0) > 4000 && (
+              <span className="text-xs text-text-dim mt-2 block">...truncated</span>
+            )}
           </Card>
         </>
       )}

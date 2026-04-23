@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">ウェブサイト</a> &bull;
   <a href="https://docs.librefang.ai">ドキュメント</a> &bull;
-  <a href="../docs/CONTRIBUTING.md">コントリビュート</a> &bull;
+  <a href="../CONTRIBUTING.md">コントリビュート</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -27,6 +27,7 @@
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
   <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+  <a href="https://deepwiki.com/librefang/librefang"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
 ---
@@ -37,10 +38,10 @@ LibreFang は **エージェントオペレーティングシステム** — Rus
 
 従来のエージェントフレームワークは入力を待ちます。LibreFang は**あなたのために働くエージェント**を実行します — スケジュールに従い、24時間365日、ターゲットの監視、リード生成、ソーシャルメディア管理、ダッシュボードへのレポートを行います。
 
-> LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../docs/GOVERNANCE.md) を参照。
+> LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../GOVERNANCE.md) を参照。
 
 <p align="center">
-  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang ダッシュボード" />
+  <img src="../public/assets/dashboard.png" width="800" alt="LibreFang ダッシュボード" />
 </p>
 
 ## クイックスタート
@@ -116,7 +117,7 @@ librefang hand status researcher     # 進捗確認
 librefang hand list                  # 全 Hands を表示
 ```
 
-独自の Hand を作成: `HAND.toml` + システムプロンプト + `SKILL.md` を定義。[ガイド](../docs/skill-development.md)
+独自の Hand を作成: `HAND.toml` + システムプロンプト + `SKILL.md` を定義。[ガイド](https://docs.librefang.ai/agent/skills)
 
 ## アーキテクチャ
 
@@ -141,13 +142,13 @@ xtask                 ビルド自動化
 
 ## 主な機能
 
-**40 チャネルアダプター** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、Feishu、LINE、Mastodon、Bluesky 他。[完全リスト](../docs/channel-adapters.md)
+**40 チャネルアダプター** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、Feishu、LINE、Mastodon、Bluesky 他。[完全リスト](https://docs.librefang.ai/integrations/channels)
 
-**27 LLM プロバイダー** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 他。インテリジェントルーティング、自動フォールバック、コスト追跡。[詳細](../docs/providers.md)
+**27 LLM プロバイダー** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 他。インテリジェントルーティング、自動フォールバック、コスト追跡。[詳細](https://docs.librefang.ai/configuration/providers)
 
-**16 セキュリティレイヤー** — WASM サンドボックス、Merkle 監査証跡、テイント追跡、Ed25519 署名、SSRF 保護、シークレットゼロ化他。[詳細](../docs/comparison.md#16-security-systems--defense-in-depth)
+**16 セキュリティレイヤー** — WASM サンドボックス、Merkle 監査証跡、テイント追跡、Ed25519 署名、SSRF 保護、シークレットゼロ化他。[詳細](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 
-**OpenAI 互換 API** — ドロップインの `/v1/chat/completions` エンドポイント。140+ REST/WS/SSE エンドポイント。[API リファレンス](../docs/api-reference.md)
+**OpenAI 互換 API** — ドロップインの `/v1/chat/completions` エンドポイント。140+ REST/WS/SSE エンドポイント。[API リファレンス](https://docs.librefang.ai/integrations/api)
 
 **クライアント SDK** — ストリーミング対応の完全な REST クライアント。
 
@@ -185,9 +186,9 @@ client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**MCP サポート** — MCP クライアントとサーバーを内蔵。IDE 連携、カスタムツール拡張、エージェントパイプライン構築。[詳細](../docs/providers.md)
+**MCP サポート** — MCP クライアントとサーバーを内蔵。IDE 連携、カスタムツール拡張、エージェントパイプライン構築。[詳細](https://docs.librefang.ai/integrations/mcp-a2a)
 
-**A2A プロトコル** — Google Agent-to-Agent プロトコル対応。エージェントシステム間の発見・通信・タスク委譲。[詳細](../docs/api-reference.md)
+**A2A プロトコル** — Google Agent-to-Agent プロトコル対応。エージェントシステム間の発見・通信・タスク委譲。[詳細](https://docs.librefang.ai/integrations/mcp-a2a)
 
 **デスクトップアプリ** — Tauri 2.0 ネイティブアプリ。システムトレイ、通知、グローバルショートカット。
 
@@ -204,28 +205,29 @@ cargo fmt --all -- --check                               # フォーマットチ
 
 ## 比較
 
-[docs/comparison.md](../docs/comparison.md) で OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph とのベンチマークと機能比較を確認できます。
+[比較](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) で OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph とのベンチマークと機能比較を確認できます。
 
 ## リンク
 
-- [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md) &bull; [トラブルシューティング](../docs/troubleshooting.md)
-- [コントリビュート](../docs/CONTRIBUTING.md) &bull; [ガバナンス](../docs/GOVERNANCE.md) &bull; [セキュリティ](../docs/SECURITY.md)
+- [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](https://docs.librefang.ai/integrations/api) &bull; [入門ガイド](https://docs.librefang.ai/getting-started) &bull; [トラブルシューティング](https://docs.librefang.ai/operations/troubleshooting)
+- [コントリビュート](../CONTRIBUTING.md) &bull; [ガバナンス](../GOVERNANCE.md) &bull; [セキュリティ](../SECURITY.md)
 - ディスカッション: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [ユースケース](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [機能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [お知らせ](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## コントリビューター
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="../public/assets/contributors.svg" alt="Contributors" />
+  <img src="../web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
   コード、ドキュメント、翻訳、バグ報告など、あらゆる形の貢献を歓迎します。<br/>
-  <a href="../docs/CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
+  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！<br/>
+  また、新しいコントリビューター向けの役立つ情報が更新されている<a href="https://leszek3737.github.io/librefang-WIki/">非公式wiki</a>もご覧いただけます。
 </p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="../public/assets/star-history.svg" alt="Star History" />
+    <img src="../web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

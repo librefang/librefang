@@ -1,10 +1,13 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, listModels, testProvider, setProviderKey, deleteProviderKey, setProviderUrl, createRegistryContent, setDefaultProvider, getStatus } from "../api";
-import type { ProviderItem } from "../api";
+import { createRegistryContent } from "../api";
+import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
+import { useProviders, useProviderStatus } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -23,7 +26,21 @@ import {
   Check, ChevronLeft
 } from "lucide-react";
 
-const REFRESH_MS = 30000;
+function getErrorMessage(e: unknown): string | null {
+  if (e instanceof Error) {
+    return e.message.trim() || null;
+  }
+
+  if (typeof e === "string") {
+    return e.trim() || null;
+  }
+
+  return null;
+}
+
+function getActionResultError(result: ApiActionResponse & { error_message?: string }, fallback: string): string {
+  return String(result.error_message || result.error || fallback);
+}
 
 const providerIcons: Record<string, React.ReactNode> = {
   openai: <Sparkles className="w-5 h-5" />,
@@ -44,6 +61,10 @@ const providerIcons: Record<string, React.ReactNode> = {
 function getProviderIcon(id: string): React.ReactNode {
   const key = id.toLowerCase().split("-")[0];
   return providerIcons[key] || <Cpu className="w-5 h-5" />;
+}
+
+function isCliProvider(provider: Pick<ProviderItem, "auth_status" | "base_url" | "key_required">): boolean {
+  return provider.auth_status === "configured_cli" || provider.auth_status === "cli_not_installed" || (!provider.base_url && !provider.key_required);
 }
 
 function getLatencyColor(ms?: number) {
@@ -91,11 +112,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
   const [setting, setSetting] = useState(false);
   const isDefault = currentDefault === providerId;
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "provider", providerId, { available: true }],
-    queryFn: () => listModels({ provider: providerId, available: true }),
-    staleTime: 60_000,
-  });
+  const modelsQuery = useModels({ provider: providerId, available: true });
 
   const models = modelsQuery.data?.models || [];
 
@@ -161,8 +178,10 @@ interface ProviderConfigState {
 }
 
 function useProviderConfig(
-  refetchProviders: () => void,
-  testMutation: ReturnType<typeof useMutation<any, any, string>>,
+  testMutation: ReturnType<typeof useMutation<ApiActionResponse, unknown, string>>,
+  setKeyMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; key: string }>>,
+  deleteKeyMutation: ReturnType<typeof useMutation<unknown, unknown, string>>,
+  setUrlMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
   t: (key: string, opts?: any) => string,
   activeTab: string,
@@ -194,63 +213,74 @@ function useProviderConfig(
       const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
       const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
       if (urlChanged || proxyChanged) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
+        await setUrlMutation.mutateAsync({
+          id: state.provider.id,
+          baseUrl: state.urlInput.trim() || state.provider.base_url || "",
+          proxyUrl: proxyChanged ? state.proxyInput.trim() : undefined,
+        });
       }
       if (state.keyInput.trim()) {
-        await setProviderKey(state.provider.id, state.keyInput.trim());
+        await setKeyMutation.mutateAsync({
+          id: state.provider.id,
+          key: state.keyInput.trim(),
+        });
       }
-      refetchProviders();
       setState(s => ({ ...s, provider: null }));
       if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
-    } catch (e: any) {
-      setState(s => ({ ...s, error: e?.message || String(e) }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, refetchProviders, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t, activeTab, setActiveTab]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, saving: true }));
     try {
-      await deleteProviderKey(state.provider.id);
-      refetchProviders();
+      await deleteKeyMutation.mutateAsync(state.provider.id);
       setState(s => ({ ...s, provider: null, hasStoredKey: false }));
       addToast(t("providers.key_removed"), "success");
-    } catch (e: any) {
-      setState(s => ({ ...s, error: e?.message || String(e) }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, refetchProviders, addToast, t]);
+  }, [state.provider, deleteKeyMutation, addToast, t]);
 
   const testKey = useCallback(async () => {
     if (!state.provider) return;
     setState(s => ({ ...s, testing: true, testResult: null }));
     try {
       if (state.keyInput.trim()) {
-        await setProviderKey(state.provider.id, state.keyInput.trim());
+        await setKeyMutation.mutateAsync({
+          id: state.provider.id,
+          key: state.keyInput.trim(),
+        });
         setState(s => ({ ...s, hasStoredKey: true, keyInput: "" }));
       }
       const urlChanged = state.urlInput.trim() && state.urlInput !== state.provider.base_url;
       const proxyChanged = state.proxyInput !== (state.provider.proxy_url || "");
       if (urlChanged || proxyChanged) {
-        await setProviderUrl(state.provider.id, state.urlInput.trim() || state.provider.base_url || "", proxyChanged ? state.proxyInput.trim() : undefined);
+        await setUrlMutation.mutateAsync({
+          id: state.provider.id,
+          baseUrl: state.urlInput.trim() || state.provider.base_url || "",
+          proxyUrl: proxyChanged ? state.proxyInput.trim() : undefined,
+        });
       }
       const result = await testMutation.mutateAsync(state.provider.id);
       if (result.status === "error") {
-        setState(s => ({ ...s, testResult: { ok: false, message: String(result.error_message || result.error || t("providers.unreachable")) } }));
+        setState(s => ({ ...s, testResult: { ok: false, message: getActionResultError(result, t("providers.unreachable")) } }));
       } else {
         setState(s => ({ ...s, testResult: { ok: true, message: t("providers.reachable") } }));
       }
-      refetchProviders();
-    } catch (e: any) {
-      setState(s => ({ ...s, testResult: { ok: false, message: e?.message || t("common.error") } }));
+    } catch (e: unknown) {
+      setState(s => ({ ...s, testResult: { ok: false, message: getErrorMessage(e) || t("common.error") } }));
     } finally {
       setState(s => ({ ...s, testing: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, refetchProviders, t]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, testMutation, setKeyMutation, setUrlMutation, t]);
 
   return { ...state, open, close, setKeyInput, setUrlInput, setProxyInput, saveKey, removeKey, testKey };
 }
@@ -274,7 +304,7 @@ interface ProviderCardProps {
 
 function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
   const isConfigured = isProviderAvailable(p.auth_status);
-  const isCli = p.auth_status === "configured_cli" || p.auth_status === "cli_not_installed" || (!p.base_url && !p.key_required);
+  const isCli = isCliProvider(p);
 
   if (viewMode === "list") {
     return (
@@ -385,7 +415,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           </div>
         </div>
       )}
-      <div className={`relative z-20 h-1.5 bg-gradient-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
+      <div className={`relative z-20 h-1.5 bg-linear-to-r ${isConfigured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -396,7 +426,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
             >
               {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20" : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
               {getProviderIcon(p.id)}
             </div>
             <div className="min-w-0">
@@ -415,14 +445,14 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
         {/* Stats */}
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-brand"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.models")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{p.model_count ?? 0}</p>
           </div>
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Clock className="w-3 h-3 text-warning" />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.latency")}</p>
@@ -552,10 +582,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const isConfigured = isProviderAvailable(provider.auth_status);
   const authBadge = getAuthBadge(provider.auth_status);
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "provider", provider.id],
-    queryFn: () => listModels({ provider: provider.id }),
-  });
+  const modelsQuery = useModels({ provider: provider.id });
   const models = modelsQuery.data?.models ?? [];
 
   return (
@@ -827,8 +854,8 @@ function CreateProviderWizard({
     setSubmitError(null);
     try {
       await onSubmit(buildValues());
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : String(err));
+    } catch (err: unknown) {
+      setSubmitError(getErrorMessage(err) ?? t("common.error"));
     } finally {
       setSubmitting(false);
     }
@@ -1033,14 +1060,19 @@ export function ProvidersPage() {
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
-  const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
-  const statusQuery = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: REFRESH_MS });
-  const testMutation = useMutation({ mutationFn: testProvider });
-  const defaultProviderMutation = useMutation({ mutationFn: ({ id, model }: { id: string; model?: string }) => setDefaultProvider(id, model) });
+  const providersQuery = useProviders();
+  const statusQuery = useProviderStatus();
+  const testMutation = useTestProvider();
+  const setKeyMutation = useSetProviderKey();
+  const deleteKeyMutation = useDeleteProviderKey();
+  const setUrlMutation = useSetProviderUrl();
+  const defaultProviderMutation = useSetDefaultProvider();
 
   const config = useProviderConfig(
-    () => void providersQuery.refetch(),
     testMutation,
+    setKeyMutation,
+    deleteKeyMutation,
+    setUrlMutation,
     addToast,
     t,
     activeTab,
@@ -1063,8 +1095,8 @@ export function ProvidersPage() {
         return tabMatch && searchMatch && statusMatch;
       })
       .sort((a, b) => {
-        const aCli = a.auth_status === "configured_cli" || a.auth_status === "cli_not_installed" || (!a.base_url && !a.key_required) ? 1 : 0;
-        const bCli = b.auth_status === "configured_cli" || b.auth_status === "cli_not_installed" || (!b.base_url && !b.key_required) ? 1 : 0;
+        const aCli = isCliProvider(a) ? 1 : 0;
+        const bCli = isCliProvider(b) ? 1 : 0;
         if (aCli !== bCli) return aCli - bCli;
         let cmp = 0;
         if (sortField === "name") cmp = a.id.localeCompare(b.id);
@@ -1106,19 +1138,16 @@ export function ProvidersPage() {
       }
     }));
     addToast(t("common.success"), "success");
-    void providersQuery.refetch();
   };
 
   const handleTest = async (id: string) => {
     setPendingId(id);
     try {
       const result = await testMutation.mutateAsync(id);
-      if (result.status === "error") addToast(String(result.error_message || result.error || t("common.error")), "error");
+      if (result.status === "error") addToast(getActionResultError(result, t("common.error")), "error");
       else addToast(t("common.success"), "success");
-      await providersQuery.refetch();
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
-      await providersQuery.refetch();
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     } finally {
       setPendingId(null);
     }
@@ -1127,26 +1156,29 @@ export function ProvidersPage() {
   const handleSetDefault = async (id: string, model?: string) => {
     try {
       await defaultProviderMutation.mutateAsync({ id, model });
-      await statusQuery.refetch();
       addToast(t("providers.default_set"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     }
   };
 
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmProvider) return;
     try {
-      await deleteProviderKey(deleteConfirmProvider.id);
-      await providersQuery.refetch();
+      await deleteKeyMutation.mutateAsync(deleteConfirmProvider.id);
       setDeleteConfirmProvider(null);
       addToast(t("providers.key_removed"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("common.error"), "error");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
     }
   };
 
   const allSelected = filteredProviders.length > 0 && selectedIds.size === filteredProviders.length;
+  const isUnchanged = !!config.provider
+    && !config.keyInput.trim()
+    && config.urlInput === (config.provider.base_url || "")
+    && config.proxyInput === (config.provider.proxy_url || "");
+  const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1295,7 +1327,7 @@ export function ProvidersPage() {
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
               <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
-                {providerIcons[config.provider.id] || <Server className="w-5 h-5 text-brand" />}
+                {getProviderIcon(config.provider.id)}
               </div>
               <div>
                 <p className="text-sm font-bold">{config.provider.display_name || config.provider.id}</p>
@@ -1345,7 +1377,7 @@ export function ProvidersPage() {
 
             <div className="flex gap-2 pt-2">
               <Button variant="primary" className="flex-1" onClick={config.saveKey}
-                disabled={config.saving || config.testing || (!config.keyInput.trim() && config.urlInput === (config.provider.base_url || "") && config.proxyInput === (config.provider.proxy_url || ""))}>
+                disabled={saveDisabled}>
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>
@@ -1380,7 +1412,7 @@ export function ProvidersPage() {
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
               <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center">
-                {providerIcons[deleteConfirmProvider.id] || <Server className="w-5 h-5 text-error" />}
+                {getProviderIcon(deleteConfirmProvider.id)}
               </div>
               <div>
                 <p className="text-sm font-bold">{deleteConfirmProvider.display_name || deleteConfirmProvider.id}</p>

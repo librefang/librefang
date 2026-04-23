@@ -23,7 +23,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, dryRunWorkflow, getWorkflow, listWorkflowTemplates, instantiateTemplate, saveWorkflowAsTemplate, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
+import { listAgents, listWorkflows, getWorkflow, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { Button } from "../components/ui/Button";
@@ -38,6 +38,48 @@ import {
   FlaskConical, AlertCircle, CheckCircle2, SkipForward, ChevronUp,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
+import {
+  useCreateWorkflow,
+  useDeleteWorkflow,
+  useDryRunWorkflow,
+  useInstantiateTemplate,
+  useRunWorkflow,
+  useSaveWorkflowAsTemplate,
+  useUpdateWorkflow as useUpdateWorkflowMutation,
+} from "../lib/mutations/workflows";
+import { useWorkflowTemplates } from "../lib/queries/workflows";
+
+type CanvasDraft = {
+  nodes: Node[];
+  edges: Edge[];
+  workflowName: string;
+  workflowDescription: string;
+};
+
+const CANVAS_DRAFT_KEY = "canvasDraft";
+
+function readCanvasDraft(): CanvasDraft | null {
+  if (typeof window === "undefined") return null;
+  const rawDraft = sessionStorage.getItem(CANVAS_DRAFT_KEY);
+  if (!rawDraft) return null;
+  try {
+    const parsed = JSON.parse(rawDraft) as Partial<CanvasDraft>;
+    return {
+      nodes: Array.isArray(parsed.nodes) ? parsed.nodes : [],
+      edges: Array.isArray(parsed.edges) ? parsed.edges : [],
+      workflowName: typeof parsed.workflowName === "string" ? parsed.workflowName : "",
+      workflowDescription: typeof parsed.workflowDescription === "string" ? parsed.workflowDescription : "",
+    };
+  } catch {
+    sessionStorage.removeItem(CANVAS_DRAFT_KEY);
+    return null;
+  }
+}
+
+function clearCanvasDraft() {
+  if (typeof window === "undefined") return;
+  sessionStorage.removeItem(CANVAS_DRAFT_KEY);
+}
 
 // Node type configuration — n8n-style color scheme
 const NODE_TYPES = [
@@ -256,21 +298,14 @@ function TemplateBrowser({
   onClose: () => void;
   t: (key: string) => string;
 }) {
-  const [templates, setTemplates] = useState<ApiWorkflowTemplate[]>([]);
-  const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<ApiWorkflowTemplate | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, unknown>>({});
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    listWorkflowTemplates(searchQuery || undefined)
-      .then(setTemplates)
-      .catch(() => setTemplates([]))
-      .finally(() => setLoading(false));
-  }, [searchQuery]);
+  const instantiateTemplateMutation = useInstantiateTemplate();
+  const templatesQuery = useWorkflowTemplates(searchQuery || undefined);
+  const templates = templatesQuery.data ?? [];
+  const loading = templatesQuery.isLoading || templatesQuery.isFetching;
 
   const handleSelect = (tmpl: ApiWorkflowTemplate) => {
     setSelectedTemplate(tmpl);
@@ -285,16 +320,13 @@ function TemplateBrowser({
 
   const handleInstantiate = async () => {
     if (!selectedTemplate) return;
-    setSubmitting(true);
     setError(null);
     try {
-      const resp = await instantiateTemplate(selectedTemplate.id, paramValues);
+      const resp = await instantiateTemplateMutation.mutateAsync({ id: selectedTemplate.id, params: paramValues });
       const workflowId = (resp as any).workflow_id || (resp as any).id || "";
       onInstantiate(workflowId);
     } catch (e: any) {
       setError(e?.message || t("canvas.template_instantiate_error"));
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -353,8 +385,8 @@ function TemplateBrowser({
               <div className="px-3 py-2 rounded-lg bg-error/10 border border-error/30 text-error text-xs">{error}</div>
             )}
 
-            <Button variant="primary" className="w-full" onClick={handleInstantiate} disabled={submitting}>
-              {submitting ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
+            <Button variant="primary" className="w-full" onClick={handleInstantiate} disabled={instantiateTemplateMutation.isPending}>
+              {instantiateTemplateMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
               {t("canvas.use_template")}
             </Button>
           </div>
@@ -668,6 +700,15 @@ function CanvasPageInner() {
   const [showHelp, setShowHelp] = useState(false);
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(100);
+
+  const createWorkflowMutation = useCreateWorkflow();
+  const updateWorkflowMutation = useUpdateWorkflowMutation();
+  const deleteWorkflowMutation = useDeleteWorkflow();
+  const runWorkflowMutation = useRunWorkflow();
+  const dryRunWorkflowMutation = useDryRunWorkflow();
+  const saveWorkflowAsTemplateMutation = useSaveWorkflowAsTemplate();
 
   // Undo/redo history
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -754,6 +795,41 @@ function CanvasPageInner() {
     setErrorMsg(msg);
     setTimeout(() => setErrorMsg(null), 5000);
   }, []);
+
+  const toErrorMessage = useCallback((error: unknown, fallback?: string) => {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === "string" && error) return error;
+    return fallback ?? String(error);
+  }, []);
+
+  const clearDraft = useCallback(() => {
+    clearCanvasDraft();
+  }, []);
+
+  const applyCanvasState = useCallback((draft: CanvasDraft) => {
+    setNodes(draft.nodes);
+    setEdges(draft.edges.map((edge) => ({
+      ...edge,
+      markerEnd: edge.markerEnd ?? { type: MarkerType.ArrowClosed },
+    })));
+    setWorkflowName(draft.workflowName);
+    setWorkflowDescription(draft.workflowDescription);
+    setSelectedWorkflow(null);
+  }, [setNodes, setEdges]);
+
+  const persistDraft = useCallback((draft: CanvasDraft) => {
+    if (
+      draft.nodes.length === 0
+      && draft.edges.length === 0
+      && !draft.workflowName.trim()
+      && !draft.workflowDescription.trim()
+    ) {
+      clearDraft();
+      return;
+    }
+    if (typeof window === "undefined") return;
+    sessionStorage.setItem(CANVAS_DRAFT_KEY, JSON.stringify(draft));
+  }, [clearDraft]);
 
   // Recalculate group bounds to contain all child nodes (declared early, needed by autoLayout)
   const NODE_W = 200;
@@ -1089,11 +1165,70 @@ function CanvasPageInner() {
         // If editing an existing workflow, restore selectedWorkflow so save uses update logic
         if (workflowId) setSelectedWorkflow({ id: workflowId, name: name || "", description: description || "" } as WorkflowItem);
         sessionStorage.removeItem("workflowTemplate");
-        return true;
-      } catch { /* ignore */ }
+        return "loaded" as const;
+      } catch (e: unknown) {
+        sessionStorage.removeItem("workflowTemplate");
+        showError(toErrorMessage(e, t("canvas.template_load_error", { defaultValue: "Failed to load template" })));
+        return "failed" as const;
+      }
     }
-    return false;
-  }, [t, setNodes, setEdges]);
+    return "missing" as const;
+  }, [t, setNodes, setEdges, showError, toErrorMessage]);
+
+  const loadWorkflowIntoCanvas = useCallback(async (workflowId: string, fallback?: WorkflowItem | null) => {
+    const detail = await getWorkflow(workflowId);
+    let wfNodes: Node[];
+    let wfEdges: Edge[];
+    const layout = detail.layout as { nodes?: Node[]; edges?: Edge[] } | undefined;
+    if (layout?.nodes) {
+      wfNodes = layout.nodes;
+      wfEdges = layout.edges || [];
+    } else {
+      const steps = Array.isArray(detail.steps) ? detail.steps : [];
+      wfNodes = steps.map((s: any, idx: number) => ({
+        id: `node-${idx}`,
+        type: "custom",
+        position: { x: 50, y: idx * 80 },
+        data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name },
+      }));
+      const hasDag = steps.some((step: any) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
+      if (hasDag) {
+        const nameToId: Record<string, string> = {};
+        steps.forEach((step: any, idx: number) => {
+          nameToId[step.name] = `node-${idx}`;
+        });
+        wfEdges = [];
+        steps.forEach((step: any, idx: number) => {
+          (step.depends_on || []).forEach((dep: string, depIdx: number) => {
+            const sourceId = nameToId[dep];
+            if (sourceId) {
+              wfEdges.push({
+                id: `dep-${idx}-${depIdx}`,
+                source: sourceId,
+                target: `node-${idx}`,
+                style: { strokeDasharray: "6 3" },
+                label: "depends",
+                labelStyle: { fontSize: 9, fill: "#6b7280" },
+              });
+            }
+          });
+        });
+      } else {
+        wfEdges = wfNodes.slice(0, -1).map((_, i) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+      }
+    }
+
+    setNodes(wfNodes);
+    setEdges(wfEdges.map((edge) => ({ ...edge, markerEnd: { type: MarkerType.ArrowClosed } })));
+    setWorkflowName(detail.name || fallback?.name || "");
+    setWorkflowDescription(detail.description || fallback?.description || "");
+    setSelectedWorkflow({
+      id: workflowId,
+      name: detail.name || fallback?.name || "",
+      description: detail.description || fallback?.description || "",
+    } as WorkflowItem);
+    setErrorMsg(null);
+  }, [setNodes, setEdges]);
 
   // Load agents, workflows, then load template or workflow from URL
   useEffect(() => {
@@ -1101,45 +1236,46 @@ function CanvasPageInner() {
       .then(async ([a, w]) => {
         setAgents(a);
         setWorkflows(w);
+        const draft = readCanvasDraft();
         // 1. Try loading from sessionStorage template
-        if (loadTemplate(a)) return;
+        const templateState = loadTemplate(a);
+        if (templateState !== "missing") return;
         // 2. Try loading from URL ?wf= parameter
         if (routeWorkflowId) {
           try {
-            const detail = await getWorkflow(routeWorkflowId);
-            let wfNodes, wfEdges;
-            if (detail.layout?.nodes) {
-              wfNodes = detail.layout.nodes;
-              wfEdges = detail.layout.edges || [];
-            } else {
-              const steps = Array.isArray(detail.steps) ? detail.steps : [];
-              wfNodes = steps.map((s: any, idx: number) => ({
-                id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
-                data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name }
-              }));
-              wfEdges = wfNodes.slice(0, -1).map((_: any, i: number) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
-            }
-            setNodes(wfNodes);
-            setEdges(wfEdges.map((e: any) => ({ ...e, markerEnd: { type: MarkerType.ArrowClosed } })));
-            setWorkflowName(detail.name || "");
-            setWorkflowDescription(detail.description || "");
-            setSelectedWorkflow({ id: routeWorkflowId, name: detail.name || "", description: detail.description || "" } as WorkflowItem);
+            await loadWorkflowIntoCanvas(routeWorkflowId, w.find((item) => item.id === routeWorkflowId) ?? null);
             return;
-          } catch { /* ignore */ }
+          } catch (e: unknown) {
+            showError(toErrorMessage(e, t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" })));
+            setNodes([]);
+            setEdges([]);
+            setWorkflowName("");
+            setWorkflowDescription("");
+            setSelectedWorkflow(null);
+            return;
+          }
         }
-        // 3. Fallback: restore from sessionStorage
-        const savedNodes = sessionStorage.getItem("canvasNodes");
-        if (savedNodes) {
-          try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
+        // 3. Blank canvas can restore the unsaved draft.
+        if (draft) {
+          applyCanvasState(draft);
         }
       })
-      .catch(() => { });
-  }, [routeTimestamp, routeWorkflowId, loadTemplate]);
+      .catch((e: unknown) => { showError(toErrorMessage(e, t("canvas.load_error", { defaultValue: "Failed to load data" }))); });
+  }, [routeTimestamp, routeWorkflowId, applyCanvasState, loadTemplate, loadWorkflowIntoCanvas, showError, t, toErrorMessage]);
 
-  // Save nodes to sessionStorage
+  // Persist only unsaved blank-canvas drafts. Saved workflows should reload from backend.
   useEffect(() => {
-    if (nodes.length > 0) sessionStorage.setItem("canvasNodes", JSON.stringify(nodes));
-  }, [nodes]);
+    if (routeWorkflowId || selectedWorkflow?.id) {
+      clearDraft();
+      return;
+    }
+    persistDraft({
+      nodes,
+      edges,
+      workflowName,
+      workflowDescription,
+    });
+  }, [nodes, edges, workflowName, workflowDescription, selectedWorkflow, routeWorkflowId, persistDraft, clearDraft]);
 
   // nodeType -> default stepMode mapping
   const NODE_MODE_MAP: Record<string, string> = {
@@ -1353,41 +1489,93 @@ function CanvasPageInner() {
       });
   }, []);
 
-  // Save workflow
-  const handleSave = useCallback(async () => {
-    if (!workflowName.trim()) {
+  const ensureSavedWorkflow = useCallback(async (options?: { requireName?: boolean }) => {
+    const requireName = options?.requireName ?? false;
+    const trimmedName = workflowName.trim();
+    if (requireName && !trimmedName) {
       showError(t("canvas.name_required"));
-      return;
+      return null;
     }
+
     const steps = buildSteps(nodes);
     if (steps.length === 0) {
       showError(t("canvas.no_agent_steps"));
-      return;
+      return null;
     }
+
+    const resolvedName = trimmedName || t("workflows.untitled_workflow");
     const layout = { nodes, edges };
+
+    if (selectedWorkflow?.id) {
+      const workflowId = selectedWorkflow.id;
+      await updateWorkflowMutation.mutateAsync({
+        workflowId,
+        payload: { name: resolvedName, description: workflowDescription, steps, layout },
+      });
+      const updatedWorkflow = {
+        id: workflowId,
+        name: resolvedName,
+        description: workflowDescription,
+      } as WorkflowItem;
+      setSelectedWorkflow(updatedWorkflow);
+      setWorkflows((prev) => prev.map((workflow) => workflow.id === workflowId
+        ? { ...workflow, name: resolvedName, description: workflowDescription }
+        : workflow));
+      setWorkflowName(resolvedName);
+      navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
+      clearDraft();
+      return { id: workflowId, workflow: updatedWorkflow, created: false };
+    }
+
+    const created = await createWorkflowMutation.mutateAsync({
+      name: resolvedName,
+      description: workflowDescription,
+      steps,
+      layout,
+    });
+    const createdId = typeof created?.id === "string" ? created.id : null;
+    if (!createdId) {
+      throw new Error(t("canvas.save_error", { defaultValue: "Failed to create workflow" }));
+    }
+    const createdWorkflow = {
+      id: createdId,
+      name: resolvedName,
+      description: workflowDescription,
+      steps: typeof created.steps === "number" || Array.isArray(created.steps) ? created.steps : steps.length,
+      created_at: created.created_at,
+    } as WorkflowItem;
+    setSelectedWorkflow(createdWorkflow);
+    setWorkflows((prev) => [createdWorkflow, ...prev.filter((workflow) => workflow.id !== createdId)]);
+    setWorkflowName(resolvedName);
+    navigate({ to: "/canvas", search: { t: undefined, wf: createdId }, replace: true });
+    clearDraft();
+    return { id: createdId, workflow: createdWorkflow, created: true };
+  }, [
+    workflowName,
+    buildSteps,
+    nodes,
+    edges,
+    selectedWorkflow,
+    workflowDescription,
+    updateWorkflowMutation,
+    navigate,
+    clearDraft,
+    t,
+    createWorkflowMutation,
+    showError,
+  ]);
+
+  // Save workflow
+  const handleSave = useCallback(async () => {
     try {
-      if (selectedWorkflow?.id) {
-        await updateWorkflow(selectedWorkflow.id, { name: workflowName, description: workflowDescription, steps, layout });
-      } else {
-        await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
-      }
-      const workflowsData = await listWorkflows();
-      setWorkflows(workflowsData);
-      if (!selectedWorkflow?.id) {
-        const newest = [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          setSelectedWorkflow(newest);
-          navigate({ to: "/canvas", search: { t: undefined, wf: newest.id }, replace: true });
-        }
-      } else {
-        navigate({ to: "/canvas", search: { t: undefined, wf: selectedWorkflow.id }, replace: true });
-      }
+      const saved = await ensureSavedWorkflow({ requireName: true });
+      if (!saved) return;
       setErrorMsg(null);
       showToast(t("canvas.saved"));
-    } catch (e: any) {
-      showError(e?.message || String(e));
+    } catch (e: unknown) {
+      showError(toErrorMessage(e));
     }
-  }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast]);
+  }, [ensureSavedWorkflow, t, showError, showToast, toErrorMessage]);
 
   // Save as template
   const handleSaveAsTemplate = useCallback(async () => {
@@ -1396,12 +1584,12 @@ function CanvasPageInner() {
       return;
     }
     try {
-      await saveWorkflowAsTemplate(selectedWorkflow.id);
+      await saveWorkflowAsTemplateMutation.mutateAsync(selectedWorkflow.id);
       showToast(t("canvas.saved_as_template"));
-    } catch (e: any) {
-      showError(e?.message || String(e));
+    } catch (e: unknown) {
+      showError(toErrorMessage(e));
     }
-  }, [selectedWorkflow, t, showError, showToast]);
+  }, [selectedWorkflow, t, showError, showToast, toErrorMessage, saveWorkflowAsTemplateMutation]);
 
 
 
@@ -1428,25 +1616,12 @@ function CanvasPageInner() {
 
     // No saved workflow -> save first
     if (!workflowId && nodes.length > 0) {
-      const steps = buildSteps(nodes);
-      if (steps.length === 0) {
-        showError(t("canvas.no_agent_steps"));
-        return;
-      }
-      const name = workflowName.trim() || t("workflows.untitled_workflow");
-      const layout = { nodes, edges };
       try {
-        await createWorkflow({ name, description: workflowDescription, steps, layout });
-        const updatedList = await listWorkflows();
-        setWorkflows(updatedList);
-        const newest = [...updatedList].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
-        if (newest) {
-          workflowId = newest.id;
-          setSelectedWorkflow(newest);
-          setWorkflowName(name);
-        }
-      } catch (e: any) {
-        showError(e?.message || String(e));
+        const saved = await ensureSavedWorkflow();
+        if (!saved) return;
+        workflowId = saved.id;
+      } catch (e: unknown) {
+        showError(toErrorMessage(e));
         return;
       }
     }
@@ -1456,69 +1631,29 @@ function CanvasPageInner() {
     setRunningWorkflowId(workflowId);
     setErrorMsg(null);
     setRunResult(null);
+    setDryRunResult(null);
+    setExpandedRunStep(null);
     // Edge animation during run
     setEdges(eds => eds.map(e => ({ ...e, animated: true })));
-
-    // Progressively highlight node animation
-    const agentNodeIds = nodes.filter(n => (n.data as any).agentId).map(n => n.id);
-    const allNodeIds = nodes.map(n => n.id);
-    let stepTimer: ReturnType<typeof setInterval> | null = null;
-    let currentStep = 0;
-
-    const updateRunState = (runningId: string | null, doneIds: Set<string>) => {
-      setNodes(nds => nds.map(n => ({
-        ...n,
-        data: {
-          ...(n.data as any),
-          _runState: doneIds.has(n.id) ? "done" : n.id === runningId ? "running" : undefined,
-        }
-      })));
-    };
-
-    // Step through animation, last node stays running until API returns
-    const doneSet = new Set<string>();
-    if (agentNodeIds.length > 0) {
-      updateRunState(agentNodeIds[0], doneSet);
-      if (agentNodeIds.length > 1) {
-        stepTimer = setInterval(() => {
-          if (currentStep < agentNodeIds.length - 1) {
-            // Mark current as done, advance to next
-            doneSet.add(agentNodeIds[currentStep]);
-            currentStep++;
-            updateRunState(agentNodeIds[currentStep], doneSet);
-          }
-          // Stop timer at last node, keep running until API returns
-          if (currentStep >= agentNodeIds.length - 1) {
-            if (stepTimer) clearInterval(stepTimer);
-            stepTimer = null;
-          }
-        }, 20000);
+    setNodes(nds => nds.map(n => ({
+      ...n,
+      data: {
+        ...(n.data as any),
+        _runState: (n.data as any).agentId ? "running" : undefined,
       }
-    }
+    })));
 
     try {
-      const resp = await runWorkflow(workflowId, runInput);
-      // Complete: mark all nodes as done
-      if (stepTimer) clearInterval(stepTimer);
-      setNodes(nds => nds.map(n => ({
-        ...n,
-        data: { ...(n.data as any), _runState: allNodeIds.includes(n.id) ? "done" : undefined }
-      })));
-      setDryRunResult(null);
-      setExpandedRunStep(null);
+      const resp = await runWorkflowMutation.mutateAsync({ workflowId, input: runInput });
       setRunResult({
         output: (resp as any).output || (resp as any).message || JSON.stringify(resp),
         status: (resp as any).status || "completed",
         run_id: (resp as any).run_id || "",
         step_results: (resp as any).step_results ?? [],
       });
-      // Clear done state and edge animation after 3 seconds
-      setTimeout(() => {
-        setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
-        setEdges(eds => eds.map(e => ({ ...e, animated: false })));
-      }, 3000);
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      setEdges(eds => eds.map(e => ({ ...e, animated: false })));
     } catch (e: any) {
-      if (stepTimer) clearInterval(stepTimer);
       // Error: clear all state and edge animation
       setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
@@ -1527,7 +1662,7 @@ function CanvasPageInner() {
     } finally {
       setRunningWorkflowId(null);
     }
-  }, [selectedWorkflow, nodes, edges, workflowName, workflowDescription, buildSteps, runInput, t, showError]);
+  }, [selectedWorkflow, nodes.length, ensureSavedWorkflow, toErrorMessage, showError, runInput, runWorkflowMutation]);
 
   // Dry-run: resolve agents and expand prompts without calling any LLMs
   const handleDryRun = useCallback(async (id?: string) => {
@@ -1542,101 +1677,43 @@ function CanvasPageInner() {
     setRunResult(null);
     setExpandedDryStep(null);
     try {
-      const result = await dryRunWorkflow(workflowId, runInput);
+      const result = await dryRunWorkflowMutation.mutateAsync({ workflowId, input: runInput });
       setDryRunResult(result);
     } catch (e: any) {
       showError((e as any)?.message || String(e));
     } finally {
       setIsDryRunning(false);
     }
-  }, [selectedWorkflow, runInput, showError, t]);
+  }, [selectedWorkflow, runInput, showError, t, dryRunWorkflowMutation]);
 
   // Delete workflow
   const handleDeleteConfirmed = useCallback(async (id: string) => {
     try {
-      await deleteWorkflow(id);
+      await deleteWorkflowMutation.mutateAsync(id);
       setWorkflows(prev => prev.filter(w => w.id !== id));
       if (selectedWorkflow?.id === id) {
         setSelectedWorkflow(null);
         setNodes([]); setEdges([]);
         setWorkflowName(""); setWorkflowDescription("");
+        setEditingNode(null);
+        clearDraft();
+        navigate({ to: "/canvas", search: { t: undefined, wf: undefined }, replace: true });
       }
-    } catch (e) { console.error(e); }
-  }, [selectedWorkflow, setNodes, setEdges]);
+    } catch (e: unknown) {
+      showError(toErrorMessage(e));
+    }
+  }, [selectedWorkflow, deleteWorkflowMutation, clearDraft, navigate, showError, toErrorMessage]);
 
   // Select saved workflow
   const handleSelectWorkflow = useCallback(async (w: WorkflowItem) => {
-    setSelectedWorkflow(w);
-    setWorkflowName(w.name);
-    setWorkflowDescription(w.description || "");
     setEditingNode(null);
-
-    // List endpoint returns steps as a count (number); fetch full detail when needed
-    let stepsArray: any[];
-    if (Array.isArray(w.steps)) {
-      stepsArray = w.steps;
-    } else {
-      try {
-        const full = await getWorkflow(w.id);
-        stepsArray = Array.isArray(full.steps) ? full.steps : [];
-      } catch {
-        stepsArray = [];
-      }
+    try {
+      await loadWorkflowIntoCanvas(w.id, w);
+      navigate({ to: "/canvas", search: { t: undefined, wf: w.id }, replace: true });
+    } catch (e: unknown) {
+      showError(toErrorMessage(e, t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" })));
     }
-    const newNodes: Node[] = stepsArray.map((step: any, idx: number) => {
-      const fullPrompt = step.prompt_template || step.prompt || "";
-      return {
-        id: `node-${idx}`,
-        type: "custom",
-        position: { x: 50, y: idx * 80 },
-        data: {
-          label: step.name,
-          description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
-          prompt: fullPrompt,
-          agentId: step.agent_id || step.agent?.agent_id,
-          agentName: step.agent_name || step.agent?.name,
-          nodeType: "agent",
-          dependsOn: step.depends_on || [],
-        }
-      };
-    });
-    setNodes(newNodes);
-
-    // Build edges: use depends_on (DAG) if any step has dependencies, else sequential
-    const hasDag = stepsArray.some((s: any) => s.depends_on && s.depends_on.length > 0);
-    const newEdges: Edge[] = [];
-    if (hasDag) {
-      // Build name→nodeId map
-      const nameToId: Record<string, string> = {};
-      stepsArray.forEach((step: any, idx: number) => { nameToId[step.name] = `node-${idx}`; });
-      stepsArray.forEach((step: any, idx: number) => {
-        (step.depends_on || []).forEach((dep: string, depIdx: number) => {
-          const sourceId = nameToId[dep];
-          if (sourceId) {
-            newEdges.push({
-              id: `dep-${idx}-${depIdx}`,
-              source: sourceId,
-              target: `node-${idx}`,
-              markerEnd: { type: MarkerType.ArrowClosed },
-              style: { strokeDasharray: "6 3" },
-              label: "depends",
-              labelStyle: { fontSize: 9, fill: "#6b7280" },
-            });
-          }
-        });
-      });
-    } else {
-      for (let i = 0; i < newNodes.length - 1; i++) {
-        newEdges.push({
-          id: `edge-${i}`,
-          source: newNodes[i].id,
-          target: newNodes[i + 1].id,
-          markerEnd: { type: MarkerType.ArrowClosed }
-        });
-      }
-    }
-    setEdges(newEdges);
-  }, [setNodes, setEdges]);
+  }, [loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
 
   // Create new workflow
   const handleNewWorkflow = useCallback(() => {
@@ -1644,7 +1721,9 @@ function CanvasPageInner() {
     setNodes([]); setEdges([]);
     setWorkflowName(""); setWorkflowDescription("");
     setEditingNode(null);
-  }, [setNodes, setEdges]);
+    clearDraft();
+    navigate({ to: "/canvas", search: { t: undefined, wf: undefined }, replace: true });
+  }, [clearDraft, navigate, setNodes, setEdges]);
 
   // Template instantiation callback: close browser, refresh workflow list, select new workflow
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
@@ -1654,16 +1733,16 @@ function CanvasPageInner() {
       setWorkflows(updatedList);
       const created = updatedList.find(w => w.id === workflowId);
       if (created) {
-        handleSelectWorkflow(created);
+        await loadWorkflowIntoCanvas(created.id, created);
+        navigate({ to: "/canvas", search: { t: undefined, wf: created.id }, replace: true });
       }
-    } catch { /* ignore */ }
-  }, [handleSelectWorkflow]);
+    } catch (e: unknown) {
+      showError(toErrorMessage(e, t("canvas.template_instantiate_error")));
+    }
+  }, [loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
 
   // Valid agent step count
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
-
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(100);
 
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-100 bg-main" : "h-[calc(100vh-140px)]"}`}>
@@ -1734,7 +1813,7 @@ function CanvasPageInner() {
 
           {/* Canvas operations */}
           <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
-            <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
+            <Button variant="secondary" onClick={handleNewWorkflow} title={t("common.clear")}>
               <Trash2 className="w-4 h-4" />
             </Button>
             <Button variant="secondary" onClick={() => setShowHelp(true)} title={t("canvas.shortcuts")} className="hidden sm:flex">

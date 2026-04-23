@@ -6,8 +6,9 @@
 //! manifests.
 
 use crate::error::{KernelError, KernelResult};
-use librefang_types::agent::{AgentId, AgentManifest};
+use librefang_types::agent::{AgentId, AgentManifest, WorkspaceMode};
 use librefang_types::error::LibreFangError;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
@@ -87,13 +88,121 @@ pub(super) fn migrate_legacy_agent_dirs(home_dir: &Path, workspaces_agents_dir: 
     }
 }
 
+/// One-shot migration: relocate stray `*.bak*` files left behind by older
+/// versions at the home-dir root into `backups/`. Known producers:
+/// `config.toml.bak`, `config.toml.bak.<ts>`, `integrations.toml.bak.<ts>`.
+pub(super) fn migrate_root_backups(home_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(home_dir) else {
+        return;
+    };
+    let candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            if name.starts_with("config.toml.bak") || name.starts_with("integrations.toml.bak") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let backups_dir = home_dir.join("backups");
+    if std::fs::create_dir_all(&backups_dir).is_err() {
+        return;
+    }
+    for src in candidates {
+        let Some(name) = src.file_name().map(|n| n.to_os_string()) else {
+            continue;
+        };
+        let dest = backups_dir.join(&name);
+        if dest.exists() {
+            // Already relocated in a prior run — discard the stray duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate backup: {e}"
+            );
+        }
+    }
+}
+
+/// One-shot cleanup: remove stray log files left at the home-dir root by
+/// older CLI builds. Both were created (and truncated) by every CLI
+/// invocation via a `tracing_subscriber` file layer, so they never held
+/// useful history — modern CLI builds write to `logs/` (or drop the layer
+/// entirely for one-shot commands) and the real daemon logs already live
+/// in `logs/daemon.log`.
+pub(super) fn cleanup_legacy_root_logs(home_dir: &Path) {
+    for name in ["daemon.log", "tui.log"] {
+        let path = home_dir.join(name);
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// One-shot migration: relocate runtime state JSON files that older versions
+/// wrote at the home-dir root into `data/`. Moves only the filenames LibreFang
+/// is known to produce; unknown files are left alone.
+pub(super) fn migrate_root_state_files(home_dir: &Path) {
+    const STATE_FILES: &[&str] = &[
+        "cron_jobs.json",
+        "hand_state.json",
+        "sessions.json",
+        "workflow_runs.json",
+        "custom_models.json",
+        "model_overrides.json",
+        "suppressed_providers.json",
+        "webhooks.json",
+    ];
+    let data_dir = home_dir.join("data");
+    let mut created_data_dir = false;
+    for name in STATE_FILES {
+        let src = home_dir.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        if !created_data_dir {
+            if std::fs::create_dir_all(&data_dir).is_err() {
+                return;
+            }
+            created_data_dir = true;
+        }
+        let dest = data_dir.join(name);
+        if dest.exists() {
+            // Newer version already wrote the canonical copy — discard the
+            // stale root duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to relocate state file: {e}"
+            );
+        }
+    }
+}
+
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
     if home_dir.join(".git").exists() {
         return;
     }
     let ok = std::process::Command::new("git")
-        .args(["init", "-q"])
+        .args(["init", "-q", "-b", "main"])
         .current_dir(home_dir)
         .status()
         .is_ok_and(|s| s.success());
@@ -104,7 +213,7 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
     if !gitignore.exists() {
         let _ = std::fs::write(
             &gitignore,
-            "secrets.env\nvault.enc\ndaemon.json\ndaemon.log\nhand_state.json\nsessions.json\nworkflow_runs.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
+            "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n",
         );
     }
     let _ = std::process::Command::new("git")
@@ -129,7 +238,15 @@ pub(super) fn init_git_if_missing(home_dir: &Path) {
 
 /// Create workspace directory structure for an agent.
 pub(super) fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
-    for subdir in &["data", "output", "sessions", "skills", "logs", "memory"] {
+    for subdir in &[
+        ".identity",
+        "data",
+        "output",
+        "sessions",
+        "skills",
+        "logs",
+        "memory",
+    ] {
         std::fs::create_dir_all(workspace.join(subdir)).map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Failed to create workspace dir {}/{subdir}: {e}",
@@ -232,10 +349,21 @@ pub(super) fn backfill_workspace_dir(
 }
 
 /// Generate workspace identity files for an agent (SOUL.md, USER.md, TOOLS.md, MEMORY.md).
-/// Uses `create_new` to never overwrite existing files (preserves user edits).
-pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest) {
+/// Files are written to `{workspace}/.identity/` to keep the workspace root clean and
+/// allow multiple agents to share the same workspace without collisions.
+///
+/// User-editable files (SOUL, USER, MEMORY, AGENTS, BOOTSTRAP, IDENTITY) use `create_new`
+/// to preserve manual edits. TOOLS.md is always rewritten so named workspace paths stay
+/// current after the agent manifest is updated.
+pub(super) fn generate_identity_files(
+    workspace: &Path,
+    manifest: &AgentManifest,
+    resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>,
+) {
     use std::fs::OpenOptions;
     use std::io::Write;
+
+    let identity_dir = workspace.join(".identity");
 
     let soul_content = format!(
         "# Soul\n\
@@ -256,8 +384,7 @@ pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest
          - Timezone:\n\
          - Preferences:\n";
 
-    let tools_content = "# Tools & Environment\n\
-         <!-- Agent-specific environment notes (not synced) -->\n";
+    let tools_content = build_tools_content(resolved_workspaces);
 
     let memory_content = "# Long-Term Memory\n\
          <!-- Curated knowledge the agent preserves across sessions -->\n";
@@ -307,10 +434,10 @@ pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest
         name = manifest.name
     );
 
-    let files: &[(&str, &str)] = &[
+    // User-editable files — never overwrite (preserve manual edits)
+    let editable_files: &[(&str, &str)] = &[
         ("SOUL.md", &soul_content),
         ("USER.md", user_content),
-        ("TOOLS.md", tools_content),
         ("MEMORY.md", memory_content),
         ("AGENTS.md", agents_content),
         ("BOOTSTRAP.md", &bootstrap_content),
@@ -335,11 +462,11 @@ pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest
         None
     };
 
-    for (filename, content) in files {
+    for (filename, content) in editable_files {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(workspace.join(filename))
+            .open(identity_dir.join(filename))
         {
             Ok(mut f) => {
                 let _ = f.write_all(content.as_bytes());
@@ -350,12 +477,27 @@ pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest
         }
     }
 
+    // TOOLS.md is auto-generated config — always rewrite so named workspace paths stay current
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(identity_dir.join("TOOLS.md"))
+    {
+        Ok(mut f) => {
+            let _ = f.write_all(tools_content.as_bytes());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to write TOOLS.md for {}: {e}", workspace.display());
+        }
+    }
+
     // Write HEARTBEAT.md for autonomous agents
     if let Some(ref hb) = heartbeat_content {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(workspace.join("HEARTBEAT.md"))
+            .open(identity_dir.join("HEARTBEAT.md"))
         {
             Ok(mut f) => {
                 let _ = f.write_all(hb.as_bytes());
@@ -365,6 +507,105 @@ pub(super) fn generate_identity_files(workspace: &Path, manifest: &AgentManifest
             }
         }
     }
+}
+
+/// Build the TOOLS.md content, injecting named workspace paths and modes.
+fn build_tools_content(resolved_workspaces: &HashMap<String, (PathBuf, WorkspaceMode)>) -> String {
+    let mut content = "# Tools & Environment\n\
+        <!-- Auto-generated by LibreFang — do not edit manually, changes will be overwritten on spawn -->\n"
+        .to_string();
+
+    if !resolved_workspaces.is_empty() {
+        content.push_str("\n## Shared Workspaces\n");
+        let mut entries: Vec<_> = resolved_workspaces.iter().collect();
+        entries.sort_by_key(|(name, _)| name.as_str());
+        for (name, (path, mode)) in &entries {
+            let mode_str = match mode {
+                WorkspaceMode::ReadWrite => "read-write",
+                WorkspaceMode::ReadOnly => "read-only",
+            };
+            content.push_str(&format!(
+                "- **@{name}** → `{}` ({mode_str})\n",
+                path.display()
+            ));
+        }
+        content.push_str(
+            "\nUse the paths above when reading or writing shared content.\n\
+             Read-only workspaces reject write operations.\n",
+        );
+    }
+
+    content
+}
+
+/// One-shot migration: move identity files from the workspace root into `.identity/`.
+/// Called on every spawn; files that are already in `.identity/` are left alone.
+pub(super) fn migrate_identity_files(workspace: &Path) {
+    const IDENTITY_FILES: &[&str] = &[
+        "SOUL.md",
+        "USER.md",
+        "TOOLS.md",
+        "MEMORY.md",
+        "AGENTS.md",
+        "BOOTSTRAP.md",
+        "IDENTITY.md",
+        "HEARTBEAT.md",
+    ];
+    let identity_dir = workspace.join(".identity");
+    let _ = std::fs::create_dir_all(&identity_dir);
+
+    for name in IDENTITY_FILES {
+        let src = workspace.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        let dest = identity_dir.join(name);
+        if dest.exists() {
+            // `.identity/` copy wins — discard the stale root duplicate.
+            let _ = std::fs::remove_file(&src);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&src, &dest) {
+            tracing::warn!(
+                src = %src.display(),
+                dest = %dest.display(),
+                "Failed to migrate identity file: {e}"
+            );
+        }
+    }
+}
+
+/// Create named workspace directories and return their resolved absolute paths with modes.
+/// Paths are validated (no absolute paths, no `..` components).
+pub(super) fn ensure_named_workspaces(
+    workspaces_root: &Path,
+    decls: &HashMap<String, librefang_types::agent::WorkspaceDecl>,
+) -> HashMap<String, (PathBuf, WorkspaceMode)> {
+    let mut resolved = HashMap::new();
+    for (name, decl) in decls {
+        if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
+            tracing::warn!(name, path = %decl.path.display(), "Invalid named workspace path — skipped");
+            continue;
+        }
+        let abs = workspaces_root.join(&decl.path);
+        if let Err(e) = std::fs::create_dir_all(&abs) {
+            tracing::warn!(name, path = %abs.display(), "Failed to create named workspace: {e}");
+            continue;
+        }
+        // Canonicalize after create_dir_all so the path is consistent with
+        // readonly_workspace_prefixes (which also canonicalizes). Skip on failure
+        // rather than falling back to a non-canonical path that would silently
+        // bypass the readonly check.
+        let canonical = match abs.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(name, path = %abs.display(), "Failed to canonicalize named workspace: {e}");
+                continue;
+            }
+        };
+        resolved.insert(name.clone(), (canonical, decl.mode.clone()));
+    }
+    resolved
 }
 
 /// Append an assistant response summary to the daily memory log (best-effort, append-only).
@@ -396,30 +637,45 @@ pub(super) fn append_daily_memory_log(workspace: &Path, response: &str) {
 }
 
 /// Read a workspace identity file with a size cap to prevent prompt stuffing.
-/// Returns None if the file doesn't exist or is empty.
+/// Checks `.identity/{filename}` first (new layout), falls back to `{filename}` at workspace
+/// root (pre-migration layout). Returns None if the file doesn't exist or is empty.
 pub(super) fn read_identity_file(workspace: &Path, filename: &str) -> Option<String> {
     const MAX_IDENTITY_FILE_BYTES: usize = 32_768; // 32KB cap
-    let path = workspace.join(filename);
-    // Security: ensure path stays inside workspace
-    match path.canonicalize() {
-        Ok(canonical) => {
-            if let Ok(ws_canonical) = workspace.canonicalize() {
-                if !canonical.starts_with(&ws_canonical) {
-                    return None; // path traversal attempt
-                }
-            }
+
+    // Prefer the new `.identity/` location; fall back to root for unmigrated workspaces.
+    let candidates = [
+        workspace.join(".identity").join(filename),
+        workspace.join(filename),
+    ];
+
+    let ws_canonical = workspace.canonicalize().ok();
+
+    for path in &candidates {
+        // Security: ensure path stays inside workspace.
+        // When ws_canonical is None the workspace doesn't exist yet — skip rather than
+        // allowing the check to be bypassed.
+        match path.canonicalize() {
+            Ok(canonical) => match &ws_canonical {
+                Some(wsc) if !canonical.starts_with(wsc) => continue,
+                None => continue,
+                _ => {}
+            },
+            Err(_) => continue, // file doesn't exist at this location
         }
-        Err(_) => return None, // file doesn't exist
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        return if content.len() > MAX_IDENTITY_FILE_BYTES {
+            Some(librefang_types::truncate_str(&content, MAX_IDENTITY_FILE_BYTES).to_string())
+        } else {
+            Some(content)
+        };
     }
-    let content = std::fs::read_to_string(&path).ok()?;
-    if content.trim().is_empty() {
-        return None;
-    }
-    if content.len() > MAX_IDENTITY_FILE_BYTES {
-        Some(librefang_types::truncate_str(&content, MAX_IDENTITY_FILE_BYTES).to_string())
-    } else {
-        Some(content)
-    }
+    None
 }
 
 /// Get the system hostname as a String.

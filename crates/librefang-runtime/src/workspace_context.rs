@@ -14,13 +14,9 @@ use tracing::debug;
 const MAX_FILE_SIZE: u64 = 32_768;
 
 /// Known context file names scanned in the workspace root.
-const CONTEXT_FILES: &[&str] = &[
-    "AGENTS.md",
-    "SOUL.md",
-    "TOOLS.md",
-    "IDENTITY.md",
-    "HEARTBEAT.md",
-];
+/// TOOLS.md is intentionally excluded — it is injected via the dedicated
+/// `tools_md` field in PromptContext (Section 6.5) to avoid truncation.
+const CONTEXT_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "IDENTITY.md", "HEARTBEAT.md"];
 
 /// Detected project type based on marker files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +76,13 @@ impl WorkspaceContext {
 
         let mut cache = HashMap::new();
         for &name in CONTEXT_FILES {
-            let file_path = root.join(name);
+            // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
+            let identity_path = root.join(".identity").join(name);
+            let file_path = if identity_path.exists() {
+                identity_path
+            } else {
+                root.join(name)
+            };
             if let Some(cached) = read_cached_file(&file_path) {
                 debug!(file = name, "Loaded workspace context file");
                 cache.insert(name.to_string(), cached);
@@ -98,7 +100,13 @@ impl WorkspaceContext {
 
     /// Get the content of a cached context file, refreshing if mtime changed.
     pub fn get_file(&mut self, name: &str) -> Option<&str> {
-        let file_path = self.workspace_root.join(name);
+        // Prefer .identity/ (current layout); fall back to workspace root (pre-migration)
+        let identity_path = self.workspace_root.join(".identity").join(name);
+        let file_path = if identity_path.exists() {
+            identity_path
+        } else {
+            self.workspace_root.join(name)
+        };
 
         // Check if we have a cached version
         if let Some(cached) = self.cache.get(name) {

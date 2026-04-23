@@ -8,6 +8,8 @@
 //! - Remote skills from FangHub registry
 
 pub mod clawhub;
+pub mod config_injection;
+pub mod evolution;
 pub(crate) mod http_client;
 pub mod loader;
 pub mod marketplace;
@@ -80,6 +82,8 @@ pub enum SkillSource {
     OpenClaw,
     /// Downloaded from ClawHub marketplace.
     ClawHub { slug: String, version: String },
+    /// Downloaded from ClawHub China mirror (mirror-cn.clawhub.com).
+    ClawHubCn { slug: String, version: String },
     /// Downloaded from Skillhub marketplace.
     Skillhub { slug: String, version: String },
 }
@@ -103,6 +107,35 @@ pub struct SkillRequirements {
     pub tools: Vec<String>,
     /// Capabilities this skill needs from the host.
     pub capabilities: Vec<String>,
+}
+
+/// Declaration of a config variable a skill depends on.
+///
+/// Skills can declare global configuration values they need under
+/// `[[config_vars]]` in their `skill.toml`:
+///
+/// ```toml
+/// [[config_vars]]
+/// key = "wiki.base_url"
+/// description = "Base URL of the internal wiki"
+/// default = "https://wiki.example.com"
+/// ```
+///
+/// The kernel collects all declarations from enabled skills, resolves
+/// each key against the user's `~/.librefang/config.toml` (dotted-path
+/// lookup under `skills.config.<key>`), and injects the resolved values
+/// into the LLM system prompt as a *Config variables* block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillConfigVar {
+    /// Dotted-path key used to look up the value in config.toml, e.g.
+    /// `"wiki.base_url"`.  The storage path is
+    /// `skills.config.<key>`.
+    pub key: String,
+    /// Human-readable description of what this variable controls.
+    pub description: String,
+    /// Default value used when the config key is absent or empty.
+    pub default: Option<String>,
 }
 
 /// A skill manifest (parsed from skill.toml).
@@ -140,6 +173,11 @@ pub struct SkillManifest {
     /// ```
     #[serde(default)]
     pub config: HashMap<String, serde_json::Value>,
+    /// Config variable declarations — values the skill needs from the
+    /// global config to function correctly.  Resolved at prompt-build
+    /// time and injected into the system prompt.
+    #[serde(default)]
+    pub config_vars: Vec<SkillConfigVar>,
 }
 
 /// Skill metadata section.

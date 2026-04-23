@@ -1,0 +1,200 @@
+# 审批与 TOTP 第二因子
+
+人机协同审批让您能随时踩刹车：当 Agent 请求执行敏感工具时，LibreFang 会挂起该调用，
+等待您手动批准或拒绝。TOTP 第二因子在此基础上为高危操作追加一层基于时间的一次性密码验证，
+这样即使 API 令牌泄漏，攻击者也无法独自触发破坏性动作。
+
+## 本页涵盖
+
+- [审批策略](#approval-policy)
+- [启用 TOTP](#enabling-totp)
+- [仪表盘流程](#dashboard-flow)
+- [API 参考](#api-reference)
+- [恢复码](#recovery-codes)
+- [加固清单](#hardening-checklist)
+- [会话级批量审批](#会话级批量审批)
+
+---
+
+## 审批策略
+
+**配置位置：** `~/.librefang/config.toml` 的 `[approval]` 段。
+**源码：** `librefang-types/src/approval.rs` 中的 `ApprovalPolicy`。
+
+```toml
+[approval]
+# 始终需要审批的工具。`true` 表示默认集合，`false` 表示关闭所有审批。
+require_approval = ["shell_exec", "file_write", "file_delete", "apply_patch"]
+timeout_secs = 60                      # 10..=300
+auto_approve_autonomous = false        # 无人值守时自动批准
+auto_approve = false                   # 启动时清空审批列表
+trusted_senders = []                   # 可直接放行的用户 ID 列表
+
+# 第二因子
+second_factor = "none"                 # "none" | "totp" | "login" | "both"
+totp_issuer = "LibreFang"              # 显示在验证器应用中的名称
+totp_grace_period_secs = 30            # 首次验证后，此时间窗内跳过 TOTP
+totp_tools = []                        # 留空表示审批列表内所有工具都需 TOTP
+```
+
+### 第二因子作用范围
+
+| 取值    | 审批是否需要 TOTP | 仪表盘登录是否需要 TOTP |
+|--------|:-:|:-:|
+| `none`  | —  | —  |
+| `totp`  | 需要 | —  |
+| `login` | —  | 需要 |
+| `both`  | 需要 | 需要 |
+
+`totp_tools` 支持 glob 通配符（如 `shell_*`）——这样可以只对破坏性工具强制第二因子，
+而只读工具继续走普通审批。
+
+### 超时回退
+
+审批超时后，LibreFang 按 `timeout_fallback` 决定如何处理：
+
+- `reject`（默认）——Agent 收到拒绝并停止执行。
+- `allow`——放行。仅适用于完全受信任的自主场景。
+- `retry`——再请求一次审批。
+
+---
+
+## 启用 TOTP
+
+整个 TOTP 流程由仪表盘驱动，但底层端点可供任何客户端使用。
+
+1. **打开「设置 → 安全 → 第二因子」。**
+2. 点击**启用 TOTP**。服务器调用 `POST /api/approvals/totp/setup` 生成随机 base32 密钥，
+   加密存入保险库，并返回 `otpauth://` URI 与 PNG 二维码。
+3. 使用 Google Authenticator、1Password、Authy 等任意符合 RFC 6238 的应用扫码。
+4. **重要：** 保存界面上显示的 10 个恢复码——它们只会显示一次，也是设备丢失时唯一的后路。
+5. 输入一个实时生成的 6 位验证码以确认启用（`POST /api/approvals/totp/confirm`）。
+   密钥必须在确认成功后才会生效。
+6. 将 `config.toml` 中的 `second_factor` 从 `none` 切换为 `totp`、`login` 或 `both`，
+   重启守护进程——或者直接在「设置」页面切换。
+
+在第 5 步成功之前，未确认的密钥处于待激活状态，再次调用 setup 即可丢弃它。
+
+---
+
+## 仪表盘流程
+
+审批页（`/approvals`）包含三个标签：
+
+- **待处理**——实时展示正在等待的请求，包含 Agent、工具名、风险等级以及完整负载。
+  点击条目可查看结构化的调用参数。
+- **审计**——分页的审计日志，记录决定方、决策结果以及是否使用了 TOTP
+  （`second_factor_used = 1`）。
+- **TOTP**——启用 / 撤销界面，包含二维码、恢复码列表以及「重新生成恢复码」操作。
+
+当 TOTP 被强制启用时，审批卡片会出现一个 6 位数字输入框；**批量审批**按钮会自动禁用
+（`approvals.batch_disabled_totp`），避免有人用一个被窃取的验证码大规模放行。
+
+**修改并重试。** 对被拒绝的工具调用，可以直接在审批卡片里编辑参数并重新发起。
+适用于 Agent 几乎写对了请求、但参数需要微调（例如换一个文件路径）的场景。
+
+---
+
+## API 参考
+
+所有端点位于 `/api/approvals` 之下。
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/approvals` | GET | 列出待处理请求（加 `?audit=1` 返回审计日志） |
+| `/api/approvals/{id}/approve` | POST | 批准（TOTP 强制时在 body 中加 `{ "totp_code": "123456" }`） |
+| `/api/approvals/{id}/reject` | POST | 拒绝，可附反馈 |
+| `/api/approvals/totp/setup` | POST | 生成密钥、二维码与恢复码 |
+| `/api/approvals/totp/confirm` | POST | 通过 6 位验证码确认启用 |
+| `/api/approvals/totp/status` | GET | `{ enrolled, confirmed, enforced, remaining_recovery_codes }` |
+| `/api/approvals/totp` | DELETE | 撤销启用（需要有效 TOTP 或恢复码） |
+
+TOTP 强制启用下的批准示例：
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/approvals/${ID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+一次成功验证会启动 `totp_grace_period_secs` 宽限窗口，该窗口内同一会话的后续审批
+自动跳过 TOTP——在快速迭代时兼顾安全与效率。
+
+---
+
+## 恢复码
+
+启用时会生成 10 个一次性恢复码，以 `totp_recovery_codes` 键存入保险库。每个恢复码：
+
+- 为 10 位随机字母数字；
+- 使用后即被从保险库移除；
+- 在任何接受 `totp_code` 字段的端点（包括 `DELETE /api/approvals/totp`）都可替代 TOTP 使用。
+
+`GET /api/approvals/totp/status` 返回的 `remaining_recovery_codes` 可供仪表盘在用尽之前
+提示用户。一旦用尽，请撤销后重新启用以获取新的一组恢复码。
+
+---
+
+## 加固清单
+
+1. 任何暴露到网络的部署都应将 `second_factor` 设为 `"both"`。
+2. `require_approval` 要精简但诚实——凡是写盘、执行 shell、调用变更型 API 的工具都要列进去。
+3. `trusted_senders` 只授予一方自动化 ID，切勿授予公共 webhook ID。
+4. 使用 `totp_tools` 对 `shell_exec`、`file_delete`、`apply_patch` 等破坏性工具
+   额外要求 TOTP——即便审批列表更宽，凭被窃取的一因子仍无法触发破坏。
+5. 生产环境优先使用 `timeout_fallback = "reject"` 而非 `"allow"`。
+6. 将恢复码保存在密码管理器中，不要与 API 令牌放在同一位置。两者同时泄漏时 TOTP 失去意义。
+7. 怀疑保险库被攻破时请轮换 `LIBREFANG_VAULT_KEY`（32 字节）——这会使保险库中的
+   TOTP 密钥失效，强制重新启用。
+
+另请参考：[安全运维](/zh/security/operations) 了解循环守卫与会话修复等运行时防护，
+以及 [通信 API](/zh/integrations/api/communication) 中完整的审批请求 / 响应结构。
+
+---
+
+## 会话级批量审批
+
+**源码：** `librefang-api/src/routes/approvals.rs`
+
+多个 Agent 并发运行时，每个会话可能同时积累多条待审批请求。全局 `/api/approvals` 端点跨所有待审批请求操作，不区分会话。会话级端点将范围缩小到**单个会话**，使你可以审查并解决某个 Agent 的全部待审批队列，而不会误操作其他会话的请求。
+
+### 新增端点
+
+| 端点 | 方法 | 用途 |
+|------|------|------|
+| `/api/approvals/session/:session_id` | GET | 列出属于该 `session_id` 的所有待审批请求 |
+| `/api/approvals/session/:session_id/approve_all` | POST | 批准该会话的所有待审批请求（TOTP 启用时需传 `{ "totp_code": "…" }`） |
+| `/api/approvals/session/:session_id/reject_all` | POST | 拒绝该会话的所有待审批请求，可附带 `{ "reason": "…" }` |
+
+批准某会话所有请求示例：
+
+```bash
+SESSION_ID="01J3WXYZ..."
+
+curl -X POST \
+  "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}/approve_all" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+列出某会话待审批请求示例：
+
+```bash
+curl "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}"
+```
+
+### 与 `/api/approvals` 的区别
+
+现有的 `GET /api/approvals` 端点（无额外路径段）返回所有活跃会话和 Agent 的全部待审批请求。批量审批时，可能会操作属于完全不同 Agent 的请求。
+
+会话级端点**仅**操作 `session_id` 字段与路径参数匹配的请求，在多个并发 Agent 同时等待人工输入时提供精细控制。
+
+### 审批请求中的 `session_id` 字段
+
+`session_id` 是 `ApprovalRequest` 上的**可选**字段。在会话级功能引入之前创建的代码路径生成的审批请求不携带 `session_id`，不会出现在会话过滤列表中。这些旧请求仍可通过现有的按 UUID 端点访问：
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```

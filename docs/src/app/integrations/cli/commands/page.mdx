@@ -470,7 +470,7 @@ librefang trigger list [--agent-id <ID>]
 Create an event trigger for an agent.
 
 ```
-librefang trigger create <AGENT_ID> <PATTERN_JSON> [--prompt <TEMPLATE>] [--max-fires <N>]
+librefang trigger create <AGENT_ID> <PATTERN_JSON> [options]
 ```
 
 **Arguments:**
@@ -478,29 +478,98 @@ librefang trigger create <AGENT_ID> <PATTERN_JSON> [--prompt <TEMPLATE>] [--max-
 | Argument | Description |
 |---|---|
 | `<AGENT_ID>` | UUID of the agent that owns the trigger. |
-| `<PATTERN_JSON>` | Trigger pattern as a JSON string. |
+| `<PATTERN_JSON>` | Trigger pattern as a JSON string (e.g. `'"lifecycle"'`). |
 
 **Options:**
 
 | Option | Default | Description |
 |---|---|---|
-| `--prompt <TEMPLATE>` | `"Event: {{event}}"` | Prompt template. Use `{{event}}` as a placeholder for the event data. |
-| `--max-fires <N>` | `0` (unlimited) | Maximum number of times the trigger will fire. |
+| `--prompt <TEMPLATE>` | `"Event: {{event}}"` | Prompt template sent to the agent. Use `{{event}}` as placeholder. |
+| `--max-fires <N>` | `0` (unlimited) | Maximum number of times the trigger can fire. |
+| `--target-agent <ID>` | *(owner)* | Route the triggered message to a different agent instead of the owner. |
+| `--cooldown <SECS>` | none | Minimum seconds between consecutive fires of this trigger. |
+| `--session-mode <MODE>` | agent default | Override session mode for triggered invocations (`persistent` or `new`). |
 
 **Pattern examples:**
 
 ```bash
 # Fire on any lifecycle event
-librefang trigger create <AGENT_ID> '{"lifecycle":{}}'
+librefang trigger create <AGENT_ID> '"lifecycle"'
 
-# Fire when a specific agent is spawned
-librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"*"}}'
+# Fire when any agent is spawned
+librefang trigger create <AGENT_ID> '"agent_spawned"'
 
-# Fire on agent termination
-librefang trigger create <AGENT_ID> '{"agent_terminated":{}}'
+# Fire on agent termination, max 5 times, 60s cooldown
+librefang trigger create <AGENT_ID> '"agent_terminated"' --max-fires 5 --cooldown 60
 
-# Fire on all events (limited to 10 fires)
-librefang trigger create <AGENT_ID> '{"all":{}}' --max-fires 10
+# Fire on all events, route message to a different agent
+librefang trigger create <AGENT_ID> '"all"' --target-agent <OTHER_AGENT_ID>
+
+# Custom pattern JSON
+librefang trigger create <AGENT_ID> '{"agent_spawned":{"name_pattern":"worker-*"}}'
+```
+
+---
+
+### librefang trigger get
+
+Show all details of a single trigger.
+
+```
+librefang trigger get <TRIGGER_ID>
+```
+
+---
+
+### librefang trigger update
+
+Partially update a trigger. Only the flags you supply are changed.
+
+```
+librefang trigger update <TRIGGER_ID> [options]
+```
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--pattern <JSON>` | New event pattern (JSON string). |
+| `--prompt <TEMPLATE>` | New prompt template. |
+| `--enabled <true\|false>` | Enable or disable the trigger. |
+| `--max-fires <N>` | New maximum fires limit. |
+| `--cooldown <SECS>` | New cooldown in seconds. |
+| `--clear-cooldown` | Remove the cooldown limit entirely. |
+| `--session-mode <MODE>` | New session mode override (`persistent` or `new`). |
+| `--clear-session-mode` | Remove the session mode override (revert to agent default). |
+| `--target-agent <ID>` | Route the triggered message to a different agent (UUID). |
+| `--clear-target-agent` | Remove the target agent override (revert to owner routing). |
+
+```bash
+# Change prompt and set a 30s cooldown
+librefang trigger update <TRIGGER_ID> --prompt "Alert: {{event}}" --cooldown 30
+
+# Remove the cooldown
+librefang trigger update <TRIGGER_ID> --clear-cooldown
+
+# Switch to new-session mode
+librefang trigger update <TRIGGER_ID> --session-mode new
+
+# Redirect firing to a different agent
+librefang trigger update <TRIGGER_ID> --target-agent <OTHER_AGENT_ID>
+
+# Clear the target agent redirect
+librefang trigger update <TRIGGER_ID> --clear-target-agent
+```
+
+---
+
+### librefang trigger enable / disable
+
+Enable or disable a trigger without deleting it.
+
+```
+librefang trigger enable <TRIGGER_ID>
+librefang trigger disable <TRIGGER_ID>
 ```
 
 ---

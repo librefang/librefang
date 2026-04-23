@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
+import { type CommsEventItem } from "../api";
+import { useChannels, useCommsTopology, useCommsEvents } from "../lib/queries/channels";
+import { useDashboardSnapshot } from "../lib/queries/overview";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -14,8 +15,6 @@ import {
   Mail, Phone, Link2, Wifi, Globe, ChevronRight, Search, X,
   ArrowsUpFromLine, Users
 } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 // Channel icons
 const channelIcons: Record<string, React.ReactNode> = {
@@ -82,7 +81,7 @@ function TopologyNode({ node, onClick }: { node: { id: string; name?: string; st
       onClick={onClick}
       className="flex flex-col items-center gap-2 p-4 rounded-xl bg-surface border border-border-subtle hover:border-brand transition-colors cursor-pointer"
     >
-      <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
+      <div className={`w-12 h-12 rounded-xl bg-linear-to-br ${getNodeColor()} flex items-center justify-center shadow-lg`}>
         <Users className="w-6 h-6 text-white" />
       </div>
       <div className="text-center">
@@ -99,29 +98,15 @@ export function CommsPage() {
   const [activeTab, setActiveTab] = useState<"channels" | "topology" | "events">("channels");
   const [search, setSearch] = useState("");
 
-  const channelsQuery = useQuery({
-    queryKey: ["channels", "list", "comms"],
-    queryFn: listChannels,
-    refetchInterval: REFRESH_MS
-  });
+  const channelsQuery = useChannels();
 
-  const snapshotQuery = useQuery({
-    queryKey: ["dashboard", "snapshot", "comms"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: REFRESH_MS
-  });
+  const snapshotQuery = useDashboardSnapshot();
 
-  const topologyQuery = useQuery({
-    queryKey: ["comms", "topology"],
-    queryFn: getCommsTopology,
-    refetchInterval: REFRESH_MS * 2
-  });
+  const topologyQuery = useCommsTopology();
 
-  const eventsQuery = useQuery({
-    queryKey: ["comms", "events"],
-    queryFn: () => listCommsEvents(50),
-    refetchInterval: 5000,
+  const eventsQuery = useCommsEvents(50, {
     enabled: activeTab === "events",
+    refetchInterval: 5_000,
   });
 
   const channels = channelsQuery.data ?? [];

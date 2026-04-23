@@ -263,11 +263,10 @@ impl QwenCodeDriver {
                     let mut msg_parts = Vec::new();
                     for block in blocks {
                         match block {
-                            ContentBlock::Text { text, .. } => {
-                                if !text.is_empty() {
-                                    msg_parts.push(text.clone());
-                                }
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                msg_parts.push(text.clone());
                             }
+                            ContentBlock::Text { .. } => {}
                             ContentBlock::Image { media_type, data } => {
                                 // Decode first — if the base64 is bad, we
                                 // don't want to have created a temp dir or
@@ -1048,6 +1047,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::text("Hello"),
                 pinned: false,
+                timestamp: None,
             }],
             tools: vec![],
             max_tokens: 1024,
@@ -1058,6 +1058,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1095,6 +1096,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             }],
             tools: vec![],
             max_tokens: 1024,
@@ -1105,6 +1107,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1169,6 +1172,7 @@ mod tests {
                     path: tmp.display().to_string(),
                 }]),
                 pinned: false,
+                timestamp: None,
             }],
             tools: vec![],
             max_tokens: 1024,
@@ -1179,6 +1183,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1268,6 +1273,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             }],
             tools: vec![],
             max_tokens: 1024,
@@ -1278,6 +1284,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);
@@ -1310,6 +1317,7 @@ mod tests {
                     path: "/definitely/does/not/exist/image.png".to_string(),
                 }]),
                 pinned: false,
+                timestamp: None,
             }],
             tools: vec![],
             max_tokens: 1024,
@@ -1320,6 +1328,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let prepared = QwenCodeDriver::build_prompt(&request);

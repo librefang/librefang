@@ -10,6 +10,28 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/skills/uninstall", axum::routing::post(uninstall_skill))
         .route("/skills/reload", axum::routing::post(reload_skills))
         .route("/skills/create", axum::routing::post(create_skill))
+        .route("/skills/{name}", axum::routing::get(get_skill_detail))
+        .route(
+            "/skills/{name}/evolve/update",
+            axum::routing::post(evolve_update_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/patch",
+            axum::routing::post(evolve_patch_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/rollback",
+            axum::routing::post(evolve_rollback_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/delete",
+            axum::routing::post(evolve_delete_skill),
+        )
+        .route(
+            "/skills/{name}/evolve/file",
+            axum::routing::post(evolve_write_file).delete(evolve_remove_file),
+        )
+        .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
         // Marketplace / ClawHub
         .route(
             "/marketplace/search",
@@ -26,6 +48,21 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::get(clawhub_skill_code),
         )
         .route("/clawhub/install", axum::routing::post(clawhub_install))
+        // ClawHub China mirror (mirror-cn.clawhub.com)
+        .route("/clawhub-cn/search", axum::routing::get(clawhub_cn_search))
+        .route("/clawhub-cn/browse", axum::routing::get(clawhub_cn_browse))
+        .route(
+            "/clawhub-cn/skill/{slug}",
+            axum::routing::get(clawhub_cn_skill_detail),
+        )
+        .route(
+            "/clawhub-cn/skill/{slug}/code",
+            axum::routing::get(clawhub_cn_skill_code),
+        )
+        .route(
+            "/clawhub-cn/install",
+            axum::routing::post(clawhub_cn_install),
+        )
         // Skillhub marketplace
         .route(
             "/skillhub/search",
@@ -53,6 +90,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         .route("/hands/{hand_id}", axum::routing::delete(uninstall_hand))
         .route("/hands/active", axum::routing::get(list_active_hands))
         .route("/hands/{hand_id}", axum::routing::get(get_hand))
+        .route(
+            "/hands/{hand_id}/manifest",
+            axum::routing::get(get_hand_manifest),
+        )
         .route(
             "/hands/{hand_id}/activate",
             axum::routing::post(activate_hand),
@@ -106,7 +147,9 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::get(hand_instance_status),
         )
         .route("/hands/reload", axum::routing::post(reload_hands))
-        // MCP server management
+        // Unified MCP server management — every MCP server lives as an
+        // [[mcp_servers]] entry in config.toml, with an optional template_id
+        // recording which catalog entry (if any) it was installed from.
         .route(
             "/mcp/servers",
             axum::routing::get(list_mcp_servers).post(add_mcp_server),
@@ -117,7 +160,11 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .put(update_mcp_server)
                 .delete(delete_mcp_server),
         )
-        // MCP OAuth auth endpoints
+        .route(
+            "/mcp/servers/{name}/reconnect",
+            axum::routing::post(reconnect_mcp_server_handler),
+        )
+        // MCP OAuth auth endpoints (existing, unchanged)
         .route(
             "/mcp/servers/{name}/auth/status",
             axum::routing::get(super::mcp_auth::auth_status),
@@ -134,30 +181,16 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/mcp/servers/{name}/auth/revoke",
             axum::routing::delete(super::mcp_auth::auth_revoke),
         )
-        // Integrations
-        .route("/integrations", axum::routing::get(list_integrations))
+        // Read-only catalog of installable MCP server templates
+        .route("/mcp/catalog", axum::routing::get(list_mcp_catalog))
         .route(
-            "/integrations/available",
-            axum::routing::get(list_available_integrations),
+            "/mcp/catalog/{id}",
+            axum::routing::get(get_mcp_catalog_entry),
         )
-        .route("/integrations/add", axum::routing::post(add_integration))
-        .route(
-            "/integrations/{id}",
-            axum::routing::get(get_integration).delete(remove_integration),
-        )
-        .route(
-            "/integrations/{id}/reconnect",
-            axum::routing::post(reconnect_integration),
-        )
-        .route(
-            "/integrations/health",
-            axum::routing::get(integrations_health),
-        )
-        .route(
-            "/integrations/reload",
-            axum::routing::post(reload_integrations),
-        )
-        // Extensions
+        // Health + reload (covers all configured servers)
+        .route("/mcp/health", axum::routing::get(mcp_health_handler))
+        .route("/mcp/reload", axum::routing::post(reload_mcp_handler))
+        // Extensions — kept as dashboard-friendly aliases over the unified store.
         .route("/extensions", axum::routing::get(list_extensions))
         .route(
             "/extensions/install",
@@ -197,20 +230,49 @@ use std::time::Instant;
         (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
     )
 )]
-pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let skills_dir = state.kernel.home_dir().join("skills");
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    if let Err(e) = registry.load_all() {
-        tracing::warn!("Failed to reload skill registry: {e}");
+pub async fn list_skills(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Use the kernel's LIVE registry so `skills.disabled` and
+    // `skills.extra_dirs` from config.toml take effect on this
+    // endpoint. Creating a fresh `SkillRegistry::new + load_all()`
+    // here — as the code did previously — bypassed the operator
+    // policy wired in `reload_skills`, making disabled skills show up
+    // in the UI and extra_dirs invisible.
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let category_filter = params.get("category").map(|s| s.as_str());
+
+    // Collect all categories first (unaffected by the filter), then apply filter.
+    // Category derivation lives in `librefang_skills::registry::derive_category`
+    // so this list agrees with the kernel's prompt-builder grouping.
+    let all_skills = registry.list();
+    let mut categories = std::collections::BTreeSet::new();
+    for s in &all_skills {
+        categories.insert(librefang_skills::registry::derive_category(&s.manifest).to_string());
     }
 
-    let skills: Vec<serde_json::Value> = registry
-        .list()
+    let skills: Vec<serde_json::Value> = all_skills
         .iter()
+        .filter(|s| {
+            let cat = librefang_skills::registry::derive_category(&s.manifest);
+            match category_filter {
+                Some(filter) => cat == filter,
+                None => true,
+            }
+        })
         .map(|s| {
             let source = match &s.manifest.source {
                 Some(librefang_skills::SkillSource::ClawHub { slug, version }) => {
                     serde_json::json!({"type": "clawhub", "slug": slug, "version": version})
+                }
+                Some(librefang_skills::SkillSource::ClawHubCn { slug, version }) => {
+                    serde_json::json!({"type": "clawhub-cn", "slug": slug, "version": version})
                 }
                 Some(librefang_skills::SkillSource::Skillhub { slug, version }) => {
                     serde_json::json!({"type": "skillhub", "slug": slug, "version": version})
@@ -239,7 +301,12 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
 
-    Json(serde_json::json!({ "skills": skills, "total": skills.len() }))
+    let categories_vec: Vec<String> = categories.into_iter().collect();
+    Json(serde_json::json!({
+        "skills": skills,
+        "total": skills.len(),
+        "categories": categories_vec,
+    }))
 }
 
 /// POST /api/skills/install — Install a skill from FangHub (GitHub).
@@ -333,22 +400,24 @@ pub async fn uninstall_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
 ) -> impl IntoResponse {
+    // Route through the evolution module so user-initiated uninstall
+    // picks up the per-skill lock and path-traversal check. The raw
+    // `registry.remove()` path had neither — a concurrent evolve mid-rm
+    // could see inconsistent state, and "/../" was accepted.
     let skills_dir = state.kernel.home_dir().join("skills");
-    let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    if let Err(e) = registry.load_all() {
-        tracing::warn!("Failed to reload skill registry: {e}");
-    }
-
-    match registry.remove(&req.name) {
-        Ok(()) => {
-            // Hot-reload so agents stop seeing the removed skill
+    match librefang_skills::evolution::uninstall_skill(&skills_dir, &req.name) {
+        Ok(result) => {
             state.kernel.reload_skills();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({"status": "uninstalled", "name": req.name})),
+                Json(serde_json::json!({
+                    "status": "uninstalled",
+                    "name": result.skill_name,
+                    "message": result.message,
+                })),
             )
         }
-        Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+        Err(e) => evolution_err_to_response(e),
     }
 }
 
@@ -895,6 +964,343 @@ pub async fn clawhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub install failed: {msg}");
+            (status, Json(serde_json::json!({"error": msg})))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ClawHub China mirror endpoints (mirror-cn.clawhub.com)
+// ---------------------------------------------------------------------------
+
+const CLAWHUB_CN_BASE_URL: &str = "https://mirror-cn.clawhub.com/api/v1";
+
+/// GET /api/clawhub-cn/search — Search ClawHub via the China mirror.
+pub async fn clawhub_cn_search(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = params.get("q").cloned().unwrap_or_default();
+    if query.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"items": [], "next_cursor": null})),
+        );
+    }
+
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
+    let cache_key = format!("cn:search:{}:{}", query, limit);
+    if let Some(entry) = state.clawhub_cache.get(&cache_key) {
+        if entry.0.elapsed().as_secs() < 120 {
+            return (StatusCode::OK, Json(entry.1.clone()));
+        }
+    }
+
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
+    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+
+    match client.search(&query, limit).await {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .results
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "slug": e.slug,
+                        "name": e.display_name,
+                        "description": e.summary,
+                        "version": e.version,
+                        "score": e.score,
+                        "updated_at": e.updated_at,
+                    })
+                })
+                .collect();
+            let resp = serde_json::json!({"items": items, "next_cursor": null});
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            tracing::warn!("ClawHub CN search failed: {msg}");
+            let status = if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (
+                status,
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
+            )
+        }
+    }
+}
+
+/// GET /api/clawhub-cn/browse — Browse ClawHub via the China mirror.
+pub async fn clawhub_cn_browse(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sort = match params.get("sort").map(|s| s.as_str()) {
+        Some("downloads") => librefang_skills::clawhub::ClawHubSort::Downloads,
+        Some("stars") => librefang_skills::clawhub::ClawHubSort::Stars,
+        Some("updated") => librefang_skills::clawhub::ClawHubSort::Updated,
+        Some("rating") => librefang_skills::clawhub::ClawHubSort::Rating,
+        _ => librefang_skills::clawhub::ClawHubSort::Trending,
+    };
+
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
+    let cursor = params.get("cursor").map(|s| s.as_str());
+
+    let cache_key = format!("cn:browse:{:?}:{}:{}", sort, limit, cursor.unwrap_or(""));
+    if let Some(entry) = state.clawhub_cache.get(&cache_key) {
+        if entry.0.elapsed().as_secs() < 120 {
+            return (StatusCode::OK, Json(entry.1.clone()));
+        }
+    }
+
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
+    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+
+    match client.browse(sort, limit, cursor).await {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .items
+                .iter()
+                .map(clawhub_browse_entry_to_json)
+                .collect();
+            let resp = serde_json::json!({
+                "items": items,
+                "next_cursor": results.next_cursor,
+            });
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            tracing::warn!("ClawHub CN browse failed: {msg}");
+            let status = if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (
+                status,
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
+            )
+        }
+    }
+}
+
+/// GET /api/clawhub-cn/skill/{slug} — Skill detail via the China mirror.
+pub async fn clawhub_cn_skill_detail(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
+    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+
+    let skills_dir = state.kernel.home_dir().join("skills");
+    let is_installed = client.is_installed(&slug, &skills_dir);
+
+    match client.get_skill(&slug).await {
+        Ok(detail) => {
+            let version = detail
+                .latest_version
+                .as_ref()
+                .map(|v| v.version.as_str())
+                .unwrap_or("");
+            let author = detail
+                .owner
+                .as_ref()
+                .map(|o| o.handle.as_str())
+                .unwrap_or("");
+            let author_name = detail
+                .owner
+                .as_ref()
+                .map(|o| o.display_name.as_str())
+                .unwrap_or("");
+            let author_image = detail
+                .owner
+                .as_ref()
+                .and_then(|o| o.image.as_deref())
+                .unwrap_or("");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "slug": detail.skill.slug,
+                    "name": detail.skill.display_name,
+                    "description": detail.skill.summary,
+                    "version": version,
+                    "downloads": detail.skill.stats.downloads,
+                    "stars": detail.skill.stats.stars,
+                    "author": author,
+                    "author_name": author_name,
+                    "author_image": author_image,
+                    "tags": detail.skill.tags,
+                    "updated_at": detail.skill.updated_at,
+                    "created_at": detail.skill.created_at,
+                    "is_installed": is_installed,
+                    "installed": is_installed,
+                })),
+            )
+        }
+        Err(e) => {
+            let status = if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            (status, Json(serde_json::json!({"error": format!("{e}")})))
+        }
+    }
+}
+
+/// GET /api/clawhub-cn/skill/{slug}/code — Skill source code via the China mirror.
+pub async fn clawhub_cn_skill_code(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
+    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+
+    let mut code = String::new();
+    let mut filename = String::new();
+
+    if let Ok(content) = client.get_file(&slug, "SKILL.md").await {
+        code = content;
+        filename = "SKILL.md".to_string();
+    } else if let Ok(content) = client.get_file(&slug, "package.json").await {
+        code = content;
+        filename = "package.json".to_string();
+    } else if let Ok(content) = client.get_file(&slug, "skill.toml").await {
+        code = content;
+        filename = "skill.toml".to_string();
+    }
+
+    if code.is_empty() {
+        return ApiErrorResponse::not_found("No source code found for this skill")
+            .into_json_tuple();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "slug": slug,
+            "filename": filename,
+            "code": code,
+        })),
+    )
+}
+
+/// POST /api/clawhub-cn/install — Install a skill from the ClawHub China mirror.
+pub async fn clawhub_cn_install(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::types::ClawHubInstallRequest>,
+) -> impl IntoResponse {
+    let home = state.kernel.home_dir();
+    let skills_dir = if let Some(ref hand_id) = req.hand {
+        let hand_dir = home.join("workspaces").join("hands").join(hand_id);
+        if !hand_dir.exists() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Hand '{hand_id}' not found")})),
+            );
+        }
+        let dir = hand_dir.join("skills");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    } else {
+        home.join("skills")
+    };
+
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
+    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+
+    if client.is_installed(&req.slug, &skills_dir) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Skill '{}' is already installed", req.slug),
+                "status": "already_installed",
+            })),
+        );
+    }
+
+    match client.install(&req.slug, &skills_dir).await {
+        Ok(result) => {
+            // Patch source provenance to ClawHubCn
+            let skill_dir = skills_dir.join(&req.slug);
+            let manifest_path = skill_dir.join("skill.toml");
+            if manifest_path.exists() {
+                if let Ok(toml_str) = std::fs::read_to_string(&manifest_path) {
+                    if let Ok(mut manifest) =
+                        toml::from_str::<librefang_skills::SkillManifest>(&toml_str)
+                    {
+                        manifest.source = Some(librefang_skills::SkillSource::ClawHubCn {
+                            slug: req.slug.clone(),
+                            version: result.version.clone(),
+                        });
+                        if let Ok(updated) = toml::to_string_pretty(&manifest) {
+                            let _ = std::fs::write(&manifest_path, updated);
+                        }
+                    }
+                }
+            }
+
+            let warnings: Vec<serde_json::Value> = result
+                .warnings
+                .iter()
+                .map(|w| {
+                    serde_json::json!({
+                        "severity": format!("{:?}", w.severity),
+                        "message": w.message,
+                    })
+                })
+                .collect();
+
+            let translations: Vec<serde_json::Value> = result
+                .tool_translations
+                .iter()
+                .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "installed",
+                    "name": result.skill_name,
+                    "version": result.version,
+                    "slug": result.slug,
+                    "is_prompt_only": result.is_prompt_only,
+                    "warnings": warnings,
+                    "tool_translations": translations,
+                })),
+            )
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
+                StatusCode::FORBIDDEN
+            } else if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::warn!("ClawHub CN install failed: {msg}");
             (status, Json(serde_json::json!({"error": msg})))
         }
     }
@@ -1530,6 +1936,90 @@ pub async fn get_hand(
         }
         None => ApiErrorResponse::not_found(format!("Hand not found: {hand_id}")).into_json_tuple(),
     }
+}
+
+/// GET /api/hands/{hand_id}/manifest — Return the hand's HAND.toml as text.
+///
+/// Reads the on-disk HAND.toml from either the registry or workspaces dir
+/// so comments and original formatting survive. Falls back to serializing
+/// the in-memory `HandDefinition` if the file isn't on disk (e.g. installed
+/// programmatically), so the endpoint always has something to return for
+/// any hand the registry knows about.
+#[utoipa::path(
+    get,
+    path = "/api/hands/{hand_id}/manifest",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "HAND.toml content", content_type = "application/toml")
+    )
+)]
+pub async fn get_hand_manifest(
+    State(state): State<Arc<AppState>>,
+    Path(hand_id): Path<String>,
+) -> impl IntoResponse {
+    use axum::body::Body;
+
+    // Gate the filesystem lookup on registry membership so a crafted
+    // hand_id can't be used to probe for `**/HAND.toml` paths under the
+    // home dir. Mirrors the `get_hand` pattern above.
+    let definition = match state.kernel.hands().get_definition(&hand_id) {
+        Some(def) => def,
+        None => {
+            return ApiErrorResponse::not_found(format!("Hand not found: {hand_id}"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    let home = state.kernel.home_dir();
+    // Two install layouts that scan_hands_dir actually walks
+    // (librefang-hands/src/registry.rs:165). Anything else is a
+    // codebase inconsistency that wouldn't make it into the registry,
+    // so the gate above would already 404 it before we get here.
+    let candidates = [
+        home.join("registry")
+            .join("hands")
+            .join(&hand_id)
+            .join("HAND.toml"),
+        home.join("workspaces").join(&hand_id).join("HAND.toml"),
+    ];
+
+    let mut toml_content: Option<String> = None;
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                toml_content = Some(content);
+                break;
+            }
+        }
+    }
+
+    // Fall back to re-serialising the in-memory definition so hands
+    // installed via API (no on-disk HAND.toml) still get a useful
+    // payload. Loses comments / formatting but preserves structure.
+    if toml_content.is_none() {
+        match toml::to_string_pretty(&definition) {
+            Ok(s) => toml_content = Some(s),
+            Err(e) => {
+                return ApiErrorResponse::internal(format!(
+                    "Failed to serialize hand definition: {e}"
+                ))
+                .into_json_tuple()
+                .into_response();
+            }
+        }
+    }
+
+    let text = toml_content.expect("toml_content set in fallback above");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/toml")],
+        Body::from(text),
+    )
+        .into_response()
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
@@ -2552,6 +3042,7 @@ pub async fn hand_send_message(
                     memories_used: result.memories_used,
                     memory_conflicts: result.memory_conflicts,
                     thinking: None,
+                    owner_notice: result.owner_notice,
                 })),
             )
         }
@@ -2848,6 +3339,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 .unwrap_or(serde_json::json!({"state": "not_required"}));
             serde_json::json!({
                 "name": s.name,
+                "template_id": s.template_id,
                 "transport": transport,
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
@@ -2856,8 +3348,14 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         })
         .collect();
 
-    // Get connected servers and their tools from the live MCP connections
+    // Get connected servers and their tools from the live MCP connections.
+    //
+    // `connected` reflects liveness, not just vec residency: a subprocess that
+    // died silently (stdio transport crash, SSE drop) leaves its McpConnection
+    // in the vec until the health loop or a reconnect replaces it. Cross-check
+    // with `mcp_health` so the badge/count match reality (#2738).
     let connections = state.kernel.mcp_connections_ref().lock().await;
+    let health = state.kernel.mcp_health();
     let connected: Vec<serde_json::Value> = connections
         .iter()
         .map(|conn| {
@@ -2871,20 +3369,33 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                     })
                 })
                 .collect();
+            let is_alive = matches!(
+                health.get_health(conn.name()).map(|h| h.status),
+                Some(librefang_extensions::McpStatus::Ready),
+            );
             serde_json::json!({
                 "name": conn.name(),
                 "tools_count": tools.len(),
                 "tools": tools,
-                "connected": true,
+                "connected": is_alive,
             })
         })
         .collect();
+
+    let total_connected = connected
+        .iter()
+        .filter(|c| {
+            c.get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .count();
 
     Json(serde_json::json!({
         "configured": config_servers,
         "connected": connected,
         "total_configured": config_servers.len(),
-        "total_connected": connected.len(),
+        "total_connected": total_connected,
     }))
 }
 
@@ -2925,6 +3436,7 @@ pub async fn get_mcp_server(
 
     let mut result = serde_json::json!({
         "name": entry.name,
+        "template_id": entry.template_id,
         "transport": transport,
         "timeout_secs": entry.timeout_secs,
         "env": entry.env,
@@ -2971,26 +3483,117 @@ pub async fn add_mcp_server(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Validate required fields
-    let name = match body.get("name").and_then(|v| v.as_str()) {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-        _ => {
-            return ApiErrorResponse::bad_request("Missing or empty 'name' field")
-                .into_json_tuple();
-        }
-    };
+    // Two accepted shapes:
+    //   (A) Template install: { "template_id": "github", "credentials": { ... } }
+    //   (B) Raw entry:        { "name": "...", "transport": { ... }, ... }
+    let (entry, name) = if let Some(tid) = body
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        // Template install path
+        let creds: std::collections::HashMap<String, String> = body
+            .get("credentials")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    if body.get("transport").is_none() {
-        return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
-    }
+        let catalog = state
+            .kernel
+            .mcp_catalog()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = match catalog.get(&tid) {
+            Some(e) => e.clone(),
+            None => {
+                return ApiErrorResponse::not_found(format!("MCP catalog entry '{tid}' not found"))
+                    .into_json_tuple();
+            }
+        };
+        drop(catalog);
 
-    // Validate by deserializing the body into McpServerConfigEntry
-    let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
-        Ok(e) => e,
-        Err(e) => {
-            return ApiErrorResponse::bad_request(format!("Invalid MCP server config: {e}"))
-                .into_json_tuple();
+        // Duplicate-name check BEFORE running the installer. `install_integration`
+        // stores provided credentials in the vault as a side effect, so if we
+        // returned 409 from the check below (which used to run after install)
+        // the vault would already hold credentials for a server the caller never
+        // managed to register. Reject first, side-effect second.
+        let prospective_name = entry.id.clone();
+        if state
+            .kernel
+            .config_ref()
+            .mcp_servers
+            .iter()
+            .any(|s| s.name == prospective_name)
+        {
+            return ApiErrorResponse::conflict(format!(
+                "MCP server '{prospective_name}' already exists"
+            ))
+            .into_json_tuple();
         }
+
+        // Credential resolver: dotenv + vault (if unlocked)
+        let home = state.kernel.home_dir().to_path_buf();
+        let dotenv_path = home.join(".env");
+        let vault_path = home.join("vault.enc");
+        let vault = if vault_path.exists() {
+            let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+            if v.unlock().is_ok() {
+                Some(v)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut resolver =
+            librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+
+        // Ephemeral catalog to feed the installer (it takes &McpCatalog).
+        let mut cat = librefang_extensions::catalog::McpCatalog::new(&home);
+        cat.load(&home);
+        let result = match librefang_extensions::installer::install_integration(
+            &cat,
+            &mut resolver,
+            &entry.id,
+            &creds,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return ApiErrorResponse::bad_request(format!("Install failed: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        (result.server, result.id)
+    } else {
+        // Raw entry path
+        let name = match body.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                return ApiErrorResponse::bad_request("Missing or empty 'name' field")
+                    .into_json_tuple();
+            }
+        };
+
+        if body.get("transport").is_none() {
+            return ApiErrorResponse::bad_request("Missing 'transport' field").into_json_tuple();
+        }
+
+        let entry: librefang_types::config::McpServerConfigEntry =
+            match serde_json::from_value(body) {
+                Ok(e) => e,
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Invalid MCP server config: {e}"
+                    ))
+                    .into_json_tuple();
+                }
+            };
+        (entry, name)
     };
 
     // Check for duplicate name
@@ -3040,6 +3643,7 @@ pub async fn add_mcp_server(
         Json(serde_json::json!({
             "status": "added",
             "name": name,
+            "template_id": entry.template_id,
             "reload": reload_status,
         })),
     )
@@ -3277,7 +3881,10 @@ fn upsert_mcp_server_config(
     validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        // Propagate parse errors instead of silently defaulting to an empty
+        // table, which would overwrite every unrelated section when we write
+        // back. A malformed config.toml should surface to the caller.
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         toml::value::Table::new()
     };
@@ -3313,7 +3920,10 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
     validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        toml::from_str(&content).unwrap_or_default()
+        // Propagate parse errors instead of silently defaulting to an empty
+        // table, which would destroy every unrelated section when we write
+        // back after the retain().
+        toml::from_str(&content).map_err(|e| format!("config.toml is not valid TOML: {e}"))?
     } else {
         return Ok(());
     };
@@ -3331,20 +3941,6 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
     let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
     std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
     Ok(())
-}
-
-fn is_safe_component_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains("..")
-        && !name.contains('/')
-        && !name.contains('\\')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && std::path::Path::new(name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            == Some(name)
 }
 
 fn validate_static_file_path(
@@ -3385,6 +3981,9 @@ pub async fn create_skill(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
     let name = match body["name"].as_str() {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => {
@@ -3393,59 +3992,589 @@ pub async fn create_skill(
         }
     };
 
-    // Validate name (alphanumeric + hyphens only)
-    if !is_safe_component_name(&name) {
-        return ApiErrorResponse::bad_request(
-            "Skill name must contain only letters, numbers, hyphens, and underscores",
-        )
-        .into_json_tuple();
-    }
+    let description = match body["description"].as_str() {
+        Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => {
+            return ApiErrorResponse::bad_request("Missing or empty 'description' field")
+                .into_json_tuple();
+        }
+    };
 
-    let description = body["description"].as_str().unwrap_or("").to_string();
-    let runtime = body["runtime"].as_str().unwrap_or("prompt_only");
     let prompt_context = body["prompt_context"].as_str().unwrap_or("").to_string();
+    let tags: Vec<String> = body["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // Only allow prompt_only skills from the web UI for safety
-    if runtime != "prompt_only" {
-        return ApiErrorResponse::bad_request(
-            "Only prompt_only skills can be created from the web UI",
-        )
-        .into_json_tuple();
+    // Use the evolution module for safe, validated skill creation
+    let skills_dir = state.kernel.home_dir().join("skills");
+    match librefang_skills::evolution::create_skill(
+        &skills_dir,
+        &name,
+        &description,
+        &prompt_context,
+        tags,
+        Some("dashboard"),
+    ) {
+        Ok(result) => {
+            audit_evolve(&state, "create", &result.skill_name, &result.message);
+            // Hot-reload skills so the new skill is available immediately
+            state.kernel.reload_skills();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "created",
+                    "name": result.skill_name,
+                    "version": result.version,
+                    "message": result.message,
+                })),
+            )
+        }
+        Err(e) => {
+            ApiErrorResponse::bad_request(format!("Failed to create skill: {e}")).into_json_tuple()
+        }
     }
+}
 
-    // Write skill.toml to ~/.librefang/skills/{name}/
-    let skill_dir = state.kernel.home_dir().join("skills").join(&name);
-    if skill_dir.exists() {
-        return ApiErrorResponse::conflict(format!("Skill '{}' already exists", name))
-            .into_json_tuple();
-    }
+/// Get detailed information about a specific skill, including linked files,
+/// tags, evolution history, and readiness status.
+#[utoipa::path(
+    get,
+    path = "/api/skills/{name}",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill detail with evolution history", body = serde_json::Value),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn get_skill_detail(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
 
-    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-        return ApiErrorResponse::internal(format!("Failed to create skill directory: {e}"))
-            .into_json_tuple();
-    }
+    let skill = match registry.get(&name) {
+        Some(s) => s,
+        None => {
+            return ApiErrorResponse::not_found(format!("Skill '{name}' not found"))
+                .into_json_tuple();
+        }
+    };
 
-    let toml_content = format!(
-        "[skill]\nname = \"{}\"\ndescription = \"{}\"\nruntime = \"prompt_only\"\n\n[prompt]\ncontext = \"\"\"\n{}\n\"\"\"\n",
-        name,
-        description.replace('"', "\\\""),
-        prompt_context
-    );
+    let manifest = &skill.manifest;
 
-    let toml_path = skill_dir.join("skill.toml");
-    if let Err(e) = std::fs::write(&toml_path, &toml_content) {
-        return ApiErrorResponse::internal(format!("Failed to write skill.toml: {e}"))
-            .into_json_tuple();
-    }
+    // List linked files
+    let linked_files = librefang_skills::evolution::list_supporting_files(skill);
+
+    // Get evolution metadata
+    let evolution_meta = librefang_skills::evolution::get_evolution_info(skill);
+
+    // Build response
+    let tools: Vec<serde_json::Value> = manifest
+        .tools
+        .provided
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+            })
+        })
+        .collect();
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "status": "created",
-            "name": name,
-            "note": "Restart the daemon to load the new skill, or it will be available on next boot."
+            "name": manifest.skill.name,
+            "version": manifest.skill.version,
+            "description": manifest.skill.description,
+            "author": manifest.skill.author,
+            "license": manifest.skill.license,
+            "tags": manifest.skill.tags,
+            "runtime": format!("{:?}", manifest.runtime.runtime_type),
+            "tools": tools,
+            "has_prompt_context": manifest.prompt_context.is_some(),
+            "prompt_context_length": manifest.prompt_context.as_ref().map(|c| c.len()).unwrap_or(0),
+            "source": manifest.source,
+            "enabled": skill.enabled,
+            "path": skill.path.to_string_lossy(),
+            "linked_files": linked_files,
+            "evolution": {
+                "versions": evolution_meta.versions,
+                "use_count": evolution_meta.use_count,
+                "evolution_count": evolution_meta.evolution_count,
+                "mutation_count": evolution_meta.mutation_count,
+            },
+            // Full prompt_context text so the dashboard Update modal
+            // can pre-fill the editor. Capped at MAX_PROMPT_CONTEXT_CHARS
+            // by the evolution module on write, so safe to inline here.
+            "prompt_context": manifest.prompt_context,
         })),
     )
+}
+
+// ── Skill evolution handlers ───────────────────────────────────────────
+//
+// Each handler looks the skill up by name, clones the InstalledSkill
+// snapshot so we don't hold the RwLock across the await, delegates to
+// the evolution module, then reloads the registry so the change is
+// immediately visible on subsequent requests.
+
+fn clone_installed_skill(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Result<librefang_skills::InstalledSkill, (StatusCode, Json<serde_json::Value>)> {
+    // Try the live registry first. Fall back to disk for skills that
+    // exist on the filesystem but haven't been hot-reloaded into the
+    // in-memory registry yet — e.g. after a just-completed
+    // `skill_evolve_create` from within the same dashboard session.
+    {
+        let registry = state
+            .kernel
+            .skill_registry_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = registry.get(name) {
+            return Ok(s.clone());
+        }
+    }
+    let skills_dir = state.kernel.home_dir().join("skills");
+    librefang_skills::evolution::load_installed_skill_from_disk(&skills_dir, name).map_err(|e| {
+        match e {
+            librefang_skills::SkillError::NotFound(_) => {
+                ApiErrorResponse::not_found(format!("Skill '{name}' not found")).into_json_tuple()
+            }
+            other => {
+                ApiErrorResponse::bad_request(format!("Skill '{name}': {other}")).into_json_tuple()
+            }
+        }
+    })
+}
+
+/// Reject dashboard/CLI evolve calls when the kernel is in Stable mode
+/// (registry frozen). Mirrors the agent-tool gate in `tool_runner.rs`
+/// — evolution writes to disk directly, so the frozen check on its
+/// own only stops the in-memory reload. Without this guard the
+/// dashboard would happily mutate skills that the operator pinned via
+/// Stable mode.
+fn reject_if_frozen(state: &Arc<AppState>) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let registry = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if registry.is_frozen() {
+        Some(
+            ApiErrorResponse::bad_request(
+                "Skill evolution is disabled in Stable mode (registry frozen)",
+            )
+            .into_json_tuple(),
+        )
+    } else {
+        None
+    }
+}
+
+fn evolution_err_to_response(
+    e: librefang_skills::SkillError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use librefang_skills::SkillError as E;
+    let msg = e.to_string();
+    match e {
+        E::NotFound(_) => ApiErrorResponse::not_found(msg).into_json_tuple(),
+        E::AlreadyInstalled(_) => ApiErrorResponse::conflict(msg).into_json_tuple(),
+        E::InvalidManifest(_) | E::SecurityBlocked(_) | E::YamlParse(_) | E::TomlParse(_) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        _ => ApiErrorResponse::internal(msg).into_json_tuple(),
+    }
+}
+
+fn evolution_ok_response(
+    result: librefang_skills::evolution::EvolutionResult,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Serialize the whole struct so dashboard consumers pick up the
+    // full set of EvolutionResult fields automatically
+    // (match_strategy, match_count, evolution_count, mutation_count,
+    // use_count) instead of relying on this handler being updated
+    // every time a new field is added.
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(result).unwrap_or(serde_json::json!({}))),
+    )
+}
+
+/// GET /api/skills/{name}/file?path=... — return the contents of a
+/// supporting file so the dashboard can render it. Share the same
+/// security rules as `skill_read_file` (no absolute paths, no traversal,
+/// must resolve within the skill directory, size-capped).
+#[utoipa::path(
+    get,
+    path = "/api/skills/{name}/file",
+    tag = "skills",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("path" = String, Query, description = "Relative file path inside the skill directory")
+    ),
+    responses(
+        (status = 200, description = "File contents", body = serde_json::Value),
+        (status = 400, description = "Invalid path"),
+        (status = 404, description = "Skill or file not found")
+    )
+)]
+pub async fn get_supporting_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(rel_path) = params.get("path") else {
+        return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
+    };
+    // Reject absolute paths and traversal early — defense in depth even
+    // before canonicalisation runs. Check by `Path::Component` rather
+    // than a substring scan: the old `contains("..")` rejected legit
+    // names like `config..bak.md` and `..prefix.txt`, while still
+    // missing the bare Windows-style `foo\..\bar` (components are
+    // resolved differently).
+    if rel_path.is_empty() || std::path::Path::new(rel_path).is_absolute() {
+        return ApiErrorResponse::bad_request(format!("Invalid path: {rel_path}"))
+            .into_json_tuple();
+    }
+    if std::path::Path::new(rel_path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return ApiErrorResponse::bad_request(format!(
+            "Path traversal ('..') is not allowed: {rel_path}"
+        ))
+        .into_json_tuple();
+    }
+
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let requested = skill.path.join(rel_path);
+    let Ok(canonical) = requested.canonicalize() else {
+        return ApiErrorResponse::not_found(format!("File not found: {rel_path}"))
+            .into_json_tuple();
+    };
+    let Ok(root) = skill.path.canonicalize() else {
+        return ApiErrorResponse::internal("Skill directory missing").into_json_tuple();
+    };
+    if !canonical.starts_with(&root) {
+        return ApiErrorResponse::bad_request(format!(
+            "'{rel_path}' is outside the skill directory"
+        ))
+        .into_json_tuple();
+    }
+
+    // Size cap: even supporting files up to 1 MiB can exceed response
+    // limits in the browser. Truncate and advertise.
+    const MAX_BYTES: usize = 256 * 1024;
+    let content = match std::fs::read_to_string(&canonical) {
+        Ok(s) => s,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to read file: {e}"))
+                .into_json_tuple();
+        }
+    };
+    let (truncated, body) = if content.len() > MAX_BYTES {
+        let cut = content
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_BYTES)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        (true, content[..cut].to_string())
+    } else {
+        (false, content)
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "path": rel_path,
+            "content": body,
+            "truncated": truncated,
+        })),
+    )
+}
+
+/// Record a successful skill evolution in the audit trail. All
+/// dashboard-initiated mutations go through this so the audit log has a
+/// tamper-evident record of every `/api/skills/.../evolve/*` action.
+fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &str) {
+    state.kernel.audit().record(
+        // Dashboard calls don't have an agent_id — use a distinctive
+        // actor so audit readers can tell user actions from agent ones.
+        "dashboard".to_string(),
+        librefang_runtime::audit::AuditAction::AgentMessage,
+        format!("skill_evolve:{action}:{skill_name}"),
+        detail.to_string(),
+    );
+}
+
+/// POST /api/skills/{name}/evolve/update — full-rewrite prompt_context.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/update",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Skill updated", body = serde_json::Value),
+        (status = 400, description = "Invalid request / security-blocked content"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_update_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let Some(prompt_context) = body["prompt_context"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'prompt_context' field").into_json_tuple();
+    };
+    let changelog = body["changelog"].as_str().unwrap_or("").trim();
+    if changelog.is_empty() {
+        return ApiErrorResponse::bad_request("Missing 'changelog' field").into_json_tuple();
+    }
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::update_skill(
+        &skill,
+        prompt_context,
+        changelog,
+        Some("dashboard"),
+    ) {
+        Ok(r) => {
+            audit_evolve(&state, "update", &r.skill_name, changelog);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/patch — fuzzy find-and-replace.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/patch",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Skill patched", body = serde_json::Value),
+        (status = 400, description = "Invalid request / fuzzy match failed"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_patch_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let Some(old_string) = body["old_string"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'old_string' field").into_json_tuple();
+    };
+    let Some(new_string) = body["new_string"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'new_string' field").into_json_tuple();
+    };
+    let changelog = body["changelog"].as_str().unwrap_or("").trim();
+    if changelog.is_empty() {
+        return ApiErrorResponse::bad_request("Missing 'changelog' field").into_json_tuple();
+    }
+    let replace_all = body["replace_all"].as_bool().unwrap_or(false);
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::patch_skill(
+        &skill,
+        old_string,
+        new_string,
+        changelog,
+        replace_all,
+        Some("dashboard"),
+    ) {
+        Ok(r) => {
+            audit_evolve(&state, "patch", &r.skill_name, changelog);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/rollback — roll back to previous version.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/rollback",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill rolled back", body = serde_json::Value),
+        (status = 404, description = "Skill or snapshot not found")
+    )
+)]
+pub async fn evolve_rollback_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::rollback_skill(&skill, Some("dashboard")) {
+        Ok(r) => {
+            audit_evolve(
+                &state,
+                "rollback",
+                &r.skill_name,
+                "rolled back to previous version",
+            );
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/delete — delete a locally-evolved skill.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/delete",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    responses(
+        (status = 200, description = "Skill deleted", body = serde_json::Value),
+        (status = 400, description = "Non-local skill — deletion refused"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_delete_skill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let skills_dir = state.kernel.home_dir().join("skills");
+    match librefang_skills::evolution::delete_skill(&skills_dir, &name) {
+        Ok(r) => {
+            audit_evolve(&state, "delete", &r.skill_name, &r.message);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// POST /api/skills/{name}/evolve/file — add a supporting file.
+#[utoipa::path(
+    post,
+    path = "/api/skills/{name}/evolve/file",
+    tag = "skills",
+    params(("name" = String, Path, description = "Skill name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "File written", body = serde_json::Value),
+        (status = 400, description = "Invalid path / over size limit"),
+        (status = 404, description = "Skill not found")
+    )
+)]
+pub async fn evolve_write_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let Some(path) = body["path"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'path' field").into_json_tuple();
+    };
+    let Some(content) = body["content"].as_str() else {
+        return ApiErrorResponse::bad_request("Missing 'content' field").into_json_tuple();
+    };
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::write_supporting_file(&skill, path, content) {
+        Ok(r) => {
+            audit_evolve(&state, "write_file", &r.skill_name, path);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
+}
+
+/// DELETE /api/skills/{name}/evolve/file — remove a supporting file.
+/// Path is supplied via the `?path=` query string since axum's DELETE
+/// body handling is inconsistent across clients.
+#[utoipa::path(
+    delete,
+    path = "/api/skills/{name}/evolve/file",
+    tag = "skills",
+    params(
+        ("name" = String, Path, description = "Skill name"),
+        ("path" = String, Query, description = "Relative path of the file to remove")
+    ),
+    responses(
+        (status = 200, description = "File removed", body = serde_json::Value),
+        (status = 400, description = "Missing 'path' parameter"),
+        (status = 404, description = "Skill or file not found")
+    )
+)]
+pub async fn evolve_remove_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_if_frozen(&state) {
+        return resp;
+    }
+    let Some(path) = params.get("path") else {
+        return ApiErrorResponse::bad_request("Missing 'path' query parameter").into_json_tuple();
+    };
+    let skill = match clone_installed_skill(&state, &name) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match librefang_skills::evolution::remove_supporting_file(&skill, path) {
+        Ok(r) => {
+            audit_evolve(&state, "remove_file", &r.skill_name, path);
+            state.kernel.reload_skills();
+            evolution_ok_response(r)
+        }
+        Err(e) => evolution_err_to_response(e),
+    }
 }
 
 // ── Helper functions for secrets.env management ────────────────────────
@@ -3680,353 +4809,157 @@ pub(crate) fn remove_channel_config(
 }
 
 // ---------------------------------------------------------------------------
-// Integration management endpoints
+// MCP catalog + reconnect + health + reload endpoints
 // ---------------------------------------------------------------------------
 
-/// Derive a human-readable status string for an integration.
-fn integration_status_str(
-    installed: Option<&librefang_extensions::InstalledIntegration>,
-    health: Option<&librefang_extensions::health::IntegrationHealth>,
-) -> &'static str {
-    match installed {
-        Some(inst) if !inst.enabled => "disabled",
-        Some(_) => match health.map(|h| &h.status) {
-            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-            _ => "installed",
-        },
-        None => "available",
+/// Serialize a single catalog transport for API output.
+fn serialize_catalog_transport(t: &librefang_extensions::McpCatalogTransport) -> serde_json::Value {
+    match t {
+        librefang_extensions::McpCatalogTransport::Stdio { command, args } => {
+            serde_json::json!({ "type": "stdio", "command": command, "args": args })
+        }
+        librefang_extensions::McpCatalogTransport::Sse { url } => {
+            serde_json::json!({ "type": "sse", "url": url })
+        }
+        librefang_extensions::McpCatalogTransport::Http { url } => {
+            serde_json::json!({ "type": "http", "url": url })
+        }
     }
 }
 
-/// GET /api/integrations — List installed integrations with status.
+/// Collect catalog ids that are "already installed" for the purposes of
+/// the catalog list/detail endpoints. Includes both `template_id` matches
+/// (server was installed via the template) and `name` matches (manually
+/// configured server occupies the catalog entry's id), so the endpoints
+/// agree with `add_mcp_server`'s 409 name-collision guard and the UI
+/// doesn't offer Install on entries that will definitely fail.
+fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for s in state.kernel.config_ref().mcp_servers.iter() {
+        if let Some(tid) = s.template_id.clone() {
+            ids.insert(tid);
+        }
+        ids.insert(s.name.clone());
+    }
+    ids
+}
+
+fn render_catalog_entry(
+    entry: &librefang_extensions::McpCatalogEntry,
+    installed_template_ids: &std::collections::HashSet<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": entry.id,
+        "name": entry.name,
+        "description": entry.description,
+        "icon": entry.icon,
+        "category": entry.category.to_string(),
+        "installed": installed_template_ids.contains(&entry.id),
+        "tags": entry.tags,
+        "transport": serialize_catalog_transport(&entry.transport),
+        "required_env": entry.required_env.iter().map(|e| serde_json::json!({
+            "name": e.name,
+            "label": e.label,
+            "help": e.help,
+            "is_secret": e.is_secret,
+            "get_url": e.get_url,
+        })).collect::<Vec<_>>(),
+        "has_oauth": entry.oauth.is_some(),
+        "setup_instructions": entry.setup_instructions,
+    })
+}
+
+/// GET /api/mcp/catalog — List all installable MCP catalog entries.
 #[utoipa::path(
     get,
-    path = "/api/integrations",
-    tag = "integrations",
+    path = "/api/mcp/catalog",
+    tag = "mcp",
     responses(
-        (status = 200, description = "List installed integrations with status", body = serde_json::Value)
+        (status = 200, description = "MCP catalog entries", body = serde_json::Value)
     )
 )]
-pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let installed_ids = collect_installed_catalog_ids(&state);
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
-
-    let mut entries = Vec::new();
-    for info in registry.list_all_info() {
-        let h = health.get_health(&info.template.id);
-        let status = integration_status_str(info.installed.as_ref(), h.as_ref());
-        if status == "available" {
-            continue; // Only show installed
-        }
-        entries.push(serde_json::json!({
-            "id": info.template.id,
-            "name": info.template.name,
-            "icon": info.template.icon,
-            "category": info.template.category.to_string(),
-            "status": status,
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
-        }));
-    }
-
+    let entries: Vec<serde_json::Value> = catalog
+        .list()
+        .iter()
+        .map(|e| render_catalog_entry(e, &installed_ids))
+        .collect();
     Json(serde_json::json!({
-        "installed": entries,
+        "entries": entries,
         "count": entries.len(),
     }))
 }
 
-/// GET /api/integrations/:id — Get a single integration by ID.
+/// GET /api/mcp/catalog/{id} — Single catalog entry detail.
 #[utoipa::path(
     get,
-    path = "/api/integrations/{id}",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
+    path = "/api/mcp/catalog/{id}",
+    tag = "mcp",
+    params(("id" = String, Path, description = "Catalog entry id")),
     responses(
-        (status = 200, description = "Integration detail", body = serde_json::Value),
-        (status = 404, description = "Integration not found", body = serde_json::Value),
+        (status = 200, description = "Catalog entry detail", body = serde_json::Value),
+        (status = 404, description = "Catalog entry not found", body = serde_json::Value),
     )
 )]
-pub async fn get_integration(
+pub async fn get_mcp_catalog_entry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let registry = state
+    let installed_ids = collect_installed_catalog_ids(&state);
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
-
-    // Look up the template first
-    let template = match registry.get_template(&id) {
-        Some(t) => t,
-        None => {
-            return ApiErrorResponse::not_found(format!("Integration '{}' not found", id))
-                .into_json_tuple()
-                .into_response();
-        }
-    };
-
-    let installed = registry.get_installed(&id);
-    let h = health.get_health(&id);
-
-    let status = integration_status_str(installed, h.as_ref());
-
-    let error_message = h.as_ref().and_then(|h| match &h.status {
-        librefang_extensions::IntegrationStatus::Error(msg) => Some(msg.clone()),
-        _ => None,
-    });
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": template.id,
-            "name": template.name,
-            "description": template.description,
-            "icon": template.icon,
-            "category": template.category.to_string(),
-            "status": status,
-            "tags": template.tags,
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed": installed.is_some(),
-            "enabled": installed.map(|i| i.enabled).unwrap_or(false),
-            "installed_at": installed.map(|i| i.installed_at.to_rfc3339()),
-            "has_oauth": template.oauth.is_some(),
-            "setup_instructions": template.setup_instructions,
-            "required_env": template.required_env.iter().map(|e| serde_json::json!({
-                "name": e.name,
-                "label": e.label,
-                "help": e.help,
-                "is_secret": e.is_secret,
-                "get_url": e.get_url,
-            })).collect::<Vec<_>>(),
-            "error": error_message,
-        })),
-    )
-        .into_response()
+    match catalog.get(&id) {
+        Some(entry) => (
+            StatusCode::OK,
+            Json(render_catalog_entry(entry, &installed_ids)),
+        ),
+        None => ApiErrorResponse::not_found(format!("MCP catalog entry '{}' not found", id))
+            .into_json_tuple(),
+    }
 }
 
-/// GET /api/integrations/available — List all available templates.
+/// POST /api/mcp/servers/{name}/reconnect — Force a reconnect of an MCP server.
 #[utoipa::path(
-    get,
-    path = "/api/integrations/available",
-    tag = "integrations",
+    post,
+    path = "/api/mcp/servers/{name}/reconnect",
+    tag = "mcp",
+    params(("name" = String, Path, description = "Server name")),
     responses(
-        (status = 200, description = "List all available integration templates", body = serde_json::Value)
+        (status = 200, description = "Reconnect an MCP server", body = serde_json::Value),
+        (status = 404, description = "MCP server not configured", body = serde_json::Value),
     )
 )]
-pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+pub async fn reconnect_mcp_server_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let configured = state
         .kernel
-        .extensions()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let templates: Vec<serde_json::Value> = registry
-        .list_templates()
+        .config_ref()
+        .mcp_servers
         .iter()
-        .map(|t| {
-            let installed = registry.is_installed(&t.id);
-            let transport = match &t.transport {
-                librefang_extensions::McpTransportTemplate::Stdio { command, args } => {
-                    serde_json::json!({ "type": "stdio", "command": command, "args": args })
-                }
-                librefang_extensions::McpTransportTemplate::Sse { url } => {
-                    serde_json::json!({ "type": "sse", "url": url })
-                }
-                librefang_extensions::McpTransportTemplate::Http { url } => {
-                    serde_json::json!({ "type": "http", "url": url })
-                }
-            };
-            serde_json::json!({
-                "id": t.id,
-                "name": t.name,
-                "description": t.description,
-                "icon": t.icon,
-                "category": t.category.to_string(),
-                "installed": installed,
-                "tags": t.tags,
-                "transport": transport,
-                "required_env": t.required_env.iter().map(|e| serde_json::json!({
-                    "name": e.name,
-                    "label": e.label,
-                    "help": e.help,
-                    "is_secret": e.is_secret,
-                    "get_url": e.get_url,
-                })).collect::<Vec<_>>(),
-                "has_oauth": t.oauth.is_some(),
-                "setup_instructions": t.setup_instructions,
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "integrations": templates,
-        "count": templates.len(),
-    }))
-}
-
-/// POST /api/integrations/add — Install an integration.
-#[utoipa::path(
-    post,
-    path = "/api/integrations/add",
-    tag = "integrations",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, description = "Install an integration", body = serde_json::Value)
-    )
-)]
-pub async fn add_integration(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let id = match req.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id.to_string(),
-        None => {
-            return ApiErrorResponse::bad_request("Missing 'id' field").into_json_tuple();
-        }
-    };
-
-    // Scope the write lock so it's dropped before any .await
-    let install_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if registry.is_installed(&id) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Integration '{}' already installed", id),
-            ))
-        } else if registry.get_template(&id).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown integration: '{}'", id),
-            ))
-        } else {
-            let entry = librefang_extensions::InstalledIntegration {
-                id: id.clone(),
-                installed_at: chrono::Utc::now(),
-                enabled: true,
-                oauth_provider: None,
-                config: std::collections::HashMap::new(),
-            };
-            match registry.install(entry) {
-                Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-    }; // write lock dropped here
-
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
-    }
-
-    state.kernel.extension_monitor().register(&id);
-
-    // Hot-connect the new MCP server
-    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "installed",
-            "connected": connected > 0,
-            "message": format!("Integration '{}' installed", id),
-        })),
-    )
-}
-
-/// DELETE /api/integrations/:id — Remove an integration.
-#[utoipa::path(
-    delete,
-    path = "/api/integrations/{id}",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
-    responses(
-        (status = 200, description = "Remove an integration", body = serde_json::Value)
-    )
-)]
-pub async fn remove_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    // Scope the write lock
-    let uninstall_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.uninstall(&id).err()
-    };
-
-    if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
-    }
-
-    state.kernel.extension_monitor().unregister(&id);
-
-    // Hot-disconnect the removed MCP server
-    if let Err(e) = state.kernel.reload_extension_mcps().await {
-        tracing::warn!("Failed to reload MCP extensions: {e}");
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "removed",
-        })),
-    )
-}
-
-/// POST /api/integrations/:id/reconnect — Reconnect an MCP server.
-#[utoipa::path(
-    post,
-    path = "/api/integrations/{id}/reconnect",
-    tag = "integrations",
-    params(
-        ("id" = String, Path, description = "Integration ID"),
-    ),
-    responses(
-        (status = 200, description = "Reconnect an integration MCP server", body = serde_json::Value)
-    )
-)]
-pub async fn reconnect_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let is_installed = {
-        let registry = state
-            .kernel
-            .extensions()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.is_installed(&id)
-    };
-
-    if !is_installed {
-        return ApiErrorResponse::not_found(format!("Integration '{}' not installed", id))
+        .any(|s| s.name == name);
+    if !configured {
+        return ApiErrorResponse::not_found(format!("MCP server '{}' not configured", name))
             .into_json_tuple();
     }
 
-    match state.kernel.reconnect_extension_mcp(&id).await {
+    match state.kernel.reconnect_mcp_server(&name).await {
         Ok(tool_count) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "id": id,
+                "id": name,
                 "status": "connected",
                 "tool_count": tool_count,
             })),
@@ -4034,7 +4967,7 @@ pub async fn reconnect_integration(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "id": id,
+                "id": name,
                 "status": "error",
                 "error": e,
             })),
@@ -4042,17 +4975,17 @@ pub async fn reconnect_integration(
     }
 }
 
-/// GET /api/integrations/health — Health status for all integrations.
+/// GET /api/mcp/health — Health snapshot across all configured MCP servers.
 #[utoipa::path(
     get,
-    path = "/api/integrations/health",
-    tag = "integrations",
+    path = "/api/mcp/health",
+    tag = "mcp",
     responses(
-        (status = 200, description = "Health status for all integrations", body = serde_json::Value)
+        (status = 200, description = "Health snapshot for all configured MCP servers", body = serde_json::Value)
     )
 )]
-pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health_entries = state.kernel.extension_monitor().all_health();
+pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let health_entries = state.kernel.mcp_health().all_health();
     let entries: Vec<serde_json::Value> = health_entries
         .iter()
         .map(|h| {
@@ -4076,17 +5009,26 @@ pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl Int
     }))
 }
 
-/// POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.
+/// POST /api/mcp/reload — Re-read the catalog and reconnect MCP servers.
 #[utoipa::path(
     post,
-    path = "/api/integrations/reload",
-    tag = "integrations",
+    path = "/api/mcp/reload",
+    tag = "mcp",
     responses(
-        (status = 200, description = "Hot-reload integration configs and reconnect MCP", body = serde_json::Value)
+        (status = 200, description = "Reload catalog and reconnect MCP servers", body = serde_json::Value)
     )
 )]
-pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.reload_extension_mcps().await {
+pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Sync the in-memory config with config.toml before reconnecting.
+    // `reload_mcp_servers` reads from `self.config.load_full()`, so if the
+    // caller just edited config.toml out-of-band (the CLI's `librefang mcp
+    // add/remove` does this, then POSTs /api/mcp/reload) the reload would
+    // otherwise run against the stale snapshot and miss the change.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config before MCP reload: {e}");
+    }
+
+    match state.kernel.reload_mcp_servers().await {
         Ok(connected) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -4099,49 +5041,80 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 // ---------------------------------------------------------------------------
-// Extension management endpoints
+// Extension management endpoints — kept as dashboard-friendly aliases over
+// the unified store. Installed state comes from config.mcp_servers with
+// `template_id` set; catalog-only entries come from the McpCatalog.
 // ---------------------------------------------------------------------------
 
-/// GET /api/extensions — List all installed extensions (integrations) with status.
+fn installed_servers_by_template(
+    servers: &[librefang_types::config::McpServerConfigEntry],
+) -> std::collections::HashMap<String, &librefang_types::config::McpServerConfigEntry> {
+    let mut map = std::collections::HashMap::new();
+    for s in servers {
+        if let Some(tid) = &s.template_id {
+            map.insert(tid.clone(), s);
+        }
+    }
+    map
+}
+
+fn status_str_for_catalog(
+    template_id: &str,
+    installed_by_template: &std::collections::HashMap<
+        String,
+        &librefang_types::config::McpServerConfigEntry,
+    >,
+    health: &librefang_extensions::health::HealthMonitor,
+) -> &'static str {
+    match installed_by_template.get(template_id) {
+        Some(srv) => match health.get_health(&srv.name).as_ref().map(|h| &h.status) {
+            Some(librefang_extensions::McpStatus::Ready) => "ready",
+            Some(librefang_extensions::McpStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    }
+}
+
+/// GET /api/extensions — List catalog entries annotated with installed state.
 #[utoipa::path(
     get,
     path = "/api/extensions",
     tag = "extensions",
     responses(
-        (status = 200, description = "List all installed extensions with status", body = serde_json::Value)
+        (status = 200, description = "List catalog entries with install/health status", body = serde_json::Value)
     )
 )]
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
+    let cfg = state.kernel.config_snapshot();
+    let installed_map = installed_servers_by_template(&cfg.mcp_servers);
+    let health = state.kernel.mcp_health();
+
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_monitor();
 
     let mut extensions = Vec::new();
-    for info in registry.list_all_info() {
-        let h = health.get_health(&info.template.id);
-        let status = match &info.installed {
-            Some(inst) if !inst.enabled => "disabled",
-            Some(_) => match h.as_ref().map(|h| &h.status) {
-                Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-                Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-                _ => "installed",
-            },
-            None => "available",
-        };
+    for entry in catalog.list() {
+        let status = status_str_for_catalog(&entry.id, &installed_map, health);
+        let installed_entry = installed_map.get(&entry.id);
+        let tool_count = installed_entry
+            .and_then(|srv| health.get_health(&srv.name))
+            .map(|h| h.tool_count)
+            .unwrap_or(0);
         extensions.push(serde_json::json!({
-            "name": info.template.id,
-            "display_name": info.template.name,
-            "description": info.template.description,
-            "icon": info.template.icon,
-            "category": info.template.category.to_string(),
+            "name": entry.id,
+            "display_name": entry.name,
+            "description": entry.description,
+            "icon": entry.icon,
+            "category": entry.category.to_string(),
             "status": status,
-            "tags": info.template.tags,
-            "installed": info.installed.is_some(),
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+            "tags": entry.tags,
+            "installed": installed_entry.is_some(),
+            "tool_count": tool_count,
+            "installed_at": serde_json::Value::Null,
         }));
     }
 
@@ -4151,72 +5124,68 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     }))
 }
 
-/// GET /api/extensions/:name — Get details for a single extension by name.
+/// GET /api/extensions/:name — Get details for a single catalog entry.
 #[utoipa::path(
     get,
     path = "/api/extensions/{name}",
     tag = "extensions",
     params(
-        ("name" = String, Path, description = "Extension name"),
+        ("name" = String, Path, description = "Catalog entry id"),
     ),
     responses(
-        (status = 200, description = "Get details for a single extension", body = serde_json::Value)
+        (status = 200, description = "Catalog entry detail + install status", body = serde_json::Value)
     )
 )]
 pub async fn get_extension(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let registry = state
+    let cfg = state.kernel.config_snapshot();
+    let installed_map = installed_servers_by_template(&cfg.mcp_servers);
+    let catalog = state
         .kernel
-        .extensions()
+        .mcp_catalog()
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
-    let template = match registry.get_template(&name) {
+    let entry = match catalog.get(&name) {
         Some(t) => t.clone(),
         None => {
             return ApiErrorResponse::not_found(format!("Extension '{}' not found", name))
                 .into_json_tuple();
         }
     };
+    drop(catalog);
 
-    let installed = registry.get_installed(&name).cloned();
-    let health = state.kernel.extension_monitor().get_health(&name);
+    let installed_entry = installed_map.get(&entry.id);
+    let health = state.kernel.mcp_health();
+    let health_snapshot = installed_entry.and_then(|srv| health.get_health(&srv.name));
 
-    let status = match &installed {
-        Some(inst) if !inst.enabled => "disabled",
-        Some(_) => match health.as_ref().map(|h| &h.status) {
-            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-            _ => "installed",
-        },
-        None => "available",
-    };
+    let status = status_str_for_catalog(&entry.id, &installed_map, health);
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "name": template.id,
-            "display_name": template.name,
-            "description": template.description,
-            "icon": template.icon,
-            "category": template.category.to_string(),
+            "name": entry.id,
+            "display_name": entry.name,
+            "description": entry.description,
+            "icon": entry.icon,
+            "category": entry.category.to_string(),
             "status": status,
-            "tags": template.tags,
-            "installed": installed.is_some(),
-            "tool_count": health.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
-            "required_env": template.required_env.iter().map(|e| serde_json::json!({
+            "tags": entry.tags,
+            "installed": installed_entry.is_some(),
+            "tool_count": health_snapshot.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed_at": serde_json::Value::Null,
+            "required_env": entry.required_env.iter().map(|e| serde_json::json!({
                 "name": e.name,
                 "label": e.label,
                 "help": e.help,
                 "is_secret": e.is_secret,
                 "get_url": e.get_url,
             })).collect::<Vec<_>>(),
-            "has_oauth": template.oauth.is_some(),
-            "setup_instructions": template.setup_instructions,
-            "health": health.as_ref().map(|h| serde_json::json!({
+            "has_oauth": entry.oauth.is_some(),
+            "setup_instructions": entry.setup_instructions,
+            "health": health_snapshot.as_ref().map(|h| serde_json::json!({
                 "last_ok": h.last_ok.map(|t| t.to_rfc3339()),
                 "last_error": h.last_error,
                 "consecutive_failures": h.consecutive_failures,
@@ -4226,14 +5195,15 @@ pub async fn get_extension(
     )
 }
 
-/// POST /api/extensions/install — Install an extension by name.
+/// POST /api/extensions/install — Install a catalog entry (alias for
+/// POST /api/mcp/servers with template_id).
 #[utoipa::path(
     post,
     path = "/api/extensions/install",
     tag = "extensions",
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Install an extension by name", body = serde_json::Value)
+        (status = 200, description = "Install a catalog entry", body = serde_json::Value)
     )
 )]
 pub async fn install_extension(
@@ -4245,47 +5215,78 @@ pub async fn install_extension(
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
-    // Scope the write lock so it's dropped before any .await
-    let install_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if registry.is_installed(&name) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Extension '{}' already installed", name),
-            ))
-        } else if registry.get_template(&name).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown extension: '{}'", name),
-            ))
-        } else {
-            let entry = librefang_extensions::InstalledIntegration {
-                id: name.clone(),
-                installed_at: chrono::Utc::now(),
-                enabled: true,
-                oauth_provider: None,
-                config: std::collections::HashMap::new(),
-            };
-            match registry.install(entry) {
-                Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-    }; // write lock dropped here
-
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
+    let already_installed = state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .any(|s| s.template_id.as_deref() == Some(name.as_str()) || s.name == name);
+    if already_installed {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Extension '{}' already installed", name),
+            })),
+        );
     }
 
-    state.kernel.extension_monitor().register(&name);
+    // Reuse the installer via an ephemeral catalog load.
+    let home = state.kernel.home_dir().to_path_buf();
+    let dotenv_path = home.join(".env");
+    let vault_path = home.join("vault.enc");
+    let vault = if vault_path.exists() {
+        let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if v.unlock().is_ok() {
+            Some(v)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut resolver =
+        librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
+    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
+    catalog.load(&home);
 
-    // Hot-connect the new MCP server
-    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
+    let result = match librefang_extensions::installer::install_integration(
+        &catalog,
+        &mut resolver,
+        &name,
+        &std::collections::HashMap::new(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            let err_str = e.to_string();
+            let status = match e {
+                librefang_extensions::ExtensionError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, Json(serde_json::json!({"error": err_str})));
+        }
+    };
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to write config: {e}"),
+            })),
+        );
+    }
+
+    // Sync the in-memory config with the freshly-written config.toml before
+    // reload_mcp_servers runs. `reload_mcp_servers` reads from
+    // `self.config.load_full()`, so skipping this step means the just-added
+    // [[mcp_servers]] entry is invisible and the endpoint reports "installed"
+    // without actually connecting anything.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config after extension install: {e}");
+    }
+
+    state.kernel.mcp_health().register(&result.server.name);
+    let connected = state.kernel.reload_mcp_servers().await.unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -4297,14 +5298,14 @@ pub async fn install_extension(
     )
 }
 
-/// POST /api/extensions/uninstall — Uninstall an extension by name.
+/// POST /api/extensions/uninstall — Uninstall by catalog id (template_id).
 #[utoipa::path(
     post,
     path = "/api/extensions/uninstall",
     tag = "extensions",
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Uninstall an extension by name", body = serde_json::Value)
+        (status = 200, description = "Uninstall a catalog-backed MCP server", body = serde_json::Value)
     )
 )]
 pub async fn uninstall_extension(
@@ -4316,25 +5317,41 @@ pub async fn uninstall_extension(
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
     }
 
-    // Scope the write lock
-    let uninstall_err = {
-        let mut registry = state
-            .kernel
-            .extensions()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.uninstall(&name).err()
+    // Resolve template_id -> server name (may differ for raw-authored entries).
+    let server_name = state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .find(|s| s.template_id.as_deref() == Some(name.as_str()) || s.name == name)
+        .map(|s| s.name.clone());
+
+    let server_name = match server_name {
+        Some(n) => n,
+        None => {
+            return ApiErrorResponse::not_found(format!("Extension '{}' not installed", name))
+                .into_json_tuple();
+        }
     };
 
-    if let Some(e) = uninstall_err {
-        return ApiErrorResponse::not_found(e.to_string()).into_json_tuple();
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
+        return ApiErrorResponse::internal(format!("Failed to update config: {e}"))
+            .into_json_tuple();
     }
 
-    state.kernel.extension_monitor().unregister(&name);
+    // Sync the in-memory config before reload_mcp_servers runs. Otherwise
+    // `self.config.load_full()` still returns the stale snapshot with the
+    // removed entry and `reload_mcp_servers` happily reconnects the server
+    // we just deleted.
+    if let Err(e) = state.kernel.reload_config().await {
+        tracing::warn!("Failed to reload config after extension uninstall: {e}");
+    }
 
-    // Hot-disconnect the removed MCP server
-    if let Err(e) = state.kernel.reload_extension_mcps().await {
-        tracing::warn!("Failed to reload MCP extensions after uninstall: {e}");
+    state.kernel.mcp_health().unregister(&server_name);
+    state.kernel.disconnect_mcp_server(&server_name).await;
+    if let Err(e) = state.kernel.reload_mcp_servers().await {
+        tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
     }
 
     (
@@ -4381,6 +5398,7 @@ mod tests {
 
         let entry = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Stdio {
                 command: "npx".to_string(),
                 args: vec![
@@ -4439,6 +5457,7 @@ mod tests {
 
         let v1 = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Http {
                 url: "http://old:8080/mcp".to_string(),
             }),
@@ -4452,6 +5471,7 @@ mod tests {
 
         let v2 = McpServerConfigEntry {
             name: "nocodb".to_string(),
+            template_id: None,
             transport: Some(McpTransportEntry::Http {
                 url: "http://new:9090/mcp".to_string(),
             }),

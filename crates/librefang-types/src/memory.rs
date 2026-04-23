@@ -221,10 +221,13 @@ impl Default for ProactiveMemoryConfig {
             extraction_threshold: 0.7,
             extraction_model: None,
             extract_categories: vec![
-                "user_preference".to_string(),
-                "important_fact".to_string(),
-                "task_context".to_string(),
-                "relationship".to_string(),
+                "communication_style".to_string(),
+                "preference".to_string(),
+                "expertise".to_string(),
+                "work_style".to_string(),
+                "project_context".to_string(),
+                "personal_detail".to_string(),
+                "frustration".to_string(),
             ],
             session_ttl_hours: 24,
             duplicate_threshold: 0.5,
@@ -324,16 +327,31 @@ pub enum MemoryAction {
 pub trait MemoryExtractor: Send + Sync {
     /// Extract important memories from conversation messages using LLM.
     ///
-    /// Takes conversation messages and returns extracted memory items.
-    /// The implementation should use an LLM to identify:
-    /// - User preferences
-    /// - Important facts
-    /// - Task context
-    /// - Relationship information
+    /// `categories` is the caller-supplied list from `ProactiveMemoryConfig::extract_categories`.
+    /// Implementations must restrict extracted memories to these categories so that the
+    /// config is the single source of truth — not a hardcoded list inside the prompt.
     async fn extract_memories(
         &self,
         messages: &[serde_json::Value],
+        categories: &[String],
     ) -> crate::error::LibreFangResult<ExtractionResult>;
+
+    /// Same as `extract_memories` but also passes the invoking agent's
+    /// id, so implementors can route their LLM call through a forked
+    /// agent turn (shared prompt cache with the parent) instead of a
+    /// standalone provider request. Callers that know the agent id
+    /// (notably auto_memorize, which parses it out of `user_id`) should
+    /// prefer this method. Default delegates to `extract_memories`,
+    /// ignoring `agent_id` — appropriate for the rule-based extractor
+    /// which never touches an LLM.
+    async fn extract_memories_with_agent_id(
+        &self,
+        messages: &[serde_json::Value],
+        _agent_id: &str,
+        categories: &[String],
+    ) -> crate::error::LibreFangResult<ExtractionResult> {
+        self.extract_memories(messages, categories).await
+    }
 
     /// Decide what to do with a new memory given existing similar memories.
     ///
@@ -553,6 +571,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
     async fn extract_memories(
         &self,
         messages: &[serde_json::Value],
+        _categories: &[String],
     ) -> crate::error::LibreFangResult<ExtractionResult> {
         let mut memories = Vec::new();
         let mut relations = Vec::new();
@@ -594,7 +613,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                         &mut memories,
                         &extracted,
                         MemoryLevel::User,
-                        "user_preference",
+                        "preference",
                         role,
                     );
                     relations.push(RelationTriple {
@@ -634,7 +653,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                         &mut memories,
                         &extracted,
                         MemoryLevel::User,
-                        "important_fact",
+                        "personal_detail",
                         role,
                     );
                     relations.push(RelationTriple {
@@ -668,7 +687,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                         &mut memories,
                         &extracted,
                         MemoryLevel::User,
-                        "user_preference",
+                        "preference",
                         role,
                     );
                     relations.push(RelationTriple {
@@ -705,7 +724,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                             &mut memories,
                             &extracted,
                             MemoryLevel::Session,
-                            "task_context",
+                            "project_context",
                             role,
                         );
                     }

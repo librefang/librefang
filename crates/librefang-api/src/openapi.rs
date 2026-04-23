@@ -123,28 +123,23 @@ use crate::types;
         routes::hand_instance_browser,
         routes::reload_hands,
 
-        // ── MCP Servers ──
+        // ── MCP Servers (unified) ──
         routes::list_mcp_servers,
         routes::get_mcp_server,
         routes::add_mcp_server,
         routes::update_mcp_server,
         routes::delete_mcp_server,
+        routes::reconnect_mcp_server_handler,
+        routes::list_mcp_catalog,
+        routes::get_mcp_catalog_entry,
+        routes::mcp_health_handler,
+        routes::reload_mcp_handler,
 
-        // ── Extensions ──
+        // ── Extensions (dashboard-friendly aliases over MCP store) ──
         routes::list_extensions,
         routes::get_extension,
         routes::install_extension,
         routes::uninstall_extension,
-
-        // ── Integrations ──
-        routes::list_integrations,
-        routes::get_integration,
-        routes::list_available_integrations,
-        routes::add_integration,
-        routes::remove_integration,
-        routes::reconnect_integration,
-        routes::integrations_health,
-        routes::reload_integrations,
 
         // ── Models & Providers ──
         routes::list_models,
@@ -187,6 +182,7 @@ use crate::types;
         routes::save_workflow_as_template,
         routes::list_triggers,
         routes::create_trigger,
+        routes::get_trigger,
         routes::delete_trigger,
         routes::update_trigger,
         routes::list_schedules,
@@ -220,6 +216,12 @@ use crate::types;
         routes::usage_summary,
         routes::usage_by_model,
         routes::usage_daily,
+
+        // ── Auto-Dream (background memory consolidation) ──
+        routes::auto_dream_status,
+        routes::auto_dream_trigger,
+        routes::auto_dream_abort,
+        routes::auto_dream_set_enabled,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -340,6 +342,7 @@ use crate::types;
         types::BulkActionResult,
         types::ExtensionInstallRequest,
         types::ExtensionUninstallRequest,
+        routes::auto_dream::SetEnabledRequest,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),
@@ -347,8 +350,7 @@ use crate::types;
         (name = "skills", description = "Skill and tool management, ClawHub marketplace"),
         (name = "hands", description = "Browser automation hands management"),
         (name = "mcp", description = "MCP server management and protocol endpoints"),
-        (name = "extensions", description = "Extension/integration management"),
-        (name = "integrations", description = "Third-party integration connections"),
+        (name = "extensions", description = "Extension management"),
         (name = "models", description = "Model catalog, aliases, and provider management"),
         (name = "channels", description = "Messaging channel configuration"),
         (name = "workflows", description = "Workflow, trigger, schedule, and cron job management"),

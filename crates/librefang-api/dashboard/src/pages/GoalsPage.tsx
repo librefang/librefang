@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createGoal, listGoals, listGoalTemplates, updateGoal, deleteGoal, type GoalItem, type GoalTemplate } from "../api";
+import { type GoalItem, type GoalTemplate } from "../api";
+import { useGoals, useGoalTemplates } from "../lib/queries/goals";
+import { useCreateGoal, useUpdateGoal, useDeleteGoal } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { Card } from "../components/ui/Card";
@@ -9,8 +10,6 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, ChevronDown, ChevronRight } from "lucide-react";
-
-const REFRESH_MS = 30000;
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   rocket: Rocket,
@@ -23,7 +22,6 @@ const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>
 
 export function GoalsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
   const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0, parent_id: "", agent_id: "" });
@@ -31,15 +29,33 @@ export function GoalsPage() {
   const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0 });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const goalsQuery = useQuery({ queryKey: ["goals", "list"], queryFn: listGoals, refetchInterval: REFRESH_MS });
-  const templatesQuery = useQuery({ queryKey: ["goals", "templates"], queryFn: listGoalTemplates });
+  const goalsQuery = useGoals();
+  const templatesQuery = useGoalTemplates();
   const [applyingTemplate, setApplyingTemplate] = useState<string | null>(null);
 
-  const createMutation = useMutation({ mutationFn: createGoal });
-  const updateMutation = useMutation({ mutationFn: ({ id, data }: { id: string; data: any }) => updateGoal(id, data) });
-  const deleteMutation = useMutation({ mutationFn: deleteGoal });
+  const createMutation = useCreateGoal();
+  const updateMutation = useUpdateGoal();
+  const deleteMutation = useDeleteGoal();
   const goals = goalsQuery.data ?? [];
   const templates = templatesQuery.data ?? [];
+
+  const runBatch = async <T,>(items: readonly T[], action: (item: T) => Promise<unknown>) => {
+    let succeeded = 0;
+    for (const item of items) {
+      try {
+        await action(item);
+        succeeded += 1;
+      } catch {
+        // Continue so batch actions report aggregate success/failure totals.
+      }
+    }
+
+    return {
+      total: items.length,
+      succeeded,
+      failed: items.length - succeeded,
+    };
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,7 +64,6 @@ export function GoalsPage() {
       await createMutation.mutateAsync(createDraft);
       addToast(t("common.success"), "success");
       setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "" });
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -57,13 +72,19 @@ export function GoalsPage() {
   const handleApplyTemplate = async (tpl: GoalTemplate) => {
     setApplyingTemplate(tpl.id);
     try {
-      for (const g of tpl.goals) {
-        await createMutation.mutateAsync(g);
+      const result = await runBatch(tpl.goals, (goal) => createMutation.mutateAsync(goal));
+      if (result.failed === 0) {
+        addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
+      } else {
+        addToast(
+          t("goals.apply_template_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
-      addToast(t("common.success"), "success");
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
     } finally {
       setApplyingTemplate(null);
     }
@@ -85,7 +106,6 @@ export function GoalsPage() {
       await updateMutation.mutateAsync({ id: editingId, data: editDraft });
       addToast(t("common.success"), "success");
       setEditingId(null);
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -96,7 +116,6 @@ export function GoalsPage() {
       await deleteMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
       setConfirmDeleteId(null);
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -112,7 +131,6 @@ export function GoalsPage() {
     const status = nextStatus(current);
     try {
       await updateMutation.mutateAsync({ id, data: { status, progress: status === "completed" ? 100 : status === "in_progress" ? 50 : 0 } });
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -120,11 +138,20 @@ export function GoalsPage() {
 
   const handleClearAll = async () => {
     try {
-      for (const g of goals) {
-        await deleteMutation.mutateAsync(g.id);
+      const result = await runBatch(goals, (goal) => deleteMutation.mutateAsync(goal.id));
+      if (result.failed === 0) {
+        addToast(`${t("common.success")} (${result.succeeded}/${result.total})`, "success");
+        setShowClearConfirm(false);
+      } else {
+        addToast(
+          t("goals.clear_all_partial", {
+            succeeded: result.succeeded,
+            total: result.total,
+            failed: result.failed,
+          }),
+          result.succeeded > 0 ? "info" : "error",
+        );
       }
-      addToast(t("common.success"), "success");
-      await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
     }
@@ -133,20 +160,25 @@ export function GoalsPage() {
   const rows = useMemo(() => {
     const roots: GoalItem[] = [];
     const childrenByParent = new Map<string, GoalItem[]>();
+    const goalsById = new Map(goals.map(goal => [goal.id, goal]));
     for (const goal of goals) {
-      if (goal.parent_id) {
+      if (goal.parent_id && goalsById.has(goal.parent_id)) {
         const list = childrenByParent.get(goal.parent_id) ?? [];
         list.push(goal);
         childrenByParent.set(goal.parent_id, list);
       } else roots.push(goal);
     }
     const result: { goal: GoalItem; depth: number; hasChildren: boolean }[] = [];
+    const visited = new Set<string>();
     function walk(goal: GoalItem, depth: number) {
+      if (visited.has(goal.id)) return;
+      visited.add(goal.id);
       const children = childrenByParent.get(goal.id) ?? [];
       result.push({ goal, depth, hasChildren: children.length > 0 });
       if (expandedById[goal.id]) for (const child of children) walk(child, depth + 1);
     }
     for (const root of roots) walk(root, 0);
+    for (const goal of goals) walk(goal, 0);
     return result;
   }, [expandedById, goals]);
 
@@ -258,7 +290,7 @@ export function GoalsPage() {
             </div>
             <div className="h-2.5 rounded-full bg-main overflow-hidden">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-brand to-success transition-all duration-700"
+                className="h-full rounded-full bg-linear-to-r from-brand to-success transition-all duration-700"
                 style={{ width: `${stats.pct}%` }}
               />
             </div>
@@ -268,7 +300,7 @@ export function GoalsPage() {
                 {showClearConfirm ? (
                   <>
                     <span className="text-error">{t("goals.clear_all_confirm")}</span>
-                    <button onClick={() => { handleClearAll(); setShowClearConfirm(false); }} className="text-error font-bold hover:underline">{t("common.confirm")}</button>
+                    <button onClick={() => void handleClearAll()} className="text-error font-bold hover:underline">{t("common.confirm")}</button>
                     <button onClick={() => setShowClearConfirm(false)} className="hover:underline">{t("common.cancel")}</button>
                   </>
                 ) : (

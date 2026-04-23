@@ -531,6 +531,28 @@ pub struct BrowserConfig {
     pub max_sessions: usize,
     /// Path to Chromium/Chrome binary. Auto-detected if None.
     pub chromium_path: Option<String>,
+    /// Remote CDP endpoint to attach to instead of spawning a local Chromium.
+    ///
+    /// Accepted formats:
+    /// - `ws://host:port/devtools/browser/<id>` — page-level WebSocket (direct attach)
+    /// - `http://host:port` — HTTP discovery endpoint; librefang calls `GET /json/new`
+    ///   to create a fresh tab and connects to the returned WebSocket URL.
+    ///
+    /// When set, `headless`, `chromium_path`, and local-process discovery are
+    /// ignored. Browser lifecycle (start/stop) is the operator's responsibility.
+    ///
+    /// **Security**: CDP is unauthenticated. Never expose the debugging port on a
+    /// public interface. Use SSH tunnels, WireGuard, or a trusted-network path.
+    #[serde(default)]
+    pub cdp_endpoint: Option<String>,
+    /// Environment variable that holds a bearer token for the CDP endpoint.
+    ///
+    /// Some CDP proxies (e.g. Browserless) require `Authorization: Bearer <token>`
+    /// on the WebSocket upgrade request. Set this to the name of an env var that
+    /// contains the token (e.g. `"LIBREFANG_CDP_TOKEN"`); librefang reads the
+    /// value at connect time and never logs it.
+    #[serde(default)]
+    pub cdp_auth_token_env: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -544,6 +566,8 @@ impl Default for BrowserConfig {
             idle_timeout_secs: 300,
             max_sessions: 5,
             chromium_path: None,
+            cdp_endpoint: None,
+            cdp_auth_token_env: None,
         }
     }
 }
@@ -948,9 +972,15 @@ pub struct SkillsConfig {
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
     pub load_user: bool,
     /// Extra skill directories to scan in addition to `~/.librefang/skills/`.
-    /// Each entry must be an absolute path.
+    /// Each entry must be an absolute path. Scanned read-only after the
+    /// primary skills dir; local skills with the same name win.
     #[serde(default)]
     pub extra_dirs: Vec<std::path::PathBuf>,
+    /// Names of skills to skip at load time. Useful for quickly disabling
+    /// a skill (agent-evolved or marketplace-installed) without deleting
+    /// its directory. Matching is case-sensitive on the skill manifest name.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for SkillsConfig {
@@ -958,6 +988,7 @@ impl Default for SkillsConfig {
         Self {
             load_user: true,
             extra_dirs: Vec::new(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -1454,6 +1485,88 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Session auto-reset policy types
+// ---------------------------------------------------------------------------
+
+/// Which automatic-reset strategy is active for a session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResetMode {
+    /// No automatic reset. Sessions persist indefinitely. (default)
+    #[default]
+    Off,
+    /// Reset after `idle_minutes` of inactivity.
+    Idle,
+    /// Reset once per day at `daily_at_hour` (local clock, 0-23).
+    Daily,
+    /// Reset when *either* idle or daily condition is satisfied.
+    Both,
+}
+
+/// Why a session was last reset (stored on [`AgentEntry`] for observability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResetReason {
+    /// Last-active exceeded `idle_minutes`.
+    Idle,
+    /// The daily fixed-time boundary was crossed.
+    Daily,
+    /// Session was flagged `suspended` (forced by operator / stuck-loop recovery).
+    Suspended,
+    /// Manual reset requested via API or CLI.
+    Manual,
+}
+
+impl std::fmt::Display for SessionResetReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => f.write_str("idle"),
+            Self::Daily => f.write_str("daily"),
+            Self::Suspended => f.write_str("suspended"),
+            Self::Manual => f.write_str("manual"),
+        }
+    }
+}
+
+/// Per-session auto-reset policy.
+///
+/// Configured inside `[session.reset]` in `config.toml`:
+/// ```toml
+/// [session.reset]
+/// mode = "idle"
+/// idle_minutes = 1440   # 24 h
+///
+/// # or
+/// mode = "both"
+/// idle_minutes = 60
+/// daily_at_hour = 4
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionResetPolicy {
+    /// Which reset strategy (or strategies) to apply.
+    pub mode: SessionResetMode,
+    /// Inactivity threshold in minutes for `Idle` / `Both` modes.
+    /// Default: 1440 (24 hours).
+    pub idle_minutes: u64,
+    /// Hour of day (0–23, local clock) at which the `Daily` / `Both` reset fires.
+    /// Default: 4 (04:00 local).
+    pub daily_at_hour: u8,
+}
+
+impl Default for SessionResetPolicy {
+    fn default() -> Self {
+        Self {
+            mode: SessionResetMode::Off,
+            idle_minutes: 1440,
+            daily_at_hour: 4,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// Session retention policy configuration.
 ///
 /// Controls automatic cleanup of idle or excess sessions and optional
@@ -1487,6 +1600,10 @@ pub struct SessionConfig {
     /// Optional shell script to run when a new session is created (fire-and-forget).
     #[serde(default)]
     pub on_session_start_script: Option<String>,
+    /// Automatic session-reset policy (idle timeout and/or daily fixed-time reset).
+    /// Default: `mode = "off"` — no automatic resets, fully backward-compatible.
+    #[serde(default)]
+    pub reset: SessionResetPolicy,
 }
 
 impl Default for SessionConfig {
@@ -1498,6 +1615,7 @@ impl Default for SessionConfig {
             reset_prompt: None,
             context_injection: Vec::new(),
             on_session_start_script: None,
+            reset: SessionResetPolicy::default(),
         }
     }
 }
@@ -1655,6 +1773,51 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+        }
+    }
+}
+
+/// Task-board (shared-task-queue) safety knobs.
+///
+/// When a worker agent calls `task_claim` the task transitions to
+/// `in_progress` and `claimed_at` is stamped. If the worker's LLM stalls
+/// (empty response, crash, timeout) it will never call `task_complete`
+/// and the task would otherwise stay `in_progress` forever — no retry,
+/// no external signal, no way for the delegator to know something broke
+/// (issues #2923, #2926).
+///
+/// The sweeper runs in the kernel and flips stuck tasks back to `pending`
+/// so they can be reclaimed, clearing `assigned_to` in the process.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [task_board]
+/// claim_ttl_secs = 600         # 10 minutes — auto-reset after this
+/// sweep_interval_secs = 30     # how often the sweeper runs
+/// ```
+///
+/// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
+/// for long-running human-in-the-loop tasks where a 10 minute reset
+/// would be wrong.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskBoardConfig {
+    /// How long an `in_progress` task may stay claimed before the sweeper
+    /// resets it to `pending`. Default: 600 s (10 minutes). 0 disables.
+    pub claim_ttl_secs: u64,
+    /// How often the sweeper scans for stuck tasks. Default: 30 s.
+    pub sweep_interval_secs: u64,
+    /// Maximum number of auto-resets before a stuck task is marked `failed`.
+    /// Default: 0 = no limit (retry indefinitely).
+    pub max_retries: u32,
+}
+
+impl Default for TaskBoardConfig {
+    fn default() -> Self {
+        Self {
+            claim_ttl_secs: 600,
+            sweep_interval_secs: 30,
+            max_retries: 0,
         }
     }
 }
@@ -1943,6 +2106,21 @@ pub struct KernelConfig {
     /// Cron scheduler max total jobs across all agents. Default: 500.
     #[serde(default = "default_max_cron_jobs")]
     pub max_cron_jobs: usize,
+    /// Maximum estimated token count for the cron session before automatic
+    /// pruning. Oldest messages are removed from the front of the session
+    /// until the estimated count falls below this threshold.
+    ///
+    /// `None` (default) disables pruning and preserves existing behaviour.
+    /// Set to e.g. `100000` for a rolling 100k-token window.
+    #[serde(default)]
+    pub cron_session_max_tokens: Option<u64>,
+    /// Maximum number of messages retained in a cron session. When the
+    /// session exceeds this count the oldest messages are pruned before
+    /// each cron fire. Applied in addition to `cron_session_max_tokens`.
+    ///
+    /// `None` (default) disables message-count pruning.
+    #[serde(default)]
+    pub cron_session_max_messages: Option<usize>,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -2033,6 +2211,9 @@ pub struct KernelConfig {
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
+    /// Task-board (shared task queue) safety knobs — see [`TaskBoardConfig`].
+    #[serde(default)]
+    pub task_board: TaskBoardConfig,
     /// External authentication provider configuration (OAuth2/OIDC).
     #[serde(default)]
     pub external_auth: ExternalAuthConfig,
@@ -2042,6 +2223,9 @@ pub struct KernelConfig {
     /// Proactive memory (mem0-style) configuration.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryConfig,
+    /// Auto-dream (background memory consolidation) configuration.
+    #[serde(default)]
+    pub auto_dream: AutoDreamConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -2103,6 +2287,20 @@ pub struct KernelConfig {
     /// Increase for browser automation or long-running builds.
     #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: u64,
+    /// Per-tool timeout overrides. Exact key matches take priority over glob
+    /// patterns; among globs, the longest matching pattern wins (most specific
+    /// first). Falls back to `tool_timeout_secs` when no entry matches.
+    ///
+    /// Example:
+    /// ```toml
+    /// [tool_timeouts]
+    /// agent_send    = 600
+    /// agent_spawn   = 600
+    /// "mcp_browser_*" = 900
+    /// shell_exec    = 300
+    /// ```
+    #[serde(default)]
+    pub tool_timeouts: std::collections::HashMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -2296,7 +2494,14 @@ pub struct VertexAiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextEngineTomlConfig {
-    /// Built-in engine name. Default: `"default"`.
+    /// Built-in engine name. Supported values:
+    /// - `"default"`: plain [`DefaultContextEngine`] with no additional wrapping
+    /// - `"summary"`: [`SummaryContextEngine`] — threshold-gated LLM summarisation
+    ///   that fires when prompt tokens cross ~80 % of the context window
+    /// - `"no_compact"`: [`NoCompactContextEngine`] — disables automatic compaction
+    ///   while wiring all other lifecycle hooks
+    ///
+    /// Default: `"default"`.
     pub engine: String,
     /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
     /// Takes precedence over manual `hooks` if set.
@@ -3195,6 +3400,95 @@ impl Default for HeartbeatTomlConfig {
     }
 }
 
+/// Auto-dream (background memory consolidation) configuration.
+///
+/// Global toggle and scheduling knobs for the per-agent auto-dream system.
+/// Individual agents still opt in via `auto_dream_enabled = true` on their
+/// manifest — this config only governs *when* the scheduler looks and what
+/// thresholds apply. A dream fires for an agent when all of these hold:
+///
+///   * `[auto_dream] enabled = true` (this struct)
+///   * agent manifest has `auto_dream_enabled = true`
+///   * at least `min_hours` have passed since that agent's last dream
+///   * at least `min_sessions` sessions were touched since then
+///
+/// Configure in config.toml:
+/// ```toml
+/// [auto_dream]
+/// enabled = false
+/// min_hours = 24
+/// min_sessions = 5
+/// check_interval_secs = 86400
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoDreamConfig {
+    /// Master toggle. Default: disabled — when false, no dream fires regardless
+    /// of per-agent opt-in.
+    pub enabled: bool,
+    /// Minimum hours since that agent's last consolidation before the next
+    /// one fires. Default: 24.
+    #[serde(default = "default_auto_dream_min_hours")]
+    pub min_hours: f64,
+    /// Minimum number of sessions touched since that agent's last
+    /// consolidation before the next one fires. Default: 5. Set to 0 to
+    /// disable the session-count gate entirely.
+    #[serde(default = "default_auto_dream_min_sessions")]
+    pub min_sessions: u32,
+    /// How often the *backstop* scheduler loop wakes up to check gates, in
+    /// seconds. Default: 86400 (1 day). The primary trigger is the
+    /// `AgentLoopEnd` hook that fires the moment a turn completes — the
+    /// scheduler only catches opted-in agents that may go a long time
+    /// without any turn (e.g., a channel bot waiting for inbound traffic).
+    /// Lowering this just increases the rate of stat/SQL probes that mostly
+    /// find nothing to do; raising it delays dreams only for the idle
+    /// never-turned case.
+    #[serde(default = "default_auto_dream_check_interval_secs")]
+    pub check_interval_secs: u64,
+    /// Optional override for the lock directory. When empty, defaults to
+    /// `<data_dir>/auto_dream/`. Per-agent locks are stored as
+    /// `<dir>/<agent_id>.lock`.
+    #[serde(default)]
+    pub lock_dir: String,
+    /// Timeout for a single dream invocation in seconds. Default: 600.
+    #[serde(default = "default_auto_dream_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_auto_dream_min_hours() -> f64 {
+    24.0
+}
+
+fn default_auto_dream_min_sessions() -> u32 {
+    5
+}
+
+fn default_auto_dream_check_interval_secs() -> u64 {
+    // 1 day. Dreams are primarily triggered by the AgentLoopEnd hook the
+    // moment a turn ends, not by this scheduler. The scheduler exists to
+    // catch the "agent is opted-in but has no activity" edge case (e.g.
+    // channel bots) where no turn ever fires. 1 day is frequent enough for
+    // that fallback without wasting 144× more stat calls per day.
+    86_400
+}
+
+fn default_auto_dream_timeout_secs() -> u64 {
+    600
+}
+
+impl Default for AutoDreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_hours: default_auto_dream_min_hours(),
+            min_sessions: default_auto_dream_min_sessions(),
+            check_interval_secs: default_auto_dream_check_interval_secs(),
+            lock_dir: String::new(),
+            timeout_secs: default_auto_dream_timeout_secs(),
+        }
+    }
+}
+
 /// Registry sync configuration.
 ///
 /// Configure in config.toml:
@@ -3265,6 +3559,18 @@ fn default_prompt_caching() -> bool {
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
+    /// Catalog template this server was installed from, if any.
+    ///
+    /// Set when the user installs a server via `POST /api/mcp/servers` with
+    /// `{template_id, credentials}` or the CLI `librefang mcp add <id>` flow.
+    /// Stays `None` for manually-authored entries. Used by the dashboard to
+    /// render the catalog badge and by the migrator.
+    // `skip_serializing_if = "Option::is_none"` mirrors the `oauth` field —
+    // `upsert_mcp_server_config` round-trips through serde_json → TOML and
+    // null values would serialize as `template_id = ""`, which fails to
+    // deserialize back into `Option<String>` on reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<String>,
     /// Transport configuration. Optional — entries without transport are skipped at boot.
     pub transport: Option<McpTransportEntry>,
     /// Request timeout in seconds.
@@ -3537,6 +3843,8 @@ impl Default for KernelConfig {
             approval: crate::approval::ApprovalPolicy::default(),
             notification: crate::approval::NotificationConfig::default(),
             max_cron_jobs: default_max_cron_jobs(),
+            cron_session_max_tokens: None,
+            cron_session_max_messages: None,
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
@@ -3562,9 +3870,11 @@ impl Default for KernelConfig {
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
             queue: QueueConfig::default(),
+            task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
+            auto_dream: AutoDreamConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),
@@ -3583,6 +3893,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
+            tool_timeouts: std::collections::HashMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
@@ -4069,6 +4380,21 @@ pub struct ChannelsConfig {
     pub wechat: OneOrMany<WeChatConfig>,
     /// WeCom/WeChat Work configuration(s).
     pub wecom: OneOrMany<WeComConfig>,
+
+    // --- Global file-download settings ---
+    /// Maximum file size in bytes for channel file downloads (default: 50 MB).
+    #[serde(default = "default_file_download_max_bytes")]
+    pub file_download_max_bytes: u64,
+
+    /// Directory to store downloaded files.
+    /// When `None`, defaults to `std::env::temp_dir()/librefang_uploads`.
+    #[serde(default)]
+    pub file_download_dir: Option<String>,
+}
+
+/// Default max file download size: 50 MB.
+fn default_file_download_max_bytes() -> u64 {
+    50 * 1024 * 1024
 }
 
 /// Telegram channel adapter configuration.

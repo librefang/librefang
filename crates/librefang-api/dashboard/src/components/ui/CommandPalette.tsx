@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
-import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio, Terminal } from "lucide-react";
+import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio, Terminal, ExternalLink } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 
@@ -11,7 +11,22 @@ interface CommandItem {
   icon: LucideIcon;
   action: () => void;
   categoryKey: string;
+  external?: boolean;
 }
+
+// Public librefang.ai registry catalog. Keys match the registry categories
+// in librefang-registry, labels are i18n keys already in the dashboard.
+const REGISTRY_ITEMS: { slug: string; labelKey: string; icon: LucideIcon }[] = [
+  { slug: "skills",    labelKey: "nav.skills",    icon: Shield },
+  { slug: "hands",     labelKey: "nav.hands",     icon: Hand },
+  { slug: "agents",    labelKey: "nav.agents",    icon: Bot },
+  { slug: "providers", labelKey: "nav.providers", icon: Server },
+  { slug: "workflows", labelKey: "nav.workflows", icon: Layers },
+  { slug: "channels",  labelKey: "nav.channels",  icon: Network },
+  { slug: "plugins",   labelKey: "nav.plugins",   icon: Puzzle },
+  { slug: "mcp",       labelKey: "nav.mcp_servers", icon: Cpu },
+  // `models` intentionally omitted — librefang.ai has no /models route.
+];
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -24,7 +39,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(isOpen, dialogRef);
+  useFocusTrap(isOpen, dialogRef, true);
 
   const commands = useMemo<CommandItem[]>(() => [
     { id: "overview", labelKey: "nav.overview", categoryKey: "nav.core", icon: Home, action: () => navigate({ to: "/overview" }) },
@@ -56,6 +71,17 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     { id: "config-network", labelKey: "config.cat_network", categoryKey: "nav.config", icon: Network, action: () => navigate({ to: "/config/network" }) },
     { id: "config-infra", labelKey: "config.cat_infra", categoryKey: "nav.config", icon: Server, action: () => navigate({ to: "/config/infra" }) },
     { id: "terminal", labelKey: "nav.terminal", categoryKey: "nav.advanced", icon: Terminal, action: () => navigate({ to: "/terminal" }) },
+    // Registry browse shortcuts — open the public librefang.ai catalog in a
+    // new tab so users can discover community skills / hands / templates
+    // without leaving the keyboard.
+    ...REGISTRY_ITEMS.map(({ slug, labelKey, icon }): CommandItem => ({
+      id: `registry-${slug}`,
+      labelKey,
+      categoryKey: "command_palette.registry",
+      icon,
+      external: true,
+      action: () => window.open(`https://librefang.ai/${slug}`, "_blank", "noopener,noreferrer"),
+    })),
   ], [navigate]);
 
   const filteredCommands = useMemo(() => commands.filter(cmd => {
@@ -153,6 +179,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                     >
                       <cmd.icon className="h-4 w-4 shrink-0" />
                       <span className="flex-1 text-sm font-medium">{t(cmd.labelKey)}</span>
+                      {cmd.external && <ExternalLink className="h-3 w-3 shrink-0 text-text-dim/60" />}
                     </button>
                   );
                 })}

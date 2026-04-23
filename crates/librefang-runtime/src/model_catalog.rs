@@ -22,6 +22,42 @@ pub struct ModelCatalog {
     overrides: HashMap<String, ModelOverrides>,
 }
 
+/// Infer (supports_vision, supports_tools, supports_thinking) from a model's
+/// name and the `families` array returned by Ollama's `/api/tags`.
+///
+/// Rules:
+/// - `families` contains "clip"  → vision model (LLaVA, BakLLaVA, Moondream, …)
+/// - name contains "embed"       → embedding model; tools/thinking N/A
+/// - name contains known thinking-model patterns → supports_thinking
+fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, bool) {
+    let lower = name.to_lowercase();
+
+    // Embedding check runs first and short-circuits the rest.
+    // A vision-encoder used for embeddings (e.g. a hypothetical "clip-embed")
+    // is still not a chat vision model, so the families check is intentionally
+    // skipped for embedding models.
+    let is_embed = lower.contains("embed") || lower.contains("embedding");
+    if is_embed {
+        return (false, false, false);
+    }
+
+    let supports_vision = families
+        .map(|fs| fs.iter().any(|f| f.to_lowercase() == "clip"))
+        .unwrap_or(false);
+
+    // Name-based heuristics for thinking/reasoning models.
+    // Note: `qwen3` matches all Qwen3 variants, including non-thinking ones —
+    // Ollama does not distinguish thinking vs standard mode in `families`.
+    let supports_thinking = lower.contains("qwq")
+        || lower.contains("deepseek-r1")
+        || lower.contains("/r1")
+        || lower.contains(":r1")
+        || lower.contains("qwen3")
+        || lower.contains("marco-o1");
+
+    (supports_vision, true, supports_thinking)
+}
+
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
@@ -663,9 +699,15 @@ impl ModelCatalog {
 
     /// Merge dynamically discovered models from a local provider.
     ///
-    /// Adds models not already in the catalog with `Local` tier and zero cost.
+    /// Accepts enriched metadata from Ollama's `/api/tags` response to infer
+    /// capabilities (vision via the "clip" family, embeddings, thinking models).
+    /// Falls back to conservative defaults when metadata is absent.
     /// Also updates the provider's `model_count`.
-    pub fn merge_discovered_models(&mut self, provider: &str, model_ids: &[String]) {
+    pub fn merge_discovered_models(
+        &mut self,
+        provider: &str,
+        model_info: &[crate::provider_health::DiscoveredModelInfo],
+    ) {
         let existing_ids: std::collections::HashSet<String> = self
             .models
             .iter()
@@ -674,14 +716,25 @@ impl ModelCatalog {
             .collect();
 
         let mut added = 0usize;
-        for id in model_ids {
-            if existing_ids.contains(&id.to_lowercase()) {
+        for info in model_info {
+            if existing_ids.contains(&info.name.to_lowercase()) {
                 continue;
             }
-            // Generate a human-friendly display name
-            let display = format!("{} ({})", id, provider);
+            // Use capabilities from probe when available (Ollama ≥0.7 native or
+            // heuristic fallback). Fall back to local name/families heuristics.
+            let (supports_vision, supports_tools, supports_thinking) =
+                if !info.capabilities.is_empty() {
+                    let is_embedding = info.capabilities.iter().any(|c| c == "embedding");
+                    let has_vision = info.capabilities.iter().any(|c| c == "vision");
+                    let (_, _, supports_thinking) =
+                        infer_capabilities(&info.name, info.families.as_deref());
+                    (has_vision, !is_embedding, supports_thinking)
+                } else {
+                    infer_capabilities(&info.name, info.families.as_deref())
+                };
+            let display = format!("{} ({})", info.name, provider);
             self.models.push(ModelCatalogEntry {
-                id: id.clone(),
+                id: info.name.clone(),
                 display_name: display,
                 provider: provider.to_string(),
                 tier: ModelTier::Local,
@@ -689,10 +742,10 @@ impl ModelCatalog {
                 max_output_tokens: 16_384,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
-                supports_tools: true,
-                supports_vision: false,
-                supports_streaming: true,
-                supports_thinking: false,
+                supports_tools,
+                supports_vision,
+                supports_streaming: supports_tools,
+                supports_thinking,
                 aliases: Vec::new(),
             });
             added += 1;
@@ -929,11 +982,16 @@ impl ModelCatalog {
         Ok(total_added)
     }
 
-    /// Load cached catalog from `home_dir/cache/catalog/providers/`.
+    /// Load cached catalog from the shared registry checkout at
+    /// `home_dir/registry/providers/`.
     ///
-    /// Merges community models synced from the remote model-catalog repo.
+    /// Prior to the registry-unify refactor this read from
+    /// `home_dir/cache/catalog/providers/`, which was a copy of the same
+    /// data. Reading `registry/providers/` directly eliminates the copy
+    /// step and guarantees the catalog is never staler than what
+    /// `registry_sync` last pulled.
     pub fn load_cached_catalog_for(&mut self, home_dir: &std::path::Path) {
-        let providers_dir = home_dir.join("cache").join("catalog").join("providers");
+        let providers_dir = home_dir.join("registry").join("providers");
         if providers_dir.exists() {
             match self.load_cached_catalog(&providers_dir) {
                 Ok(n) => {
@@ -1040,18 +1098,51 @@ pub fn read_codex_credential() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_health::DiscoveredModelInfo;
 
-    /// Build a catalog for tests.
-    ///
     fn test_catalog() -> ModelCatalog {
         let home = crate::registry_sync::resolve_home_dir_for_tests();
         ModelCatalog::new(&home)
+    }
+
+    /// Convert plain name strings to minimal `DiscoveredModelInfo` for tests
+    /// that don't need to exercise capability inference.
+    fn names_to_info(names: &[&str]) -> Vec<DiscoveredModelInfo> {
+        names
+            .iter()
+            .map(|n| DiscoveredModelInfo {
+                name: n.to_string(),
+                parameter_size: None,
+                quantization_level: None,
+                family: None,
+                families: None,
+                size: None,
+                capabilities: vec![],
+            })
+            .collect()
     }
 
     #[test]
     fn test_catalog_has_models() {
         let catalog = test_catalog();
         assert!(catalog.list_models().len() >= 30);
+    }
+
+    /// Mirrors the pre-refactor `catalog_sync::test_alias_catalog_parse` —
+    /// keeps direct coverage of `AliasesCatalogFile` deserialization, which
+    /// is now only consumed here in `model_catalog`.
+    #[test]
+    fn test_aliases_catalog_parse() {
+        let toml_str = r#"
+[aliases]
+sonnet = "claude-sonnet-4-20250514"
+gpt4 = "gpt-4o"
+"#;
+        let file: librefang_types::model_catalog::AliasesCatalogFile =
+            toml::from_str(toml_str).unwrap();
+        assert_eq!(file.aliases.len(), 2);
+        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
+        assert_eq!(file.aliases["gpt4"], "gpt-4o");
     }
 
     /// P2 regression: when registry classification is unavailable
@@ -1333,10 +1424,8 @@ id = "acme"
     fn test_merge_adds_new_models() {
         let mut catalog = test_catalog();
         let before = catalog.models_by_provider("ollama").len();
-        catalog.merge_discovered_models(
-            "ollama",
-            &["codestral:latest".to_string(), "qwen2:7b".to_string()],
-        );
+        catalog
+            .merge_discovered_models("ollama", &names_to_info(&["codestral:latest", "qwen2:7b"]));
         let after = catalog.models_by_provider("ollama").len();
         assert_eq!(after, before + 2);
         // Verify the new models are Local tier with zero cost
@@ -1358,7 +1447,7 @@ id = "acme"
             .id
             .clone();
         let before = catalog.list_models().len();
-        catalog.merge_discovered_models("ollama", &[existing_id]);
+        catalog.merge_discovered_models("ollama", &names_to_info(&[existing_id.as_str()]));
         let after = catalog.list_models().len();
         assert_eq!(after, before); // no new model added
     }
@@ -1367,9 +1456,82 @@ id = "acme"
     fn test_merge_updates_model_count() {
         let mut catalog = test_catalog();
         let before_count = catalog.get_provider("ollama").unwrap().model_count;
-        catalog.merge_discovered_models("ollama", &["new-model:latest".to_string()]);
+        catalog.merge_discovered_models("ollama", &names_to_info(&["new-model:latest"]));
         let after_count = catalog.get_provider("ollama").unwrap().model_count;
         assert_eq!(after_count, before_count + 1);
+    }
+
+    #[test]
+    fn test_merge_infers_capabilities_from_ollama_metadata() {
+        let mut catalog = test_catalog();
+
+        let models = vec![
+            // Vision model: families includes "clip"
+            DiscoveredModelInfo {
+                name: "llava:latest".to_string(),
+                families: Some(vec!["llama".to_string(), "clip".to_string()]),
+                family: Some("llama".to_string()),
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            },
+            // Embedding model: name contains "embed"
+            DiscoveredModelInfo {
+                name: "nomic-embed-text:latest".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            },
+            // Thinking model: name contains "deepseek-r1"
+            DiscoveredModelInfo {
+                name: "deepseek-r1:8b".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            },
+            // Plain chat model
+            DiscoveredModelInfo {
+                name: "llama3.2:latest".to_string(),
+                families: Some(vec!["llama".to_string()]),
+                family: Some("llama".to_string()),
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            },
+        ];
+        catalog.merge_discovered_models("ollama", &models);
+
+        let llava = catalog.find_model("llava:latest").unwrap();
+        assert!(
+            llava.supports_vision,
+            "llava should have vision via clip family"
+        );
+        assert!(llava.supports_tools);
+
+        let embed = catalog.find_model("nomic-embed-text:latest").unwrap();
+        assert!(!embed.supports_vision);
+        assert!(
+            !embed.supports_tools,
+            "embedding model should not have tools"
+        );
+        assert!(!embed.supports_thinking);
+
+        let r1 = catalog.find_model("deepseek-r1:8b").unwrap();
+        assert!(r1.supports_thinking, "deepseek-r1 should have thinking");
+        assert!(!r1.supports_vision);
+
+        let llama = catalog.find_model("llama3.2:latest").unwrap();
+        assert!(!llama.supports_vision);
+        assert!(llama.supports_tools);
+        assert!(!llama.supports_thinking);
     }
 
     #[test]
@@ -2212,6 +2374,96 @@ supports_streaming = true
                 model.id
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for infer_capabilities
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod infer_capabilities_tests {
+    use super::infer_capabilities;
+
+    fn families(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn embedding_model_has_no_capabilities() {
+        assert_eq!(
+            infer_capabilities("nomic-embed-text:latest", None),
+            (false, false, false)
+        );
+        assert_eq!(
+            infer_capabilities("bge-embedding:latest", None),
+            (false, false, false)
+        );
+        // embedding check wins even when families contains "clip"
+        assert_eq!(
+            infer_capabilities("clip-embed:latest", Some(&families(&["clip"]))),
+            (false, false, false)
+        );
+    }
+
+    #[test]
+    fn vision_model_detected_via_clip_family() {
+        assert_eq!(
+            infer_capabilities("llava:latest", Some(&families(&["llama", "clip"]))),
+            (true, true, false)
+        );
+        assert_eq!(
+            infer_capabilities("moondream:latest", Some(&families(&["clip"]))),
+            (true, true, false)
+        );
+        // clip family match is case-insensitive
+        assert_eq!(
+            infer_capabilities("llava:7b", Some(&families(&["CLIP"]))),
+            (true, true, false)
+        );
+    }
+
+    #[test]
+    fn plain_chat_model_gets_tools_only() {
+        assert_eq!(
+            infer_capabilities("llama3.2:latest", Some(&families(&["llama"]))),
+            (false, true, false)
+        );
+        assert_eq!(infer_capabilities("mistral:7b", None), (false, true, false));
+    }
+
+    #[test]
+    fn thinking_models_detected_by_name() {
+        assert_eq!(
+            infer_capabilities("deepseek-r1:8b", None),
+            (false, true, true)
+        );
+        assert_eq!(infer_capabilities("qwq:32b", None), (false, true, true));
+        assert_eq!(infer_capabilities("qwen3:8b", None), (false, true, true));
+        assert_eq!(
+            infer_capabilities("marco-o1:latest", None),
+            (false, true, true)
+        );
+        // :r1 tag variant
+        assert_eq!(
+            infer_capabilities("some-model:r1", None),
+            (false, true, true)
+        );
+        // /r1 path variant
+        assert_eq!(
+            infer_capabilities("vendor/r1:latest", None),
+            (false, true, true)
+        );
+    }
+
+    #[test]
+    fn vision_and_thinking_can_combine() {
+        // hypothetical future model that is both vision + thinking
+        let fs = families(&["llama", "clip"]);
+        let (vision, tools, thinking) = infer_capabilities("deepseek-r1-vision:latest", Some(&fs));
+        assert!(vision);
+        assert!(tools);
+        assert!(thinking);
     }
 }
 

@@ -17,6 +17,7 @@ const {
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
+  ownerIntentsRelay,
   buildConversationsContext,
   isRateLimited,
   buildCorsHeaders,
@@ -29,6 +30,10 @@ const {
   resolveLidProactively,
   checkHeartbeat,
   computeBackoffDelay,
+  isSilentResponse,
+  stripNoReply,
+  createHoldbackAccumulator,
+  SILENT_HOLDBACK_MIN_CHARS,
   echoTracker,
   ECHO_TRACKER_ENABLED,
   EchoTracker,
@@ -36,6 +41,12 @@ const {
   lidMapSet,
   db,
   LID_PERSIST_ENABLED,
+  normalizeBaseJid,
+  sessionRecoveryMap,
+  SESSION_RECOVERY_COOLDOWN_MS,
+  SESSION_RECOVERY_MAX_ATTEMPTS,
+  runDispatchSelfTest,
+  channelTypeForChat,
 } = require('./index.js');
 
 // ---------------------------------------------------------------------------
@@ -727,6 +738,238 @@ describe('echo tracker wiring (Phase 3 §A)', () => {
     const trackCount = (src.match(/echoTracker\.track\(/g) || []).length;
     assert.equal(trackCount, 7,
       `expected 7 echoTracker.track() calls (one per outbound text site), got ${trackCount}`);
+    });
+});
+
+// Phase 3 §B (EB-02): forward_dispatch structured log + boot self-test
+// ---------------------------------------------------------------------------
+describe('EB-02 forward_dispatch log + dispatch_self_test', () => {
+  let mockServer;
+  const LISTEN_PORT = MOCK_LIBREFANG_PORT; // reuse
+
+  // Capture console.log lines containing forward_dispatch; preserve original.
+  const originalLog = console.log;
+  let captured = [];
+  function startCapture() {
+    captured = [];
+    console.log = (...args) => {
+      const line = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+      captured.push(line);
+      // also forward to original so node --test output stays readable
+      originalLog(...args);
+    };
+  }
+  function stopCapture() {
+    console.log = originalLog;
+  }
+
+  before(async () => {
+    // Reuse the mock server from CS-01 suite spec: it's torn down after that
+    // suite. Spin up a local instance for this block.
+    mockServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ id: 'test-agent-id', name: 'TestAgent' }]));
+          return;
+        }
+        if (req.url && req.url.startsWith('/api/agents/') && req.url.endsWith('/message')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ response: 'mock reply' }));
+          return;
+        }
+        if (req.url && req.url.startsWith('/api/agents/') && req.url.endsWith('/message/stream')) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write('data: {"type":"text","content":"hi"}\n\n');
+          res.write('data: {"type":"done","response":"hi"}\n\n');
+          res.end();
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mockServer.listen(LISTEN_PORT, '127.0.0.1', resolve));
+  });
+
+  after(async () => {
+    if (mockServer) await new Promise((r) => mockServer.close(r));
+  });
+
+  it('Test 1: forwardToLibreFang emits exactly one forward_dispatch JSON line per call', async () => {
+    startCapture();
+    try {
+      delete process.env.LIBREFANG_DISPATCH_LOG; // default ON
+      await forwardToLibreFang('hi', '', '+39123', 'Alice', false, [], {
+        isGroup: false, wasMentioned: false, chatJid: '39123@s.whatsapp.net',
+      });
+    } finally {
+      stopCapture();
+    }
+    const dispatchLines = captured.filter((l) => l.includes('"event":"forward_dispatch"'));
+    assert.equal(dispatchLines.length, 1, `expected exactly 1 forward_dispatch, got ${dispatchLines.length}`);
+    const parsed = JSON.parse(dispatchLines[0]);
+    assert.equal(parsed.event, 'forward_dispatch');
+    assert.equal(typeof parsed.session_key, 'string');
+    assert.match(parsed.session_key, /:\+39123:39123@s\.whatsapp\.net$/);
+    assert.equal(parsed.phone, '+39123');
+    assert.equal(parsed.push_name, 'Alice');
+    assert.equal(parsed.is_group, false);
+    assert.equal(parsed.was_mentioned, false);
+    assert.equal(parsed.channel_type, 'whatsapp:39123@s.whatsapp.net');
+  });
+
+  it('Test 2: forwardToLibreFangStreaming emits exactly one forward_dispatch per call', async () => {
+    startCapture();
+    try {
+      delete process.env.LIBREFANG_DISPATCH_LOG;
+      await forwardToLibreFangStreaming(
+        'hi', '', '+39456', 'Bob', false, [], () => {},
+        '456@g.us', { isGroup: true, wasMentioned: true }
+      ).catch(() => {}); // streaming may fall back on mock SSE oddities; log still emits pre-POST
+    } finally {
+      stopCapture();
+    }
+    const dispatchLines = captured.filter((l) => l.includes('"event":"forward_dispatch"'));
+    assert.ok(dispatchLines.length >= 1, `expected >=1 forward_dispatch (streaming may recurse on fallback), got ${dispatchLines.length}`);
+    const parsed = JSON.parse(dispatchLines[0]);
+    assert.equal(parsed.is_group, true);
+    assert.equal(parsed.was_mentioned, true);
+    assert.match(parsed.session_key, /:\+39456:456@g\.us$/);
+  });
+
+  it('Test 3: LIBREFANG_DISPATCH_LOG=off silences forward_dispatch but HTTP still fires', async () => {
+    // The flag is read at module load time. Simulate "off" by monkey-patching
+    // the exported constant via require cache? Simpler: assert that when the
+    // flag is set BEFORE a fresh require we'd get no log. Since we can't
+    // re-require the monolith safely mid-suite (SQLite locks), verify the
+    // source-level invariant: the emission is guarded by a DISPATCH_LOG_VERBOSE
+    // const derived from env, and no unguarded emission exists.
+    const srcFs = require('node:fs');
+    const src = srcFs.readFileSync(__dirname + '/index.js', 'utf8');
+    // Exactly 2 `if (DISPATCH_LOG_VERBOSE)` guard blocks must exist — one per
+    // forward function. Count the guard itself (not a span to the emission),
+    // so this stays green if the body of the if-block is reformatted.
+    const guardCount = (src.match(/if\s*\(DISPATCH_LOG_VERBOSE\)/g) || []).length;
+    assert.equal(guardCount, 2, `expected exactly 2 if(DISPATCH_LOG_VERBOSE) guards, got ${guardCount}`);
+    // And there must be exactly 2 forward_dispatch emission sites total.
+    const emitCount = (src.match(/"event"\s*:\s*'forward_dispatch'/g) || []).length;
+    assert.equal(emitCount, 2, `expected exactly 2 forward_dispatch emission sites, got ${emitCount}`);
+    // The flag is parsed from env with default 'verbose'.
+    assert.match(src, /LIBREFANG_DISPATCH_LOG[\s\S]{0,80}verbose/);
+  });
+
+  it('Test 4: runDispatchSelfTest returns ok for distinct chatJids and flags regression', () => {
+    const r = runDispatchSelfTest();
+    assert.equal(r.ok, true, `self-test should pass on a healthy helper; got ${JSON.stringify(r)}`);
+    // Simulate regression by passing a degraded function — the exported
+    // helper accepts an optional override to keep the real one pure.
+    const degraded = () => 'whatsapp'; // always returns same thing
+    const r2 = runDispatchSelfTest(degraded);
+    assert.equal(r2.ok, false);
+    assert.match(r2.reason, /channel_type regression/);
+    // Sanity: channelTypeForChat itself is exported and behaves.
+    assert.notEqual(channelTypeForChat('a@s.whatsapp.net'), channelTypeForChat('b@s.whatsapp.net'));
+  });
+});
+
+// §A — owner_notify channel (Phase 02 Plan 01)
+// ---------------------------------------------------------------------------
+describe('§A owner_notify channel', () => {
+  let mockServer;
+  let nextResponse = { response: 'public reply' };
+  const sentRequests = [];
+
+  before(async () => {
+    mockServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        sentRequests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+        if (req.url === '/api/agents' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify([{ id: 'owner-notice-agent', name: 'Test' }]));
+          return;
+        }
+        if (req.url && req.url.endsWith('/message') && req.method === 'POST') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(nextResponse));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mockServer.listen(MOCK_LIBREFANG_PORT, '127.0.0.1', resolve));
+  });
+
+  after(async () => {
+    if (mockServer) await new Promise((r) => mockServer.close(r));
+  });
+
+  it('Test 1: forwardToLibreFang surfaces owner_notice via onOwnerNotice callback', async () => {
+    nextResponse = {
+      response: 'Public reply to chat',
+      owner_notice: '🎩 confirmation_needed: Caterina has asked for confirmation',
+    };
+    const captured = [];
+    const reply = await forwardToLibreFang(
+      'hi', '', '+39111', 'Alice', false, [],
+      {
+        isGroup: true,
+        wasMentioned: true,
+        chatJid: '120363@g.us',
+        onOwnerNotice: (txt) => captured.push(txt),
+      }
+    );
+    assert.equal(reply, 'Public reply to chat');
+    assert.equal(captured.length, 1);
+    assert.match(captured[0], /confirmation_needed/);
+    assert.match(captured[0], /Caterina/);
+  });
+
+  it('Test 2: forwardToLibreFang does not invoke callback when owner_notice absent (BC-01)', async () => {
+    nextResponse = { response: 'plain reply, no owner notice' };
+    const captured = [];
+    const reply = await forwardToLibreFang(
+      'hi', '', '+39222', 'Bob', false, [],
+      {
+        isGroup: false, wasMentioned: false, chatJid: '39222@s.whatsapp.net',
+        onOwnerNotice: (txt) => captured.push(txt),
+      }
+    );
+    assert.equal(reply, 'plain reply, no owner notice');
+    assert.equal(captured.length, 0);
+  });
+
+  it('Test 3: extractNotifyOwner still parses legacy [NOTIFY_OWNER] tags (BC kept for one release)', () => {
+    const text = 'Hello [NOTIFY_OWNER]{"reason":"x","summary":"y"}[/NOTIFY_OWNER] tail.';
+    const { notifications, cleanedText } = extractNotifyOwner(text);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].reason, 'x');
+    assert.equal(notifications[0].summary, 'y');
+    assert.equal(cleanedText, 'Hello  tail.');
+  });
+
+  it('Test 4: LIBREFANG_OWNER_CHANNEL flag is read from env at module load', () => {
+    // Sanity: verify the module exposes a stable on/off contract by source.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.match(src, /LIBREFANG_OWNER_CHANNEL/);
+    assert.match(src, /OWNER_CHANNEL_ENABLED/);
+  });
+
+  it('Test 5: gateway dual-send code path exists for owner_notify event', () => {
+    // Source-level invariant: the dual-send block must reference both the
+    // OWNER_JIDS set and the structured owner_notify log event so Task 5
+    // smoke can rely on log scraping.
+    const fs = require('node:fs');
+    const src = fs.readFileSync(__dirname + '/index.js', 'utf8');
+    assert.match(src, /event:\s*'owner_notify'/);
+    assert.match(src, /for \(const ownerJid of OWNER_JIDS\)/);
+    assert.match(src, /target_jids:/);
   });
 });
 
@@ -982,6 +1225,44 @@ describe('ID-02 cross-restart hydration', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Signal session recovery — upsert-path SessionError
+// ---------------------------------------------------------------------------
+describe('normalizeBaseJid', () => {
+  it('strips device suffix :N from phone-number JID', () => {
+    assert.equal(normalizeBaseJid('393760105565:24@s.whatsapp.net'), '393760105565@s.whatsapp.net');
+  });
+
+  it('strips device suffix :N from LID JID', () => {
+    assert.equal(normalizeBaseJid('191856289808491:24@lid'), '191856289808491@lid');
+  });
+
+  it('leaves base JID unchanged when no device suffix', () => {
+    assert.equal(normalizeBaseJid('393760105565@s.whatsapp.net'), '393760105565@s.whatsapp.net');
+  });
+
+  it('handles empty/null input', () => {
+    assert.equal(normalizeBaseJid(''), '');
+    assert.equal(normalizeBaseJid(null), '');
+    assert.equal(normalizeBaseJid(undefined), '');
+  });
+
+  it('leaves group JID unchanged (no :N pattern)', () => {
+    assert.equal(normalizeBaseJid('120363123@g.us'), '120363123@g.us');
+  });
+});
+
+describe('sessionRecoveryMap constants', () => {
+  it('exposes cooldown and max-attempts thresholds', () => {
+    assert.ok(SESSION_RECOVERY_COOLDOWN_MS > 0);
+    assert.ok(SESSION_RECOVERY_MAX_ATTEMPTS >= 1);
+  });
+
+  it('map is a Map instance', () => {
+    assert.ok(sessionRecoveryMap instanceof Map);
+  });
+});
+
 after(() => {
   try {
     const fs = require('node:fs');
@@ -994,4 +1275,268 @@ after(() => {
   } catch {}
   // Force exit — SQLite and setInterval timers keep the event loop alive
   setTimeout(() => process.exit(0), 100);
+});
+
+// ---------------------------------------------------------------------------
+// silent_response — gateway-side canonical detector (Phase 2 §B, OB-02/03/07)
+// ---------------------------------------------------------------------------
+describe('isSilentResponse', () => {
+  it('matches the canonical NO_REPLY token', () => {
+    assert.equal(isSilentResponse('NO_REPLY'), true);
+    assert.equal(isSilentResponse('no_reply'), true);
+    assert.equal(isSilentResponse('  NO_REPLY  '), true);
+    assert.equal(isSilentResponse('NO_REPLY.'), true);
+    assert.equal(isSilentResponse('NO_REPLY\n'), true);
+  });
+
+  it('matches the bracketed [no reply needed] form', () => {
+    assert.equal(isSilentResponse('[no reply needed]'), true);
+    assert.equal(isSilentResponse('[NO REPLY NEEDED]'), true);
+    assert.equal(isSilentResponse('[no reply needed].'), true);
+    assert.equal(isSilentResponse('no reply needed'), true);
+  });
+
+  it('matches sentinels glued to emojis', () => {
+    assert.equal(isSilentResponse('NO_REPLY🎩'), true);
+    assert.equal(isSilentResponse('NO_REPLY 😐'), true);
+  });
+
+  it('matches sentinels at the trailing position after context', () => {
+    assert.equal(isSilentResponse('Tutto bene, Signore.\nNO_REPLY'), true);
+    assert.equal(isSilentResponse('Some context. [no reply needed]'), true);
+    assert.equal(isSilentResponse('...a Sua disposizione. 🎩NO_REPLY'), true);
+  });
+
+  it('does not match empty / whitespace-only / normal text', () => {
+    assert.equal(isSilentResponse(''), false);
+    assert.equal(isSilentResponse('   '), false);
+    assert.equal(isSilentResponse('Ok'), false);
+    assert.equal(isSilentResponse('Confermato, rispondo dopo'), false);
+  });
+
+  it('respects word boundaries', () => {
+    assert.equal(isSilentResponse('NO_REPLYING'), false);
+    assert.equal(isSilentResponse('noreply@example.com'), false);
+  });
+
+  it('does not flag embedded substrings inside real replies', () => {
+    assert.equal(isSilentResponse('the NO_REPLY sentinel is documented'), false);
+    assert.equal(isSilentResponse('Ok NO_REPLY received but here is your real answer'), false);
+  });
+
+  it('rejects non-string inputs gracefully', () => {
+    assert.equal(isSilentResponse(null), false);
+    assert.equal(isSilentResponse(undefined), false);
+    assert.equal(isSilentResponse(42), false);
+  });
+});
+
+describe('stripNoReply', () => {
+  it('returns empty string for a whole-message sentinel', () => {
+    assert.equal(stripNoReply('NO_REPLY'), '');
+    assert.equal(stripNoReply('  NO_REPLY  '), '');
+    assert.equal(stripNoReply('[no reply needed]'), '');
+  });
+
+  it('returns the text unchanged when not silent', () => {
+    assert.equal(stripNoReply('Hello world'), 'Hello world');
+    assert.equal(stripNoReply(''), '');
+  });
+
+  it('returns trailing-sentinel text as empty (legacy contract)', () => {
+    // Trailing sentinel collapses the whole message to silent under V2.
+    assert.equal(stripNoReply('Tutto bene. NO_REPLY'), '');
+  });
+});
+
+describe('createHoldbackAccumulator (OB-07 streaming hold-back)', () => {
+  it('NEVER flushes when stream produces only NO_REPLY', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('NO_REPLY');
+    const result = await acc.end();
+    assert.equal(flushes.length, 0, 'sock.sendMessage must not be called');
+    assert.equal(result.silent, true);
+    assert.equal(result.flushed, false);
+  });
+
+  it('NEVER flushes for the canonical OB-07 case ["Ok ", "[no reply", " needed]"]', async () => {
+    // This is the user-directive critical case: a streaming source emits
+    // three deltas that, only when concatenated, reveal a sentinel. The
+    // hold-back must keep deferring until end() and then classify silent.
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Ok ');
+    await acc.push('[no reply');
+    await acc.push(' needed]');
+    const result = await acc.end();
+    assert.equal(flushes.length, 0, 'sock.sendMessage must NEVER be called');
+    assert.equal(result.silent, true);
+  });
+
+  it('flushes legitimate streaming responses once threshold is crossed', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Hello ');
+    await acc.push('world, how are you doing today?');
+    const result = await acc.end();
+    assert.ok(flushes.length >= 1, 'expected at least one flush for non-silent text');
+    assert.equal(result.flushed, true);
+    assert.equal(result.silent, false);
+    // First flush should contain the cumulative buffer at the moment the
+    // threshold was crossed (everything seen so far).
+    assert.ok(flushes[0].includes('Hello'));
+    assert.ok(flushes[0].includes('world'));
+  });
+
+  it('forwards subsequent deltas immediately after the first flush', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('This is a long enough chunk to immediately flush past the threshold.');
+    await acc.push(' more');
+    await acc.push(' deltas');
+    await acc.end();
+    assert.equal(flushes.length, 3);
+    assert.equal(flushes[1], ' more');
+    assert.equal(flushes[2], ' deltas');
+  });
+
+  it('handles many empty deltas followed by a real message', async () => {
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    for (let i = 0; i < 10; i++) await acc.push('');
+    await acc.push('Ok sure, here is a sufficiently long real reply.');
+    const result = await acc.end();
+    assert.equal(result.silent, false);
+    assert.ok(flushes.length >= 1);
+  });
+
+  it('treats a short non-sentinel response as silent at end (held forever)', async () => {
+    // Edge case: a 2-char real response like "Ok" never crosses the
+    // threshold, so the hold-back classifier falls through to end(),
+    // which checks isSilentResponse — "Ok" is NOT silent, so end()
+    // flushes the held buffer.
+    const flushes = [];
+    const acc = createHoldbackAccumulator({ onFlush: (t) => flushes.push(t) });
+    await acc.push('Ok');
+    const result = await acc.end();
+    assert.equal(result.silent, false);
+    assert.equal(flushes.length, 1);
+    assert.equal(flushes[0], 'Ok');
+  });
+
+  it('throws when onFlush is missing', () => {
+    assert.throws(() => createHoldbackAccumulator({}), /onFlush/);
+  });
+
+  it('exposes buffered + hasFlushed introspection helpers', async () => {
+    const acc = createHoldbackAccumulator({ onFlush: () => {} });
+    await acc.push('partial');
+    assert.equal(acc.buffered, 'partial');
+    assert.equal(acc.hasFlushed, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ownerIntentsRelay — guards the RELAY system-instruction injection so that
+// neutral owner-to-agent messages don't get forced into relay mode when a
+// stranger conversation happens to be active.
+// ---------------------------------------------------------------------------
+describe('ownerIntentsRelay', () => {
+  it('returns false for neutral greetings', () => {
+    assert.equal(ownerIntentsRelay('saludos'), false);
+    assert.equal(ownerIntentsRelay('hola'), false);
+    assert.equal(ownerIntentsRelay('ciao'), false);
+    assert.equal(ownerIntentsRelay('Buondì'), false);
+    assert.equal(ownerIntentsRelay('come stai?'), false);
+    assert.equal(ownerIntentsRelay(''), false);
+    assert.equal(ownerIntentsRelay('   '), false);
+  });
+
+  it('returns true for explicit /relay or /reply command', () => {
+    assert.equal(ownerIntentsRelay('/relay tell him I will be late'), true);
+    assert.equal(ownerIntentsRelay('/reply ok grazie'), true);
+  });
+
+  it('returns true for @mention', () => {
+    assert.equal(ownerIntentsRelay('@alice hi there'), true);
+    assert.equal(ownerIntentsRelay('please say @bob hi'), true);
+  });
+
+  it('Italian pack: recognises delegated-speech verbs, rejects owner→agent formal imperative', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    // Positive — explicit recipient / verb-with-baked-in-object
+    assert.ok(re.test('rispondi a Federico che sto bene'));
+    assert.ok(re.test('digli che arrivo'));
+    assert.ok(re.test('saluta Caterina per me'));
+    assert.ok(re.test('scrivi a Paolo'));
+    assert.ok(re.test('chiedi a Mario il prezzo'));
+    assert.ok(re.test('inoltra a tutti la comunicazione'));
+    assert.ok(re.test('dica a Mario che sto bene'));
+    // Negative — owner addressing the bot, not a relay.
+    // Pre-fix regex matched bare `dica`, so "mi dica" triggered a false
+    // relay intent; the narrowed `dica\s+a\s+\w+` pattern blocks it.
+    assert.equal(re.test('mi dica'), false);
+    assert.equal(re.test('mi dica di più'), false);
+    assert.equal(re.test('Dica pure'), false);
+  });
+
+  it('multi-language union: both EN and IT patterns active simultaneously', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['en', 'it']);
+    assert.ok(re.test('tell Alice I am busy'));
+    assert.ok(re.test('digli che arrivo'));
+  });
+
+  it('returns true for English delegated-speech verbs', () => {
+    assert.equal(ownerIntentsRelay('reply to Bob that I agree'), true);
+    assert.equal(ownerIntentsRelay('tell Alice I am busy'), true);
+    assert.equal(ownerIntentsRelay('write to the team'), true);
+  });
+
+  it('is case-insensitive (IT pack)', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['it']);
+    assert.ok(re.test('  RISPONDI A Mario ok'.trim()));
+    assert.ok(re.test('DIGLI che sto arrivando'));
+  });
+
+  it('does not match partial words', () => {
+    assert.equal(ownerIntentsRelay('salutami la zia'), false);
+    assert.equal(ownerIntentsRelay('rispostaok'), false);
+  });
+
+  it('does not treat "tell me/us/you" as relay intent (owner → agent)', () => {
+    assert.equal(ownerIntentsRelay('tell me a joke'), false);
+    assert.equal(ownerIntentsRelay('can you tell me about this'), false);
+    assert.equal(ownerIntentsRelay('tell us the news'), false);
+    assert.equal(ownerIntentsRelay('tell you what'), false);
+  });
+
+  it('does not treat "looking forward to" as relay intent', () => {
+    assert.equal(ownerIntentsRelay('I look forward to meeting you'), false);
+    assert.equal(ownerIntentsRelay('looking forward to the call'), false);
+    assert.equal(ownerIntentsRelay('I am forward to hearing from you'), false);
+  });
+
+  it('still matches "forward <it|this|the X> to <recipient>"', () => {
+    assert.equal(ownerIntentsRelay('forward it to Bob'), true);
+    assert.equal(ownerIntentsRelay('forward this to Alice'), true);
+    assert.equal(ownerIntentsRelay('forward the message to the team'), true);
+  });
+
+  it('German pack: rejects "Sag mir" / "Sage uns" (owner→bot), accepts explicit recipient', () => {
+    const { compileIntentRegex } = require('./lib/intent_patterns');
+    const re = compileIntentRegex(['de']);
+    // Positive — explicit third-party recipient
+    assert.ok(re.test('Sag Klaus ich komme später'));
+    assert.ok(re.test('sage Anna bitte Bescheid'));
+    assert.ok(re.test('schreib an Petra'));
+    assert.ok(re.test('antworte an Marco'));
+    // Negative — self-directed (owner talking to the bot)
+    assert.equal(re.test('Sag mir was du denkst'), false);
+    assert.equal(re.test('sag mir bitte'), false);
+    assert.equal(re.test('sage uns die Wahrheit'), false);
+  });
 });

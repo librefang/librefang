@@ -1,72 +1,104 @@
-import { useState, useCallback, useRef, useEffect, type RefObject } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
-import { Plus, X, AlertCircle } from "lucide-react";
-import { authHeader } from "../api";
+import { Plus, X, HelpCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { useUIStore } from "../lib/store";
+import { useTerminalWindows } from "../lib/queries/terminal";
+import {
+  useCreateTerminalWindow,
+  useRenameTerminalWindow,
+  useDeleteTerminalWindow,
+} from "../lib/mutations/terminal";
+import { ApiError, type TerminalWindow } from "../lib/http/client";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 
-interface WindowInfo {
-  id: string;
-  index: number;
-  name: string;
-  active: boolean;
+// Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
+const TERM_MIN_COLS = 1;
+const TERM_MAX_COLS = 1000;
+const TERM_MIN_ROWS = 1;
+const TERM_MAX_ROWS = 500;
+
+function clampTermSize(cols: number, rows: number): { cols: number; rows: number } | null {
+  const c = Math.max(TERM_MIN_COLS, Math.min(TERM_MAX_COLS, Math.floor(cols)));
+  const r = Math.max(TERM_MIN_ROWS, Math.min(TERM_MAX_ROWS, Math.floor(rows)));
+  if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+  return { cols: c, rows: r };
 }
 
 interface TerminalTabsProps {
   ws: WebSocket | null;
   tmuxAvailable: boolean;
   maxWindows: number;
-  activeWindowId: string | null;
+  displayedActiveWindowId: string | null;
   onSwitchWindow: (windowId: string) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
-  shellName: string;
 }
 
-const WINDOW_NAME_RE = /^[A-Za-z0-9 ._-]{1,64}$/;
+// Match backend validate_window_name: any Unicode except control chars and '|', 1–64 chars.
+const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
 
-function useTmuxWindows(tmuxAvailable: boolean) {
-  return useQuery<WindowInfo[]>({
-    queryKey: ["terminal-windows"],
-    queryFn: async () => {
-      const res = await fetch("/api/terminal/windows", { headers: authHeader() });
-      if (!res.ok) throw new Error("Failed to fetch windows");
-      return res.json();
-    },
-    refetchInterval: 10000,
-    enabled: tmuxAvailable,
-  });
+const ORDER_KEY = "terminal.tabOrder";
+
+function loadOrder(): string[] {
+  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]"); } catch { return []; }
+}
+function saveOrder(ids: string[]) {
+  localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
 }
 
 export function TerminalTabs({
   ws,
   tmuxAvailable,
   maxWindows,
-  activeWindowId,
+  displayedActiveWindowId,
   onSwitchWindow,
   terminalRef,
   fitAddonRef,
-  shellName,
 }: TerminalTabsProps) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const { data: windows = [] } = useTmuxWindows(tmuxAvailable);
-  const [showNameInput, setShowNameInput] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const { data: windows = [] } = useTerminalWindows({ enabled: tmuxAvailable });
+  const createMutation = useCreateTerminalWindow();
+  const renameMutation = useRenameTerminalWindow();
+  const deleteMutation = useDeleteTerminalWindow();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [tabOrder, setTabOrder] = useState<string[]>(loadOrder);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
   const settleTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const windowsRef = useRef<WindowInfo[]>([]);
+  const windowsRef = useRef<TerminalWindow[]>([]);
 
   useEffect(() => {
     windowsRef.current = windows;
   }, [windows]);
 
+  // Keep tab order in sync with server windows list.
+  // Skip when windows is empty (query still loading) to avoid wiping persisted order.
+  useEffect(() => {
+    if (windows.length === 0) return;
+    setTabOrder(prev => {
+      const existing = new Set(windows.map(w => w.id));
+      const filtered = prev.filter(id => existing.has(id));
+      const newIds = windows.map(w => w.id).filter(id => !filtered.includes(id));
+      const next = [...filtered, ...newIds];
+      saveOrder(next);
+      return next;
+    });
+  }, [windows]);
+
+  const addToast = useUIStore((s) => s.addToast);
+
   const handleTabClick = useCallback(
     (windowId: string) => {
+      if (editingId === windowId) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ type: "switch_window", window: windowId }));
       onSwitchWindow(windowId);
@@ -79,11 +111,12 @@ export function TerminalTabs({
         const fit = fitAddonRef.current;
         if (!term || !fit || !ws || ws.readyState !== WebSocket.OPEN) return;
         fit.fit();
-        ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        const size = clampTermSize(term.cols, term.rows);
+        if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
       }, 100);
       settleTimeoutsRef.current = [tid];
     },
-    [ws, onSwitchWindow, terminalRef, fitAddonRef]
+    [ws, onSwitchWindow, terminalRef, fitAddonRef, editingId]
   );
 
   useEffect(() => {
@@ -93,179 +126,303 @@ export function TerminalTabs({
   }, []);
 
   useEffect(() => {
-    if (showNameInput) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [showNameInput]);
-
-  useEffect(() => {
-    if (activeWindowId !== null || windows.length === 0) return;
+    if (displayedActiveWindowId !== null || windows.length === 0) return;
     const active = windows.find((w) => w.active);
     onSwitchWindow(active ? active.id : windows[0].id);
-  }, [windows, activeWindowId, onSwitchWindow]);
+  }, [windows, displayedActiveWindowId, onSwitchWindow]);
+
+  useEffect(() => {
+    if (editingId) {
+      const tid = setTimeout(() => {
+        editInputRef.current?.focus();
+        editInputRef.current?.select();
+      }, 0);
+      return () => clearTimeout(tid);
+    }
+  }, [editingId]);
 
   const handleCreate = useCallback(async () => {
-    const name = newName.trim();
-    if (name && !WINDOW_NAME_RE.test(name)) return;
-
-    setCreating(true);
-    setCreateError(null);
+    if (createMutation.isPending) return;
     try {
-      const res = await fetch("/api/terminal/windows", {
-        method: "POST",
-        headers: { ...authHeader(), "Content-Type": "application/json" },
-        body: JSON.stringify(name ? { name } : {}),
-      });
-      if (res.status === 429) {
-        setCreateError(t("terminal.tabs.limit_reached"));
-        return;
+      await createMutation.mutateAsync({});
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        addToast(t("terminal.tabs.limit_reached"), "error");
+      } else {
+        addToast(t("terminal.tabs.create_failed"), "error");
       }
-      if (!res.ok) {
-        setCreateError(t("terminal.tabs.create_failed"));
-        return;
-      }
-      queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-      setNewName("");
-      setShowNameInput(false);
-    } finally {
-      setCreating(false);
     }
-  }, [newName, queryClient, t]);
+  }, [createMutation, addToast, t]);
 
-  const addToast = useUIStore((s) => s.addToast);
+  const startRename = useCallback((w: TerminalWindow) => {
+    setEditingId(w.id);
+    setEditValue(w.name);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setEditingId(null);
+    setEditValue("");
+  }, []);
+
+  const commitRename = useCallback(() => {
+    if (!editingId) return;
+    const name = editValue.trim();
+    const current = windowsRef.current.find((w) => w.id === editingId);
+    if (!current || name === "" || name === current.name) {
+      cancelRename();
+      return;
+    }
+    if (!WINDOW_NAME_RE.test(name)) {
+      addToast(t("terminal.tabs.name_invalid"), "error");
+      return;
+    }
+    const idToRename = editingId;
+    cancelRename();
+    renameMutation.mutate(
+      { windowId: idToRename, name },
+      {
+        onError: () => addToast(t("terminal.tabs.rename_failed"), "error"),
+      }
+    );
+  }, [editingId, editValue, renameMutation, cancelRename, addToast, t]);
 
   const handleCloseTab = useCallback(
-    async (windowId: string, e: React.MouseEvent) => {
+    async (windowId: string, e: React.MouseEvent | React.KeyboardEvent) => {
       e.stopPropagation();
       const currentWindows = windowsRef.current;
       if (currentWindows.length <= 1) return;
       try {
-        const res = await fetch(
-          `/api/terminal/windows/${encodeURIComponent(windowId)}`,
-          { method: "DELETE", headers: authHeader() }
-        );
-        if (res.ok) {
-          const isActive = activeWindowId === windowId;
-          if (isActive) {
-            const remaining = currentWindows.filter((w) => w.id !== windowId);
-            if (remaining.length > 0) {
-              const next = remaining[0];
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "switch_window", window: next.id }));
-              }
-              onSwitchWindow(next.id);
-            } else {
-              onSwitchWindow("");
+        await deleteMutation.mutateAsync(windowId);
+        if (displayedActiveWindowId === windowId) {
+          const remaining = currentWindows.filter((w) => w.id !== windowId);
+          if (remaining.length > 0) {
+            const next = remaining[0];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "switch_window", window: next.id }));
             }
+            onSwitchWindow(next.id);
+          } else {
+            onSwitchWindow("");
           }
-          queryClient.invalidateQueries({ queryKey: ["terminal-windows"] });
-        } else {
-          console.error("Failed to delete terminal window", res.status);
-          addToast(t("terminal.tabs.delete_failed"), "error");
         }
       } catch (err) {
         console.error("Failed to delete terminal window", err);
         addToast(t("terminal.tabs.delete_failed"), "error");
       }
     },
-    [queryClient, activeWindowId, ws, onSwitchWindow, addToast, t]
+    [deleteMutation, displayedActiveWindowId, ws, onSwitchWindow, addToast, t]
   );
+
+  // ── Tab overflow indicators ───────────────────────────────────────────────
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [showLeftArrow, setShowLeftArrow] = useState(false);
+  const [showRightArrow, setShowRightArrow] = useState(false);
+
+  const updateOverflowArrows = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    setShowLeftArrow(el.scrollLeft > 0);
+    setShowRightArrow(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    updateOverflowArrows();
+    el.addEventListener("scroll", updateOverflowArrows, { passive: true });
+    const ro = new ResizeObserver(updateOverflowArrows);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", updateOverflowArrows);
+      ro.disconnect();
+    };
+  }, [updateOverflowArrows]);
+
+  const [showHelp, setShowHelp] = useState(false);
+  const helpRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showHelp) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (helpRef.current && !helpRef.current.contains(e.target as Node)) {
+        setShowHelp(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [showHelp]);
+
+  const sortedWindows = useMemo(() => {
+    const orderMap = new Map(tabOrder.map((id, i) => [id, i]));
+    return [...windows].sort((a, b) => {
+      const ai = orderMap.get(a.id) ?? Infinity;
+      const bi = orderMap.get(b.id) ?? Infinity;
+      return ai - bi;
+    });
+  }, [windows, tabOrder]);
+
+  // Re-check arrows when the windows list changes (tabs added/removed).
+  useEffect(() => {
+    updateOverflowArrows();
+  }, [sortedWindows, updateOverflowArrows]);
 
   if (!tmuxAvailable) return null;
 
   const atLimit = windows.length >= maxWindows;
+  const nearLimit = windows.length >= Math.max(2, maxWindows - 2);
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-gray-900/80 border-b border-gray-700/50 overflow-x-auto">
-      {windows.map((w) => (
-        <button
-          key={w.id}
-          onClick={() => handleTabClick(w.id)}
-          className={`px-3 py-1 rounded-t text-sm whitespace-nowrap transition-colors ${
-            w.id === activeWindowId
-              ? "bg-[#1a1a2e] text-white border-t border-x border-gray-600"
-              : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/50"
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            {w.name || t("terminal.tabs.unnamed")}
-            {windows.length > 1 && (
+    <div className="flex items-end bg-[#161b22] border-b border-gray-700/60 shrink-0">
+      <div className="relative flex-1 min-w-0">
+        {showLeftArrow && (
+          <div className="pointer-events-none absolute left-0 inset-y-0 flex items-center pl-0.5 z-10">
+            <ChevronLeft className="h-3 w-3 text-gray-500" />
+          </div>
+        )}
+        {showRightArrow && (
+          <div className="pointer-events-none absolute right-0 inset-y-0 flex items-center pr-0.5 z-10">
+            <ChevronRight className="h-3 w-3 text-gray-500" />
+          </div>
+        )}
+      <div ref={tabScrollRef} className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      {sortedWindows.map((w) => {
+        const isActive = w.id === displayedActiveWindowId;
+        const isEditing = editingId === w.id;
+        return (
+          <div
+            key={w.id}
+            onClick={() => handleTabClick(w.id)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startRename(w);
+            }}
+            onAuxClick={(e) => {
+              if (e.button === 1 && windows.length > 1) {
+                e.preventDefault();
+                void handleCloseTab(w.id, e);
+              }
+            }}
+            draggable={!isEditing}
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (!dragId || dragId === w.id) return;
+              setTabOrder(prev => {
+                const next = [...prev];
+                const fromIdx = next.indexOf(dragId);
+                const toIdx = next.indexOf(w.id);
+                if (fromIdx < 0 || toIdx < 0) return prev;
+                next.splice(fromIdx, 1);
+                next.splice(toIdx, 0, dragId);
+                saveOrder(next);
+                return next;
+              });
+              setDragId(null);
+            }}
+            onDragEnd={() => setDragId(null)}
+            title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
+            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors cursor-pointer select-none rounded-t-md border-t border-x ${
+              isActive
+                ? "bg-[#0d1117] text-gray-200 border-gray-700/70 -mb-px pb-[7px]"
+                : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/40 mb-0"
+            } ${dragId === w.id ? "opacity-50" : ""}`}
+          >
+            {isEditing ? (
+              <input
+                ref={editInputRef}
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void commitRename();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelRename();
+                  }
+                  e.stopPropagation();
+                }}
+                onBlur={() => void commitRename()}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                maxLength={64}
+                aria-label={t("terminal.tabs.name_label")}
+                className="bg-gray-900 text-gray-200 text-xs px-1.5 py-0.5 rounded border border-blue-500/70 outline-none w-28"
+              />
+            ) : (
+              <span className="max-w-[120px] truncate">
+                {w.name || t("terminal.tabs.unnamed")}
+              </span>
+            )}
+            {!isEditing && windows.length > 1 && (
               <span
                 role="button"
                 tabIndex={0}
-                onClick={(e) => handleCloseTab(w.id, e)}
+                aria-label={t("terminal.tabs.close")}
+                onClick={(e) => void handleCloseTab(w.id, e)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") handleCloseTab(w.id, e as unknown as React.MouseEvent);
+                  if (e.key === "Enter" || e.key === " ") void handleCloseTab(w.id, e);
                 }}
-                className="text-gray-500 hover:text-red-400 cursor-pointer"
+                className={`text-gray-600 hover:text-red-400 cursor-pointer transition-colors rounded ${
+                  isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                }`}
               >
                 <X className="h-3 w-3" />
               </span>
             )}
+          </div>
+        );
+      })}
+
+      <button
+        onClick={() => void handleCreate()}
+        disabled={atLimit || createMutation.isPending}
+        aria-label={t("terminal.tabs.new")}
+        title={atLimit ? t("terminal.tabs.limit_reached") : t("terminal.tabs.new")}
+        className="mb-0.5 flex items-center justify-center w-6 h-6 rounded text-gray-600 hover:text-gray-300 hover:bg-gray-800/50 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-600 disabled:hover:bg-transparent"
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
+      </div>
+      </div>
+
+      <div className="flex items-center gap-1 shrink-0 self-center pr-2 pb-0.5">
+        {nearLimit && (
+          <span className="text-[10px] text-gray-600 tabular-nums">
+            {windows.length}/{maxWindows}
           </span>
-        </button>
-      ))}
-      {showNameInput ? (
-        <div className="flex items-center gap-1 ml-1">
-          <input
-            ref={inputRef}
-            value={newName}
-            onChange={(e) => {
-              setNewName(e.target.value);
-              setCreateError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-              if (e.key === "Escape") {
-                setShowNameInput(false);
-                setNewName("");
-                setCreateError(null);
-              }
-            }}
-            placeholder={t("terminal.tabs.new")}
-            maxLength={64}
-            className="px-2 py-0.5 text-sm bg-gray-800 text-white border border-gray-600 rounded w-32 focus:outline-none focus:border-blue-500"
-            autoFocus
-          />
+        )}
+
+        <div ref={helpRef} className="relative">
           <button
-            onClick={handleCreate}
-            disabled={creating}
-            className="text-xs text-green-400 hover:text-green-300"
+            onClick={() => setShowHelp((v) => !v)}
+            aria-label={t("terminal.tabs.help")}
+            className="flex items-center justify-center w-5 h-5 rounded text-gray-600 hover:text-gray-400 transition-colors"
           >
-            OK
+            <HelpCircle className="h-3.5 w-3.5" />
           </button>
-          <button
-            onClick={() => {
-              setShowNameInput(false);
-              setNewName("");
-              setCreateError(null);
-            }}
-            className="text-xs text-gray-500 hover:text-gray-300"
-          >
-            <X className="h-3 w-3" />
-          </button>
-          {createError && (
-            <span className="flex items-center gap-1 text-xs text-red-400">
-              <AlertCircle className="h-3 w-3" />
-              {createError}
-            </span>
+
+          {showHelp && (
+            <div className="absolute right-0 top-full mt-1 z-50 w-56 rounded-lg border border-gray-700/80 bg-[#1c2128] shadow-xl text-xs text-gray-300 p-3 space-y-2">
+              <p className="font-semibold text-gray-200 mb-1">{t("terminal.tabs.help_title")}</p>
+              {([
+                ["terminal.tabs.help_switch",  "terminal.tabs.help_switch_key"],
+                ["terminal.tabs.help_rename",  "terminal.tabs.help_rename_key"],
+                ["terminal.tabs.help_close",   "terminal.tabs.help_close_key"],
+                ["terminal.tabs.help_new",     "terminal.tabs.help_new_key"],
+              ] as const).map(([desc, key]) => (
+                <div key={key} className="flex items-start justify-between gap-2">
+                  <span className="text-gray-400 leading-snug">{t(desc)}</span>
+                  <kbd className="shrink-0 px-1.5 py-0.5 rounded bg-gray-700/60 text-[10px] text-gray-300 font-mono leading-tight whitespace-nowrap">
+                    {t(key)}
+                  </kbd>
+                </div>
+              ))}
+            </div>
           )}
         </div>
-      ) : (
-        !atLimit && (
-          <button
-            onClick={() => {
-              setNewName(`${shellName}_${windows.length + 1}`);
-              setShowNameInput(true);
-            }}
-            className="p-1 text-gray-500 hover:text-gray-300 transition-colors"
-            title={t("terminal.tabs.new")}
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-        )
-      )}
+      </div>
     </div>
   );
 }

@@ -1,13 +1,19 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
-  listMcpServers, addMcpServer, updateMcpServer, deleteMcpServer,
-  getMcpAuthStatus, startMcpAuth, revokeMcpAuth,
-  listAvailableIntegrations,
-  type McpServerConfigured, type McpServerConnected, type McpServerTransport,
-  type IntegrationTemplate,
+  type McpServerConfigured, type McpServerConnected, type McpTransport,
+  type McpCatalogEntry,
 } from "../api";
+import { useMcpServers, useMcpCatalog, useMcpHealth, mcpQueries } from "../lib/queries/mcp";
+import {
+  useAddMcpServer,
+  useUpdateMcpServer,
+  useDeleteMcpServer,
+  useReloadMcp,
+  useStartMcpAuth,
+  useRevokeMcpAuth,
+} from "../lib/mutations/mcp";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -22,23 +28,75 @@ import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Plug, Plus, X, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
-  Search, Clock, Filter, Store, Key, Download,
+  Search, Clock, Filter, Store, Key, Download, RefreshCw, Activity,
 } from "lucide-react";
+import { DynamicIcon } from "lucide-react/dynamic";
+import type { IconName } from "lucide-react/dynamic";
 
-const REFRESH_MS = 30000;
+// Wraps `DynamicIcon` so a catalog entry with a stale or mistyped
+// `lucide:xxx` name (backend-controlled, but still human-edited) falls back
+// to a neutral icon instead of throwing and blowing up the surrounding card.
+// `DynamicIcon` lazy-imports the icon module — if the name isn't a real
+// lucide icon the import rejects and the `Suspense` fallback doesn't catch
+// that; it bubbles up as a render error, which this boundary converts into
+// `fallback`.
+class DynamicIconBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error) {
+    // eslint-disable-next-line no-console
+    console.warn("CatalogIcon: DynamicIcon failed to load, using fallback.", error);
+  }
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
+function CatalogIcon({ icon, className }: { icon: string; className?: string }) {
+  if (icon.startsWith("lucide:")) {
+    const name = icon.slice("lucide:".length) as IconName;
+    const fallback = <Plug className={className} />;
+    return (
+      <DynamicIconBoundary fallback={fallback}>
+        <DynamicIcon name={name} className={className} fallback={() => fallback} />
+      </DynamicIconBoundary>
+    );
+  }
+  return <span className="text-xl">{icon}</span>;
+}
 
 type TransportType = "stdio" | "sse" | "http";
 type StatusFilter = "all" | "connected" | "disconnected";
+
+interface LabeledItem {
+  id: string;
+  value: string;
+}
 
 interface ServerFormState {
   name: string;
   transportType: TransportType;
   command: string;
-  args: string[];
+  args: LabeledItem[];
   url: string;
   timeout: number;
-  env: string[];
+  env: LabeledItem[];
   headers: string;
+}
+
+function makeLocalId() {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 const defaultForm: ServerFormState = {
@@ -52,13 +110,23 @@ const defaultForm: ServerFormState = {
   headers: "",
 };
 
+// Prefer the backend-assigned id, fall back to the user-facing name.
+// Every URL operation (update / delete / auth / reconnect) should use this.
+function serverIdOf(server: McpServerConfigured): string {
+  return server.id ?? server.name;
+}
+
+function serverIdentityOf(server: Pick<McpServerConfigured, "id" | "name"> | Pick<McpServerConnected, "name">): string {
+  return "id" in server && server.id ? server.id : server.name;
+}
+
 function formToPayload(form: ServerFormState): McpServerConfigured {
-  let transport: McpServerTransport;
+  let transport: McpTransport;
   if (form.transportType === "stdio") {
     transport = {
       type: "stdio",
       command: form.command,
-      args: form.args.filter(Boolean),
+      args: form.args.map(item => item.value.trim()).filter(Boolean),
     };
   } else {
     transport = { type: form.transportType, url: form.url };
@@ -69,7 +137,7 @@ function formToPayload(form: ServerFormState): McpServerConfigured {
     name: form.name,
     transport,
     timeout_secs: form.timeout || 30,
-    env: form.env.filter(Boolean),
+    env: form.env.map(item => item.value.trim()).filter(Boolean),
   };
   // Only include headers if user explicitly entered values, to avoid
   // overwriting server-side headers that the list API may not return.
@@ -85,10 +153,10 @@ function configuredToForm(server: McpServerConfigured): ServerFormState {
     name: server.name,
     transportType: transport.type ?? "stdio",
     command: transport.command ?? "",
-    args: transport.args ?? [],
+    args: (transport.args ?? []).map(v => ({ id: makeLocalId(), value: v })),
     url: transport.url ?? "",
     timeout: server.timeout_secs ?? 30,
-    env: server.env ?? [],
+    env: (server.env ?? []).map(v => ({ id: makeLocalId(), value: v })),
     headers: (server.headers ?? []).join("\n"),
   };
 }
@@ -107,11 +175,12 @@ function getTransportDetail(server: McpServerConfigured): string {
 
 // ── ArgsEditor ──────────────────────────────────────────────────────
 
-function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items: LabeledItem[]) => void }) {
+  const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, ""];
+    const next = [...items, { id: makeLocalId(), value: "" }];
     onChange(next);
     // Focus the newly added input after render
     setTimeout(() => {
@@ -125,18 +194,18 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
 
   function updateItem(idx: number, value: string) {
     const next = [...items];
-    next[idx] = value;
+    next[idx] = { ...next[idx], value };
     onChange(next);
   }
 
   return (
     <div className="space-y-1.5">
       {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5">
+        <div key={item.id} className="flex items-center gap-1.5">
           <input
             ref={el => { inputRefs.current[idx] = el; }}
             type="text"
-            value={item}
+            value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
             className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
           />
@@ -144,7 +213,7 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
             type="button"
             onClick={() => removeItem(idx)}
             className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
-            aria-label="Remove argument"
+            aria-label={t("mcp.remove_argument")}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -156,7 +225,7 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
         className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
-        Add argument
+        {t("mcp.add_argument")}
       </button>
     </div>
   );
@@ -164,11 +233,12 @@ function ArgsEditor({ items, onChange }: { items: string[]; onChange: (items: st
 
 // ── EnvEditor ───────────────────────────────────────────────────────
 
-function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: string[]) => void }) {
+function EnvEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items: LabeledItem[]) => void }) {
+  const { t } = useTranslation();
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   function addItem() {
-    const next = [...items, ""];
+    const next = [...items, { id: makeLocalId(), value: "" }];
     onChange(next);
     setTimeout(() => {
       inputRefs.current[next.length - 1]?.focus();
@@ -181,27 +251,27 @@ function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: str
 
   function updateItem(idx: number, value: string) {
     const next = [...items];
-    next[idx] = value;
+    next[idx] = { ...next[idx], value };
     onChange(next);
   }
 
   return (
     <div className="space-y-1.5">
       {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5">
+        <div key={item.id} className="flex items-center gap-1.5">
           <input
             ref={el => { inputRefs.current[idx] = el; }}
             type="text"
-            value={item}
+            value={item.value}
             onChange={(e) => updateItem(idx, e.target.value)}
-            placeholder="KEY=VALUE"
+            placeholder={t("mcp.env_placeholder")}
             className="flex-1 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
           />
           <button
             type="button"
             onClick={() => removeItem(idx)}
             className="shrink-0 flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:text-error hover:bg-error/8 transition-colors"
-            aria-label="Remove variable"
+            aria-label={t("mcp.remove_variable")}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -213,7 +283,7 @@ function EnvEditor({ items, onChange }: { items: string[]; onChange: (items: str
         className="flex items-center gap-1 text-[10px] font-bold text-text-dim hover:text-brand transition-colors py-0.5"
       >
         <Plus className="h-3 w-3" />
-        Add variable
+        {t("mcp.add_variable")}
       </button>
     </div>
   );
@@ -236,22 +306,28 @@ function AuthBadge({
   onAuthSuccess,
 }: {
   server: McpServerConfigured;
-  onAuthSuccess: () => void;
+  onAuthSuccess?: () => void;
 }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
+  const queryClient = useQueryClient();
   const authState = server.auth_state?.state ?? "not_required";
   const [polling, setPolling] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startAuthMutation = useStartMcpAuth();
+  const revokeAuthMutation = useRevokeMcpAuth();
+  const serverIdentity = serverIdentityOf(server);
 
   useEffect(() => {
-    if ((authState === "pending_auth" && polling) || polling) {
+    if (polling) {
       pollRef.current = setInterval(async () => {
         try {
-          const status = await getMcpAuthStatus(server.name);
+          const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
           if (status.auth.state === "authorized") {
             setPolling(false);
-            onAuthSuccess();
+            queryClient.invalidateQueries({ queryKey: mcpQueries.servers().queryKey });
+            queryClient.invalidateQueries({ queryKey: mcpQueries.health().queryKey });
+            onAuthSuccess?.();
           } else if (status.auth.state === "error") {
             setPolling(false);
             addToast(status.auth.message || t("mcp.auth_failed"), "error");
@@ -264,12 +340,12 @@ function AuthBadge({
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [authState, polling, server.name, onAuthSuccess, addToast]);
+  }, [authState, polling, serverIdentity, onAuthSuccess, addToast, queryClient, t]);
 
   const handleStartAuth = useCallback(async () => {
     const authWindow = window.open("about:blank", "_blank");
     try {
-      const result = await startMcpAuth(server.name);
+      const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
         authWindow.location.href = result.auth_url;
       } else {
@@ -277,23 +353,23 @@ function AuthBadge({
       }
       setPolling(true);
       addToast(t("mcp.auth_started"), "info");
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (authWindow && !authWindow.closed) {
         authWindow.close();
       }
-      addToast(e?.message || t("mcp.auth_start_failed"), "error");
+      addToast(errorMessage(e, t("mcp.auth_start_failed")), "error");
     }
-  }, [server.name, addToast, t]);
+  }, [serverIdentity, startAuthMutation, addToast, t]);
 
   const handleRevoke = useCallback(async () => {
     try {
-      await revokeMcpAuth(server.name);
-      onAuthSuccess();
+      await revokeAuthMutation.mutateAsync(serverIdentity);
+      onAuthSuccess?.();
       addToast(t("mcp.auth_revoked"), "success");
-    } catch (e: any) {
-      addToast(e?.message || t("mcp.auth_revoke_failed"), "error");
+    } catch (e: unknown) {
+      addToast(errorMessage(e, t("mcp.auth_revoke_failed")), "error");
     }
-  }, [server.name, onAuthSuccess, addToast, t]);
+  }, [serverIdentity, revokeAuthMutation, onAuthSuccess, addToast, t]);
 
   if (authState === "not_required") return null;
 
@@ -376,12 +452,16 @@ function ServerCard({
   onToggleTools: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onAuthSuccess: () => void;
+  onAuthSuccess?: () => void;
   t: (key: string, opts?: any) => string;
 }) {
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;
   const [showAllTools, setShowAllTools] = useState(false);
+
+  // Cache transport info — computed once per render, not 3-4x
+  const transportType = useMemo(() => getTransportType(server), [server]);
+  const transportDetail = useMemo(() => getTransportDetail(server), [server]);
 
   // Reset "show all" when tools section is collapsed
   useEffect(() => {
@@ -399,7 +479,7 @@ function ServerCard({
   return (
     <Card hover padding="none" className="flex flex-col overflow-hidden group">
       {/* Gradient top bar */}
-      <div className={`h-1.5 bg-gradient-to-r ${
+      <div className={`h-1.5 bg-linear-to-r ${
         isConnected
           ? "from-success via-success/60 to-success/30"
           : "from-error via-error/60 to-error/30"
@@ -411,8 +491,8 @@ function ServerCard({
           <div className="flex items-center gap-3 min-w-0">
             <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
               isConnected
-                ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20"
-                : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"
+                ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
+                : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
             }`}>
               <Plug className={`w-5 h-5 ${isConnected ? "text-success" : "text-brand"}`} />
             </div>
@@ -421,7 +501,7 @@ function ServerCard({
                 isConnected ? "group-hover:text-success" : "group-hover:text-brand"
               }`}>{server.name}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
-                {getTransportType(server)}
+                {transportType}
               </p>
             </div>
           </div>
@@ -435,14 +515,14 @@ function ServerCard({
 
         {/* Stats */}
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Wrench className={`w-3 h-3 ${isConnected ? "text-success" : "text-brand"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.tools")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{toolsCount}</p>
           </div>
-          <div className="p-3 rounded-xl bg-gradient-to-br from-main/60 to-main/30 border border-border-subtle/50">
+          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
               <Clock className="w-3 h-3 text-warning" />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.timeout")}</p>
@@ -454,17 +534,17 @@ function ServerCard({
         {/* Transport badge + detail */}
         <div className="flex items-center gap-2 mb-3">
           <Badge variant="default">
-            <TransportIcon type={getTransportType(server)} />
-            <span className="ml-1">{getTransportType(server).toUpperCase()}</span>
+            <TransportIcon type={transportType} />
+            <span className="ml-1">{transportType.toUpperCase()}</span>
           </Badge>
         </div>
         <div className="flex items-center gap-2 text-xs mb-2">
-          {getTransportType(server) === "stdio" ? (
+          {transportType === "stdio" ? (
             <Terminal className="w-3 h-3 text-text-dim/50 shrink-0" />
           ) : (
             <Globe className="w-3 h-3 text-text-dim/50 shrink-0" />
           )}
-          <span className="text-text-dim font-mono text-[10px] truncate">{getTransportDetail(server)}</span>
+          <span className="text-text-dim font-mono text-[10px] truncate">{transportDetail}</span>
         </div>
       </div>
 
@@ -531,70 +611,30 @@ function ServerCard({
 
 export function McpServersPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
 
-  const [tab, setTab] = useState<"servers" | "registry">("servers");
+  const [tab, setTab] = useState<"servers" | "catalog">("servers");
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfigured | null>(null);
-  const [deletingServer, setDeletingServer] = useState<string | null>(null);
+  const [deletingServer, setDeletingServer] = useState<McpServerConfigured | null>(null);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<ServerFormState>(defaultForm);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [marketplaceSearch, setMarketplaceSearch] = useState("");
-  const [installingTemplate, setInstallingTemplate] = useState<IntegrationTemplate | null>(null);
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [installingTemplate, setInstallingTemplate] = useState<McpCatalogEntry | null>(null);
   const [envInputs, setEnvInputs] = useState<Record<string, string>>({});
 
   useCreateShortcut(() => setShowAddModal(true));
 
-  const serversQuery = useQuery({
-    queryKey: ["mcp-servers"],
-    queryFn: listMcpServers,
-    refetchInterval: REFRESH_MS,
-  });
+  const serversQuery = useMcpServers();
+  const catalogQuery = useMcpCatalog({ enabled: tab === "catalog" });
+  const healthQuery = useMcpHealth();
 
-  const registryQuery = useQuery({
-    queryKey: ["integrations-available"],
-    queryFn: listAvailableIntegrations,
-    enabled: tab === "registry",
-  });
-
-  const addMutation = useMutation({
-    mutationFn: (server: McpServerConfigured) => addMcpServer(server),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
-      setShowAddModal(false);
-      setInstallingTemplate(null);
-      setEnvInputs({});
-      setForm(defaultForm);
-      addToast(t("mcp.add_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.add_failed"), "error"),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ name, server }: { name: string; server: Partial<McpServerConfigured> }) => updateMcpServer(name, server),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      setEditingServer(null);
-      setForm(defaultForm);
-      addToast(t("mcp.update_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.update_failed"), "error"),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (name: string) => deleteMcpServer(name),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      queryClient.invalidateQueries({ queryKey: ["integrations-available"] });
-      setDeletingServer(null);
-      addToast(t("mcp.delete_success"), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("mcp.delete_failed"), "error"),
-  });
+  const addMutation = useAddMcpServer();
+  const updateMutation = useUpdateMcpServer();
+  const deleteMutation = useDeleteMcpServer();
+  const reloadMutation = useReloadMcp();
 
   const data = serversQuery.data;
   const configured = data?.configured ?? [];
@@ -602,7 +642,7 @@ export function McpServersPage() {
 
   const connectedMap = useMemo(() => {
     const map = new Map<string, McpServerConnected>();
-    for (const c of connected) map.set(c.name, c);
+    for (const c of connected) map.set(serverIdentityOf(c), c);
     return map;
   }, [connected]);
 
@@ -618,39 +658,70 @@ export function McpServersPage() {
     }
     if (statusFilter !== "all") {
       result = result.filter(s => {
-        const isConn = connectedMap.get(s.name)?.connected ?? false;
+        const isConn = connectedMap.get(serverIdentityOf(s))?.connected ?? false;
         return statusFilter === "connected" ? isConn : !isConn;
       });
     }
     return result;
   }, [configured, searchQuery, statusFilter, connectedMap]);
 
-  function toggleTools(name: string) {
+  const toggleTools = useCallback((server: McpServerConfigured) => {
+    const identity = serverIdentityOf(server);
     setExpandedTools(prev => {
       const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
+      if (next.has(identity)) next.delete(identity);
+      else next.add(identity);
       return next;
     });
-  }
+  }, []);
 
   function openAdd() {
     setForm(defaultForm);
     setShowAddModal(true);
   }
 
-  function openEdit(server: McpServerConfigured) {
+  const openEdit = useCallback((server: McpServerConfigured) => {
     setForm(configuredToForm(server));
     setEditingServer(server);
-  }
+  }, []);
+
+  const deleteServer = useCallback((server: McpServerConfigured) => {
+    setDeletingServer(server);
+  }, []);
 
   function handleSubmit() {
     const payload = formToPayload(form);
     if (editingServer) {
-      updateMutation.mutate({ name: editingServer.name, server: payload });
+      updateMutation.mutate(
+        { id: serverIdOf(editingServer), server: payload },
+        {
+          onSuccess: () => {
+            setEditingServer(null);
+            setForm(defaultForm);
+            addToast(t("mcp.update_success"), "success");
+          },
+          onError: (e: unknown) => addToast(errorMessage(e, t("mcp.update_failed")), "error"),
+        },
+      );
     } else {
-      addMutation.mutate(payload);
+      addMutation.mutate(payload, {
+        onSuccess: () => {
+          setShowAddModal(false);
+          setInstallingTemplate(null);
+          setEnvInputs({});
+          setForm(defaultForm);
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
+      });
     }
+  }
+
+  function handleReload() {
+    reloadMutation.mutate(undefined, {
+      onSuccess: () => addToast(t("mcp.reload_success"), "success"),
+      onError: (e: unknown) => addToast(errorMessage(e, t("mcp.reload_failed")), "error"),
+    });
   }
 
   const isModalOpen = showAddModal || editingServer !== null;
@@ -659,23 +730,9 @@ export function McpServersPage() {
   const updateField = <K extends keyof ServerFormState>(key: K, value: ServerFormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
-  function buildPayloadFromTemplate(tpl: IntegrationTemplate, envOverrides?: Record<string, string>): McpServerConfigured {
-    const transport = tpl.transport;
-    let mcpTransport: McpServerTransport;
-    const ttype = transport?.type ?? "stdio";
-    if (ttype === "stdio") {
-      mcpTransport = { type: "stdio", command: transport?.command ?? "", args: transport?.args ?? [] };
-    } else {
-      mcpTransport = { type: ttype as "sse" | "http", url: transport?.url ?? "" };
-    }
-    const env = (tpl.required_env ?? []).map(e => {
-      const val = envOverrides?.[e.name] ?? "";
-      return `${e.name}=${val}`;
-    });
-    return { name: tpl.id, transport: mcpTransport, timeout_secs: 30, env };
-  }
-
-  function installFromTemplate(tpl: IntegrationTemplate) {
+  // Catalog install: backend expects `{ template_id, credentials }` — the
+  // dashboard no longer materializes a full server spec from the template.
+  function installFromTemplate(tpl: McpCatalogEntry) {
     const hasEnv = (tpl.required_env ?? []).length > 0;
     if (hasEnv) {
       const defaults: Record<string, string> = {};
@@ -683,50 +740,117 @@ export function McpServersPage() {
       setEnvInputs(defaults);
       setInstallingTemplate(tpl);
     } else {
-      addMutation.mutate(buildPayloadFromTemplate(tpl));
+      addMutation.mutate({ template_id: tpl.id }, {
+        onSuccess: () => {
+          setShowAddModal(false);
+          setInstallingTemplate(null);
+          setEnvInputs({});
+          setForm(defaultForm);
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
+      });
     }
   }
 
   function confirmTemplateInstall() {
     if (!installingTemplate) return;
-    addMutation.mutate(buildPayloadFromTemplate(installingTemplate, envInputs));
+    // Strip blank credential fields before submit. The server's installer
+    // persists whatever is sent, so a skipped optional field would land
+    // in the vault as an empty string and the downstream env lookup would
+    // then skip its dotenv fallback (since the vault "has" a value,
+    // albeit empty). Dropping the key lets the resolver chain work.
+    const cleanCreds: Record<string, string> = {};
+    for (const [k, v] of Object.entries(envInputs)) {
+      if (typeof v === "string" && v.trim().length > 0) cleanCreds[k] = v;
+    }
+    addMutation.mutate(
+      { template_id: installingTemplate.id, credentials: cleanCreds },
+      {
+        onSuccess: () => {
+          setShowAddModal(false);
+          setInstallingTemplate(null);
+          setEnvInputs({});
+          setForm(defaultForm);
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
+      },
+    );
   }
 
-  const registryTemplates = registryQuery.data?.integrations ?? [];
-  const configuredNames = useMemo(() => new Set(configured.map(s => s.name)), [configured]);
+  const catalogEntries = catalogQuery.data?.entries ?? [];
+  // Catalog entries are already flagged `installed` by the backend, but the
+  // dashboard also treats a server whose `template_id` matches as installed.
+  const installedTemplateIds = useMemo(
+    () => new Set(configured.map(s => s.template_id).filter((x): x is string => Boolean(x))),
+    [configured],
+  );
 
   const filteredTemplates = useMemo(() => {
-    if (!marketplaceSearch.trim()) return registryTemplates;
-    const q = marketplaceSearch.toLowerCase();
-    return registryTemplates.filter(tpl =>
+    if (!catalogSearch.trim()) return catalogEntries;
+    const q = catalogSearch.toLowerCase();
+    return catalogEntries.filter(tpl =>
       tpl.name.toLowerCase().includes(q) ||
       tpl.id.toLowerCase().includes(q) ||
       (tpl.description || "").toLowerCase().includes(q) ||
       (tpl.category || "").toLowerCase().includes(q) ||
       (tpl.tags ?? []).some(tag => tag.toLowerCase().includes(q))
     );
-  }, [registryTemplates, marketplaceSearch]);
+  }, [catalogEntries, catalogSearch]);
 
   const connectedCount = useMemo(
-    () => configured.filter(s => connectedMap.get(s.name)?.connected).length,
+    () => configured.filter(s => connectedMap.get(serverIdentityOf(s))?.connected).length,
     [configured, connectedMap],
   );
   const disconnectedCount = configured.length - connectedCount;
+
+  // Backend returns a list of per-server status entries — badge is "ok"
+  // only when every entry reports a ready/healthy state. Null keeps the
+  // badge hidden while loading or before any servers have been pinged.
+  const healthEntries = healthQuery.data?.health;
+  const healthOk =
+    healthEntries === undefined
+      ? null
+      : healthEntries.length === 0
+        ? null
+        : healthEntries.every(h => h.status === "ready" || h.status === "ok");
 
   return (
     <div className="space-y-6">
       <PageHeader
         icon={<Plug className="h-5 w-5" />}
-        badge="MCP"
+        badge={t("mcp.badge", { defaultValue: "MCP" })}
         title={t("mcp.title")}
-        subtitle={tab === "registry" ? t("mcp.marketplace_subtitle") : t("mcp.subtitle")}
-        isFetching={serversQuery.isFetching || registryQuery.isFetching}
-        onRefresh={() => { serversQuery.refetch(); if (tab === "registry") registryQuery.refetch(); }}
+        subtitle={tab === "catalog" ? t("mcp.catalog_subtitle") : t("mcp.subtitle")}
+        isFetching={serversQuery.isFetching || catalogQuery.isFetching || healthQuery.isFetching}
+        onRefresh={() => {
+          serversQuery.refetch();
+          healthQuery.refetch();
+          if (tab === "catalog") catalogQuery.refetch();
+        }}
         helpText={t("mcp.help")}
         actions={
-          <Button size="sm" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={openAdd}>
-            {t("mcp.add_server")}
-          </Button>
+          <>
+            {healthOk !== null && (
+              <Badge variant={healthOk ? "success" : "error"} dot>
+                <Activity className="h-3 w-3 mr-1" />
+                {healthOk ? t("mcp.health_ok") : t("mcp.health_degraded")}
+              </Badge>
+            )}
+            <Button
+              size="sm"
+              variant="secondary"
+              leftIcon={<RefreshCw className={`h-3.5 w-3.5 ${reloadMutation.isPending ? "animate-spin" : ""}`} />}
+              onClick={handleReload}
+              disabled={reloadMutation.isPending}
+            >
+              {t("mcp.reload")}
+            </Button>
+            <Button size="sm" leftIcon={<Plus className="h-3.5 w-3.5" />} onClick={openAdd}>
+              {t("mcp.add_server")}
+            </Button>
+          </>
         }
       />
 
@@ -747,13 +871,13 @@ export function McpServersPage() {
           )}
         </button>
         <button
-          onClick={() => setTab("registry")}
+          onClick={() => setTab("catalog")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-            tab === "registry" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
+            tab === "catalog" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
           }`}
         >
           <Store className="h-3.5 w-3.5" />
-          {t("mcp.tab_marketplace")}
+          {t("mcp.tab_catalog")}
         </button>
       </div>
 
@@ -822,8 +946,8 @@ export function McpServersPage() {
               title={t("mcp.empty")}
               description={t("mcp.empty_desc")}
               action={
-                <Button size="sm" leftIcon={<Store className="h-3.5 w-3.5" />} onClick={() => setTab("registry")}>
-                  {t("mcp.tab_marketplace")}
+                <Button size="sm" leftIcon={<Store className="h-3.5 w-3.5" />} onClick={() => setTab("catalog")}>
+                  {t("mcp.tab_catalog")}
                 </Button>
               }
             />
@@ -841,50 +965,52 @@ export function McpServersPage() {
           {/* Server cards */}
           {filteredServers.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-              {filteredServers.map((server) => (
-                <ServerCard
-                  key={server.name}
-                  server={server}
-                  conn={connectedMap.get(server.name)}
-                  isExpanded={expandedTools.has(server.name)}
-                  onToggleTools={() => toggleTools(server.name)}
-                  onEdit={() => openEdit(server)}
-                  onDelete={() => setDeletingServer(server.name)}
-                  onAuthSuccess={() => serversQuery.refetch()}
-                  t={t}
-                />
-              ))}
+              {filteredServers.map((server) => {
+                const id = serverIdentityOf(server);
+                return (
+                  <ServerCard
+                    key={id}
+                    server={server}
+                    conn={connectedMap.get(id)}
+                    isExpanded={expandedTools.has(id)}
+                    onToggleTools={() => toggleTools(server)}
+                    onEdit={() => openEdit(server)}
+                    onDelete={() => deleteServer(server)}
+                    t={t}
+                  />
+                );
+              })}
             </div>
           )}
         </>
       )}
 
-      {/* Marketplace tab */}
-      {tab === "registry" && (
+      {/* Catalog tab */}
+      {tab === "catalog" && (
         <>
-          {registryQuery.isLoading && <ListSkeleton rows={3} />}
+          {catalogQuery.isLoading && <ListSkeleton rows={3} />}
 
-          {/* Marketplace search — visible once data has loaded */}
-          {!registryQuery.isLoading && registryTemplates.length > 0 && (
+          {/* Catalog search — visible once data has loaded */}
+          {!catalogQuery.isLoading && catalogEntries.length > 0 && (
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-text-dim/50" />
               <input
                 type="text"
-                value={marketplaceSearch}
-                onChange={(e) => setMarketplaceSearch(e.target.value)}
-                placeholder={t("mcp.marketplace_search_placeholder")}
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                placeholder={t("mcp.catalog_search_placeholder")}
                 className="w-full rounded-xl border border-border-subtle bg-surface pl-10 pr-4 py-2.5 text-sm font-medium text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
               />
             </div>
           )}
-          {!registryQuery.isLoading && registryTemplates.length === 0 && (
+          {!catalogQuery.isLoading && catalogEntries.length === 0 && (
             <EmptyState
               icon={<Store className="h-10 w-10" />}
-              title={t("mcp.marketplace_empty")}
-              description={t("mcp.marketplace_empty_desc")}
+              title={t("mcp.catalog_empty")}
+              description={t("mcp.catalog_empty_desc")}
             />
           )}
-          {!registryQuery.isLoading && registryTemplates.length > 0 && filteredTemplates.length === 0 && (
+          {!catalogQuery.isLoading && catalogEntries.length > 0 && filteredTemplates.length === 0 && (
             <EmptyState
               icon={<Search className="h-10 w-10" />}
               title={t("mcp.no_results")}
@@ -894,10 +1020,10 @@ export function McpServersPage() {
           {filteredTemplates.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
               {filteredTemplates.map((tpl) => {
-                const alreadyAdded = configuredNames.has(tpl.id);
+                const alreadyAdded = tpl.installed || installedTemplateIds.has(tpl.id);
                 return (
                   <Card key={tpl.id} hover={!alreadyAdded} padding="none" className={`flex flex-col overflow-hidden group ${alreadyAdded ? "opacity-75" : ""}`}>
-                    <div className={`h-1.5 bg-gradient-to-r ${
+                    <div className={`h-1.5 bg-linear-to-r ${
                       alreadyAdded
                         ? "from-success via-success/60 to-success/30"
                         : "from-brand via-brand/60 to-brand/30"
@@ -908,27 +1034,27 @@ export function McpServersPage() {
                         <div className="flex items-center gap-3 min-w-0">
                           <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
                             alreadyAdded
-                              ? "bg-gradient-to-br from-success/10 to-success/5 border border-success/20"
-                              : "bg-gradient-to-br from-brand/10 to-brand/5 border border-brand/20"
+                              ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
+                              : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
                           }`}>
                             {tpl.icon
-                              ? <span className="text-xl">{tpl.icon}</span>
+                              ? <CatalogIcon icon={tpl.icon} className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
                               : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
                             }
                           </div>
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <h3 className={`text-sm font-black truncate transition-colors ${
                               alreadyAdded ? "" : "group-hover:text-brand"
                             }`}>{tpl.name}</h3>
                             {tpl.category && (
-                              <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
+                              <span className="block truncate text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
                             )}
                           </div>
                         </div>
                         {alreadyAdded && (
                           <Badge variant="success" dot>
                             <Check className="h-3 w-3 mr-0.5" />
-                            {t("mcp.marketplace_installed")}
+                            {t("mcp.catalog_installed")}
                           </Badge>
                         )}
                       </div>
@@ -975,8 +1101,8 @@ export function McpServersPage() {
                         }`}
                       >
                         {alreadyAdded
-                          ? <><Check className="h-3.5 w-3.5" /> {t("mcp.marketplace_installed")}</>
-                          : <><Download className="h-3.5 w-3.5" /> {t("mcp.marketplace_add")}</>
+                          ? <><Check className="h-3.5 w-3.5" /> {t("mcp.catalog_installed")}</>
+                          : <><Download className="h-3.5 w-3.5" /> {t("mcp.catalog_install")}</>
                         }
                       </button>
                     </div>
@@ -1120,7 +1246,7 @@ export function McpServersPage() {
         </div>
       </Modal>
 
-      {/* Marketplace env setup modal */}
+      {/* Catalog env setup modal */}
       <Modal
         isOpen={!!installingTemplate}
         onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
@@ -1165,7 +1291,7 @@ export function McpServersPage() {
               leftIcon={<Download className="h-3.5 w-3.5" />}
               onClick={confirmTemplateInstall}
             >
-              {t("mcp.marketplace_add")}
+              {t("mcp.catalog_install")}
             </Button>
           </div>
         </div>
@@ -1178,7 +1304,15 @@ export function McpServersPage() {
         message={t("mcp.delete_confirm")}
         tone="destructive"
         confirmLabel={t("common.delete")}
-        onConfirm={() => { if (deletingServer) deleteMutation.mutate(deletingServer); }}
+        onConfirm={() => {
+          if (deletingServer) deleteMutation.mutate(serverIdOf(deletingServer), {
+            onSuccess: () => {
+              setDeletingServer(null);
+              addToast(t("mcp.delete_success"), "success");
+            },
+            onError: (e: unknown) => addToast(errorMessage(e, t("mcp.delete_failed")), "error"),
+          });
+        }}
         onClose={() => setDeletingServer(null)}
       />
     </div>

@@ -115,7 +115,9 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
         let agent_clone = path.starts_with("/api/agents/") && path.ends_with("/clone");
         let approval_action = path == "/api/approvals/batch"
             || path.ends_with("/approve")
+            || path.ends_with("/approve_all")
             || path.ends_with("/reject")
+            || path.ends_with("/reject_all")
             || path.ends_with("/modify");
         return agent_message || agent_clone || approval_action;
     }
@@ -312,12 +314,13 @@ pub async fn auth(
     } else {
         after_version.strip_suffix('/').unwrap_or(&after_version)
     };
-    if path == "/api/shutdown" {
+    // Loopback requests (CLI on the same machine) bypass auth entirely.
+    {
         let is_loopback = request
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().is_loopback())
-            .unwrap_or(false); // SECURITY: default-deny — unknown origin is NOT loopback
+            .unwrap_or(false);
         if is_loopback {
             return next.run(request).await;
         }
@@ -367,11 +370,39 @@ pub async fn auth(
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
+    // Path has been trimmed of trailing slashes above, so `/dashboard/` is
+    // normalized to `/dashboard`. Match the bare root as well as any
+    // descendant so the login gate (and cookie session lookup below) don't
+    // silently miss the root navigation.
+    let is_dashboard_path = path == "/dashboard" || path.starts_with("/dashboard/");
+
+    // Compute `auth_configured` early so we can decide whether the SPA
+    // shell at `/dashboard/*` stays publicly reachable. When *any* form of
+    // auth is configured, shell access goes behind the session cookie and
+    // an unauthenticated browser gets a minimal inline login page
+    // (see the 401 handler below). When no auth is configured the shell
+    // stays public so the out-of-the-box dev experience still works.
+    let auth_configured = !api_key.trim().is_empty()
+        || !auth_state.user_api_keys.is_empty()
+        || auth_state.dashboard_auth_enabled;
+    // The inline login page (`login_page.html`) only speaks username/password,
+    // so only gate the shell when *that* mode is actually enabled. API-key-only
+    // deployments keep a public shell so the SPA can load its own API-key
+    // entry UI; the individual `/api/*` endpoints still require a Bearer
+    // token, which is the real security boundary.
+    //
+    // Dashboard assets (JS/CSS/font chunks) are always public — they contain
+    // no sensitive data and the SPA shell needs them to render even the
+    // inline login page returned for unauthenticated browsers.
+    let is_dashboard_asset = path.starts_with("/dashboard/assets/");
+    let dashboard_shell_public =
+        (!auth_state.dashboard_auth_enabled && is_dashboard_path) || is_dashboard_asset;
+
     let always_public_get_only = is_get
         && (matches!(
             path,
             "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
-        ) || path.starts_with("/dashboard/")
+        ) || dashboard_shell_public
             || path.starts_with("/a2a/")
             || path.starts_with("/api/uploads/")
             || path.starts_with("/api/auth/login"));
@@ -402,9 +433,9 @@ pub async fn auth(
             | "/api/hands/active"
             | "/api/skills"
             | "/api/sessions"
-            | "/api/integrations"
-            | "/api/integrations/available"
-            | "/api/integrations/health"
+            | "/api/mcp/servers"
+            | "/api/mcp/catalog"
+            | "/api/mcp/health"
             | "/api/workflows"
     );
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
@@ -414,15 +445,6 @@ pub async fn auth(
     let dashboard_read_public =
         (is_get && (dashboard_read_exact || dashboard_read_prefix)) || path == "/api/logs/stream"; // SSE stream, read-only
 
-    // The flag only engages when *some* form of auth is actually configured.
-    // Gating on `api_key.is_empty()` alone would silently no-op the flag
-    // whenever an operator configures only per-user keys or dashboard
-    // username/password auth — which is exactly the setup most production
-    // deployments use. Mirror the "auth configured?" check below so every
-    // auth mode participates.
-    let auth_configured = !api_key.trim().is_empty()
-        || !auth_state.user_api_keys.is_empty()
-        || auth_state.dashboard_auth_enabled;
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
     let is_public = always_public || (dashboard_read_public && !enforce_auth_on_reads);
@@ -456,6 +478,27 @@ pub async fn auth(
             .and_then(|v| v.to_str().ok())
     });
 
+    // Cookie-based session token — only accepted for SPA shell navigation
+    // (`/dashboard/*`). API endpoints still require a Bearer/header token so
+    // a cross-site request that auto-forwards the cookie cannot trigger a
+    // write. Pair with `SameSite=Lax` on the Set-Cookie (issued by
+    // `dashboard_login`) for the usual CSRF posture.
+    let cookie_session_token = if is_dashboard_path {
+        request
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|header| {
+                header
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|kv| kv.strip_prefix("librefang_session="))
+                    .map(str::to_string)
+            })
+    } else {
+        None
+    };
+
     // Split composite key (supports multiple valid tokens separated by \n).
     let valid_keys: Vec<&str> = api_key.split('\n').filter(|k| !k.is_empty()).collect();
 
@@ -486,8 +529,11 @@ pub async fn auth(
     }
 
     // Check the active session store for randomly generated dashboard tokens.
-    // Also prune expired sessions opportunistically.
-    let provided_token = api_token.or(query_token);
+    // Also prune expired sessions opportunistically. Cookie token is only
+    // consulted for `/dashboard/*` navigation (filtered upstream).
+    let provided_token = api_token
+        .or(query_token)
+        .or(cookie_session_token.as_deref());
     if let Some(token_str) = provided_token {
         let mut sessions = auth_state.active_sessions.write().await;
         // Remove expired sessions while we hold the lock
@@ -555,6 +601,19 @@ pub async fn auth(
         translator.t("api-error-auth-missing-header")
     };
 
+    // Browser navigation to `/dashboard/*` with no valid session — serve a
+    // minimal self-contained login page instead of a JSON error, so the SPA
+    // bundle (and whatever it imports) never reaches an unauthenticated
+    // caller.
+    if is_get && is_dashboard_path && auth_state.dashboard_auth_enabled {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("content-type", "text/html; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(LOGIN_PAGE_HTML))
+            .unwrap_or_default();
+    }
+
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("www-authenticate", "Bearer")
@@ -564,6 +623,8 @@ pub async fn auth(
         ))
         .unwrap_or_default()
 }
+
+const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
 
 /// Security headers middleware — applied to ALL API responses.
 pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Body> {
@@ -684,6 +745,17 @@ mod tests {
             UserRole::Viewer,
             &post,
             "/api/agents/123/message"
+        ));
+        // Session-scoped approval endpoints are also denied for Viewer.
+        assert!(!user_role_allows_request(
+            UserRole::Viewer,
+            &post,
+            "/api/approvals/session/sess-1/approve_all"
+        ));
+        assert!(!user_role_allows_request(
+            UserRole::Viewer,
+            &post,
+            "/api/approvals/session/sess-1/reject_all"
         ));
     }
 

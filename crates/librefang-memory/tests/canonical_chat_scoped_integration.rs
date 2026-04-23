@@ -29,6 +29,7 @@ fn user_msg(text: &str) -> Message {
         role: Role::User,
         content: MessageContent::Text(text.to_string()),
         pinned: false,
+        timestamp: None,
     }
 }
 

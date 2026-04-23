@@ -29,11 +29,12 @@ const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
 const EVENT_CHANNEL_CAPACITY: usize = 128;
 
 /// Quality of Service level for MQTT operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum MqttQoS {
     /// At most once (fire and forget).
     AtMostOnce,
     /// At least once (acknowledged delivery).
+    #[default]
     AtLeastOnce,
     /// Exactly once (assured delivery).
     ExactlyOnce,
@@ -46,12 +47,6 @@ impl MqttQoS {
             MqttQoS::AtLeastOnce => QoS::AtLeastOnce,
             MqttQoS::ExactlyOnce => QoS::ExactlyOnce,
         }
-    }
-}
-
-impl Default for MqttQoS {
-    fn default() -> Self {
-        MqttQoS::AtLeastOnce
     }
 }
 
@@ -236,7 +231,12 @@ impl MqttAdapter {
                 librefang_user: None,
             },
             content,
-            target_agent: target_agent.map(|id| id.into()),
+            // `agent` field carries a UUID string; reject anything that doesn't
+            // parse so we don't silently turn garbage into a bogus AgentId.
+            target_agent: target_agent
+                .as_deref()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .map(librefang_types::agent::AgentId),
             timestamp: Utc::now(),
             is_group: false,
             thread_id: None,
@@ -264,8 +264,10 @@ impl ChannelAdapter for MqttAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!(
             "MQTT adapter connecting to {}:{} (client_id={})",
             self.host, self.port, self.client_id
@@ -345,7 +347,7 @@ impl ChannelAdapter for MqttAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             ChannelContent::Command { name, args } => {
@@ -372,7 +374,10 @@ impl ChannelAdapter for MqttAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // MQTT has no typing indicator concept.
         Ok(())
     }
@@ -382,12 +387,12 @@ impl ChannelAdapter for MqttAdapter {
         _user: &ChannelUser,
         _message_id: &str,
         _reaction: &LifecycleReaction,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // MQTT has no reaction concept.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
 
         // Disconnect MQTT client gracefully
@@ -483,12 +488,26 @@ mod tests {
     #[test]
     fn test_parse_payload_json_with_agent() {
         let topic = "commands/input";
-        let payload =
-            br#"{"sender": "controller", "message": "turn on lights", "agent": "home-agent-1"}"#;
+        // `agent` must be a UUID — other adapters (Telegram, Discord) route by
+        // AgentId too, and accepting free-form strings here would produce
+        // routing mismatches.
+        let payload = br#"{"sender": "controller", "message": "turn on lights", "agent": "550e8400-e29b-41d4-a716-446655440000"}"#;
         let msg = MqttAdapter::parse_payload(topic, payload, &None);
         assert!(msg.is_some());
         let msg = msg.unwrap();
         assert!(msg.target_agent.is_some());
+    }
+
+    #[test]
+    fn test_parse_payload_json_with_non_uuid_agent_ignored() {
+        let topic = "commands/input";
+        let payload =
+            br#"{"sender": "controller", "message": "turn on lights", "agent": "not-a-uuid"}"#;
+        let msg = MqttAdapter::parse_payload(topic, payload, &None);
+        assert!(msg.is_some());
+        // Non-UUID agent strings must be dropped rather than producing a
+        // corrupt AgentId — the message still goes through, just unrouted.
+        assert!(msg.unwrap().target_agent.is_none());
     }
 
     #[test]

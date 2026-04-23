@@ -291,6 +291,13 @@ pub struct ApprovalRequest {
     /// Number of times this request has been escalated (max 3).
     #[serde(default)]
     pub escalation_count: u8,
+    /// Session ID that submitted this request (for per-session queue operations).
+    ///
+    /// When set, `resolve_all_for_session` can resolve all pending requests
+    /// belonging to this session atomically (mirrors Hermes-Agent's
+    /// `resolve_gateway_approval(session_key, choice, resolve_all=True)`).
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -614,6 +621,16 @@ impl Default for ApprovalPolicy {
                 "file_write".to_string(),
                 "file_delete".to_string(),
                 "apply_patch".to_string(),
+                // Skill evolution tools write to `~/.librefang/skills/`
+                // (create/update/patch/delete) and to supporting files
+                // inside each skill (write_file/remove_file). Every
+                // call is a persistent filesystem mutation equivalent
+                // in blast radius to `file_write`/`file_delete`, so
+                // the default policy MUST gate them the same way.
+                // Without the glob, agents could mutate skills without
+                // hitting the human approval / TOTP flow that the
+                // equivalent low-level tools require.
+                "skill_evolve_*".to_string(),
             ],
             timeout_secs: 60,
             auto_approve_autonomous: false,
@@ -640,7 +657,7 @@ fn default_totp_grace_period() -> u64 {
 
 /// Custom deserializer that accepts:
 /// - A list of strings: `["shell_exec", "file_write"]`
-/// - A boolean: `false` → `[]`, `true` → `["shell_exec", "file_write", "file_delete", "apply_patch"]`
+/// - A boolean: `false` → `[]`, `true` → the default mutation set
 fn deserialize_require_approval<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -658,11 +675,15 @@ where
 
         fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
             Ok(if v {
+                // Must stay in lockstep with `ApprovalPolicy::default`
+                // above — the boolean `true` shorthand should expand to
+                // the same set a freshly-defaulted policy ships with.
                 vec![
                     "shell_exec".to_string(),
                     "file_write".to_string(),
                     "file_delete".to_string(),
                     "apply_patch".to_string(),
+                    "skill_evolve_*".to_string(),
                 ]
             } else {
                 vec![]
@@ -818,6 +839,7 @@ mod tests {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
+            session_id: None,
         }
     }
 
@@ -1099,7 +1121,13 @@ mod tests {
         assert!(policy.validate().is_ok());
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
+            vec![
+                "shell_exec",
+                "file_write",
+                "file_delete",
+                "apply_patch",
+                "skill_evolve_*",
+            ]
         );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
@@ -1114,7 +1142,13 @@ mod tests {
         assert_eq!(policy.timeout_secs, 60);
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
+            vec![
+                "shell_exec",
+                "file_write",
+                "file_delete",
+                "apply_patch",
+                "skill_evolve_*",
+            ]
         );
         assert!(!policy.auto_approve_autonomous);
     }
@@ -1133,7 +1167,13 @@ mod tests {
         let policy: ApprovalPolicy = serde_json::from_str(r#"{"require_approval": true}"#).unwrap();
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
+            vec![
+                "shell_exec",
+                "file_write",
+                "file_delete",
+                "apply_patch",
+                "skill_evolve_*",
+            ]
         );
     }
 

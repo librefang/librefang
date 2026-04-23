@@ -359,4 +359,40 @@ mod tests {
         assert!(glob_matches("mcp_*", "mcp_myserver_mytool"));
         assert!(!glob_matches("mcp_*", "file_read"));
     }
+
+    // Verifies the resolution strategy used in tool_timeout_secs_for:
+    // when multiple glob patterns match, longest pattern (most specific) wins.
+    #[test]
+    fn test_glob_tool_timeout_resolution_longest_wins() {
+        // "mcp_browser_*" (14 chars) must beat "mcp_*" (5 chars)
+        let patterns: &[(&str, u64)] = &[("mcp_*", 300), ("mcp_browser_*", 900)];
+        let tool = "mcp_browser_navigate";
+        let best = patterns
+            .iter()
+            .filter(|(p, _)| glob_matches(p, tool))
+            .max_by_key(|(p, _)| p.len());
+        assert_eq!(best.map(|(_, t)| *t), Some(900));
+    }
+
+    #[test]
+    fn test_glob_tool_timeout_resolution_star_loses_to_specific() {
+        let patterns: &[(&str, u64)] = &[("*", 60), ("shell_*", 300)];
+        let tool = "shell_exec";
+        let best = patterns
+            .iter()
+            .filter(|(p, _)| glob_matches(p, tool))
+            .max_by_key(|(p, _)| p.len());
+        assert_eq!(best.map(|(_, t)| *t), Some(300));
+    }
+
+    #[test]
+    fn test_glob_tool_timeout_resolution_no_match_returns_none() {
+        let patterns: &[(&str, u64)] = &[("mcp_*", 900), ("shell_*", 300)];
+        let tool = "file_read";
+        let best = patterns
+            .iter()
+            .filter(|(p, _)| glob_matches(p, tool))
+            .max_by_key(|(p, _)| p.len());
+        assert!(best.is_none());
+    }
 }

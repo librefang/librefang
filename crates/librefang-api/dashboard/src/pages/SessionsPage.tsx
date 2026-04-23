@@ -1,8 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { deleteSession, listAgents, listSessions, switchAgentSession, setSessionLabel } from "../api";
+import { useAgents } from "../lib/queries/agents";
+import { useSessions } from "../lib/queries/sessions";
+import { useSwitchAgentSession, useDeleteAgentSession } from "../lib/mutations/agents";
+import { useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -13,11 +15,8 @@ import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
 
-const REFRESH_MS = 30000;
-
 export function SessionsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -25,18 +24,12 @@ export function SessionsPage() {
   const [labelValue, setLabelValue] = useState("");
   const addToast = useUIStore((s) => s.addToast);
 
-  const sessionsQuery = useQuery({ queryKey: ["sessions", "list"], queryFn: listSessions, refetchInterval: REFRESH_MS });
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "sessions"], queryFn: () => listAgents() });
+  const sessionsQuery = useSessions();
+  const agentsQuery = useAgents();
 
-  const switchMutation = useMutation({ mutationFn: ({ agentId, sessionId }: any) => switchAgentSession(agentId, sessionId) });
-  const deleteMutation = useMutation({ mutationFn: (id: string) => deleteSession(id) });
-  const labelMutation = useMutation({
-    mutationFn: ({ sessionId, label }: { sessionId: string; label: string }) => setSessionLabel(sessionId, label),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setEditingLabelId(null);
-    },
-  });
+  const switchMutation = useSwitchAgentSession();
+  const deleteMutation = useDeleteAgentSession();
+  const labelMutation = useSetSessionLabel();
 
   const agents = agentsQuery.data ?? [];
   const agentMap = useMemo(() => new Map(agents.map(a => [a.id, a])), [agents]);
@@ -45,8 +38,6 @@ export function SessionsPage() {
     const list = sessionsQuery.data ?? [];
     return list
       .filter(s => {
-        // Hide sessions for agents that no longer exist
-        if (!agentMap.has(s.agent_id || "")) return false;
         if (!search) return true;
         const agent = agentMap.get(s.agent_id || "");
         return (agent?.name || "").toLowerCase().includes(search.toLowerCase()) || s.session_id.includes(search);
@@ -61,24 +52,26 @@ export function SessionsPage() {
 
   const activeCount = sessions.filter(s => s.active).length;
 
+  function saveLabel(sessionId: string, label: string, agentId?: string) {
+    labelMutation.mutate({ sessionId, label, agentId }, { onSuccess: () => setEditingLabelId(null) });
+  }
+
   async function handleSwitch(agentId: string, sessionId: string) {
     setPendingId(sessionId);
     try {
       await switchMutation.mutateAsync({ agentId, sessionId });
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       addToast(t("common.success"), "success");
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
     } finally { setPendingId(null); }
   }
 
-  async function handleDelete(id: string) {
-    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+  async function handleDelete(sessionId: string, agentId?: string) {
+    if (confirmDeleteId !== sessionId) { setConfirmDeleteId(sessionId); return; }
     setConfirmDeleteId(null);
-    setPendingId(id);
+    setPendingId(sessionId);
     try {
-      await deleteMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      await deleteMutation.mutateAsync({ sessionId, agentId });
     } catch (e: any) {
       addToast(e.message || t("common.error"), "error");
     } finally { setPendingId(null); }
@@ -168,11 +161,11 @@ export function SessionsPage() {
                           autoFocus
                           value={labelValue}
                           onChange={e => setLabelValue(e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") labelMutation.mutate({ sessionId: s.session_id, label: labelValue }); if (e.key === "Escape") setEditingLabelId(null); }}
+                          onKeyDown={e => { if (e.key === "Enter") saveLabel(s.session_id, labelValue, s.agent_id ?? undefined); if (e.key === "Escape") setEditingLabelId(null); }}
                           className="px-1.5 py-0.5 rounded border border-brand bg-main text-[10px] w-24 outline-none"
                           placeholder={t("sessions.label_placeholder", { defaultValue: "Label..." })}
                         />
-                        <button onClick={() => labelMutation.mutate({ sessionId: s.session_id, label: labelValue })} className="text-success"><Check className="w-3 h-3" /></button>
+                        <button onClick={() => saveLabel(s.session_id, labelValue, s.agent_id ?? undefined)} className="text-success"><Check className="w-3 h-3" /></button>
                         <button onClick={() => setEditingLabelId(null)} className="text-text-dim"><X className="w-3 h-3" /></button>
                       </span>
                     ) : (
@@ -197,11 +190,11 @@ export function SessionsPage() {
                   )}
                   {confirmDeleteId === s.session_id ? (
                     <div className="flex items-center gap-1">
-                      <button onClick={() => handleDelete(s.session_id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                      <button onClick={() => handleDelete(s.session_id, s.agent_id ?? undefined)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
                       <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                     </div>
                   ) : (
-                    <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
+                    <button onClick={() => handleDelete(s.session_id, s.agent_id ?? undefined)} disabled={pendingId === s.session_id}
                       className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>

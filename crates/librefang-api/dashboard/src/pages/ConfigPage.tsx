@@ -1,17 +1,24 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
-  AlertTriangle, X, Copy, Check,
+  AlertTriangle, X, Copy, Check, FileText,
 } from "lucide-react";
+import { type ConfigFieldSchema } from "../api";
 import {
-  getConfigSchema, getFullConfig, setConfigValue, reloadConfig,
-  type ConfigFieldSchema,
-} from "../api";
+  useConfigSchema,
+  useFullConfig,
+  useRawConfigToml,
+} from "../lib/queries/config";
+import {
+  useBatchSetConfigValues,
+  useSetConfigValue,
+  useReloadConfig,
+} from "../lib/mutations/config";
+import { TomlViewer } from "../components/TomlViewer";
 
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
@@ -19,12 +26,24 @@ import {
 
 const CATEGORY_SECTIONS: Record<string, string[]> = {
   general: ["general", "default_model", "thinking", "budget", "reload"],
-  memory: ["memory", "proactive_memory"],
+  memory: ["memory", "proactive_memory", "auto_dream"],
   tools: ["web", "browser", "links", "media", "tts", "canvas"],
   channels: ["channels", "broadcast", "auto_reply"],
   security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
   network: ["network", "a2a", "pairing"],
   infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
+};
+
+// Explicit field ordering for sections where the server-side JSON schema
+// ordering is wrong for the user. The API serialises `sec.fields` via
+// serde_json's default BTreeMap, which alphabetises keys — so for sections
+// like `default_model` the user sees `model` before `provider`, even though
+// model is a cascaded filter of the selected provider (ConfigPage:679). The
+// rendering code falls back to the alphabetised order for any section not
+// listed here, so forgetting an entry is a no-op rather than a regression.
+// Closes #2746.
+const SECTION_FIELD_ORDER: Record<string, string[]> = {
+  default_model: ["provider", "model", "api_key_env", "base_url"],
 };
 
 function sectionLabelFallback(key: string): string {
@@ -273,27 +292,19 @@ function ConfigFieldInput({
 
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const router = useRouter();
 
-  const schemaQuery = useQuery({
-    queryKey: ["config", "schema"],
-    queryFn: getConfigSchema,
-    staleTime: 300_000,
-  });
-
-  const configQuery = useQuery({
-    queryKey: ["config", "full"],
-    queryFn: getFullConfig,
-    staleTime: 30_000,
-  });
+  const schemaQuery = useConfigSchema();
+  const configQuery = useFullConfig();
 
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
@@ -363,8 +374,7 @@ export function ConfigPage({ category }: { category: string }) {
     [configQuery.data, schemaQuery.data]
   );
 
-  const saveMutation = useMutation({
-    mutationFn: ({ path, value }: { path: string; value: unknown }) => setConfigValue(path, value),
+  const saveMutation = useSetConfigValue({
     onSuccess: (data, variables) => {
       const reloadFailed = data.status === "saved_reload_failed";
       const restartRequired = data.status === "applied_partial" || data.restart_required;
@@ -380,7 +390,6 @@ export function ConfigPage({ category }: { category: string }) {
         }
         return p;
       });
-      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
       setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
     },
     onError: (err: Error, variables) => {
@@ -390,32 +399,97 @@ export function ConfigPage({ category }: { category: string }) {
   });
 
   const [batchSaving, setBatchSaving] = useState(false);
+  const batchStatusTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const clearBatchStatuses = useCallback((paths: string[], statuses: Record<string, { ok: boolean; msg: string }>, delay: number) => {
+    for (const path of paths) {
+      const existingTimeout = batchStatusTimeoutRefs.current[path];
+      if (existingTimeout) clearTimeout(existingTimeout);
+      batchStatusTimeoutRefs.current[path] = setTimeout(() => {
+        setSaveStatus((current) => {
+          if (current[path]?.msg !== statuses[path]?.msg) return current;
+          const next = { ...current };
+          delete next[path];
+          return next;
+        });
+        delete batchStatusTimeoutRefs.current[path];
+      }, delay);
+    }
+  }, []);
+
+  useEffect(() => () => {
+    for (const timeoutId of Object.values(batchStatusTimeoutRefs.current)) {
+      clearTimeout(timeoutId);
+    }
+  }, []);
+
+  const batchSaveMutation = useBatchSetConfigValues({
+    onSuccess: (results) => {
+      let errors = 0;
+      const nextStatuses: Record<string, { ok: boolean; msg: string }> = {};
+      for (const result of results) {
+        if (result.error) {
+          nextStatuses[result.path] = {
+            ok: false,
+            msg: result.error?.message || t("config.save_failed"),
+          };
+          errors++;
+          continue;
+        }
+
+        const reloadFailed = result.data?.status === "saved_reload_failed";
+        const restartRequired = result.data?.status === "applied_partial" || result.data?.restart_required;
+        const reloadErr = reloadFailed && result.data?.reload_error ? result.data.reload_error : null;
+        const msg = reloadFailed
+          ? reloadErr
+            ? `${t("config.saved_reload_failed", "Saved but reload failed")}: ${reloadErr}`
+            : t("config.saved_reload_failed", "Saved but reload failed")
+          : restartRequired
+            ? t("config.saved_restart", "Saved (restart required)")
+            : t("common.saved", "Saved");
+        nextStatuses[result.path] = { ok: !reloadFailed, msg };
+        if (reloadFailed) errors++;
+      }
+
+      setSaveStatus((current) => ({ ...current, ...nextStatuses }));
+
+      setPendingChanges((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          if (!result.error && JSON.stringify(current[result.path]) === JSON.stringify(result.value)) {
+            delete next[result.path];
+          }
+        }
+        return next;
+      });
+      setBatchSaving(false);
+      clearBatchStatuses(results.map((result) => result.path), nextStatuses, errors > 0 ? 5000 : 3000);
+    },
+    onError: (err: Error) => {
+      setBatchSaving(false);
+      setSaveStatus((s) => ({
+        ...s,
+        __batch__: { ok: false, msg: err.message || t("config.save_failed") },
+      }));
+      setTimeout(() => setSaveStatus((s) => {
+        const next = { ...s };
+        delete next.__batch__;
+        return next;
+      }), 5000);
+    },
+  });
   const handleBatchSave = useCallback(async () => {
     const entries = Object.entries(pendingChanges);
     if (entries.length === 0) return;
     setBatchSaving(true);
-    let errors = 0;
-    for (const [path, value] of entries) {
-      try {
-        const data = await setConfigValue(path, value);
-        const reloadFailed = data.status === "saved_reload_failed";
-        const restartRequired = data.status === "applied_partial" || data.restart_required;
-        const msg = reloadFailed
-          ? t("config.saved_reload_failed", "Saved but reload failed")
-          : restartRequired
-            ? t("config.saved_restart", "Saved (restart required)")
-            : t("common.saved", "Saved");
-        setSaveStatus((s) => ({ ...s, [path]: { ok: !reloadFailed, msg } }));
-      } catch (err: any) {
-        setSaveStatus((s) => ({ ...s, [path]: { ok: false, msg: err.message || t("config.save_failed") } }));
-        errors++;
-      }
+    try {
+      // Per-entry failures are folded into the successful batch result.
+      // Mutation-level failures are handled in the hook's onError; await here
+      // so batchSaving tracks the full request and no rejection is left unhandled.
+      await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
+    } catch {
+      // onError already mapped the batch-level failure into UI state.
     }
-    setPendingChanges({});
-    queryClient.invalidateQueries({ queryKey: ["config", "full"] });
-    setBatchSaving(false);
-    setTimeout(() => setSaveStatus({}), errors > 0 ? 5000 : 3000);
-  }, [pendingChanges, queryClient, t]);
+  }, [batchSaveMutation, pendingChanges]);
 
   const handleResetField = useCallback(
     (sectionKey: string, fieldKey: string, rootLevel?: boolean) => {
@@ -439,10 +513,8 @@ export function ConfigPage({ category }: { category: string }) {
     []
   );
 
-  const reloadMutation = useMutation({
-    mutationFn: reloadConfig,
+  const reloadMutation = useReloadConfig({
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["config", "full"] });
       setReloadStatus({ ok: true, msg: t("config.reload_success", "Config reloaded") });
     },
     onError: (err: Error) => {
@@ -542,6 +614,10 @@ export function ConfigPage({ category }: { category: string }) {
               {reloadStatus.msg}
             </span>
           )}
+          <Button variant="secondary" size="sm" onClick={() => setShowRawToml(true)}>
+            <FileText className="w-3 h-3 mr-1.5" />
+            {t("config.view_raw_toml", "View Raw TOML")}
+          </Button>
           <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
             <RefreshCw className="w-3 h-3 mr-1.5" />
             {t("config.reload", "Reload")}
@@ -614,7 +690,20 @@ export function ConfigPage({ category }: { category: string }) {
         )}
         {filteredSections.map(({ sKey, fields: visibleFields }) => {
           const sec = allSections[sKey];
-          const allFields = Object.entries(sec.fields);
+          const rawFields = Object.entries(sec.fields);
+          type FieldEntry = (typeof rawFields)[number];
+          // Apply the per-section override (see SECTION_FIELD_ORDER docstring).
+          // Listed keys come first in the declared order; any un-listed keys
+          // keep their original (alphabetical) position at the tail.
+          const order = SECTION_FIELD_ORDER[sKey];
+          const allFields: FieldEntry[] = order
+            ? [
+                ...order
+                  .map((k) => rawFields.find(([fk]) => fk === k))
+                  .filter((e): e is FieldEntry => e !== undefined),
+                ...rawFields.filter(([fk]) => !order.includes(fk)),
+              ]
+            : rawFields;
           const fieldsToShow = q
             ? allFields.filter(([fKey]) => visibleFields.includes(fKey))
             : allFields;
@@ -785,6 +874,18 @@ export function ConfigPage({ category }: { category: string }) {
           </div>
         </div>
       )}
+      <TomlViewer
+        isOpen={showRawToml}
+        onClose={() => setShowRawToml(false)}
+        title={t("config.raw_toml_title", "config.toml")}
+        toml={rawTomlQuery.data}
+        downloadName="librefang-config.toml"
+        error={
+          rawTomlQuery.error
+            ? (rawTomlQuery.error as Error).message ?? t("config.raw_toml_error", "Failed to load config.toml")
+            : null
+        }
+      />
     </div>
   );
 }

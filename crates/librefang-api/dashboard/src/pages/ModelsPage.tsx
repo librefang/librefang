@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCompact, formatCost as formatCostUtil } from "../lib/format";
 import type { ModelItem, ModelOverrides } from "../api";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listModels, addCustomModel, removeCustomModel, getModelOverrides, updateModelOverrides, deleteModelOverrides } from "../api";
+import { useModels, useModelOverrides } from "../lib/queries/models";
+import { useAddCustomModel, useRemoveCustomModel, useUpdateModelOverrides, useDeleteModelOverrides } from "../lib/mutations/models";
 import { SliderInput } from "../components/ui/SliderInput";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -26,10 +26,29 @@ type SortDir = "asc" | "desc";
 const GRID_COLS = "grid-cols-[minmax(140px,1fr)_90px_70px_70px_70px_70px_40px_40px_40px_40px_70px]";
 const GRID_MIN_W = "min-w-[860px]";
 
-const REFRESH_MS = 60000;
+type SortHeaderProps = {
+  field: SortField;
+  active: boolean;
+  dir: SortDir;
+  onToggle: (field: SortField) => void;
+  children: React.ReactNode;
+  className?: string;
+};
+
+function SortHeader({ field, active, dir, onToggle, children, className = "" }: SortHeaderProps) {
+  return (
+    <button type="button" onClick={() => onToggle(field)}
+      className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
+      {children}
+      {active
+        ? <ArrowUpDown className={`w-3 h-3 text-brand ${dir === "desc" ? "rotate-180" : ""}`} />
+        : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
+    </button>
+  );
+}
+
 export function ModelsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [search, setSearch] = useState("");
   const [tierFilter, setTierFilter] = useState<string>("all");
@@ -59,7 +78,6 @@ export function ModelsPage() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Form state
   const [formId, setFormId] = useState("");
   const [formProvider, setFormProvider] = useState("");
   const [formDisplayName, setFormDisplayName] = useState("");
@@ -71,28 +89,10 @@ export function ModelsPage() {
   const [formVision, setFormVision] = useState(false);
   const [formStreaming, setFormStreaming] = useState(true);
 
-  const modelsQuery = useQuery({
-    queryKey: ["models"],
-    queryFn: () => listModels(),
-    refetchInterval: REFRESH_MS,
-  });
+  const modelsQuery = useModels();
 
-  const addMut = useMutation({
-    mutationFn: addCustomModel,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["models"] });
-      addToast(t("models.model_added"), "success");
-      resetForm();
-    },
-  });
-
-  const deleteMut = useMutation({
-    mutationFn: removeCustomModel,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["models"] });
-      addToast(t("models.model_deleted"), "success");
-    },
-  });
+  const addMut = useAddCustomModel();
+  const deleteMut = useRemoveCustomModel();
 
   const resetForm = () => {
     setShowAdd(false);
@@ -111,31 +111,42 @@ export function ModelsPage() {
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
     if (!formId.trim() || !formProvider.trim()) return;
-    await addMut.mutateAsync({
-      id: formId.trim(),
-      provider: formProvider.trim(),
-      display_name: formDisplayName.trim() || undefined,
-      context_window: formContextWindow,
-      max_output_tokens: formMaxOutput,
-      input_cost_per_m: formInputCost,
-      output_cost_per_m: formOutputCost,
-      supports_tools: formTools,
-      supports_vision: formVision,
-      supports_streaming: formStreaming,
-    });
+    try {
+      await addMut.mutateAsync({
+        id: formId.trim(),
+        provider: formProvider.trim(),
+        display_name: formDisplayName.trim() || undefined,
+        context_window: formContextWindow,
+        max_output_tokens: formMaxOutput,
+        input_cost_per_m: formInputCost,
+        output_cost_per_m: formOutputCost,
+        supports_tools: formTools,
+        supports_vision: formVision,
+        supports_streaming: formStreaming,
+      });
+      addToast(t("models.model_added"), "success");
+      resetForm();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
   const handleDelete = async (id: string) => {
     if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
     try {
+      const model = allModels.find(m => m.id === id);
+      const key = model ? modelKey(model) : null;
       await deleteMut.mutateAsync(id);
-      const orphan = hiddenModelKeys.find(k => k.endsWith(`:${id}`));
-      if (orphan) unhideModelAction(orphan);
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+      addToast(t("models.model_deleted"), "success");
+      if (key && hiddenModelKeys.includes(key)) unhideModelAction(key);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
   };
 
-  // Available models first, unavailable last
   const allModels = useMemo(
     () => [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
       if (a.available && !b.available) return -1;
@@ -146,14 +157,17 @@ export function ModelsPage() {
   );
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
-  const providers = useMemo(
-    () => ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()],
-    [allModels],
-  );
-  const tiers = useMemo(
-    () => ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()],
-    [allModels],
-  );
+  const { providers, tiers } = useMemo(() => {
+    const providerSet = new Set<string>();
+    const tierSet = new Set<string>();
+    for (const m of allModels) {
+      providerSet.add(m.provider);
+      if (m.tier) tierSet.add(m.tier);
+    }
+    const providers = ["all", ...Array.from(providerSet).sort()];
+    const tiers = ["all", ...Array.from(tierSet).sort()];
+    return { providers, tiers };
+  }, [allModels]);
 
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
 
@@ -181,7 +195,6 @@ export function ModelsPage() {
 
   const hiddenCount = useMemo(() => allModels.filter(m => hiddenSet.has(modelKey(m))).length, [allModels, hiddenSet]);
 
-  // Sort
   const sortedFiltered = useMemo(() => {
     const sorted = [...filtered];
     const dir = sortDir === "asc" ? 1 : -1;
@@ -200,7 +213,6 @@ export function ModelsPage() {
     return sorted;
   }, [filtered, sortField, sortDir]);
 
-  // Group by provider when showing all providers
   const grouped = useMemo(() => {
     if (providerFilter !== "all") return null;
     const map = new Map<string, ModelItem[]>();
@@ -247,24 +259,21 @@ export function ModelsPage() {
     return formatCompact(tokens);
   };
 
-  const SortHeader = ({ field, children, className = "" }: { field: SortField; children: React.ReactNode; className?: string }) => (
-    <button type="button" onClick={() => toggleSort(field)}
-      className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
-      {children}
-      {sortField === field
-        ? <ArrowUpDown className="w-3 h-3 text-brand" />
-        : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
-    </button>
-  );
+
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
-  // Collapsed provider summary: tier badges + cheapest cost
   const providerSummary = (models: ModelItem[]) => {
-    const tierSet = new Set(models.map(m => m.tier).filter(Boolean));
+    const tierSet = new Set<string>();
+    let minCost: number | null = null;
+    for (const m of models) {
+      if (m.tier) tierSet.add(m.tier);
+      const cost = m.input_cost_per_m ?? 0;
+      if (cost > 0 && (minCost === null || cost < minCost)) {
+        minCost = cost;
+      }
+    }
     const tiers = Array.from(tierSet).sort();
-    const costs = models.map(m => m.input_cost_per_m ?? 0).filter(c => c > 0);
-    const minCost = costs.length > 0 ? Math.min(...costs) : null;
     return (
       <div className="flex items-center gap-1.5 ml-auto mr-2">
         {tiers.slice(0, 4).map(tier => (
@@ -278,7 +287,6 @@ export function ModelsPage() {
     );
   };
 
-  // Mobile card for a single model
   const renderMobileCard = (m: ModelItem) => {
     const isCustom = m.tier === "custom";
     const mKey = `${m.provider}:${m.id}`;
@@ -342,7 +350,6 @@ export function ModelsPage() {
     );
   };
 
-  // Desktop table row
   const renderRow = (m: ModelItem, i: number) => {
     const isCustom = m.tier === "custom";
     const mKey = `${m.provider}:${m.id}`;
@@ -448,12 +455,12 @@ export function ModelsPage() {
 
   const colHeader = (
     <div className={`grid ${GRID_COLS} ${GRID_MIN_W} gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase`}>
-      <SortHeader field="model">{t("models.col_model")}</SortHeader>
-      <SortHeader field="provider">{t("models.col_provider")}</SortHeader>
-      <SortHeader field="tier">{t("models.col_tier")}</SortHeader>
-      <SortHeader field="context">{t("models.col_context")}</SortHeader>
-      <SortHeader field="input_cost">{t("models.col_input")}</SortHeader>
-      <SortHeader field="output_cost">{t("models.col_output")}</SortHeader>
+      <SortHeader field="model" active={sortField === "model"} dir={sortDir} onToggle={toggleSort}>{t("models.col_model")}</SortHeader>
+      <SortHeader field="provider" active={sortField === "provider"} dir={sortDir} onToggle={toggleSort}>{t("models.col_provider")}</SortHeader>
+      <SortHeader field="tier" active={sortField === "tier"} dir={sortDir} onToggle={toggleSort}>{t("models.col_tier")}</SortHeader>
+      <SortHeader field="context" active={sortField === "context"} dir={sortDir} onToggle={toggleSort}>{t("models.col_context")}</SortHeader>
+      <SortHeader field="input_cost" active={sortField === "input_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_input")}</SortHeader>
+      <SortHeader field="output_cost" active={sortField === "output_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_output")}</SortHeader>
       <span className="text-center" title={t("models.col_tools")}><Wrench className="w-3.5 h-3.5 inline" /></span>
       <span className="text-center" title={t("models.col_vision")}><Eye className="w-3.5 h-3.5 inline" /></span>
       <span className="text-center" title={t("models.col_streaming")}><Zap className="w-3.5 h-3.5 inline" /></span>
@@ -705,10 +712,12 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const { t } = useTranslation();
   const overrideKey = `${model.provider}:${model.id}`;
 
-  const [loading, setLoading] = useState(true);
+  const overridesQuery = useModelOverrides(overrideKey);
+  const updateMut = useUpdateModelOverrides();
+  const deleteMut = useDeleteModelOverrides();
+
   const [saving, setSaving] = useState(false);
 
-  // Form state
   const [modelType, setModelType] = useState<"chat" | "speech" | "embedding">("chat");
   const [temperature, setTemperature] = useState(0.7);
   const [tempEnabled, setTempEnabled] = useState(false);
@@ -724,23 +733,24 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const [useMaxCompletionTokens, setUseMaxCompletionTokens] = useState(false);
   const [noSystemRole, setNoSystemRole] = useState(false);
   const [forceMaxTokens, setForceMaxTokens] = useState(false);
+  const [overridesLoaded, setOverridesLoaded] = useState(false);
 
-  // Load existing overrides
+  // Load existing overrides from query
   useEffect(() => {
-    getModelOverrides(overrideKey).then((o) => {
-      if (o.model_type) setModelType(o.model_type);
-      if (o.temperature != null) { setTemperature(o.temperature); setTempEnabled(true); }
-      if (o.top_p != null) { setTopP(o.top_p); setTopPEnabled(true); }
-      if (o.max_tokens != null) { setMaxTokens(o.max_tokens); setMaxTokensEnabled(true); }
-      if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
-      if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
-      if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
-      if (o.use_max_completion_tokens) setUseMaxCompletionTokens(true);
-      if (o.no_system_role) setNoSystemRole(true);
-      if (o.force_max_tokens) setForceMaxTokens(true);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, [overrideKey]);
+    const o = overridesQuery.data;
+    if (!o || overridesLoaded) return;
+    if (o.model_type) setModelType(o.model_type);
+    if (o.temperature != null) { setTemperature(o.temperature); setTempEnabled(true); }
+    if (o.top_p != null) { setTopP(o.top_p); setTopPEnabled(true); }
+    if (o.max_tokens != null) { setMaxTokens(o.max_tokens); setMaxTokensEnabled(true); }
+    if (o.frequency_penalty != null) { setFreqPenalty(o.frequency_penalty); setFreqEnabled(true); }
+    if (o.presence_penalty != null) { setPresPenalty(o.presence_penalty); setPresEnabled(true); }
+    if (o.reasoning_effort) setReasoningEffort(o.reasoning_effort);
+    if (o.use_max_completion_tokens != null) setUseMaxCompletionTokens(o.use_max_completion_tokens);
+    if (o.no_system_role != null) setNoSystemRole(o.no_system_role);
+    if (o.force_max_tokens != null) setForceMaxTokens(o.force_max_tokens);
+    setOverridesLoaded(true);
+  }, [overridesQuery.data, overridesLoaded]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -756,27 +766,29 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (noSystemRole) overrides.no_system_role = true;
     if (forceMaxTokens) overrides.force_max_tokens = true;
     try {
-      await updateModelOverrides(overrideKey, overrides);
+      await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       onSaved();
       onClose();
-    } catch (e: any) {
-      onError(e?.message);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onError(msg);
     } finally {
       setSaving(false);
     }
-  }, [overrideKey, modelType, temperature, tempEnabled, topP, topPEnabled, maxTokens, maxTokensEnabled, freqPenalty, freqEnabled, presPenalty, presEnabled, reasoningEffort, useMaxCompletionTokens, noSystemRole, forceMaxTokens, onSaved, onClose, onError]);
+  }, [overrideKey, modelType, temperature, tempEnabled, topP, topPEnabled, maxTokens, maxTokensEnabled, freqPenalty, freqEnabled, presPenalty, presEnabled, reasoningEffort, useMaxCompletionTokens, noSystemRole, forceMaxTokens, onSaved, onClose, onError, updateMut]);
 
   const handleReset = useCallback(async () => {
     try {
-      await deleteModelOverrides(overrideKey);
+      await deleteMut.mutateAsync(overrideKey);
       onReset();
       onClose();
-    } catch (e: any) {
-      onError(e?.message);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      onError(msg);
     }
-  }, [overrideKey, onReset, onClose, onError]);
+  }, [overrideKey, onReset, onClose, onError, deleteMut]);
 
-  if (loading) {
+  if (overridesQuery.isLoading) {
     return (
       <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
         <div className="flex items-center justify-center p-12">

@@ -19,11 +19,50 @@ use librefang_types::config::{
 };
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
+
+/// Two-channel reply envelope returned by the bridge. The `public` field is
+/// what should reach the source chat (DM or group). The `owner_notice` field
+/// is a structured private message intended for the operator's DM only —
+/// e.g. produced by the `notify_owner` LLM tool. Adapters that don't support
+/// owner-side delivery should ignore `owner_notice` and forward only `public`.
+///
+/// Both fields are `Option` so legacy/silent paths can carry "no public reply"
+/// (`public = None`) without losing an `owner_notice`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyEnvelope {
+    #[serde(default)]
+    pub public: Option<String>,
+    #[serde(default)]
+    pub owner_notice: Option<String>,
+}
+
+impl ReplyEnvelope {
+    /// Build an envelope carrying only a public reply (no owner notice).
+    pub fn from_public(s: impl Into<String>) -> Self {
+        Self {
+            public: Some(s.into()),
+            owner_notice: None,
+        }
+    }
+
+    /// Build an envelope with no public reply and no owner notice (silent turn).
+    pub fn silent() -> Self {
+        Self::default()
+    }
+
+    /// Convenience: extract the public text or empty string. Used by adapters
+    /// that don't yet route the owner_notice channel — they still get the
+    /// behaviour of the previous `Result<String, String>` API.
+    pub fn public_or_empty(&self) -> String {
+        self.public.clone().unwrap_or_default()
+    }
+}
 
 /// Kernel operations needed by channel adapters.
 ///
@@ -204,6 +243,8 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _message_text: &str,
         _sender_name: &str,
         _model: Option<&str>,
+        _bot_name: Option<&str>,
+        _aliases: Option<&[String]>,
     ) -> bool {
         true
     }
@@ -353,6 +394,42 @@ pub trait ChannelBridgeHandle: Send + Sync {
         self.send_message_streaming(agent_id, message).await
     }
 
+    /// Streaming send that *also* reports the kernel's terminal success/error
+    /// once the stream completes. Callers that need accurate delivery metrics,
+    /// lifecycle reactions, and error suppression should use this variant —
+    /// the plain `send_message_streaming_with_sender` collapses everything
+    /// into the text channel, which makes it impossible to distinguish a
+    /// successful reply from a sanitized error message after the fact.
+    ///
+    /// The oneshot resolves to `Ok(())` on success and `Err(error_string)` on
+    /// failure (panic, kernel error, or LLM error). It is sent only once the
+    /// kernel join handle has resolved, so awaiting it after draining the
+    /// text receiver is safe.
+    ///
+    /// Default implementation preserves existing behavior by reporting
+    /// fake-success — implementers that can detect kernel failure (e.g. the
+    /// real `LibreFangKernel` impl) should override this to surface real
+    /// status.
+    async fn send_message_streaming_with_sender_status(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::sync::oneshot::Receiver<Result<(), String>>,
+        ),
+        String,
+    > {
+        let rx = self
+            .send_message_streaming_with_sender(agent_id, message, sender)
+            .await?;
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        let _ = status_tx.send(Ok(()));
+        Ok((rx, status_rx))
+    }
+
     /// Push a proactive outbound message to a channel recipient.
     ///
     /// Used by the REST API push endpoint (`POST /api/agents/:id/push`) to let
@@ -366,6 +443,18 @@ pub trait ChannelBridgeHandle: Send + Sync {
         _thread_id: Option<&str>,
     ) -> Result<String, String> {
         Err("Channel push not available".to_string())
+    }
+
+    // ── File download config accessors ──
+
+    /// Return the configured file download directory, if set.
+    fn channels_download_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Return the configured max file download size in bytes, if set.
+    fn channels_download_max_bytes(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -905,6 +994,20 @@ impl BridgeManager {
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Sweep stale files (>24h) from the download directory on startup.
+        // Use Once so that registering multiple adapters doesn't trigger
+        // redundant cleanup sweeps.
+        {
+            static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
+            let dir = self
+                .handle
+                .channels_download_dir()
+                .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+            CLEANUP_ONCE.call_once(|| {
+                tokio::spawn(async move { cleanup_old_uploads(&dir).await });
+            });
+        }
+
         // Prefer shared webhook routes over adapter-managed HTTP servers.
         // If the adapter provides webhook routes, collect them for mounting
         // on the main API server and use the returned stream for dispatch.
@@ -1021,7 +1124,7 @@ impl BridgeManager {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
                                         match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
-                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
                                     } else {
@@ -1681,6 +1784,12 @@ fn build_sender_context(
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
         group_participants: extract_group_participants(message),
+        // Channel bridges land in per-channel sessions (the default); only
+        // the dashboard WS opts into canonical storage.
+        use_canonical_session: false,
+        // Channel-originated traffic is never internal cron — [SILENT] markers
+        // coming from real users must be treated as literal message content.
+        is_internal_cron: false,
     }
 }
 
@@ -2037,11 +2146,25 @@ async fn dispatch_message(
                 let text = text_content(message).unwrap_or("");
                 let sender = &message.sender.display_name;
                 let model = ov.reply_precheck_model.as_deref();
-                if !handle.classify_reply_intent(text, sender, model).await {
+                let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+                let channel_key_for_name = match account_id {
+                    Some(aid) => format!("{}:{}", ct_str, aid),
+                    None => ct_str.to_string(),
+                };
+                let bot_name = router.channel_default_name(&channel_key_for_name);
+                let aliases = if ov.group_trigger_patterns.is_empty() {
+                    None
+                } else {
+                    Some(ov.group_trigger_patterns.as_slice())
+                };
+                if !handle
+                    .classify_reply_intent(text, sender, model, bot_name.as_deref(), aliases)
+                    .await
+                {
                     debug!(
                         channel = ct_str,
                         sender = %sender,
-                        "Reply precheck: NO_REPLY — staying silent"
+                        "Reply precheck declined — staying silent"
                     );
                     return;
                 }
@@ -2187,10 +2310,12 @@ async fn dispatch_message(
     } = message.content
     {
         let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
-        if blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { .. }))
-        {
+        if blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
+            )
+        }) {
             // We have actual image data — send as structured blocks for vision
             dispatch_with_blocks(
                 blocks,
@@ -2208,6 +2333,42 @@ async fn dispatch_message(
             return;
         }
         // Image download failed — fall through to text description below
+    }
+
+    // For files: download to disk and send as content blocks
+    if let ChannelContent::File {
+        ref url,
+        ref filename,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
+        if blocks.iter().any(|b| match b {
+            ContentBlock::ImageFile { .. } => true,
+            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+            _ => false,
+        }) {
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
     }
 
     // Intercept interactive menu callbacks before forwarding to LLM.
@@ -2684,7 +2845,7 @@ async fn dispatch_message(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
@@ -2753,12 +2914,26 @@ async fn dispatch_message(
 
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
+    //
+    // We use the `_status` variant of the streaming kernel call so we can
+    // distinguish four outcomes once both `send_streaming` and the kernel
+    // have settled:
+    //   1. send_streaming Ok + kernel Ok  → real success
+    //   2. send_streaming Ok + kernel Err → adapter delivered partial text
+    //      but the agent loop ultimately failed; emit Error reaction and
+    //      record_delivery(false) so metrics reflect reality
+    //   3. send_streaming Err + kernel Ok → adapter HTTP failed mid-stream
+    //      but the agent loop produced a clean response; fall back to
+    //      send_response(buffered_text) and emit Done
+    //   4. send_streaming Err + kernel Err → both failed; honor
+    //      suppress_error_responses when delivering the buffered error
+    //      text via the fallback path
     if adapter.supports_streaming() {
         match handle
-            .send_message_streaming_with_sender(agent_id, &text, &sender_ctx)
+            .send_message_streaming_with_sender_status(agent_id, &text, &sender_ctx)
             .await
         {
-            Ok(mut delta_rx) => {
+            Ok((mut delta_rx, status_rx)) => {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
@@ -2789,25 +2964,42 @@ async fn dispatch_message(
                     buffered_text = text;
                 }
 
+                // Status is sent after the text channel fully drains, so
+                // awaiting here will not block longer than the stream itself.
+                let kernel_status = status_rx.await.unwrap_or(Ok(()));
+                let kernel_ok = kernel_status.is_ok();
+                let kernel_err_str = kernel_status.as_ref().err().cloned();
+
                 match &stream_result {
                     Ok(()) => {
-                        send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
-                            .await;
+                        // Adapter delivered. Final state depends on whether
+                        // the agent loop itself succeeded.
+                        let phase = if kernel_ok {
+                            AgentPhase::Done
+                        } else {
+                            AgentPhase::Error
+                        };
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
                         handle
                             .record_delivery(
                                 agent_id,
                                 ct_str,
                                 &message.sender.platform_id,
-                                true,
-                                None,
+                                kernel_ok,
+                                kernel_err_str.as_deref(),
                                 thread_id,
                             )
                             .await;
                         if let Some(j) = journal {
+                            let jstatus = if kernel_ok {
+                                crate::message_journal::JournalStatus::Completed
+                            } else {
+                                crate::message_journal::JournalStatus::Failed
+                            };
                             j.update_status(
                                 &message.platform_message_id,
-                                crate::message_journal::JournalStatus::Completed,
-                                None,
+                                jstatus,
+                                kernel_err_str.clone(),
                             )
                             .await;
                         }
@@ -2815,9 +3007,15 @@ async fn dispatch_message(
                     }
                     Err(e) => {
                         warn!("Streaming send failed, falling back to non-streaming: {e}");
-                        // Fall back: re-send the full accumulated text via the
-                        // non-streaming path so the user still gets a response.
-                        if !buffered_text.is_empty() {
+                        // Fall back: re-send the full accumulated text via
+                        // send_response so the user still gets a response.
+                        // Honor suppress_error_responses when the kernel
+                        // failed — the buffered text will contain a
+                        // sanitized error string we should not leak to
+                        // public-feed adapters.
+                        if !buffered_text.is_empty()
+                            && (kernel_ok || !adapter.suppress_error_responses())
+                        {
                             send_response(
                                 adapter,
                                 &message.sender,
@@ -2826,34 +3024,49 @@ async fn dispatch_message(
                                 output_format,
                             )
                             .await;
-                            send_lifecycle_reaction(
-                                adapter,
-                                &message.sender,
-                                msg_id,
-                                AgentPhase::Done,
-                            )
-                            .await;
+                            let phase = if kernel_ok {
+                                AgentPhase::Done
+                            } else {
+                                AgentPhase::Error
+                            };
+                            send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+                            // Pair the err field with the success flag — when
+                            // kernel succeeded, the fallback send_response
+                            // delivered the real reply, so the transport-side
+                            // stream error is irrelevant to delivery accounting
+                            // (record_delivery=true with err=Some is a
+                            // contradictory signal). When kernel failed, keep
+                            // the kernel error string so metrics know why.
+                            // (`e`, the stream transport error, was already
+                            // logged via warn! above.)
+                            let err_str = if kernel_ok {
+                                None
+                            } else {
+                                kernel_err_str.clone()
+                            };
                             handle
                                 .record_delivery(
                                     agent_id,
                                     ct_str,
                                     &message.sender.platform_id,
-                                    true,
-                                    None,
+                                    kernel_ok,
+                                    err_str.as_deref(),
                                     thread_id,
                                 )
                                 .await;
                             if let Some(j) = journal {
-                                j.update_status(
-                                    &message.platform_message_id,
-                                    crate::message_journal::JournalStatus::Completed,
-                                    None,
-                                )
-                                .await;
+                                let jstatus = if kernel_ok {
+                                    crate::message_journal::JournalStatus::Completed
+                                } else {
+                                    crate::message_journal::JournalStatus::Failed
+                                };
+                                j.update_status(&message.platform_message_id, jstatus, err_str)
+                                    .await;
                             }
                             return;
                         }
-                        // Buffer was empty — fall through to non-streaming path.
+                        // Buffer was empty OR kernel errored on a
+                        // suppress_error_responses adapter — give up cleanly.
                         send_lifecycle_reaction(
                             adapter,
                             &message.sender,
@@ -2861,13 +3074,14 @@ async fn dispatch_message(
                             AgentPhase::Error,
                         )
                         .await;
+                        let err_str = kernel_err_str.unwrap_or_else(|| e.to_string());
                         handle
                             .record_delivery(
                                 agent_id,
                                 ct_str,
                                 &message.sender.platform_id,
                                 false,
-                                Some(&e.to_string()),
+                                Some(&err_str),
                                 thread_id,
                             )
                             .await;
@@ -2875,7 +3089,7 @@ async fn dispatch_message(
                             j.update_status(
                                 &message.platform_message_id,
                                 crate::message_journal::JournalStatus::Failed,
-                                Some(e.to_string()),
+                                Some(err_str),
                             )
                             .await;
                         }
@@ -2891,7 +3105,76 @@ async fn dispatch_message(
         }
     }
 
-    // Non-streaming path: send to agent and relay response (with sender identity).
+    // Non-streaming-adapter path. We route through the kernel's streaming
+    // API (via `_status` variant) so progress events (tool invocations,
+    // errors) get surfaced into the accumulated text — the channel bridge
+    // injects "🔧 tool_name" and "⚠️ tool failed" lines for streaming
+    // consumers, and we want non-streaming adapters (Discord/Slack/Matrix/...)
+    // to show those too. We accumulate deltas and send once via send_response
+    // so output_format and thread_id are still honored.
+    //
+    // The `_status` variant returns a oneshot that resolves to the kernel's
+    // terminal Result. We use it to drive the correct lifecycle reaction
+    // (Done vs Error), accurate `record_delivery` success metric, journal
+    // status, and to honor `suppress_error_responses` on public-feed adapters
+    // (Mastodon) — accumulated text contains a sanitized error string when
+    // the agent loop fails, which we must not leak to a public timeline.
+    //
+    // If the streaming kernel call is unavailable up-front we fall through
+    // to the non-streaming kernel call — preserves the pre-existing
+    // `handle_send_error` retry / re-resolution path.
+    if let Ok((mut delta_rx, status_rx)) = handle
+        .send_message_streaming_with_sender_status(agent_id, &text, &sender_ctx)
+        .await
+    {
+        let mut accumulated = String::new();
+        while let Some(delta) = delta_rx.recv().await {
+            accumulated.push_str(&delta);
+        }
+        // Status is sent after the text channel fully drains, so awaiting
+        // here will not block longer than the stream itself.
+        let kernel_status = status_rx.await.unwrap_or(Ok(()));
+        let success = kernel_status.is_ok();
+        let phase = if success {
+            AgentPhase::Done
+        } else {
+            AgentPhase::Error
+        };
+        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+        if !accumulated.is_empty() && (success || !adapter.suppress_error_responses()) {
+            send_response(
+                adapter,
+                &message.sender,
+                accumulated,
+                thread_id,
+                output_format,
+            )
+            .await;
+        }
+        let err_str = kernel_status.as_ref().err().cloned();
+        handle
+            .record_delivery(
+                agent_id,
+                ct_str,
+                &message.sender.platform_id,
+                success,
+                err_str.as_deref(),
+                thread_id,
+            )
+            .await;
+        if let Some(j) = journal {
+            let jstatus = if success {
+                crate::message_journal::JournalStatus::Completed
+            } else {
+                crate::message_journal::JournalStatus::Failed
+            };
+            j.update_status(&message.platform_message_id, jstatus, err_str)
+                .await;
+        }
+        return;
+    }
+
+    // Fallback: streaming kernel call unavailable for this request.
     match handle
         .send_message_with_sender(agent_id, &text, &sender_ctx)
         .await
@@ -2992,6 +3275,243 @@ fn media_type_from_url(url: &str) -> String {
     }
 }
 
+/// Default max bytes for file downloads when the bridge has no config (50 MB).
+/// Keep in sync with `default_file_download_max_bytes` in `librefang-types`.
+const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Prefix string for a successfully saved non-image file block.
+/// Used both by `download_file_to_blocks` to produce the text and by
+/// `dispatch_message` to detect success vs failure.
+const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
+
+/// Sanitize a file extension to alphanumeric characters only.
+///
+/// Strips everything that isn't ASCII alphanumeric. Returns `"bin"` when the
+/// result would be empty.
+fn sanitize_extension(ext: &str) -> String {
+    let cleaned: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if cleaned.is_empty() {
+        "bin".to_string()
+    } else {
+        cleaned.to_lowercase()
+    }
+}
+
+/// Validate that a URL uses an allowed scheme (http or https).
+fn validate_url_scheme(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(())
+    } else {
+        Err(format!(
+            "Rejected URL with unsupported scheme: {}",
+            url.split(':').next().unwrap_or("unknown")
+        ))
+    }
+}
+
+/// Download a file from a URL to disk with streaming and size cap.
+///
+/// Returns `ContentBlock::ImageFile` on success (reuses the variant for all
+/// downloaded files) or a text block describing the failure.
+async fn download_file_to_blocks(
+    url: &str,
+    filename: &str,
+    max_bytes: u64,
+    download_dir: &std::path::Path,
+) -> Vec<ContentBlock> {
+    // Validate URL scheme
+    if let Err(reason) = validate_url_scheme(url) {
+        warn!("{reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[File download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let client = crate::http_client::new_client();
+    let resp = match client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download file from channel: {e}");
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    // Fast-reject via Content-Length header when available.
+    if let Some(cl) = resp.content_length() {
+        if cl > max_bytes {
+            warn!(
+                content_length = cl,
+                max_bytes, "File exceeds size cap (Content-Length), skipping download"
+            );
+            return vec![ContentBlock::Text {
+                text: format!(
+                    "[File too large: {cl} bytes exceeds {max_bytes} byte limit ({filename})]"
+                ),
+                provider_metadata: None,
+            }];
+        }
+    }
+
+    // Detect media type from Content-Type header.
+    let media_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    // Extract and sanitize extension from the original filename.
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(sanitize_extension)
+        .unwrap_or_else(|| "bin".to_string());
+
+    let dest_filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let file_path = download_dir.join(&dest_filename);
+
+    // Ensure upload directory exists.
+    if let Err(e) = tokio::fs::create_dir_all(download_dir).await {
+        warn!(
+            "Failed to create download dir {}: {e}",
+            download_dir.display()
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: cannot create directory: {e}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    // Stream body to disk chunk by chunk, enforcing size cap.
+    let mut stream = resp.bytes_stream();
+    let mut file = match tokio::fs::File::create(&file_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Failed to create file {}: {e}", file_path.display());
+            return vec![ContentBlock::Text {
+                text: format!("[File download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    let mut total: u64 = 0;
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                total += chunk.len() as u64;
+                if total > max_bytes {
+                    warn!(
+                        total_bytes = total,
+                        max_bytes, "File download exceeded size cap, aborting"
+                    );
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                    return vec![ContentBlock::Text {
+                        text: format!(
+                            "[File too large: exceeded {max_bytes} byte limit ({filename})]"
+                        ),
+                        provider_metadata: None,
+                    }];
+                }
+                if let Err(e) = file.write_all(&chunk).await {
+                    warn!("Failed to write chunk to {}: {e}", file_path.display());
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&file_path).await;
+                    return vec![ContentBlock::Text {
+                        text: format!("[File download failed: write error: {e}]"),
+                        provider_metadata: None,
+                    }];
+                }
+            }
+            Err(e) => {
+                warn!("Stream error downloading file: {e}");
+                drop(file);
+                let _ = tokio::fs::remove_file(&file_path).await;
+                return vec![ContentBlock::Text {
+                    text: format!("[File download failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        }
+    }
+
+    if let Err(e) = file.flush().await {
+        warn!("Failed to flush file {}: {e}", file_path.display());
+    }
+
+    // Probabilistic cleanup — avoids unbounded disk growth between restarts.
+    // Triggers on ~1/256 downloads without a rand dependency.
+    if std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        .is_multiple_of(256)
+    {
+        let sweep_dir = download_dir.to_path_buf();
+        tokio::spawn(async move { cleanup_old_uploads(&sweep_dir).await });
+    }
+
+    info!(
+        path = %file_path.display(),
+        size_bytes = total,
+        media_type = %media_type,
+        original_filename = %filename,
+        "Downloaded channel file to disk"
+    );
+
+    let path_str = file_path.to_string_lossy().into_owned();
+    if media_type.starts_with("image/") {
+        vec![ContentBlock::ImageFile {
+            media_type,
+            path: path_str,
+        }]
+    } else {
+        vec![ContentBlock::Text {
+            text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
+            provider_metadata: None,
+        }]
+    }
+}
+
+/// Remove files older than 24 hours from the upload/download directory.
+///
+/// Called on bridge startup to prevent unbounded disk growth.
+async fn cleanup_old_uploads(dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+    let mut removed = 0u64;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified < cutoff && tokio::fs::remove_file(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        info!(removed, dir = %dir.display(), "Cleaned up old upload files");
+    }
+}
+
 /// Download an image from a URL and build content blocks for multimodal LLM input.
 ///
 /// Returns a `Vec<ContentBlock>` containing an image block (base64-encoded) and
@@ -3010,6 +3530,27 @@ async fn download_image_to_blocks(
 
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+    // Validate URL scheme — only allow http/https to prevent SSRF via file:// etc.
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                warn!("Rejecting image download with disallowed scheme: {scheme}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download rejected: unsupported URL scheme '{scheme}']"),
+                    provider_metadata: None,
+                }];
+            }
+        },
+        Err(e) => {
+            warn!("Rejecting image download with invalid URL: {e}");
+            return vec![ContentBlock::Text {
+                text: "[Image download rejected: invalid URL]".to_string(),
+                provider_metadata: None,
+            }];
+        }
+    }
 
     let client = crate::http_client::new_client();
     let resp = match client.get(url).send().await {
@@ -3033,16 +3574,61 @@ async fn download_image_to_blocks(
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
         .filter(|ct| ct.starts_with("image/"));
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("Failed to read image bytes: {e}");
+    // Early rejection if Content-Length header exceeds limit
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_IMAGE_BYTES {
+            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    len / 1024
+                ),
+                None => format!("[Image too large for vision ({} KB)]", len / 1024),
+            };
             return vec![ContentBlock::Text {
-                text: format!("[Image read failed: {e}]"),
+                text: desc,
                 provider_metadata: None,
             }];
         }
-    };
+    }
+
+    // Stream body with size accumulator to enforce limit even without Content-Length
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read image bytes: {e}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image read failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        };
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_IMAGE_BYTES {
+            warn!(
+                "Image stream exceeded {} byte limit, aborting download",
+                MAX_IMAGE_BYTES
+            );
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+                None => format!(
+                    "[Image too large for vision ({} KB)]",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
+    let bytes = bytes::Bytes::from(buf);
 
     // Four-tier media type detection:
     // 1. Adapter-provided hint (e.g. Telegram file path extension) — most
@@ -3054,24 +3640,6 @@ async fn download_image_to_blocks(
         .map(|s| s.to_string())
         .or(header_type)
         .unwrap_or_else(|| detect_image_magic(&bytes).unwrap_or_else(|| media_type_from_url(url)));
-
-    if bytes.len() > MAX_IMAGE_BYTES {
-        warn!(
-            "Image too large ({} bytes), skipping vision — sending as text",
-            bytes.len()
-        );
-        let desc = match caption {
-            Some(c) => format!(
-                "[Image too large for vision ({} KB)]\nCaption: {c}",
-                bytes.len() / 1024
-            ),
-            None => format!("[Image too large for vision ({} KB)]", bytes.len() / 1024),
-        };
-        return vec![ContentBlock::Text {
-            text: desc,
-            provider_metadata: None,
-        }];
-    }
 
     // Downscale large images so batches of many photos fit within the LLM
     // context window.  Max dimension 1024px keeps enough detail for analysis
@@ -3148,6 +3716,16 @@ async fn download_image_to_blocks(
         });
         return blocks;
     }
+    // Restrict directory permissions to owner-only on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            tokio::fs::set_permissions(&upload_dir, std::fs::Permissions::from_mode(0o700)).await
+        {
+            warn!("Failed to set permissions on {}: {e}", upload_dir.display());
+        }
+    }
 
     let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
     let file_path = upload_dir.join(&filename);
@@ -3212,7 +3790,7 @@ async fn dispatch_with_blocks(
             return;
         }
     };
-    let channel_key = format!("{:?}", message.channel);
+    let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
     if let Err(denied) = handle
@@ -3647,6 +4225,27 @@ mod tests {
     use crate::types::ChannelType;
     use std::sync::Mutex;
 
+    /// Serialize every test in this module that reads OR writes
+    /// `LIBREFANG_GROUP_ADDRESSEE_GUARD`. The nested
+    /// `should_process_group_message_v2` module has its own copy of this
+    /// pattern for its tests; without serialization at this level too,
+    /// `test_mention_only_*` tests that live in the outer module flake
+    /// under parallel execution — they read the env var through
+    /// `addressee_guard_enabled()` while v2 tests concurrently mutate
+    /// it, and occasionally see `guard=on` when they expect the default.
+    pub(super) static ADDRESSEE_GUARD_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the env lock and clear the guard var for the duration of
+    /// the test so reads return `false` deterministically. Intended for
+    /// tests that assume the default (guard-off) behavior.
+    pub(super) fn with_guard_off_locked<F: FnOnce()>(f: F) {
+        let _g = ADDRESSEE_GUARD_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+        f();
+    }
+
     #[test]
     fn test_is_command_allowed_default_allows_everything() {
         // No overrides configured — all commands allowed (current behaviour).
@@ -3933,50 +4532,58 @@ mod tests {
 
     #[test]
     fn test_mention_only_allows_regex_trigger_pattern() {
-        let message = group_text_message("hello MyAgent");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(should_process_group_message(
-            "whatsapp", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("hello MyAgent");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(should_process_group_message(
+                "whatsapp", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_rejects_partial_regex_match() {
-        let message = group_text_message("hello myagenttt");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(!should_process_group_message(
-            "whatsapp", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("hello myagenttt");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(?i)\\bmyagent\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(!should_process_group_message(
+                "whatsapp", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_skips_invalid_regex_patterns() {
-        let message = group_text_message("bot please reply");
-        let overrides = ChannelOverrides {
-            group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
-            ..Default::default()
-        };
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let message = group_text_message("bot please reply");
+            let overrides = ChannelOverrides {
+                group_trigger_patterns: vec!["(".to_string(), "(?i)\\bbot\\b".to_string()],
+                ..Default::default()
+            };
+            assert!(should_process_group_message(
+                "telegram", &overrides, &message
+            ));
+        });
     }
 
     #[test]
     fn test_mention_only_keeps_existing_mention_behavior() {
-        let mut message = group_text_message("hello there");
-        message
-            .metadata
-            .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
-        let overrides = ChannelOverrides::default();
-        assert!(should_process_group_message(
-            "telegram", &overrides, &message
-        ));
+        with_guard_off_locked(|| {
+            let mut message = group_text_message("hello there");
+            message
+                .metadata
+                .insert("was_mentioned".to_string(), serde_json::Value::Bool(true));
+            let overrides = ChannelOverrides::default();
+            assert!(should_process_group_message(
+                "telegram", &overrides, &message
+            ));
+        });
     }
 
     #[test]
@@ -4836,21 +5443,24 @@ mod tests {
         use super::group_text_message;
         use librefang_types::config::{ChannelOverrides, GroupPolicy};
         use serde_json::json;
-        use std::sync::Mutex;
 
-        // Serialize tests that mutate the LIBREFANG_GROUP_ADDRESSEE_GUARD env
-        // var — env mutation is process-global.
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // Reuse the outer module's env lock so tests across BOTH modules
+        // serialize their reads/writes of LIBREFANG_GROUP_ADDRESSEE_GUARD.
+        // Two independent Mutexes meant v2 tests could mutate the env var
+        // while outer-module `test_mention_only_*` tests read it via
+        // `addressee_guard_enabled()`, causing flakes under `cargo test`
+        // parallel execution.
+        use super::ADDRESSEE_GUARD_ENV_LOCK as ENV_LOCK;
 
         fn with_guard_on<F: FnOnce()>(f: F) {
-            let _g = ENV_LOCK.lock().unwrap();
+            let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
             f();
             std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
         }
 
         fn with_guard_off<F: FnOnce()>(f: F) {
-            let _g = ENV_LOCK.lock().unwrap();
+            let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
             f();
         }
@@ -4975,6 +5585,237 @@ mod tests {
             }"#;
             let ctx: SenderContext = serde_json::from_str(json).expect("BC-02 parse");
             assert!(ctx.group_participants.is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ReplyEnvelope (§A — owner-notify channel)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reply_envelope_default_has_no_fields() {
+        let env = ReplyEnvelope::default();
+        assert!(env.public.is_none());
+        assert!(env.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_from_public_sets_only_public() {
+        let env = ReplyEnvelope::from_public("hi");
+        assert_eq!(env.public.as_deref(), Some("hi"));
+        assert!(env.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_silent_is_default() {
+        let env = ReplyEnvelope::silent();
+        assert_eq!(env, ReplyEnvelope::default());
+    }
+
+    #[test]
+    fn reply_envelope_serde_roundtrip_full() {
+        let env = ReplyEnvelope {
+            public: Some("yes Sir".into()),
+            owner_notice: Some("Caterina asked something".into()),
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let decoded: ReplyEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, env);
+    }
+
+    #[test]
+    fn reply_envelope_deserializes_legacy_missing_fields() {
+        // BC-02: stored blobs may not contain these fields yet.
+        let decoded: ReplyEnvelope = serde_json::from_str("{}").unwrap();
+        assert!(decoded.public.is_none());
+        assert!(decoded.owner_notice.is_none());
+
+        let decoded2: ReplyEnvelope = serde_json::from_str(r#"{"public":"x"}"#).unwrap();
+        assert_eq!(decoded2.public.as_deref(), Some("x"));
+        assert!(decoded2.owner_notice.is_none());
+    }
+
+    #[test]
+    fn reply_envelope_public_or_empty_helper() {
+        assert_eq!(ReplyEnvelope::default().public_or_empty(), "");
+        assert_eq!(
+            ReplyEnvelope::from_public("hello").public_or_empty(),
+            "hello"
+        );
+    }
+
+    mod classify_reply_intent_tests {
+        use super::super::*;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingHandle {
+            captured_bot_name: Arc<Mutex<Option<Option<String>>>>,
+        }
+
+        impl CapturingHandle {
+            fn new() -> (Self, Arc<Mutex<Option<Option<String>>>>) {
+                let slot = Arc::new(Mutex::new(None));
+                (
+                    Self {
+                        captured_bot_name: Arc::clone(&slot),
+                    },
+                    slot,
+                )
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ChannelBridgeHandle for CapturingHandle {
+            async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                Err("not used in test".into())
+            }
+            async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                Err("not used in test".into())
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Err("not used in test".into())
+            }
+            async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                Err("not used in test".into())
+            }
+            async fn classify_reply_intent(
+                &self,
+                _message_text: &str,
+                _sender_name: &str,
+                _model: Option<&str>,
+                bot_name: Option<&str>,
+                _aliases: Option<&[String]>,
+            ) -> bool {
+                *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
+                true
+            }
+        }
+
+        #[tokio::test]
+        async fn default_impl_returns_true_with_bot_name() {
+            struct AlwaysTrue;
+            #[async_trait::async_trait]
+            impl ChannelBridgeHandle for AlwaysTrue {
+                async fn send_message(&self, _: AgentId, _: &str) -> Result<String, String> {
+                    Err("not used in test".into())
+                }
+                async fn find_agent_by_name(&self, _: &str) -> Result<Option<AgentId>, String> {
+                    Err("not used in test".into())
+                }
+                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                    Err("not used in test".into())
+                }
+                async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
+                    Err("not used in test".into())
+                }
+            }
+
+            let h = AlwaysTrue;
+            assert!(
+                h.classify_reply_intent("hello", "user", None, Some("rodelo"), None)
+                    .await
+            );
+            assert!(
+                h.classify_reply_intent("hello", "user", None, None, None)
+                    .await
+            );
+        }
+
+        #[tokio::test]
+        async fn bot_name_is_forwarded_to_implementation() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("rodelo qué hora es?", "Alice", None, Some("rodelo"), None)
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(Some("rodelo".to_string())),
+                "bot_name must be forwarded to the classify_reply_intent implementation"
+            );
+        }
+
+        #[tokio::test]
+        async fn none_bot_name_is_forwarded() {
+            let (handle, slot) = CapturingHandle::new();
+            handle
+                .classify_reply_intent("hey there", "Bob", None, None, None)
+                .await;
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(None),
+                "None bot_name must be forwarded as None"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // File download helpers
+    // ---------------------------------------------------------------------
+
+    mod file_download_tests {
+        use super::*;
+
+        #[test]
+        fn test_sanitize_extension_normal() {
+            assert_eq!(sanitize_extension("pdf"), "pdf");
+            assert_eq!(sanitize_extension("PNG"), "png");
+            assert_eq!(sanitize_extension("tar"), "tar");
+            assert_eq!(sanitize_extension("jpg"), "jpg");
+        }
+
+        #[test]
+        fn test_sanitize_extension_strips_non_alnum() {
+            // tar.gz via Path::extension gives "gz", but test the sanitizer directly
+            assert_eq!(sanitize_extension("g.z"), "gz");
+            assert_eq!(sanitize_extension("../etc/passwd"), "etcpasswd");
+            assert_eq!(sanitize_extension("exe;rm -rf"), "exermrf");
+        }
+
+        #[test]
+        fn test_sanitize_extension_empty_and_special() {
+            assert_eq!(sanitize_extension(""), "bin");
+            assert_eq!(sanitize_extension("..."), "bin");
+            assert_eq!(sanitize_extension("///"), "bin");
+        }
+
+        #[test]
+        fn test_sanitize_extension_unicode() {
+            // Non-ASCII chars are stripped
+            assert_eq!(sanitize_extension("pdfé"), "pdf");
+            assert_eq!(sanitize_extension("日本語"), "bin");
+        }
+
+        #[test]
+        fn test_validate_url_scheme_http() {
+            assert!(validate_url_scheme("https://example.com/file.pdf").is_ok());
+            assert!(validate_url_scheme("http://example.com/file.pdf").is_ok());
+        }
+
+        #[test]
+        fn test_validate_url_scheme_rejected() {
+            assert!(validate_url_scheme("file:///etc/passwd").is_err());
+            assert!(validate_url_scheme("ftp://example.com/file.pdf").is_err());
+            assert!(validate_url_scheme("javascript:alert(1)").is_err());
+            assert!(validate_url_scheme("data:text/plain,hello").is_err());
+            assert!(validate_url_scheme("/local/path").is_err());
+        }
+
+        #[tokio::test]
+        async fn test_file_download_rejects_bad_scheme() {
+            let dir = std::env::temp_dir().join("librefang_test_download");
+            let blocks =
+                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
+                    .await;
+            assert_eq!(blocks.len(), 1);
+            match &blocks[0] {
+                ContentBlock::Text { text, .. } => {
+                    assert!(
+                        text.contains("rejected"),
+                        "Expected rejection message, got: {text}"
+                    );
+                }
+                other => panic!("Expected Text block, got: {other:?}"),
+            }
         }
     }
 }

@@ -3395,11 +3395,11 @@
         "tags": [
           "extensions"
         ],
-        "summary": "GET /api/extensions — List all installed extensions (integrations) with status.",
+        "summary": "GET /api/extensions — List catalog entries annotated with installed state.",
         "operationId": "list_extensions",
         "responses": {
           "200": {
-            "description": "List all installed extensions with status",
+            "description": "List catalog entries with install/health status",
             "content": {
               "application/json": {
                 "schema": {}
@@ -3414,7 +3414,7 @@
         "tags": [
           "extensions"
         ],
-        "summary": "POST /api/extensions/install — Install an extension by name.",
+        "summary": "POST /api/extensions/install — Install a catalog entry (alias for\nPOST /api/mcp/servers with template_id).",
         "operationId": "install_extension",
         "requestBody": {
           "content": {
@@ -3426,7 +3426,7 @@
         },
         "responses": {
           "200": {
-            "description": "Install an extension by name",
+            "description": "Install a catalog entry",
             "content": {
               "application/json": {
                 "schema": {}
@@ -3441,7 +3441,7 @@
         "tags": [
           "extensions"
         ],
-        "summary": "POST /api/extensions/uninstall — Uninstall an extension by name.",
+        "summary": "POST /api/extensions/uninstall — Uninstall by catalog id (template_id).",
         "operationId": "uninstall_extension",
         "requestBody": {
           "content": {
@@ -3453,7 +3453,7 @@
         },
         "responses": {
           "200": {
-            "description": "Uninstall an extension by name",
+            "description": "Uninstall a catalog-backed MCP server",
             "content": {
               "application/json": {
                 "schema": {}
@@ -3468,13 +3468,13 @@
         "tags": [
           "extensions"
         ],
-        "summary": "GET /api/extensions/:name — Get details for a single extension by name.",
+        "summary": "GET /api/extensions/:name — Get details for a single catalog entry.",
         "operationId": "get_extension",
         "parameters": [
           {
             "name": "name",
             "in": "path",
-            "description": "Extension name",
+            "description": "Catalog entry id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3483,7 +3483,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Get details for a single extension",
+            "description": "Catalog entry detail + install status",
             "content": {
               "application/json": {
                 "schema": {}
@@ -4035,205 +4035,6 @@
         }
       }
     },
-    "/api/integrations": {
-      "get": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "GET /api/integrations — List installed integrations with status.",
-        "operationId": "list_integrations",
-        "responses": {
-          "200": {
-            "description": "List installed integrations with status",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/add": {
-      "post": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "POST /api/integrations/add — Install an integration.",
-        "operationId": "add_integration",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Install an integration",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/available": {
-      "get": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "GET /api/integrations/available — List all available templates.",
-        "operationId": "list_available_integrations",
-        "responses": {
-          "200": {
-            "description": "List all available integration templates",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/health": {
-      "get": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "GET /api/integrations/health — Health status for all integrations.",
-        "operationId": "integrations_health",
-        "responses": {
-          "200": {
-            "description": "Health status for all integrations",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/reload": {
-      "post": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.",
-        "operationId": "reload_integrations",
-        "responses": {
-          "200": {
-            "description": "Hot-reload integration configs and reconnect MCP",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/{id}": {
-      "get": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "GET /api/integrations/:id — Get a single integration by ID.",
-        "operationId": "get_integration",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Integration ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Integration detail",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Integration not found",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "DELETE /api/integrations/:id — Remove an integration.",
-        "operationId": "remove_integration",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Integration ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Remove an integration",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/integrations/{id}/reconnect": {
-      "post": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "POST /api/integrations/:id/reconnect — Reconnect an MCP server.",
-        "operationId": "reconnect_integration",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Integration ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Reconnect an integration MCP server",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/logs/stream": {
       "get": {
         "tags": [
@@ -4270,6 +4071,101 @@
         "responses": {
           "200": {
             "description": "Search the FangHub marketplace",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/catalog": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/catalog — List all installable MCP catalog entries.",
+        "operationId": "list_mcp_catalog",
+        "responses": {
+          "200": {
+            "description": "MCP catalog entries",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/catalog/{id}": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/catalog/{id} — Single catalog entry detail.",
+        "operationId": "get_mcp_catalog_entry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Catalog entry id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalog entry detail",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Catalog entry not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/health": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/health — Health snapshot across all configured MCP servers.",
+        "operationId": "mcp_health_handler",
+        "responses": {
+          "200": {
+            "description": "Health snapshot for all configured MCP servers",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/reload": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "POST /api/mcp/reload — Re-read the catalog and reconnect MCP servers.",
+        "operationId": "reload_mcp_handler",
+        "responses": {
+          "200": {
+            "description": "Reload catalog and reconnect MCP servers",
             "content": {
               "application/json": {
                 "schema": {}
@@ -4414,6 +4310,44 @@
         "responses": {
           "200": {
             "description": "Remove an MCP server configuration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{name}/reconnect": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "POST /api/mcp/servers/{name}/reconnect — Force a reconnect of an MCP server.",
+        "operationId": "reconnect_mcp_server_handler",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconnect an MCP server",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "MCP server not configured",
             "content": {
               "application/json": {
                 "schema": {}
@@ -5819,6 +5753,13 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Default provider updated",
@@ -7471,6 +7412,13 @@
             "format": "int64",
             "minimum": 0
           },
+          "owner_notice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional private notice destined for the agent's owner DM,\nproduced when the model invoked the `notify_owner` tool during the\nturn. Channel adapters (e.g. whatsapp-gateway) MUST route this to\nthe owner's address (e.g. OWNER_JID) and NOT to the source chat.\nAdapters that don't support owner-side delivery should ignore it\n(Telegram/Discord/Slack continue to function unchanged)."
+          },
           "response": {
             "type": "string"
           },
@@ -7641,6 +7589,13 @@
               "string",
               "null"
             ]
+          },
+          "web_search_augmentation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
           }
         }
       },
@@ -7813,11 +7768,7 @@
     },
     {
       "name": "extensions",
-      "description": "Extension/integration management"
-    },
-    {
-      "name": "integrations",
-      "description": "Third-party integration connections"
+      "description": "Extension management"
     },
     {
       "name": "models",

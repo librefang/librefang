@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { fetchRegistrySchema, type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
+import { type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
+import { useRegistrySchema } from "../lib/queries/config";
 import { Input } from "./ui/Input";
 import { Select } from "./ui/Select";
 import { Button } from "./ui/Button";
@@ -536,12 +536,7 @@ export function SchemaForm({
   const [errors, setErrors] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const schemaQuery = useQuery({
-    queryKey: ["registry-schema", contentType],
-    queryFn: () => fetchRegistrySchema(contentType),
-    staleTime: 5 * 60 * 1000,
-    retry: 1,
-  });
+  const schemaQuery = useRegistrySchema(contentType);
 
   const schema = schemaQuery.data;
 

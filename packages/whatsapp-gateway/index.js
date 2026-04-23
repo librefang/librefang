@@ -9,6 +9,7 @@ const { randomUUID } = require('node:crypto');
 const toml = require('toml');
 const { EchoTracker } = require('./lib/echo-tracker');
 const lidCache = require('./lib/lid-cache');
+const { createDedupTracker } = require('./lib/dedup-tracker');
 const {
   isLidJid,
   isGroupJid,
@@ -18,6 +19,7 @@ const {
   resolvePeerId,
   deriveOwnerJids,
 } = require('./lib/identity');
+const { buildSessionKey, channelTypeForChat } = require('./lib/session-key');
 
 // ---------------------------------------------------------------------------
 // Persisted LID cache (ID-02, Phase 4 §B)
@@ -40,6 +42,25 @@ const LID_PERSIST_ENABLED = process.env.LIBREFANG_LID_PERSIST !== 'off';
 // librefang. Flag `LIBREFANG_ECHO_TRACKER=off` disables end-to-end (no-op).
 const ECHO_TRACKER_ENABLED = process.env.LIBREFANG_ECHO_TRACKER !== 'off';
 const echoTracker = new EchoTracker(100);
+
+// Phase 3 §B (EB-02) — gate the `forward_dispatch` structured log.
+// Default ON ('verbose'); set LIBREFANG_DISPATCH_LOG to any other value
+// (e.g. 'off') to silence the diagnostic line without redeploy.
+const DISPATCH_LOG_VERBOSE = (process.env.LIBREFANG_DISPATCH_LOG || 'verbose') === 'verbose';
+
+// Phase 3 §B — CS-01 regression guard. Runs once at boot (and is exported
+// for unit tests). Two distinct chatJids must yield two distinct
+// channel_type strings; otherwise the gateway-to-kernel per-conversation
+// isolation contract is broken and we refuse to boot.
+function runDispatchSelfTest(channelTypeFn) {
+  const fn = channelTypeFn || channelTypeForChat;
+  const a = fn('111@s.whatsapp.net');
+  const b = fn('222@s.whatsapp.net');
+  if (a === b || !a.startsWith('whatsapp:') || !b.startsWith('whatsapp:')) {
+    return { ok: false, reason: `channel_type regression: a=${a} b=${b}` };
+  }
+  return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // SQLite Message Store (better-sqlite3)
@@ -221,17 +242,30 @@ function dbUpdateLastSeen(jid, timestamp) {
 const CONFIG_PATH = process.env.LIBREFANG_CONFIG || path.join(os.homedir(), '.librefang', 'config.toml');
 
 function readWhatsAppConfig(configPath) {
-  const defaults = { default_agent: 'assistant', owner_numbers: [], conversation_ttl_hours: 24 };
+  const defaults = {
+    default_agent: 'assistant',
+    owner_numbers: [],
+    conversation_ttl_hours: 24,
+    // English-only by default keeps upstream deployments locale-neutral;
+    // set `[relay_intent].languages = ["en", "it", …]` in config.toml
+    // to enable extra language packs.
+    relay_intent_languages: ['en'],
+  };
   try {
     const content = fs.readFileSync(configPath, 'utf8');
     const parsed = toml.parse(content);
     const wa = parsed?.channels?.whatsapp || {};
+    const relay = parsed?.relay_intent || {};
     const cfg = {
       default_agent: wa.default_agent || defaults.default_agent,
       owner_numbers: Array.isArray(wa.owner_numbers) ? wa.owner_numbers : defaults.owner_numbers,
       conversation_ttl_hours: parseInt(wa.conversation_ttl_hours, 10) || defaults.conversation_ttl_hours,
+      relay_intent_languages:
+        Array.isArray(relay.languages) && relay.languages.length > 0
+          ? relay.languages
+          : defaults.relay_intent_languages,
     };
-    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}`);
+    console.log(`[gateway] Read config from ${configPath}: default_agent="${cfg.default_agent}", owner_numbers=${JSON.stringify(cfg.owner_numbers)}, conversation_ttl_hours=${cfg.conversation_ttl_hours}, relay_intent_languages=${JSON.stringify(cfg.relay_intent_languages)}`);
     return cfg;
   } catch (err) {
     console.warn(`[gateway] Could not read ${configPath}: ${err.message} — using defaults/env vars`);
@@ -255,6 +289,13 @@ const OWNER_NUMBERS = ownerNumbersFromEnv.length > 0 ? ownerNumbersFromEnv : tom
 const OWNER_JIDS = deriveOwnerJids(OWNER_NUMBERS);
 // Primary owner JID for unsolicited/scheduled messages only
 const OWNER_JID = OWNER_JIDS.size > 0 ? [...OWNER_JIDS][0] : '';
+
+// §A — Feature flag: when set to "off" the gateway ignores the typed
+// owner_notice channel introduced by the notify_owner LLM tool and falls
+// back to the legacy NOTIFY_OWNER text-tag path. Lets ops roll back the
+// new behaviour without a rebuild. Defaults to "on".
+const OWNER_CHANNEL_MODE = (process.env.LIBREFANG_OWNER_CHANNEL || 'on').toLowerCase();
+const OWNER_CHANNEL_ENABLED = OWNER_CHANNEL_MODE !== 'off';
 
 // Conversation TTL from config.toml (default 24 hours)
 const CONVERSATION_TTL_HOURS = parseInt(process.env.CONVERSATION_TTL_HOURS || String(tomlConfig.conversation_ttl_hours), 10);
@@ -499,6 +540,78 @@ function cleanupDecryptRetry(key) {
   decryptRetryMap.delete(key);
 }
 
+// ---------------------------------------------------------------------------
+// Signal session renegotiation tracking (upsert path)
+//
+// The existing messages.update stub-39 hook handles decryption failures that
+// Baileys surfaces via the update channel. A different class of failures —
+// libsignal throwing from session_cipher.js before any stub is emitted —
+// never reaches that hook. Those messages arrive in messages.upsert with
+// msg.message = null/undefined and are silently skipped. The fix is to
+// detect the null-content case in upsert and force a fresh Signal session
+// via assertSessions(..., true) so the peer re-keys on their next send.
+//   baseJid → { attempts, lastAttemptAt, lastMsgId, notified }
+const sessionRecoveryMap = new Map();
+const SESSION_RECOVERY_COOLDOWN_MS = 20_000;
+const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
+const SESSION_RECOVERY_EXPIRE_MS = 30 * 60 * 1000; // 30 min
+
+function normalizeBaseJid(jid) {
+  if (!jid) return '';
+  // Strip device suffix "<id>:<device>@<server>" → "<id>@<server>"
+  return jid.replace(/:\d+@/, '@');
+}
+
+async function handleSessionRecovery(deviceJid, baseJid, msgId) {
+  if (!baseJid) return;
+  if (!sock || typeof sock.assertSessions !== 'function') {
+    console.debug(`[gateway][session-recovery] skipped for ${deviceJid}: socket not ready or assertSessions unavailable`);
+    return;
+  }
+  const now = Date.now();
+  const entry = sessionRecoveryMap.get(baseJid) || {
+    attempts: 0,
+    lastAttemptAt: 0,
+    lastMsgId: null,
+    notified: false,
+  };
+  if (now - entry.lastAttemptAt < SESSION_RECOVERY_COOLDOWN_MS) return;
+  if (entry.attempts >= SESSION_RECOVERY_MAX_ATTEMPTS) {
+    if (!entry.notified && OWNER_JIDS && OWNER_JIDS.length > 0) {
+      entry.notified = true;
+      sessionRecoveryMap.set(baseJid, entry);
+      const peer = baseJid.replace(/@.*/, '');
+      const body = [
+        `⚠️ Unable to decrypt messages from ${peer}`,
+        `Tried ${entry.attempts} Signal session renegotiations — peer hasn't re-keyed.`,
+        `Last failed message id: ${entry.lastMsgId || 'unknown'}`,
+        `Hint: ask the contact to send a new message, or unlink/relink this device if it is you.`,
+      ].join('\n');
+      for (const ownerJid of OWNER_JIDS) {
+        try {
+          await sock.sendMessage(ownerJid, { text: body });
+        } catch (e) {
+          console.warn(`[gateway][session-recovery] notify ${ownerJid} failed: ${e?.message || e}`);
+        }
+      }
+      console.warn(`[gateway][session-recovery] exhausted, owner notified about ${baseJid}`);
+    }
+    return;
+  }
+  entry.attempts += 1;
+  entry.lastAttemptAt = now;
+  entry.lastMsgId = msgId || entry.lastMsgId;
+  sessionRecoveryMap.set(baseJid, entry);
+  console.warn(`[gateway][session-recovery] SessionError for ${deviceJid} (msgId=${msgId || 'n/a'}) — forcing renegotiation ${entry.attempts}/${SESSION_RECOVERY_MAX_ATTEMPTS}`);
+  try {
+    // Target the specific device so libsignal re-keys the exact chain that
+    // failed. A group/base JID would skip per-device handshake.
+    await sock.assertSessions([deviceJid], true);
+  } catch (e) {
+    console.warn(`[gateway][session-recovery] assertSessions(${deviceJid}) failed: ${e?.message || e}`);
+  }
+}
+
 // Single periodic cleanup for both stores
 setInterval(() => {
   const now = Date.now();
@@ -507,6 +620,9 @@ setInterval(() => {
   }
   for (const [key, entry] of decryptRetryMap) {
     if (now - entry.firstSeen > DECRYPT_RETRY_EXPIRE_MS) cleanupDecryptRetry(key);
+  }
+  for (const [key, entry] of sessionRecoveryMap) {
+    if (now - entry.lastAttemptAt > SESSION_RECOVERY_EXPIRE_MS) sessionRecoveryMap.delete(key);
   }
 }, 60_000).unref();
 
@@ -652,23 +768,13 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Message deduplication — Baileys can deliver the same message multiple times
 // ---------------------------------------------------------------------------
-const recentMessageIds = new Map(); // Map<msgId, timestamp>
-const DEDUP_WINDOW_MS = 60_000; // 1 minute
-
-function isDuplicate(msgId) {
-  if (!msgId) return false;
-  if (recentMessageIds.has(msgId)) return true;
-  recentMessageIds.set(msgId, Date.now());
-  return false;
-}
-
-// Cleanup dedup cache every 2 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of recentMessageIds) {
-    if (now - ts > DEDUP_WINDOW_MS) recentMessageIds.delete(id);
-  }
-}, 2 * 60 * 1000);
+// Two-phase (wasProcessed / markProcessed): Baileys re-emits `messages.upsert`
+// for a msgId whose previous handling ended in decrypt failure (null payload /
+// SessionError / PreKeyError). That retransmit is the ONLY window for
+// `assertSessions` to recover the Signal session. A mark-on-sight dedup
+// blocks the retransmit and strands the sender — 2026-04-16 outage, see
+// lib/dedup-tracker.js docstring.
+const dedupTracker = createDedupTracker({ windowMs: 60_000 });
 
 // ---------------------------------------------------------------------------
 // Step F: Escalation deduplication — debounce NOTIFY_OWNER per stranger
@@ -766,33 +872,192 @@ function extractNotifyOwner(responseText) {
       console.error('[gateway] Failed to parse NOTIFY_OWNER JSON:', match[1]);
     }
   }
+  // §A — legacy text-tag path is kept one release for compatibility, but
+  // every hit is loud-logged so callers can migrate to the typed
+  // `notify_owner` tool. Suppressed when the new envelope already routed
+  // the same payload (caller checks collectedOwnerNotices first).
+  if (notifications.length > 0) {
+    console.warn('[gateway][deprecated] NOTIFY_OWNER text tag detected; migrate to the notify_owner LLM tool. Hits:', notifications.length);
+  }
   const cleanedText = responseText.replace(NOTIFY_OWNER_RE, '').trim();
   return { notifications, cleanedText };
 }
 
 // ---------------------------------------------------------------------------
-// NO_REPLY sentinel — agent-side convention to silently decline to answer.
+// Silent-response sentinel — gateway-side mirror of the canonical Rust
+// detector at crates/librefang-runtime/src/silent_response.rs.
 // ---------------------------------------------------------------------------
-// The agent prompts instruct the LLM to emit a bare `NO_REPLY` token when it
-// decides a message doesn't warrant a reply. Ideally it is the entire
-// response, but in practice we see two leaks:
-//   1. Trailing token:  "Tutto bene, Signore.\nNO_REPLY"
-//   2. Concatenated:    "...a Sua disposizione. 🎩NO_REPLY"   ← no separator
-// Both must be scrubbed before the text hits WhatsApp. The helper returns
-// the cleaned text, or `''` when the entire response was a NO_REPLY sentinel
-// and the caller should suppress delivery entirely.
+// Two-layer protection (Phase 2 §B, OB-02 / OB-03 / OB-07):
+//
+//   1. `isSilentResponse(text)` classifies a complete (or accumulated)
+//      response as silent — case-insensitive, with trailing punctuation /
+//      whitespace / emoji tolerance, and proper word boundaries. Mirrors
+//      the Rust canonical detector so both layers of the stack agree.
+//
+//   2. `createHoldbackAccumulator({onFlush, onSilent})` is the streaming
+//      gate: it BUFFERS deltas instead of forwarding them and only
+//      releases a flush once it can prove the cumulative text is NOT
+//      sentinel-shaped (length threshold + classifier check). If the
+//      stream ends silent, NO partial chunk ever escaped. This replaces
+//      the post-hoc `stripNoReply` scrub which had a window where a
+//      mid-stream "[no reply" prefix would already have been forwarded
+//      as a WhatsApp message edit before the trailing " needed]" arrived.
+//
+// Toggle: `LIBREFANG_SILENT_V2=off` reverts to the legacy regex-scrub
+// path, kept for one release as the rollback hatch.
+const SILENT_V2_ENABLED = !['off', '0', 'false', 'no'].includes(
+  String(process.env.LIBREFANG_SILENT_V2 || '').toLowerCase(),
+);
+
+// Hold-back window: the accumulator will not flush until the buffer has
+// grown past this many chars OR the stream has ended. 32 is empirically
+// long enough to cover the longest sentinel form ("[no reply needed]" =
+// 18 chars) plus comfortable headroom for emoji/punctuation tolerance.
+const SILENT_HOLDBACK_MIN_CHARS = 32;
+
+// Match a buffer that LOOKS like it is becoming a silent sentinel.
+// Used by the hold-back accumulator to keep buffering when the prefix
+// is still ambiguous (e.g. the model has streamed `"Ok [no reply"` and
+// we don't yet know whether the next delta closes it or extends into
+// real text).
+const SILENT_PREFIX_RE = /^\s*(\[?\s*no[_\s]?reply(?:\s*needed)?\s*\]?\s*[\s.!?]*)$/i;
+
+function isSilentResponse(text) {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  if (!SILENT_V2_ENABLED) {
+    // Legacy detector — bit-for-bit equivalent to pre-Phase-2 behaviour.
+    return (
+      trimmed === 'NO_REPLY' ||
+      trimmed.endsWith('NO_REPLY') ||
+      trimmed === '[no reply needed]' ||
+      trimmed.endsWith('[no reply needed]') ||
+      trimmed === 'no reply needed' ||
+      trimmed.endsWith('no reply needed')
+    );
+  }
+
+  // Strip trailing punctuation, whitespace, and any non-ASCII (emoji).
+  // Walk by code points (handles surrogate pairs for emojis correctly).
+  let end = trimmed.length;
+  while (end > 0) {
+    let unitStart = end - 1;
+    // If we're on a low surrogate, the actual code point starts one earlier.
+    const lowUnit = trimmed.charCodeAt(unitStart);
+    if (lowUnit >= 0xDC00 && lowUnit <= 0xDFFF && unitStart > 0) {
+      const highUnit = trimmed.charCodeAt(unitStart - 1);
+      if (highUnit >= 0xD800 && highUnit <= 0xDBFF) unitStart -= 1;
+    }
+    const c = trimmed.codePointAt(unitStart);
+    const ch = String.fromCodePoint(c);
+    const isStrippable =
+      /\s/.test(ch) ||
+      ch === '.' || ch === ',' || ch === ';' || ch === ':' || ch === '!' || ch === '?' ||
+      c > 0x7F;
+    if (!isStrippable) break;
+    end = unitStart;
+  }
+  const stripped = trimmed.slice(0, end);
+  const lower = stripped.toLowerCase();
+
+  if (lower === 'no_reply' || lower === '[no reply needed]' || lower === 'no reply needed') {
+    return true;
+  }
+  for (const needle of ['no_reply', '[no reply needed]', 'no reply needed']) {
+    if (lower.endsWith(needle)) {
+      const cut = lower.length - needle.length;
+      if (cut === 0) return true;
+      const prev = lower[cut - 1];
+      // Word-boundary check: prev char must NOT be alphanumeric or _.
+      if (!/[a-z0-9_]/.test(prev)) return true;
+    }
+  }
+  return false;
+}
+
+// Legacy entry point preserved for the non-streaming and final-response
+// scrub call sites (lines that historically called stripNoReply on a
+// fully-formed response). When the response is a sentinel, returns ''
+// so callers can short-circuit delivery; otherwise returns the text
+// unchanged (the canonical V2 detector decides whole-message silence,
+// no partial scrubbing — partial scrubbing was the bug).
 function stripNoReply(text) {
   if (typeof text !== 'string' || !text) return text || '';
-  if (text.trim() === 'NO_REPLY') return '';
-  // `\bNO_REPLY\b` matches even when glued to an emoji (🎩NO_REPLY) because
-  // emoji code points are not word characters. Strip every standalone
-  // occurrence, collapse the whitespace it leaves behind.
-  const stripped = text
-    .replace(/\bNO_REPLY\b/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  return stripped === 'NO_REPLY' ? '' : stripped;
+  if (isSilentResponse(text)) return '';
+  if (!SILENT_V2_ENABLED) {
+    // Legacy in-text scrub kept under the rollback flag.
+    const stripped = text
+      .replace(/\bNO_REPLY\b/g, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return stripped === 'NO_REPLY' ? '' : stripped;
+  }
+  return text;
+}
+
+/**
+ * Streaming hold-back accumulator (OB-07).
+ *
+ * Buffers incoming deltas and decides — at every delta — whether the
+ * cumulative text has clearly diverged from any silent-response shape.
+ * Only then does it call `onFlush(buf)` once. After the first flush, all
+ * subsequent deltas are forwarded immediately via `onFlush(delta)` so
+ * progressive WhatsApp edits keep working unchanged.
+ *
+ * If the stream concludes silent, `onSilent(buf)` fires and `onFlush`
+ * is NEVER called — guaranteeing zero partial sentinel leaks.
+ *
+ * @param {object} cfg
+ * @param {(text: string) => (Promise<void> | void)} cfg.onFlush  forward
+ *   text to the channel (e.g. sock.sendMessage / WhatsApp edit)
+ * @param {(text: string) => (Promise<void> | void)} [cfg.onSilent] optional
+ *   notification for diagnostics / OBS-01 logging
+ * @param {number} [cfg.minChars=32] hold-back threshold
+ */
+function createHoldbackAccumulator({ onFlush, onSilent, minChars = SILENT_HOLDBACK_MIN_CHARS } = {}) {
+  if (typeof onFlush !== 'function') {
+    throw new TypeError('createHoldbackAccumulator requires onFlush callback');
+  }
+  let buf = '';
+  let flushed = false;
+
+  async function push(delta) {
+    if (typeof delta !== 'string' || delta.length === 0) return;
+    if (flushed) {
+      await onFlush(delta);
+      return;
+    }
+    buf += delta;
+    const looksLikeSentinel = SILENT_PREFIX_RE.test(buf);
+    if (buf.trim().length >= minChars && !looksLikeSentinel && !isSilentResponse(buf)) {
+      flushed = true;
+      await onFlush(buf);
+    }
+  }
+
+  async function end() {
+    if (flushed) return { silent: false, flushed: true };
+    if (buf.trim().length === 0 || isSilentResponse(buf)) {
+      if (typeof onSilent === 'function') await onSilent(buf);
+      try {
+        console.log(JSON.stringify({
+          event: 'silent_response_gateway',
+          final: true,
+          silent: true,
+          preview: buf.slice(0, 40),
+        }));
+      } catch { /* noop */ }
+      return { silent: true, flushed: false };
+    }
+    flushed = true;
+    await onFlush(buf);
+    return { silent: false, flushed: true };
+  }
+
+  return { push, end, get buffered() { return buf; }, get hasFlushed() { return flushed; } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,8 +1401,10 @@ async function startConnection() {
       // Skip status broadcasts
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
-      // Deduplication: skip if we've already processed this message ID
-      if (isDuplicate(msg.key.id)) {
+      // Read-only dedup check: do NOT mark here. Marking happens after the
+      // decrypt-failure branch below so WA's retransmit of a failed-decrypt
+      // msgId can reach the session-recovery path instead of being stranded.
+      if (dedupTracker.wasProcessed(msg.key.id)) {
         console.log(`[gateway] Skipping duplicate message: ${msg.key.id}`);
         continue;
       }
@@ -1150,6 +1417,23 @@ async function startConnection() {
 
       const sender = msg.key.remoteJid || '';
       const innerMsg = msg.message || {};
+
+      // Signal session recovery: inbound message with null payload ⇒ libsignal
+      // rejected the ciphertext before stub 39 was emitted. Force a fresh
+      // session with the actual device (keep the device suffix when
+      // assertSessions is called — the session is per-device, not per-user).
+      if (!msg.message && !msg.key.fromMe && sender) {
+        const recoveryJid = msg.key.participant || sender;
+        const baseJid = normalizeBaseJid(recoveryJid);
+        handleSessionRecovery(recoveryJid, baseJid, msg.key.id).catch(err => {
+          console.warn(`[gateway][session-recovery] handler error: ${err?.message || err}`);
+        });
+        continue;
+      }
+
+      // Decrypt succeeded. Mark so subsequent retransmits of this msgId
+      // are deduped.
+      dedupTracker.markProcessed(msg.key.id);
 
       // --- FASE 4: Handle reactions ---
       if (innerMsg.reactionMessage) {
@@ -1450,7 +1734,11 @@ async function startConnection() {
         } else if (isStranger) {
           const strangerContext = buildStrangerContext(pushName, phone, sender);
           messageToSend = strangerContext + messageText;
-        } else if (isOwner && activeConversations.size > 0) {
+        } else if (isOwner && activeConversations.size > 0 && ownerIntentsRelay(messageText)) {
+          // Only inject the relay system instruction when the owner's text
+          // expresses an explicit delegated-speech intent. A neutral greeting
+          // from the owner to the agent during an active stranger conversation
+          // must NOT be forced into relay mode.
           const context = buildConversationsContext();
           systemPrefix = buildRelaySystemInstruction();
           messageToSend = context + '\n\n[OWNER_MESSAGE]\n' + messageText;
@@ -1471,9 +1759,32 @@ async function startConnection() {
               .replace(RELAY_RE, '')
               .replace(/\[no reply needed\]/gi, '');
           }
-          // Also scrub the plain `NO_REPLY` sentinel — it leaks mid-stream,
-          // trailing, and glued to emojis. When the whole chunk is a
-          // NO_REPLY (or strips down to empty), skip the edit entirely.
+          // OB-07 hold-back gate: until we have already established a
+          // visible WhatsApp message (streamMsgKey != null), refuse to
+          // flush a chunk that is shorter than the hold-back threshold OR
+          // whose accumulated text still LOOKS like a silent sentinel.
+          // Once committed, subsequent edits are unconditional — the
+          // model has clearly diverged from any sentinel shape.
+          if (SILENT_V2_ENABLED && !streamMsgKey) {
+            const trimmedCum = cleaned.trim();
+            if (
+              trimmedCum.length < SILENT_HOLDBACK_MIN_CHARS ||
+              SILENT_PREFIX_RE.test(trimmedCum) ||
+              isSilentResponse(cleaned)
+            ) {
+              try {
+                console.log(JSON.stringify({
+                  event: 'silent_response_gateway',
+                  final: false,
+                  silent: true,
+                  preview: trimmedCum.slice(0, 40),
+                }));
+              } catch { /* noop */ }
+              return;
+            }
+          }
+          // Final scrub for trailing-sentinel residue (e.g. ".... NO_REPLY"
+          // arriving after the hold-back window has elapsed).
           cleaned = stripNoReply(cleaned);
           cleaned = cleaned.trim();
           if (!cleaned) return;
@@ -1488,13 +1799,49 @@ async function startConnection() {
         };
 
         // Phase 2 §C — fetch participant roster for groups (cached 5min).
-        // Empty for DMs and on fetch failure (graceful degradation per
-        // GS-01 minimal: addressee guard simply can't fire without roster).
         const groupParticipants = isGroup ? await getGroupParticipants(sock, sender) : [];
 
+        // §A — collect typed owner notices emitted via the notify_owner tool.
+        const collectedOwnerNotices = [];
+        const onOwnerNotice = (text) => {
+          if (!text) return;
+          collectedOwnerNotices.push(text);
+        };
         const rawResponse = await forwardToLibreFangStreaming(
-          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, groupParticipants },
+          messageToSend, systemPrefix, phone, pushName, isOwner, attachments, onProgress, sender, { isGroup, wasMentioned, groupParticipants, onOwnerNotice },
         );
+
+        // §A — fan out collected owner notices to every configured OWNER_JID.
+        // OB-01: happens regardless of whether a public reply will be sent
+        // below; the owner receives the private payload even when the model
+        // elects to stay silent in the source chat.
+        if (OWNER_CHANNEL_ENABLED && collectedOwnerNotices.length > 0) {
+          if (OWNER_JIDS.size === 0) {
+            console.log(JSON.stringify({
+              event: 'owner_notify_skip',
+              reason: 'no_owner_configured',
+              source_chat: sender,
+              count: collectedOwnerNotices.length,
+            }));
+          } else {
+            for (const noticeText of collectedOwnerNotices) {
+              for (const ownerJid of OWNER_JIDS) {
+                try {
+                  await sock.sendMessage(ownerJid, { text: noticeText });
+                } catch (e) {
+                  console.error(`[gateway] owner_notify send failed to ${ownerJid}: ${e.message}`);
+                }
+              }
+              console.log(JSON.stringify({
+                event: 'owner_notify',
+                target_jids: [...OWNER_JIDS],
+                source_chat: sender,
+                bytes: noticeText.length,
+              }));
+            }
+          }
+        }
+
         // Scrub NO_REPLY before markdown conversion — if the model emitted it
         // trailing or glued to an emoji it would otherwise reach WhatsApp.
         const response = markdownToWhatsApp(stripNoReply(rawResponse));
@@ -1934,6 +2281,34 @@ async function processMediaMessage(fullMsg, innerMsg, agentId) {
 }
 
 // ---------------------------------------------------------------------------
+// Detect whether an owner message expresses relay intent.
+//
+// Before this guard, `buildRelaySystemInstruction` was injected for every
+// owner turn whenever any stranger conversation was active — which forced
+// the model to interpret neutral owner-to-bot messages ("saludos", "hola",
+// "come stai?") as requests to relay a reply to the last stranger. Result
+// observed in production: owner writing "saludos" to the bot triggered a
+// RELAY_TO_STRANGER to an unrelated namesake contact.
+//
+// Only inject the relay instruction when the owner's message expresses an
+// explicit delegated-speech intent. Everything else is treated as owner
+// talking directly to the agent.
+// Regex compiled once at module load from the configured language
+// packs in `lib/intent_patterns.js`. Adding a locale is a file-level
+// change; adding the code to the config toggles it on.
+const RELAY_INTENT_RE = require('./lib/intent_patterns').compileIntentRegex(
+  tomlConfig.relay_intent_languages,
+);
+
+function ownerIntentsRelay(text) {
+  const t = (text || '').trim().toLowerCase();
+  if (!t) return false;
+  if (t.startsWith('/relay') || t.startsWith('/reply')) return true;
+  if (/(^|\s)@[\w.+-]+/.test(t)) return true;
+  return RELAY_INTENT_RE.test(t);
+}
+
+// ---------------------------------------------------------------------------
 // Build relay system instruction (Step E — separate from user text)
 // ---------------------------------------------------------------------------
 function buildRelaySystemInstruction() {
@@ -1962,7 +2337,7 @@ function buildRelaySystemInstruction() {
 // ---------------------------------------------------------------------------
 const MAX_FORWARD_RETRIES = 1;
 
-async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '', groupParticipants = [] } = {}, retryCount = 0) {
+async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup = false, wasMentioned = false, chatJid = '', groupParticipants = [], onOwnerNotice = null } = {}, retryCount = 0) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid. A bare
   // `whatsapp` channel loses per-conversation session isolation; the kernel
   // would merge unrelated chats into the same session.
@@ -1988,7 +2363,24 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
   // Per-conversation session isolation: include chat JID in channel_type
   // so the kernel creates separate sessions for each WhatsApp conversation.
   // CS-01: chatJid has already been validated non-empty at function entry.
-  const channelType = `whatsapp:${chatJid}`;
+  // Phase 3 §B — centralized in channelTypeForChat for single-sourcing.
+  const channelType = channelTypeForChat(chatJid);
+
+  // Phase 3 §B (EB-02) — single structured log per dispatch; allows
+  // reconstructing (agent, peer, chat) tuple from logs alone. Retry recursion
+  // re-enters this function, which is the desired diagnostic behavior.
+  if (DISPATCH_LOG_VERBOSE) {
+    console.log(JSON.stringify({
+      event: 'forward_dispatch',
+      session_key: buildSessionKey(cachedAgentId, phone, chatJid),
+      channel_type: channelType,
+      phone,
+      push_name: pushName,
+      is_group: !!isGroup,
+      was_mentioned: !!wasMentioned,
+    }));
+  }
+
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -2048,6 +2440,15 @@ async function forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, 
 
           try {
             const data = JSON.parse(body);
+            // §A — surface owner_notice envelope field (BC-02: absent on
+            // older daemon builds, then we just behave like before).
+            if (OWNER_CHANNEL_ENABLED && data.owner_notice && typeof onOwnerNotice === 'function') {
+              try {
+                onOwnerNotice(data.owner_notice);
+              } catch (e) {
+                console.warn(`[gateway] onOwnerNotice handler threw: ${e.message}`);
+              }
+            }
             // Silent completion — agent intentionally chose not to reply (NO_REPLY)
             if (data.silent) {
               resolve('');
@@ -2099,7 +2500,7 @@ const STREAMING_EDIT_INTERVAL_MS = 2000;
  * @param {(text: string) => Promise<void>} onProgress
  * @returns {Promise<string>} complete response
  */
-async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, groupParticipants = [] } = {}) {
+async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, isOwner, attachments, onProgress, chatJid = '', { isGroup = false, wasMentioned = false, groupParticipants = [], onOwnerNotice = null } = {}) {
   // CS-01: fail-fast — refuse to forward with an empty chatJid (same
   // rationale as `forwardToLibreFang`). Keeps streaming parity.
   if (!chatJid) {
@@ -2122,7 +2523,22 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
   const fullMessage = systemPrefix ? systemPrefix + text : text;
 
   // CS-01: chatJid has already been validated non-empty at function entry.
-  const channelType = `whatsapp:${chatJid}`;
+  // Phase 3 §B — centralized in channelTypeForChat for single-sourcing.
+  const channelType = channelTypeForChat(chatJid);
+
+  // Phase 3 §B (EB-02) — streaming-path dispatch log parity.
+  if (DISPATCH_LOG_VERBOSE) {
+    console.log(JSON.stringify({
+      event: 'forward_dispatch',
+      session_key: buildSessionKey(cachedAgentId, phone, chatJid),
+      channel_type: channelType,
+      phone,
+      push_name: pushName,
+      is_group: !!isGroup,
+      was_mentioned: !!wasMentioned,
+    }));
+  }
+
   const payload = {
     message: fullMessage,
     channel_type: channelType,
@@ -2168,7 +2584,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
           res.on('data', (chunk) => (body += chunk));
           res.on('end', () => {
             console.warn(`[gateway] SSE endpoint returned ${res.statusCode}, falling back to non-streaming`);
-            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+            forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
               .then(resolve)
               .catch(reject);
           });
@@ -2210,6 +2626,17 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
                   onProgress(display).catch(() => {});
                 }
               } catch { /* ignore */ }
+            } else if (eventType === 'owner_notice') {
+              // §A — typed owner-side payload from notify_owner tool.
+              // Forward to caller's onOwnerNotice handler unless flag disabled.
+              if (OWNER_CHANNEL_ENABLED && typeof onOwnerNotice === 'function') {
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  if (parsed.text) onOwnerNotice(parsed.text);
+                } catch (e) {
+                  console.warn(`[gateway] owner_notice SSE parse failed: ${e.message}`);
+                }
+              }
             } else if (eventType === 'chunk') {
               try {
                 const parsed = JSON.parse(dataStr);
@@ -2252,7 +2679,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
         res.on('error', (err) => {
           clearTimeout(pendingEdit);
           console.warn(`[gateway] SSE stream error: ${err.message}, falling back`);
-          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+          forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
             .then(resolve)
             .catch(reject);
         });
@@ -2261,7 +2688,7 @@ async function forwardToLibreFangStreaming(text, systemPrefix, phone, pushName, 
 
     req.on('error', (err) => {
       console.warn(`[gateway] SSE request error: ${err.message}, falling back`);
-      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid })
+      forwardToLibreFang(text, systemPrefix, phone, pushName, isOwner, attachments, { isGroup, wasMentioned, chatJid, onOwnerNotice })
         .then(resolve)
         .catch(reject);
     });
@@ -2727,6 +3154,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+// Phase 3 §B — CS-01 regression guard. Fail fast if the chatJid-to-
+// channel_type contract has silently degraded (e.g. future refactor
+// collapses both chats to bare `whatsapp`). Runs before we accept any
+// socket traffic.
+{
+  const _selfTest = runDispatchSelfTest();
+  if (!_selfTest.ok) {
+    console.error('[gateway] FATAL dispatch_self_test failed:', _selfTest.reason);
+    process.exit(1);
+  }
+  console.log(JSON.stringify({ event: 'dispatch_self_test', ok: true }));
+}
+
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
@@ -2804,6 +3244,7 @@ module.exports = {
   markdownToWhatsApp,
   extractNotifyOwner,
   extractRelayCommands,
+  ownerIntentsRelay,
   buildConversationsContext,
   isRateLimited,
   buildCorsHeaders,
@@ -2816,6 +3257,10 @@ module.exports = {
   resolveLidProactively,
   checkHeartbeat,
   computeBackoffDelay,
+  isSilentResponse,
+  stripNoReply,
+  createHoldbackAccumulator,
+  SILENT_HOLDBACK_MIN_CHARS,
   getGroupParticipants,
   invalidateGroupRoster,
   groupMetadataCache,
@@ -2829,4 +3274,11 @@ module.exports = {
   lidMapSet,
   db,
   LID_PERSIST_ENABLED,
+  normalizeBaseJid,
+  sessionRecoveryMap,
+  SESSION_RECOVERY_COOLDOWN_MS,
+  SESSION_RECOVERY_MAX_ATTEMPTS,
+  runDispatchSelfTest,
+  channelTypeForChat,
+  buildSessionKey,
 };

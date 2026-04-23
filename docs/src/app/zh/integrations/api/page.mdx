@@ -199,9 +199,10 @@ Retry-After: 60
 | POST | `/api/workflows/{id}/run` | 运行工作流 |
 | GET | `/api/workflows/{id}/runs` | 列出工作流执行记录 |
 | **触发器** | | |
-| GET | `/api/triggers` | 列出触发器 |
+| GET | `/api/triggers` | 列出触发器（可选 `?agent_id=`） |
 | POST | `/api/triggers` | 创建触发器 |
-| PUT | `/api/triggers/{id}` | 更新触发器 |
+| GET | `/api/triggers/{id}` | 获取触发器详情 |
+| PATCH | `/api/triggers/{id}` | 部分更新触发器 |
 | DELETE | `/api/triggers/{id}` | 删除触发器 |
 | **调度** | | |
 | GET | `/api/schedules` | 列出调度 |
@@ -385,15 +386,17 @@ Retry-After: 60
 | GET | `/api/backups` | 列出备份 |
 | DELETE | `/api/backups/{filename}` | 删除备份 |
 | POST | `/api/restore` | 从备份恢复 |
-| **集成** | | |
-| GET | `/api/integrations` | 列出集成 |
-| GET | `/api/integrations/available` | 可用集成 |
-| GET | `/api/integrations/health` | 集成健康状态 |
-| POST | `/api/integrations/add` | 添加集成 |
-| POST | `/api/integrations/reload` | 重新加载集成 |
-| GET | `/api/integrations/{id}` | 获取集成 |
-| DELETE | `/api/integrations/{id}` | 移除集成 |
-| POST | `/api/integrations/{id}/reconnect` | 重新连接集成 |
+| **MCP 服务器** | | |
+| GET | `/api/mcp/servers` | 列出已配置的 MCP 服务器 |
+| POST | `/api/mcp/servers` | 新增服务器（body 可为 `{template_id, credentials}` 或原始配置） |
+| GET | `/api/mcp/servers/{id}` | 获取单个服务器 |
+| PUT | `/api/mcp/servers/{id}` | 更新服务器 |
+| DELETE | `/api/mcp/servers/{id}` | 移除服务器 |
+| POST | `/api/mcp/servers/{id}/reconnect` | 重新连接 |
+| GET | `/api/mcp/catalog` | 浏览可安装的 MCP 模板 |
+| GET | `/api/mcp/catalog/{id}` | 模板详情 |
+| GET | `/api/mcp/health` | 所有 MCP 服务器的健康聚合 |
+| POST | `/api/mcp/reload` | 热重载 MCP catalog 并重连 |
 | **配对** | | |
 | POST | `/api/pairing/request` | 发起配对 |
 | POST | `/api/pairing/complete` | 完成配对 |

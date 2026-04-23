@@ -467,7 +467,7 @@ impl ProactiveMemoryStore {
         if let Ok(mut counters) = self.consolidation_counters.lock() {
             if counters.len() > 1000 {
                 let mut entries: Vec<(String, u32)> = counters.drain().collect();
-                entries.sort_by(|a, b| b.1.cmp(&a.1));
+                entries.sort_by_key(|b| std::cmp::Reverse(b.1));
                 entries.truncate(500);
                 *counters = entries.into_iter().collect();
             }
@@ -685,7 +685,7 @@ impl ProactiveMemoryStore {
         }
 
         // Sort by created_at descending
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         Ok(items)
     }
@@ -1482,7 +1482,7 @@ impl ProactiveMemoryStore {
 
         // Limit to 100 most recent items to avoid O(n^2) blowup
         if all_items.len() > 100 {
-            all_items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            all_items.sort_by_key(|b| std::cmp::Reverse(b.created_at));
             all_items.truncate(100);
         }
 
@@ -1667,8 +1667,18 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
+        let categories = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .extract_categories
+            .clone();
+
         // Step 1: Extract structured memories
-        let extraction = self.extractor.extract_memories(messages).await?;
+        let extraction = self
+            .extractor
+            .extract_memories(messages, &categories)
+            .await?;
         if !extraction.has_content {
             // Fallback: store raw message content as session memory
             let content = messages
@@ -2127,8 +2137,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Extract memories using configured extractor (LLM or rule-based)
-        let extraction_result = self.extractor.extract_memories(conversation).await?;
+        // Extract memories using the configured extractor. Use the
+        // agent-id variant: when the extractor has a kernel handle wired
+        // (LlmMemoryExtractor::with_forked_kernel), this routes the LLM
+        // call through a forked agent turn so the cache key matches the
+        // parent conversation — Anthropic hits cache on (system + tools
+        // + messages). The rule-based DefaultMemoryExtractor ignores
+        // agent_id via the trait's default forwarding, so nothing changes
+        // for kernels running without an LLM extractor.
+        let extraction_result = self
+            .extractor
+            .extract_memories_with_agent_id(
+                conversation,
+                &agent_id.to_string(),
+                &cfg.extract_categories,
+            )
+            .await?;
 
         // Apply decision flow for each extracted memory
         let mut stored_memories = Vec::new();
@@ -2350,12 +2374,9 @@ mod tests {
             .unwrap();
 
         assert!(result.has_content);
-        // DefaultMemoryExtractor should extract "I prefer" as user_preference
+        // DefaultMemoryExtractor should extract "I prefer" as preference
         assert!(!result.memories.is_empty());
-        assert_eq!(
-            result.memories[0].category,
-            Some("user_preference".to_string())
-        );
+        assert_eq!(result.memories[0].category, Some("preference".to_string()));
     }
 
     #[tokio::test]

@@ -5,6 +5,177 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.23] - 2026-04-23
+
+### Added
+
+- Auto-reset stuck in_progress tasks after TTL (closes #2923) (#2953) (@houko)
+- Named shared workspaces + identity file isolation (#2958) (@houko)
+- Add notify_owner tool + owner_notice output boundary (#2965) (@houko)
+- Moonshot/Kimi file upload support via /v1/files (#2966) (@houko)
+- Download channel files to disk for agent access (#2972) (@houko)
+- Session_key dispatch log + boot self-test for channel scoping (#2973) (@houko)
+
+### Fixed
+
+- Drop ellipsis-terminated preambles without tool_use as silent (#2617) (@f-liva)
+- Suppress NO_REPLY sentinel in streaming bridge, cron, and auto-reply (#2743) (@DaBlitzStein)
+- Make split_message HTML-tag-aware for Telegram (#2760) (@DaBlitzStein)
+- Auto-inject sender peer_id into cron jobs + delegation trust prompt (#2869) (@DaBlitzStein)
+- Route trigger-fired responses to agent's home channel (closes #2872) (#2952) (@houko)
+- Render real chat message timestamps on resume (closes #2934) (#2954) (@houko)
+- Apply assignee_match:self filter to task_posted triggers (closes #2924) (#2955) (@houko)
+- Inject bot identity into reply_precheck classifier (#2960) (@houko)
+- Sanitize bot_name in classify_reply_intent prompt; add unit tests (#2961) (@houko)
+- Tolerate tool_call_id collisions across turns in session_repair (#2962) (@houko)
+- Inject RELAY prompt only on explicit owner intent (#2967) (@houko)
+- Add missing timestamp field in session_repair Message structs (#2968) (@houko)
+- Fix all missing timestamp fields and incomplete test stubs (#2969) (@houko)
+- Read peer_id from job_json in cron_create (#2970) (@houko)
+- Recover Signal session when upsert delivers null payload (#2971) (@houko)
+
+
+## [2026.4.22] - 2026-04-22
+
+_No notable changes._
+
+## [2026.4.21] - 2026-04-21
+
+### Added
+
+- Complete trigger feature — persistence, CRUD API, CLI subcommands, dashboard UI (#2827) (#2830) (@houko)
+- Add account_id to channel_send for explicit multi-bot routing (#2845) (@houko)
+- Add per-agent auto_evolve flag to skip background skill review (#2846) (@houko)
+- Implement MCP Roots capability (#2847) (@houko)
+
+### Fixed
+
+- Correct query invalidation and missing data flow across mutations (#2770) (@leszek3737)
+- Harden workflow save and draft state (#2781) (@leszek3737)
+- Align mutation flows across config channels goals and hands (#2782) (@leszek3737)
+- Unify dashboard query hooks and flow guards (#2783) (@leszek3737)
+- Exempt Unix/Slack-style timestamps from PII phone check (#2795) (@neo-wanderer)
+- Change wizard default ollama model to gemma3:4b (#2811) (@houko)
+- Strip empty assistant messages unconditionally (#2812) (@houko)
+- Auto-delete At-schedule jobs after execution (#2808) (#2814) (@houko)
+- Reimplement apply_seccomp_allowlist with libc::SYS_* constants (#2817) (@houko)
+- Allow dashboard static assets through auth gate (#2824) (@leszek3737)
+- Force wildcard bind for api_listen in Docker (#2825) (@leszek3737)
+- Resolve channel_bridge test deadlock that blocked CI for 6h (#2829) (@houko)
+- ChatPage — type safety, cache correctness, cleanup (#2832) (@leszek3737)
+- Correct event sequence in show_progress=false test (#2834) (@houko)
+- Exempt dashboard and static paths from GCRA rate limiter (#2835) (@houko)
+- Use main as default branch for ~/.librefang git repo (#2837) (@houko)
+- Task_claim() now matches assigned_to by name as well as UUID (#2844) (@houko)
+- Dashboard refresh no longer drops history — unify webui session with canonical (#2848) (@houko)
+- Type-safety and RC-safe fixes (#2849) (@leszek3737)
+- Unbreak --all-features build + stop warning on local LLM providers (#2850) (@houko)
+- Per-job session_mode override to fix context accumulation (#2647) (#2851) (@houko)
+- Proactive extraction loses JSON mode through fork path + log noise cleanup (#2852) (@houko)
+
+### Changed
+
+- RC cleanup for ModelsPage (#2833) (@leszek3737)
+- Relocate config backups under ~/.librefang/backups/ (#2838) (@houko)
+- Move stray state/log files out of ~/.librefang root (#2840) (@houko)
+
+### Documentation
+
+- Add unofficial wiki link and DeepWiki badge to READMEs (#2821) (@leszek3737)
+
+### Maintenance
+
+- Run Windows and macOS tests on affected crates for every Rust PR (#2819) (@houko)
+- Follow-up cleanup from #2783 review (#2820) (@houko)
+- Ignore rust_out build artifact (#2836) (@houko)
+
+
+## [2026.4.20] - 2026-04-20
+
+### Added
+
+- Canonical silent-response primitive, end the NO_REPLY literal leak (#2470) (@f-liva)
+- Gate /dashboard/* behind auth + tailwind v4 renames (#2785) (@houko)
+- Add stop button to interrupt in-flight agent streams (#2787) (@neo-wanderer)
+- Add native Cohere driver (#2791) (@houko)
+- Show tool execution progress in channel replies (#2792) (@houko)
+- Finish channel-progress — universal coverage, Telegram fix, show_progress, i18n, prettify, dashboard parity (#2793) (@houko)
+- Redesign `librefang status` for layered visibility (#2799) (@houko)
+- Unify create/edit modals + inline rename (#2800) (@houko)
+
+### Fixed
+
+- Make extract_categories config drive LLM prompt categories (#2761) (@neo-wanderer)
+- Sync terminal health and active window state (#2777) (@leszek3737)
+- Clear history consistently and refresh model state (#2780) (@leszek3737)
+- Align shared query flows for MCP, skills, and workflows (#2784) (@leszek3737)
+- Route comms_task through kernel wrapper; surface task system events (#2789) (@neo-wanderer)
+- Rewrite /install to /install.sh for CLI clients (#2794) (@houko)
+- Stop writing PATH into the wrong rc file (#2796) (@houko)
+- Auto-activate PATH after installation (#2797) (@houko)
+- Bypass auth for loopback connections (#2802) (@houko)
+- Drop stray </div> from #2800 modal refactor (#2803) (@houko)
+- Surface reload error to dashboard instead of opaque 'saved but reload failed' (#2805) (@houko)
+- Validate config BEFORE writing TOML so failed saves don't corrupt the file (#2806) (@houko)
+
+### Documentation
+
+- Clarify session_mode scope — cron/channels/forks ignore it (#2790) (@neo-wanderer)
+
+### Maintenance
+
+- Split PR/main pipelines; compute affected crates precisely (#2801) (@houko)
+- Merge release-* workflows into one (keep notify) (#2804) (@houko)
+
+
+## [2026.4.19] - 2026-04-19
+
+### Added
+
+- Add auto-dream per-agent background memory consolidation (#2750) (@houko)
+- Trigger on AgentLoopEnd hook, scheduler becomes backstop (#2755) (@houko)
+- Derivative LLM calls reuse parent's prompt cache (#2767) (@houko)
+
+### Fixed
+
+- Show Provider before Model in Config default_model section (#2749) (@houko)
+- Add peer_id to cron jobs for peer-scoped memory access (#2759) (@DaBlitzStein)
+- Match ImageFile in vision dispatch gates (#2762) (@DaBlitzStein)
+- Default api_listen to 127.0.0.1:4545 for local-only startup (closes #2766) (#2769) (@houko)
+- Clear stale TOTP banners, refetch status on reset, localize error messages (#2771) (@leszek3737)
+- Fix 12 UI bugs across scheduler, sessions, memory, models, plugins, providers, runtime, workflows (#2772) (@leszek3737)
+- Gate Duration import with cfg(unix) for Windows CI (#2773) (@houko)
+- Harden canvas workflow recovery and related UI state (#2774) (@leszek3737)
+- Derive 'connected' from health state + fix catalog card overflow (closes #2738) (#2775) (@houko)
+- Align workflow mutation invalidation (#2778) (@leszek3737)
+
+### Documentation
+
+- Fix stale documentation references (#2720) (@leszek3737)
+
+### Maintenance
+
+- Replace cloudflare/wrangler-action with direct npx wrangler calls (#2740) (@houko)
+
+
+## [Unreleased]
+
+### Changed
+
+- Default `api_listen` flipped from `0.0.0.0:4545` to `127.0.0.1:4545` (loopback-only). New installs are local-only by default; set `api_listen = "0.0.0.0:4545"` to expose on LAN/remote. Affects `librefang init`, the dashboard's init endpoint, and `librefang.toml.example`. `librefang start` with an explicit `--config <path>` that doesn't exist now prints a clear `librefang init` hint instead of failing obscurely. (#2766)
+
+## [2026.4.18] - 2026-04-18
+
+### Added
+
+- Forked agent pattern: kernel exposes `run_forked_agent_streaming(agent_id, prompt, allowed_tools)` for derivative LLM calls that share the parent turn's system + tools + message prefix (Anthropic prompt cache alignment) without persisting the derivative's messages into the canonical session. Anthropic driver's `cache_control` extended from system-only to cover both the last tool block (system + tools prefix) AND the last content block of the last message (full conversation prefix), giving forks near-full cache coverage. Dashboard settings page now surfaces cache-hit rate and per-dream cost so the forkedAgent savings are visible. Proactive-memory `LlmMemoryExtractor` migrated to the forkedAgent pattern: a new trait method `extract_memories_with_agent_id` routes the extraction LLM call through `KernelHandle::run_forked_agent_oneshot` (a new trait method that drives a single-turn fork and returns the final text), sharing the parent agent's `(system + tools + messages)` cache key. The extraction-specific system prompt is embedded into the fork's user message rather than replacing the agent's system prompt, so cache alignment holds. Fall back to a standalone `driver.complete()` with `prompt_caching = true` when no kernel handle is installed (tests / rule-based extractor / fork failure) so system-prompt caching still applies. Kernel wires the extractor's weak handle inside `set_self_handle` — first call only, matching the auto-dream hook idempotency pattern. Migrates auto-dream off its previous `SenderContext { channel: "auto_dream" }` side-channel pattern — dreams now fork from the canonical session and the kernel-side `channel == AUTO_DREAM_CHANNEL` tool filter is replaced by runtime `LoopOptions::allowed_tools` enforcement at tool execute time (request schema stays byte-identical to parent for cache alignment, model's `tool_use` for disallowed tools returns synthetic error). Agent loop adds `LoopOptions { is_fork, allowed_tools }` threaded through; fork turns skip `save_session_async` and add `"is_fork": true` to `AgentLoopEnd` hook context data so subscribers can filter fork events. Auto-dream's own hook filters fork turns to avoid dream-triggers-dream recursion. (@houko)
+- Auto-dream: per-agent background memory consolidation with four-layer gating (global / per-agent opt-in / time / session count / file lock). Triggered event-driven from the `AgentLoopEnd` hook (fires the moment an agent finishes a turn) with a sparse daily backstop scheduler for opted-in agents that never turn. Includes web dashboard toggle card, TUI Dashboard strip, `[auto_dream]` config section, `DreamConsolidation` audit events with token and cost capture, runtime tool allowlist enforcement, and `GET/POST/PUT /api/auto-dream/status|trigger|abort|enabled` endpoints. (#2750) (@houko)
+
+### Maintenance
+
+- Drop bogus npm cache config on setup-node (#2736) (@houko)
+
+
 ## [2026.4.15] - 2026-04-15
 
 ### Added

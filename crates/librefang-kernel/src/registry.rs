@@ -390,6 +390,33 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Toggle the agent's auto-dream opt-in flag. The auto-dream scheduler
+    /// reads this on every tick, so the change takes effect without restart.
+    /// In-memory only — persisting to the agent manifest file is a separate
+    /// concern (matches the pattern of `update_system_prompt`).
+    pub fn update_auto_dream_enabled(&self, id: AgentId, enabled: bool) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.auto_dream_enabled = enabled;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
+    /// Cheap read-only check for the auto-dream opt-in flag, without cloning
+    /// the agent entry. Used on the hot path of the `AgentLoopEnd` hook,
+    /// which fires for every turn of every agent and would otherwise pay
+    /// the `AgentEntry` + manifest clone cost (several KB of Strings/Vecs
+    /// per turn) just to read one bool. Missing agent → `false`, matching
+    /// the "not enrolled" behaviour expected by callers.
+    pub fn is_auto_dream_enabled(&self, id: AgentId) -> bool {
+        self.agents
+            .get(&id)
+            .map(|e| e.manifest.auto_dream_enabled)
+            .unwrap_or(false)
+    }
+
     /// Update an agent's resource quota (budget limits).
     pub fn update_resources(
         &self,
@@ -430,6 +457,57 @@ impl AgentRegistry {
         entry.last_active = chrono::Utc::now();
         Ok(())
     }
+
+    /// Update the session auto-reset state flags on an agent entry.
+    ///
+    /// Called after a policy-driven session reset or a manual reset:
+    /// - `force_session_wipe` is cleared (the forced-wipe has been applied).
+    /// - `resume_pending` is cleared.
+    /// - `reset_reason` records why the reset happened.
+    ///
+    /// Does **not** update `last_active` — that is a separate concern.
+    pub fn update_session_reset_state(
+        &self,
+        id: AgentId,
+        reason: librefang_types::config::SessionResetReason,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.force_session_wipe = false;
+        entry.resume_pending = false;
+        entry.reset_reason = Some(reason);
+        Ok(())
+    }
+
+    /// Schedule a forced session wipe so the next invocation performs a hard
+    /// reset (cleared message history; session_id is preserved).
+    /// Used by operator action or stuck-loop recovery.
+    ///
+    /// Named `schedule_session_wipe` to avoid confusion with
+    /// `suspend_agent()` / `AgentState::Suspended`.
+    pub fn schedule_session_wipe(&self, id: AgentId) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.force_session_wipe = true;
+        Ok(())
+    }
+
+    /// Mark an agent's session as `resume_pending` after an interrupted
+    /// restart.  Ignored when `force_session_wipe` is already set (hard-wipe wins).
+    pub fn mark_resume_pending(&self, id: AgentId) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        if !entry.force_session_wipe {
+            entry.resume_pending = true;
+        }
+        Ok(())
+    }
 }
 
 impl Default for AgentRegistry {
@@ -468,6 +546,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         }
     }
 
@@ -580,5 +659,60 @@ mod tests {
         let after = registry.get(id).unwrap();
         assert!((after.manifest.model.temperature - 1.5).abs() < f32::EPSILON);
         assert!(after.last_active > old_active);
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_toggles_flag() {
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        // Starts false (manifest default).
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.get(id).unwrap().manifest.auto_dream_enabled);
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.get(id).unwrap().manifest.auto_dream_enabled);
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_tracks_flag() {
+        // Lightweight bool-only accessor must agree with the clone-based
+        // `get().manifest.auto_dream_enabled` path in all three states.
+        let registry = AgentRegistry::new();
+        let entry = test_entry("dreamer-fast");
+        let id = entry.id;
+        registry.register(entry).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, true).unwrap();
+        assert!(registry.is_auto_dream_enabled(id));
+
+        registry.update_auto_dream_enabled(id, false).unwrap();
+        assert!(!registry.is_auto_dream_enabled(id));
+    }
+
+    #[test]
+    fn test_is_auto_dream_enabled_missing_agent_is_false() {
+        // Missing agent must return false rather than panic — the auto-dream
+        // hook fires for every turn and cannot distinguish a killed agent
+        // from an opted-out one at that layer.
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        assert!(!registry.is_auto_dream_enabled(bogus));
+    }
+
+    #[test]
+    fn test_update_auto_dream_enabled_missing_agent_errors() {
+        let registry = AgentRegistry::new();
+        let bogus = AgentId::new();
+        let result = registry.update_auto_dream_enabled(bogus, true);
+        assert!(matches!(
+            result,
+            Err(librefang_types::error::LibreFangError::AgentNotFound(_))
+        ));
     }
 }

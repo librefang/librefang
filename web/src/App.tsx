@@ -1,21 +1,31 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Terminal, Cpu, Shield, Zap, Network, ChevronRight, ChevronDown, ExternalLink,
-  Copy, Check, Menu, X, Box, Layers, Radio, Eye,
+  Terminal, Cpu, Shield, Zap, Network, ChevronRight, ExternalLink,
+  Copy, Check, Box, Layers, Radio, Eye,
   Scissors, Users, Globe, ArrowRight, Github, Monitor,
   Star, GitFork, CircleDot, GitPullRequest, MessageSquare,
-  Sun, Moon
+  Sparkles, History, RotateCcw, FileEdit, Trash2, FilePlus,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { translations, languages } from './i18n'
+import { translations } from './i18n'
 import type { Translation } from './i18n'
 import { useRegistry, getLocalizedDesc } from './useRegistry'
 import { useAppStore } from './store'
 import { cn } from './lib/utils'
-import DeployPage from './pages/DeployPage'
-import ChangelogPage from './pages/ChangelogPage'
+// Lazy-load everything that isn't the homepage. Homepage visitors get a
+// ~40KB smaller initial bundle; registry/deploy/changelog visitors pay only
+// once on navigation (and Suspense falls back to a blank frame for ~50ms).
+const DeployPage = lazy(() => import('./pages/DeployPage'))
+const ChangelogPage = lazy(() => import('./pages/ChangelogPage'))
+const RegistryPage = lazy(() => import('./pages/RegistryPage'))
+const RegistryDetailPage = lazy(() => import('./pages/RegistryDetailPage'))
+const MetricsPage = lazy(() => import('./pages/MetricsPage'))
+const SearchDialog = lazy(() => import('./components/SearchDialog'))
+const InstallBanner = lazy(() => import('./components/InstallBanner'))
+import SiteHeader from './components/SiteHeader'
+import type { RegistryCategory } from './useRegistry'
 
 
 // ─── Language detection ───
@@ -88,211 +98,6 @@ function FadeIn({ children, className = '', delay = 0 }: FadeInProps) {
   )
 }
 
-// ─── Nav ───
-interface NavProps {
-  t: Translation
-  lang: string
-  onSwitchLang: (code: string) => void
-}
-
-function Nav({ t, lang, onSwitchLang }: NavProps) {
-  const [open, setOpen] = useState(false)
-  const [langOpen, setLangOpen] = useState(false)
-  const [scrolled, setScrolled] = useState(false)
-  const [activeSection, setActiveSection] = useState('')
-  const theme = useAppStore((s) => s.theme)
-  const toggleTheme = useAppStore((s) => s.toggleTheme)
-  const currentLangName = languages.find(l => l.code === lang)?.name || 'English'
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20)
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
-
-  useEffect(() => {
-    const sections = document.querySelectorAll('section[id]')
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveSection(entry.target.id)
-          }
-        }
-      },
-      { threshold: 0.3, rootMargin: '-80px 0px -50% 0px' }
-    )
-    sections.forEach(s => observer.observe(s))
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setOpen(false); setLangOpen(false) }
-    }
-    const handleClickOutside = (e: MouseEvent) => {
-      if (langOpen && !(e.target as HTMLElement).closest('[data-lang-menu]')) setLangOpen(false)
-    }
-    document.addEventListener('keydown', handleEscape)
-    document.addEventListener('click', handleClickOutside)
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-      document.removeEventListener('click', handleClickOutside)
-    }
-  }, [langOpen])
-
-  interface NavLink {
-    label: string
-    href: string
-    external?: boolean
-  }
-
-  const links: NavLink[] = [
-    { label: t.nav.architecture, href: '#architecture' },
-    { label: t.nav.hands, href: '#hands' },
-    { label: t.workflows?.label || 'Workflows', href: '#workflows' },
-    { label: t.nav.performance, href: '#performance' },
-    { label: t.nav.install, href: '#install' },
-    { label: t.nav.downloads || 'Downloads', href: '#downloads' },
-    { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
-  ]
-
-  return (
-    <nav className={cn('fixed top-0 left-0 right-0 z-50 transition-all duration-300', scrolled && 'bg-surface/90 backdrop-blur-md border-b border-black/10 dark:border-white/5')}>
-      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="LibreFang" className="w-8 h-8 rounded" />
-          <span className="font-bold text-slate-900 dark:text-white tracking-tight">LibreFang</span>
-        </a>
-
-        <div className="hidden md:flex items-center gap-1">
-          {links.map(link => (
-            <a
-              key={link.label}
-              href={link.href}
-              target={link.external ? '_blank' : undefined}
-              rel={link.external ? 'noopener noreferrer' : undefined}
-              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
-              onClick={(e) => {
-                if (link.href.startsWith('#')) {
-                  e.preventDefault()
-                  const el = document.querySelector(link.href)
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
-              }}
-              className={cn(
-                'px-3 py-1.5 text-sm transition-colors font-medium flex items-center gap-1',
-                activeSection === link.href.replace('#', '') ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400'
-              )}
-            >
-              {link.label}
-              {link.external && <ExternalLink className="w-3 h-3" />}
-            </a>
-          ))}
-
-          {/* Language switcher */}
-          <div className="relative ml-2" data-lang-menu>
-            <button
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-              onClick={() => setLangOpen(!langOpen)}
-              aria-label="Switch language"
-              aria-expanded={langOpen}
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">{currentLangName}</span>
-              <ChevronDown className={cn('w-3 h-3 transition-transform', langOpen && 'rotate-180')} />
-            </button>
-            {langOpen && (
-              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
-                {languages.map(l => (
-                  <button
-                    key={l.code}
-                    onClick={() => { onSwitchLang(l.code); setLangOpen(false) }}
-                    className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5')}
-                  >
-                    {l.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <button
-            onClick={toggleTheme}
-            className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
-            aria-label="Toggle theme"
-          >
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-
-          <a
-            href="https://github.com/librefang/librefang"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-3 px-4 py-1.5 text-sm font-semibold text-cyan-600 dark:text-cyan-400 border border-cyan-500/30 rounded hover:bg-cyan-500/10 transition-all"
-          >
-            GitHub
-          </a>
-        </div>
-
-        <div className="flex md:hidden items-center gap-1">
-          <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" aria-label="Toggle theme">
-            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
-          <div className="relative" data-lang-menu>
-            <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label="Switch language">
-              <Globe className="w-4 h-4" />
-            </button>
-            {langOpen && (
-              <div className="absolute right-0 mt-2 w-36 bg-surface-200 border border-black/10 dark:border-white/10 rounded shadow-xl z-50">
-                {languages.map(l => (
-                  <button key={l.code} onClick={() => { onSwitchLang(l.code); setLangOpen(false) }} className={cn('block w-full text-left px-4 py-2.5 text-sm transition-colors', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/5' : 'text-gray-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5')}>{l.name}</button>
-                ))}
-              </div>
-            )}
-          </div>
-          <button className="p-2 text-gray-600 dark:text-gray-400" onClick={() => setOpen(!open)} aria-label="Toggle menu">
-            {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
-        </div>
-      </div>
-
-      {open && (
-        <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
-          {links.map(link => (
-            <a
-              key={link.label}
-              href={link.href}
-              onClick={(e) => {
-                if (link.href.startsWith('#')) {
-                  e.preventDefault()
-                  const el = document.querySelector(link.href)
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
-                setOpen(false)
-              }}
-              aria-current={activeSection === link.href.replace('#', '') ? 'page' : undefined}
-              className="block py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors font-medium"
-            >
-              {link.label}
-            </a>
-          ))}
-          <div className="pt-2 border-t border-black/10 dark:border-white/5 mt-2 flex flex-wrap gap-2">
-            {languages.map(l => (
-              <button
-                key={l.code}
-                onClick={() => { onSwitchLang(l.code); setOpen(false) }}
-                className={cn('px-3 py-1.5 text-xs rounded', l.code === lang ? 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/10' : 'text-gray-500 hover:text-slate-900 dark:hover:text-white')}
-              >
-                {l.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-    </nav>
-  )
-}
 
 // ─── Hero ───
 interface SectionProps {
@@ -334,7 +139,12 @@ function Hero({ t, registry }: SectionProps & { registry?: import('./useRegistry
             </FadeIn>
 
             <FadeIn delay={300}>
-              <p className="text-gray-600 dark:text-gray-400 text-base leading-relaxed mb-8">{t.hero.desc}</p>
+              <p className="text-gray-600 dark:text-gray-400 text-base leading-relaxed mb-8">
+                {t.hero.desc
+                  .replace('{handsCount}', String(registry?.handsCount ?? 15))
+                  .replace('{channelsCount}', String(registry?.channelsCount ?? 44))
+                  .replace('{providersCount}', String(registry?.providersCount ?? 50))}
+              </p>
             </FadeIn>
 
             <FadeIn delay={400}>
@@ -664,6 +474,150 @@ function Performance({ t }: SectionProps) {
   )
 }
 
+// ─── Skills Self-Evolution ───
+const evolutionHowIcons: LucideIcon[] = [Sparkles, Zap, Shield, History]
+const evolutionToolIcons: LucideIcon[] = [FilePlus, FileEdit, FileEdit, RotateCcw, FilePlus, Trash2]
+
+// ─── Browse-all registry cards ─────────────────────────────
+// Homepage navigation shortcut — 9 cards, one per registry category, each
+// showing live item counts from useRegistry and linking to /<cat>.
+function BrowseRegistry({ t }: SectionProps) {
+  const lang = useAppStore(s => s.lang)
+  const { data } = useRegistry()
+  const langPrefix = lang === 'en' ? '' : `/${lang}`
+  if (!t.registry) return null
+  const cats: { key: RegistryCategory; count?: number }[] = [
+    { key: 'hands',        count: data?.handsCount },
+    { key: 'agents',       count: data?.agentsCount },
+    { key: 'skills',       count: data?.skillsCount },
+    { key: 'providers',    count: data?.providersCount },
+    { key: 'workflows',    count: data?.workflowsCount },
+    { key: 'channels',     count: data?.channelsCount },
+    { key: 'plugins',      count: data?.pluginsCount },
+    { key: 'mcp',          count: data?.mcpCount },
+  ]
+  return (
+    <section id="browse" className="py-28 px-6 scroll-mt-20">
+      <div className="max-w-6xl mx-auto">
+        <FadeIn>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">
+            {t.registry.label}
+          </div>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">
+            {t.browse?.title || 'Browse the registry'}
+          </h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-12">
+            {t.browse?.desc || 'Every category at a glance — pick one to see every entry, sorted by popularity.'}
+          </p>
+        </FadeIn>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {cats.map((c, i) => {
+            const meta = t.registry!.categories[c.key]
+            return (
+              <FadeIn key={c.key} delay={i * 40}>
+                <a
+                  href={`${langPrefix}/${c.key}`}
+                  className="group block bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/30 p-5 transition-all hover:-translate-y-0.5"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
+                      {meta.title}
+                    </h3>
+                    {c.count !== undefined && c.count > 0 && (
+                      <span className="text-xs font-mono font-bold text-amber-500">{c.count}</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{meta.desc}</p>
+                </a>
+              </FadeIn>
+            )
+          })}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function Evolution({ t }: SectionProps) {
+  if (!t.evolution) return null
+  const ev = t.evolution
+  const lang = useAppStore((s) => s.lang)
+  const langPrefix = lang === 'en' ? '' : `/${lang}`
+  const skillsHref = `${langPrefix}/skills`
+  const skillsLabel = t.registry?.categories.skills.title || 'Skills'
+  return (
+    <section id="evolution" className="py-28 px-6 scroll-mt-20">
+      <div className="max-w-6xl mx-auto">
+        <FadeIn>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded border border-amber-500/30 bg-amber-500/5 text-xs font-mono text-amber-600 dark:text-amber-400 mb-4">
+            <Sparkles className="w-3 h-3" />
+            {ev.tagline}
+          </div>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{ev.label}</div>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{ev.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{ev.desc}</p>
+        </FadeIn>
+
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+          {ev.howItWorks.map((item, i) => {
+            const Icon = evolutionHowIcons[i] || Sparkles
+            return (
+              <FadeIn key={i} delay={i * 60}>
+                <div className="bg-surface-100 border border-black/10 dark:border-white/5 hover:border-amber-500/30 p-6 transition-all h-full">
+                  <Icon className="w-5 h-5 text-amber-400/70 mb-4" />
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white mb-2">{item.title}</h3>
+                  <p className="text-sm text-gray-500 leading-relaxed">{item.desc}</p>
+                </div>
+              </FadeIn>
+            )
+          })}
+        </div>
+
+        <FadeIn>
+          <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">{ev.toolsHeading}</div>
+          <div className="grid md:grid-cols-2 gap-px bg-black/5 dark:bg-white/5 overflow-hidden mb-8">
+            {ev.tools.map((tool, i) => {
+              const Icon = evolutionToolIcons[i] || FileEdit
+              return (
+                <div key={tool.name} className="bg-surface-100 px-5 py-4 flex items-start gap-3">
+                  <Icon className="w-4 h-4 text-cyan-500/60 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <code className="text-sm font-mono font-bold text-slate-900 dark:text-white block truncate">{tool.name}</code>
+                    <p className="text-xs text-gray-500 mt-1 leading-relaxed">{tool.desc}</p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </FadeIn>
+
+        <FadeIn delay={200}>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+            <a
+              href={skillsHref}
+              onClick={() => trackEvent('click', 'evolution_browse_skills')}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-600 dark:text-amber-300 rounded text-sm font-semibold transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              {skillsLabel}
+              <ArrowRight className="w-3.5 h-3.5" />
+            </a>
+            <a
+              href="https://docs.librefang.ai/agent/skills#skill-self-evolution"
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => trackEvent('click', 'evolution_docs')}
+              className="inline-flex items-center gap-2 text-sm font-semibold text-cyan-600 dark:text-cyan-400 hover:text-cyan-500 transition-colors"
+            >
+              {ev.cta} <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
+        </FadeIn>
+      </div>
+    </section>
+  )
+}
+
 // ─── Workflows ───
 const workflowIcons: LucideIcon[] = [Scissors, Users, Eye, Network, ArrowRight, Shield]
 
@@ -921,6 +875,13 @@ function Downloads(_props: SectionProps) {
 
 // ─── Install ───
 function Install({ t }: SectionProps) {
+  const { data: registry } = useRegistry()
+  const substitute = (s: string) => s
+    .replace('{handsCount}', String(registry?.handsCount ?? 15))
+    .replace('{channelsCount}', String(registry?.channelsCount ?? 44))
+    .replace('{providersCount}', String(registry?.providersCount ?? 50))
+    .replace('{skillsCount}', String(registry?.skillsCount ?? 60))
+    .replace('{agentsCount}', String(registry?.agentsCount ?? 32))
   const [copied, setCopied] = useState(false)
   const [os, setOs] = useState<'mac' | 'windows' | 'linux' | 'unknown'>('unknown')
   const cmd = os === 'windows' ? 'irm https://librefang.ai/install.ps1 | iex' : 'curl -fsSL https://librefang.ai/install | sh'
@@ -1024,7 +985,7 @@ function Install({ t }: SectionProps) {
               <div className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-3">{t.install.includes}</div>
               <ul className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
                 {t.install.incItems.map((item, i) => (
-                  <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-amber-400 rounded-full" /> {item}</li>
+                  <li key={i} className="flex items-center gap-2"><span className="w-1 h-1 bg-amber-400 rounded-full" /> {substitute(item)}</li>
                 ))}
               </ul>
             </div>
@@ -1083,7 +1044,7 @@ function FAQ({ t }: SectionProps) {
   )
 }
 
-// ─── Community ───
+// ─── Community (merged stats + links) ───
 const communityHrefs: string[] = [
   'https://github.com/librefang/librefang/pulls',
   'https://github.com/librefang/librefang/issues',
@@ -1092,44 +1053,7 @@ const communityHrefs: string[] = [
 ]
 const communityIcons: LucideIcon[] = [GitPullRequest, CircleDot, MessageSquare, MessageSquare]
 
-function Community({ t }: SectionProps) {
-  return (
-    <section className="py-28 px-6 border-t border-black/10 dark:border-white/5">
-      <div className="max-w-6xl mx-auto">
-        <FadeIn>
-          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.community.label}</div>
-          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.community.title}</h2>
-          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.community.desc}</p>
-        </FadeIn>
 
-        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {t.community.items.map((item, i) => {
-            const Icon = communityIcons[i]!
-            return (
-              <FadeIn key={i} delay={i * 80}>
-                <a
-                  href={communityHrefs[i]}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="group flex flex-col bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1 h-full"
-                >
-                  <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-4" />
-                  <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
-                  <p className="text-sm text-gray-500 line-clamp-1">{item.desc}</p>
-                  <div className="mt-4 text-cyan-600 dark:text-cyan-500 text-sm font-semibold flex items-center gap-1 group-hover:gap-2 transition-all">
-                    {t.community.open} <ArrowRight className="w-3.5 h-3.5" />
-                  </div>
-                </a>
-              </FadeIn>
-            )
-          })}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-// ─── GitHub Stats ───
 function formatNumber(num: number | null | undefined): string {
   if (num === null || num === undefined) return '-'
   if (num >= 1000) return `${(num / 1000).toFixed(1)}k`
@@ -1179,7 +1103,7 @@ function GitHubStats({ t }: SectionProps) {
   const chartMax = Math.max(...chartData, 1)
 
   return (
-    <section className="py-28 px-6 border-t border-black/10 dark:border-white/5" id="github-stats">
+    <section className="py-28 px-6 border-t border-black/10 dark:border-white/5 scroll-mt-20" id="community">
       <div className="max-w-6xl mx-auto">
         <FadeIn>
           <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{gs.label}</div>
@@ -1239,15 +1163,35 @@ function GitHubStats({ t }: SectionProps) {
           </div>
         </FadeIn>
 
+        <FadeIn delay={300}>
+          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+            {t.community.items.map((item, i) => {
+              const Icon = communityIcons[i]!
+              return (
+                <a
+                  key={i}
+                  href={communityHrefs[i]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group flex flex-col bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all hover:-translate-y-1 h-full"
+                >
+                  <Icon className="w-5 h-5 text-cyan-500/60 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-4" />
+                  <h3 className="font-bold text-slate-900 dark:text-white mb-1">{item.label}</h3>
+                  <p className="text-sm text-gray-500 line-clamp-1">{item.desc}</p>
+                  <div className="mt-4 text-cyan-600 dark:text-cyan-500 text-sm font-semibold flex items-center gap-1 group-hover:gap-2 transition-all">
+                    {t.community.open} <ArrowRight className="w-3.5 h-3.5" />
+                  </div>
+                </a>
+              )
+            })}
+          </div>
+        </FadeIn>
+
         <FadeIn delay={400}>
-          <div className="flex flex-col sm:flex-row justify-center gap-3">
-            <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-black/10 dark:border-white/10 hover:border-cyan-500/30 hover:bg-cyan-500/10 text-slate-900 dark:text-white font-semibold rounded transition-all">
+          <div className="flex justify-center">
+            <a href="https://github.com/librefang/librefang" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-cyan-500/30 hover:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 font-semibold rounded transition-all">
               <Star className="w-4 h-4" />
               {gs.starUs}
-            </a>
-            <a href="https://github.com/librefang/librefang/discussions" target="_blank" rel="noopener noreferrer" className="inline-flex items-center justify-center gap-2 px-6 py-3 border border-black/10 dark:border-white/10 hover:border-black/20 dark:hover:border-white/20 text-gray-700 dark:text-gray-300 font-semibold rounded transition-all hover:bg-black/5 dark:hover:bg-white/5">
-              <MessageSquare className="w-4 h-4" />
-              {gs.discuss}
             </a>
           </div>
         </FadeIn>
@@ -1297,7 +1241,7 @@ function Footer({ t }: SectionProps) {
     <footer className="border-t border-black/10 dark:border-white/5 py-12 px-6">
       <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
         <div className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="LibreFang" className="w-6 h-6 rounded" />
+          <img src="/logo.png" alt="LibreFang" width="24" height="24" decoding="async" loading="lazy" className="w-6 h-6 rounded" />
           <span className="text-sm font-semibold text-gray-600 dark:text-gray-400">LibreFang</span>
           <span className="text-xs text-gray-400 dark:text-gray-600 font-mono">Agent OS</span>
         </div>
@@ -1341,12 +1285,75 @@ function BackToTop() {
   )
 }
 
+// ─── Registry page route detection ───
+const REGISTRY_ROUTES: RegistryCategory[] = [
+  'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels',
+]
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es']
+
+type RegistryMatch =
+  | { kind: 'list'; category: RegistryCategory }
+  | { kind: 'detail'; category: RegistryCategory; id: string }
+
+function detectRegistryRoute(pathname: string): RegistryMatch | null {
+  let path = pathname
+  const parts = path.split('/').filter(Boolean)
+  if (parts.length >= 1 && LOCALES.includes(parts[0]!)) {
+    path = '/' + parts.slice(1).join('/')
+  }
+  const segs = path.split('/').filter(Boolean)
+  if (segs.length === 0) return null
+  const cat = segs[0] as RegistryCategory
+  if (!REGISTRY_ROUTES.includes(cat)) return null
+  if (segs.length === 1) return { kind: 'list', category: cat }
+  // Allow /<cat>/<id> and /<cat>/<id>/ only. Item ids in the registry are
+  // slug-like (lowercase letters, digits, dashes, underscores) so guard
+  // against path-traversal or extra segments.
+  if (segs.length === 2 || (segs.length === 3 && segs[2] === '')) {
+    const id = segs[1]!
+    if (/^[a-z0-9][a-z0-9_-]*$/i.test(id)) {
+      return { kind: 'detail', category: cat, id }
+    }
+  }
+  return null
+}
+
+// The homepage handles /, /zh, /zh/, /de, /de/, etc. Anything that isn't a
+// known dedicated route (deploy/changelog/metrics/registry) and isn't the
+// locale root should show a 404, not a silent homepage fallback.
+function isHomepagePath(pathname: string): boolean {
+  const parts = pathname.split('/').filter(Boolean)
+  if (parts.length === 0) return true
+  return parts.length === 1 && LOCALES.includes(parts[0]!)
+}
+
 // ─── App ───
 export default function App() {
   const lang = useAppStore((s) => s.lang)
-  const switchLang = useAppStore((s) => s.switchLang)
-  const [isDeployPage] = useState(() => window.location.pathname.startsWith('/deploy'))
-  const [isChangelogPage] = useState(() => window.location.pathname.startsWith('/changelog'))
+  // Match both `/deploy` and locale-prefixed `/zh/deploy`, `/de/deploy`, etc.
+  // The site generates hreflang alternates at localized URLs, so without the
+  // prefix these pages 404 through the homepage fallback for every non-English
+  // visitor who hits the deploy/changelog route.
+  const localeRouteRe = (slug: string) =>
+    new RegExp(`^\\/(?:[a-z]{2}(?:-[A-Z]{2})?\\/)?${slug}(?:\\/.*)?$`)
+  const [isDeployPage] = useState(() => localeRouteRe('deploy').test(window.location.pathname))
+  const [isChangelogPage] = useState(() => localeRouteRe('changelog').test(window.location.pathname))
+  const [isMetricsPage] = useState(() => /^\/(?:[a-z]{2}(?:-[A-Z]{2})?\/)?metrics\/?$/.test(window.location.pathname))
+  const [registryRoute] = useState<RegistryMatch | null>(() => detectRegistryRoute(window.location.pathname))
+  const [isHomepage] = useState(() => isHomepagePath(window.location.pathname))
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // Cmd/Ctrl+K opens global registry search, regardless of which page we're on.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setSearchOpen(v => !v)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   useEffect(() => {
     document.documentElement.lang = lang
@@ -1358,8 +1365,92 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
+  // Maintain hreflang alternates for every page load / locale switch so the
+  // same /skills page in zh/ja/de/etc is recognized as a single translated
+  // resource by search engines instead of competing duplicates.
+  useEffect(() => {
+    const ORIGIN = 'https://librefang.ai'
+    const bareParts = window.location.pathname.split('/').filter(Boolean)
+    if (bareParts.length > 0 && LOCALES.includes(bareParts[0]!)) {
+      bareParts.shift()
+    }
+    const barePath = bareParts.length > 0 ? '/' + bareParts.join('/') : '/'
+    // Remove any previously-injected hreflang tags so switching pages doesn't
+    // leave stale ones behind.
+    document.head.querySelectorAll('link[rel="alternate"][data-hreflang="1"]').forEach(el => el.remove())
+    const insertLink = (hreflang: string, href: string) => {
+      const link = document.createElement('link')
+      link.rel = 'alternate'
+      link.hreflang = hreflang
+      link.href = href
+      link.setAttribute('data-hreflang', '1')
+      document.head.appendChild(link)
+    }
+    insertLink('x-default', ORIGIN + barePath)
+    insertLink('en', ORIGIN + barePath)
+    for (const locale of LOCALES) {
+      const suffix = barePath === '/' ? '/' : barePath
+      insertLink(locale, `${ORIGIN}/${locale}${suffix === '/' ? '' : suffix}`)
+    }
+  }, [lang, registryRoute])
+
   const t = translations[lang] || translations['en']!
   const { data: registry } = useRegistry()
+
+  // JSON-LD structured data — lets Google show rich results. We rewrite a
+  // single <script id="ld-json"> tag so switching pages doesn't leak.
+  useEffect(() => {
+    const ORIGIN = 'https://librefang.ai'
+    let tag = document.getElementById('ld-json') as HTMLScriptElement | null
+    if (!tag) {
+      tag = document.createElement('script')
+      tag.id = 'ld-json'
+      tag.type = 'application/ld+json'
+      document.head.appendChild(tag)
+    }
+    let ld: Record<string, unknown> | null = null
+    if (registryRoute) {
+      const cat = t.registry?.categories[registryRoute.category]
+      const catLabel = cat?.title || registryRoute.category
+      const catDesc = cat?.desc || ''
+      const langPart = lang === 'en' ? '' : `/${lang}`
+      if (registryRoute.kind === 'detail') {
+        ld = {
+          '@context': 'https://schema.org',
+          '@type': 'SoftwareSourceCode',
+          name: registryRoute.id,
+          codeRepository: `https://github.com/librefang/librefang-registry/tree/main/${registryRoute.category}/${registryRoute.id}`,
+          programmingLanguage: 'TOML',
+          url: `${ORIGIN}${langPart}/${registryRoute.category}/${registryRoute.id}`,
+          about: catLabel,
+          inLanguage: lang,
+        }
+      } else {
+        ld = {
+          '@context': 'https://schema.org',
+          '@type': 'CollectionPage',
+          name: `${catLabel} — LibreFang Registry`,
+          description: catDesc,
+          url: `${ORIGIN}${langPart}/${registryRoute.category}`,
+          inLanguage: lang,
+        }
+      }
+    } else if (!isDeployPage && !isChangelogPage && t.meta) {
+      ld = {
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: 'LibreFang',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, macOS, Windows',
+        description: t.meta.description,
+        url: ORIGIN + (lang === 'en' ? '/' : `/${lang}/`),
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+        sameAs: ['https://github.com/librefang/librefang'],
+        inLanguage: lang,
+      }
+    }
+    tag.textContent = ld ? JSON.stringify(ld) : ''
+  }, [lang, t, registryRoute, isDeployPage, isChangelogPage])
 
   // Update meta tags on language change
   useEffect(() => {
@@ -1371,6 +1462,35 @@ export default function App() {
       document.title = 'Changelog | LibreFang'
       return
     }
+    if (registryRoute) {
+      const cat = t.registry?.categories[registryRoute.category]
+      const label = cat?.title || registryRoute.category
+      const desc = cat?.desc || ''
+      const title = registryRoute.kind === 'detail'
+        ? `${registryRoute.id} — ${label} — LibreFang`
+        : `${label} — LibreFang Registry`
+      const descText = registryRoute.kind === 'detail'
+        ? `${registryRoute.id} — ${desc}`.slice(0, 280)
+        : desc
+      document.title = title
+      const descMeta = document.querySelector('meta[name="description"]')
+      if (descMeta && descText) descMeta.setAttribute('content', descText)
+      const ogTitle = document.querySelector('meta[property="og:title"]')
+      if (ogTitle) ogTitle.setAttribute('content', title)
+      const ogDesc = document.querySelector('meta[property="og:description"]')
+      if (ogDesc && descText) ogDesc.setAttribute('content', descText)
+      const ogImage = document.querySelector('meta[property="og:image"]')
+      if (ogImage) {
+        const src = registryRoute.kind === 'detail'
+          ? `https://librefang.ai/og/${registryRoute.category}/${registryRoute.id}.svg`
+          : `https://librefang.ai/og/${registryRoute.category}.svg`
+        ogImage.setAttribute('content', src)
+      }
+      return
+    }
+    // Non-registry route — restore the default OG image.
+    const ogImageDefault = document.querySelector('meta[property="og:image"]')
+    if (ogImageDefault) ogImageDefault.setAttribute('content', 'https://librefang.ai/og-image.svg')
     if (t.meta) {
       document.title = t.meta.title
       const descMeta = document.querySelector('meta[name="description"]')
@@ -1380,14 +1500,73 @@ export default function App() {
       const ogDesc = document.querySelector('meta[property="og:description"]')
       if (ogDesc) ogDesc.setAttribute('content', t.meta.description)
     }
-  }, [lang, t, isDeployPage, isChangelogPage])
+  }, [lang, t, isDeployPage, isChangelogPage, registryRoute])
+
+  const suspenseFallback = (
+    <div className="min-h-screen flex items-center justify-center text-gray-400">
+      <div className="w-6 h-6 rounded-full border-2 border-cyan-500 border-t-transparent animate-spin" />
+    </div>
+  )
 
   if (isDeployPage) {
-    return <DeployPage />
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <DeployPage />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
   }
 
   if (isChangelogPage) {
-    return <ChangelogPage />
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <ChangelogPage />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
+  }
+
+  if (isMetricsPage) {
+    return (
+      <Suspense fallback={suspenseFallback}>
+        <MetricsPage onOpenSearch={() => setSearchOpen(true)} />
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
+  }
+
+  if (registryRoute) {
+    return (
+      <Suspense fallback={suspenseFallback}>
+        {registryRoute.kind === 'detail'
+          ? <RegistryDetailPage category={registryRoute.category} id={registryRoute.id} onOpenSearch={() => setSearchOpen(true)} />
+          : <RegistryPage category={registryRoute.category} onOpenSearch={() => setSearchOpen(true)} />}
+        {searchOpen && <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />}
+      </Suspense>
+    )
+  }
+
+  if (!isHomepage) {
+    // Unknown route — render a 404 instead of silently falling back to the
+    // landing page. Set the response title; Cloudflare Pages still serves
+    // index.html (SPA) but crawlers see the proper page title.
+    return (
+      <main className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <div className="font-mono text-[10rem] leading-none text-cyan-500/30 select-none">404</div>
+        <h1 className="text-2xl md:text-3xl font-black tracking-tight mb-2 text-slate-900 dark:text-white">
+          {t.notFound?.title || 'Page not found'}
+        </h1>
+        <p className="text-gray-500 mb-6 max-w-sm">
+          {t.notFound?.desc || "We couldn't find what you were looking for."}
+        </p>
+        <a
+          href={lang === 'en' ? '/' : `/${lang}/`}
+          className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-surface bg-cyan-500 hover:bg-cyan-400 rounded transition-all"
+        >
+          {t.notFound?.home || 'Back to home'}
+        </a>
+      </main>
+    )
   }
 
   return (
@@ -1395,13 +1574,20 @@ export default function App() {
       <a href="#architecture" className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[60] focus:px-4 focus:py-2 focus:bg-cyan-500 focus:text-surface focus:font-bold focus:rounded">
         Skip to content
       </a>
-      <Nav t={t} lang={lang} onSwitchLang={switchLang} />
+      <SiteHeader onOpenSearch={() => setSearchOpen(true)} onTrackEvent={trackEvent} />
+      {searchOpen && (
+        <Suspense fallback={null}>
+          <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
+        </Suspense>
+      )}
       <Hero t={t} registry={registry} />
       <div className="glow-line" />
       <Architecture t={t} />
       <div className="glow-line" />
       <Hands t={t} />
+      <BrowseRegistry t={t} />
       <Workflows t={t} />
+      <Evolution t={t} />
       <Performance t={t} />
       <div className="glow-line" />
       <Install t={t} />
@@ -1409,9 +1595,11 @@ export default function App() {
       <Docs t={t} />
       <FAQ t={t} />
       <GitHubStats t={t} />
-      <Community t={t} />
       <Footer t={t} />
       <BackToTop />
+      <Suspense fallback={null}>
+        <InstallBanner />
+      </Suspense>
     </main>
   )
 }

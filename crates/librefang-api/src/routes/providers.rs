@@ -317,7 +317,11 @@ pub async fn set_model_overrides(
     Path(id): Path<String>,
     Json(body): Json<librefang_types::model_catalog::ModelOverrides>,
 ) -> impl IntoResponse {
-    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let overrides_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("model_overrides.json");
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -345,7 +349,11 @@ pub async fn delete_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let overrides_path = state.kernel.home_dir().join("model_overrides.json");
+    let overrides_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("model_overrides.json");
     let mut catalog = state
         .kernel
         .model_catalog_ref()
@@ -372,7 +380,26 @@ fn attach_probe_result(
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
         if let Ok(mut cat) = catalog.write() {
-            cat.merge_discovered_models(provider_id, &probe.discovered_models);
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+                probe
+                    .discovered_models
+                    .iter()
+                    .map(
+                        |name| librefang_runtime::provider_health::DiscoveredModelInfo {
+                            name: name.clone(),
+                            parameter_size: None,
+                            quantization_level: None,
+                            family: None,
+                            families: None,
+                            size: None,
+                            capabilities: vec![],
+                        },
+                    )
+                    .collect()
+            } else {
+                probe.discovered_model_info.clone()
+            };
+            cat.merge_discovered_models(provider_id, &info);
         }
     }
     if !probe.discovered_model_info.is_empty() {
@@ -433,7 +460,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     // Index probe results by provider list position for O(1) lookup
     let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
-    for ((idx, _, _), result) in local_providers.iter().zip(probe_results.into_iter()) {
+    for ((idx, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
     }
 
@@ -546,7 +573,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
 
     let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
-    for ((idx, _, _), result) in local_providers.iter().zip(probe_results.into_iter()) {
+    for ((idx, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
     }
 
@@ -758,7 +785,11 @@ pub async fn add_custom_model(
     // Persist to disk. If save fails, roll back the in-memory add so the
     // catalog stays consistent with what's on disk — otherwise the caller
     // sees "added" now but the model vanishes on the next daemon restart.
-    let custom_path = state.kernel.home_dir().join("custom_models.json");
+    let custom_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
         catalog.remove_custom_model(&id);
@@ -797,7 +828,11 @@ pub async fn remove_custom_model(
             .into_json_tuple();
     }
 
-    let custom_path = state.kernel.home_dir().join("custom_models.json");
+    let custom_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
         if let Some(entry) = snapshot {
@@ -864,7 +899,13 @@ pub async fn set_provider_key(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.unsuppress_provider(&name);
-        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
         catalog.detect_auth();
     }
 
@@ -1057,7 +1098,13 @@ pub async fn delete_provider_key(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.suppress_provider(&name);
-        catalog.save_suppressed(&state.kernel.home_dir().join("suppressed_providers.json"));
+        catalog.save_suppressed(
+            &state
+                .kernel
+                .home_dir()
+                .join("data")
+                .join("suppressed_providers.json"),
+        );
         catalog.detect_auth();
     }
 
@@ -1370,7 +1417,26 @@ pub async fn set_provider_url(
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
         if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
+            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+                probe
+                    .discovered_models
+                    .iter()
+                    .map(
+                        |n| librefang_runtime::provider_health::DiscoveredModelInfo {
+                            name: n.clone(),
+                            parameter_size: None,
+                            quantization_level: None,
+                            family: None,
+                            families: None,
+                            size: None,
+                            capabilities: vec![],
+                        },
+                    )
+                    .collect()
+            } else {
+                probe.discovered_model_info.clone()
+            };
+            catalog.merge_discovered_models(&name, &info);
         }
     }
 

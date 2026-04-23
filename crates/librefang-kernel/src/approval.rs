@@ -477,10 +477,6 @@ impl ApprovalManager {
             }
         }
 
-        // Drop the read lock before the remove+send to minimise lock hold time.
-        drop(policy);
-        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
-
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
                 // Record TOTP grace on successful approval with TOTP.
@@ -546,6 +542,91 @@ impl ApprovalManager {
                 (id, result)
             })
             .collect()
+    }
+
+    /// Resolve all pending requests belonging to a specific session.
+    ///
+    /// This mirrors Hermes-Agent's `resolve_gateway_approval(session_key,
+    /// choice, resolve_all=True)`: every request whose `session_id` matches
+    /// is resolved atomically with the given decision.
+    ///
+    /// Returns the number of requests resolved (0 if the session had nothing
+    /// pending).  This method does NOT spawn handle_approval_resolution for
+    /// deferred payloads — callers that need deferred execution handling should
+    /// use resolve_tool_approval (kernel) in a loop instead.
+    ///
+    /// TOTP is not enforced here: resolve() is called with totp_verified=false,
+    /// so TOTP-required requests will return Err and not be counted.  Callers
+    /// who want TOTP pre-enforcement should check policy.tool_requires_totp()
+    /// before calling this method.
+    pub fn resolve_all_for_session(
+        &self,
+        session_id: &str,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+    ) -> usize {
+        // Collect matching IDs without holding a long-lived lock on `pending`.
+        let ids: Vec<Uuid> = self
+            .pending
+            .iter()
+            .filter(|entry| {
+                entry
+                    .value()
+                    .request
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|s| s == session_id)
+            })
+            .map(|entry| *entry.key())
+            .collect();
+
+        let mut count = 0usize;
+        for id in ids {
+            // Count only requests that were successfully resolved; ignore
+            // individual errors (request may have expired or required TOTP
+            // between the collect and the resolve call).
+            if self
+                .resolve(id, decision.clone(), decided_by.clone(), false, None)
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// List all pending requests belonging to a specific session.
+    ///
+    /// Useful for dashboard views scoped to a single conversation/session,
+    /// mirroring `has_blocking_approval(session_key)` from Hermes-Agent.
+    pub fn list_pending_for_session(&self, session_id: &str) -> Vec<ApprovalRequest> {
+        self.pending
+            .iter()
+            .filter(|entry| {
+                entry
+                    .value()
+                    .request
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|s| s == session_id)
+            })
+            .map(|entry| entry.value().request.clone())
+            .collect()
+    }
+
+    /// Check whether a session has one or more blocking approval requests
+    /// currently pending.
+    ///
+    /// Mirrors `has_blocking_approval(session_key)` from Hermes-Agent.
+    pub fn has_pending_for_session(&self, session_id: &str) -> bool {
+        self.pending.iter().any(|entry| {
+            entry
+                .value()
+                .request
+                .session_id
+                .as_deref()
+                .is_some_and(|s| s == session_id)
+        })
     }
 
     /// List all pending requests (for API/dashboard display).
@@ -1016,6 +1097,7 @@ mod tests {
             channel: None,
             route_to: Vec::new(),
             escalation_count: 0,
+            session_id: None,
         }
     }
 
@@ -1309,7 +1391,13 @@ mod tests {
         let policy = mgr.policy();
         assert_eq!(
             policy.require_approval,
-            vec!["shell_exec", "file_write", "file_delete", "apply_patch"]
+            vec![
+                "shell_exec",
+                "file_write",
+                "file_delete",
+                "apply_patch",
+                "skill_evolve_*",
+            ]
         );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
@@ -2201,5 +2289,257 @@ mod tests {
         assert!(policy2.tool_requires_totp("shell_exec"));
         assert!(policy2.tool_requires_totp("file_write"));
         assert!(policy2.tool_requires_totp("anything"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-session queue methods (Hermes-Agent parity)
+    // -----------------------------------------------------------------------
+
+    fn make_session_request(agent_id: &str, session_id: &str) -> ApprovalRequest {
+        let mut req = make_request(agent_id, "shell_exec", 300);
+        req.session_id = Some(session_id.to_string());
+        req
+    }
+
+    #[test]
+    fn test_list_pending_for_session_empty() {
+        let mgr = default_manager();
+        assert!(mgr.list_pending_for_session("sess-1").is_empty());
+        assert!(!mgr.has_pending_for_session("sess-1"));
+    }
+
+    #[tokio::test]
+    async fn test_list_pending_for_session_scoped() {
+        let mgr = Arc::new(default_manager());
+
+        // Submit two requests for sess-A and one for sess-B
+        let req_a1 = make_session_request("agent-1", "sess-A");
+        let req_a2 = make_session_request("agent-1", "sess-A");
+        let req_b1 = make_session_request("agent-2", "sess-B");
+
+        let id_a1 = req_a1.id;
+        let id_a2 = req_a2.id;
+        let id_b1 = req_b1.id;
+
+        for req in [req_a1, req_a2, req_b1] {
+            let m = Arc::clone(&mgr);
+            tokio::spawn(async move { m.request_approval(req).await });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let a_pending = mgr.list_pending_for_session("sess-A");
+        assert_eq!(a_pending.len(), 2);
+        assert!(a_pending
+            .iter()
+            .all(|r| r.session_id.as_deref() == Some("sess-A")));
+
+        let b_pending = mgr.list_pending_for_session("sess-B");
+        assert_eq!(b_pending.len(), 1);
+        assert!(mgr.has_pending_for_session("sess-A"));
+        assert!(mgr.has_pending_for_session("sess-B"));
+        assert!(!mgr.has_pending_for_session("sess-C"));
+
+        // Cleanup
+        for id in [id_a1, id_a2, id_b1] {
+            let _ = mgr.resolve(id, ApprovalDecision::Denied, None, false, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_all_for_session_approves_only_matching() {
+        let mgr = Arc::new(default_manager());
+
+        let req_a = make_session_request("agent-1", "sess-target");
+        let req_b = make_session_request("agent-2", "sess-other");
+        let id_a = req_a.id;
+        let id_b = req_b.id;
+
+        for req in [req_a, req_b] {
+            let m = Arc::clone(&mgr);
+            tokio::spawn(async move { m.request_approval(req).await });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Resolve only the target session
+        let resolved = mgr.resolve_all_for_session(
+            "sess-target",
+            ApprovalDecision::Approved,
+            Some("test".to_string()),
+        );
+        assert_eq!(resolved, 1);
+
+        // sess-other should still be pending
+        assert!(mgr.has_pending_for_session("sess-other"));
+        assert!(!mgr.has_pending_for_session("sess-target"));
+
+        // Cleanup remaining
+        let _ = mgr.resolve(id_b, ApprovalDecision::Denied, None, false, None);
+        let _ = id_a; // already resolved above
+    }
+
+    #[tokio::test]
+    async fn test_resolve_all_for_session_returns_zero_when_none_pending() {
+        let mgr = default_manager();
+        let resolved =
+            mgr.resolve_all_for_session("nonexistent-session", ApprovalDecision::Approved, None);
+        assert_eq!(resolved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_all_for_session_unblocks_waiting_agents() {
+        // Verify that agents blocking on request_approval() are properly
+        // unblocked when resolve_all_for_session resolves their request.
+        let mgr = Arc::new(default_manager());
+
+        let req = make_session_request("agent-1", "sess-unblock");
+        let id = req.id;
+
+        let mgr2 = Arc::clone(&mgr);
+        let handle = tokio::spawn(async move { mgr2.request_approval(req).await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resolved = mgr.resolve_all_for_session(
+            "sess-unblock",
+            ApprovalDecision::Approved,
+            Some("batch".to_string()),
+        );
+        assert_eq!(resolved, 1);
+
+        let decision = handle.await.unwrap();
+        assert_eq!(decision, ApprovalDecision::Approved);
+
+        let _ = id; // consumed by resolve_all
+                    // Verify appears in recent
+        let recent = mgr.list_recent(10);
+        assert!(
+            recent.iter().any(|r| r.request.id == id),
+            "resolved approval should appear in recent list"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional session resolution tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_cross_agent_same_session_resolved() {
+        // Requests from different agents in the same session are all resolved.
+        let mgr = Arc::new(default_manager());
+
+        let req_a1 = make_session_request("agent-1", "sess-shared");
+        let req_a2 = make_session_request("agent-2", "sess-shared");
+        let id_a1 = req_a1.id;
+        let id_a2 = req_a2.id;
+
+        for req in [req_a1, req_a2] {
+            let m = Arc::clone(&mgr);
+            tokio::spawn(async move { m.request_approval(req).await });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resolved = mgr.resolve_all_for_session(
+            "sess-shared",
+            ApprovalDecision::Approved,
+            Some("batch".to_string()),
+        );
+        assert_eq!(resolved, 2);
+
+        // Both agents should be unblocked.
+        let recent = mgr.list_recent(10);
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().any(|r| r.request.id == id_a1));
+        assert!(recent.iter().any(|r| r.request.id == id_a2));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_all_for_session_totp_blocks_approval() {
+        // When TOTP is required, resolve_all_for_session skips the item
+        // (returns 0 for that item) and the item remains pending.
+        let policy = ApprovalPolicy {
+            second_factor: SecondFactor::Totp,
+            ..Default::default()
+        };
+        let mgr = Arc::new(ApprovalManager::new(policy));
+
+        let req = make_session_request("agent-1", "sess-totp");
+        let id = req.id;
+        let mgr2 = Arc::clone(&mgr);
+        tokio::spawn(async move { mgr2.request_approval(req).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Without totp_verified, resolve returns Err → item is skipped.
+        let resolved = mgr.resolve_all_for_session(
+            "sess-totp",
+            ApprovalDecision::Approved,
+            Some("batch".to_string()),
+        );
+        assert_eq!(resolved, 0); // Skipped, not approved.
+
+        // Request should still be pending (not consumed).
+        assert!(mgr.get_pending(id).is_some());
+
+        // With totp_verified=true, it should succeed.
+        let (resp, _) = mgr
+            .resolve(
+                id,
+                ApprovalDecision::Approved,
+                Some("admin".to_string()),
+                true,
+                Some("admin"),
+            )
+            .unwrap();
+        assert!(resp.decision.is_approved());
+
+        let recent = mgr.list_recent(10);
+        assert!(recent.iter().any(|r| r.request.id == id));
+    }
+
+    #[tokio::test]
+    async fn test_submit_request_dedup_same_tool_use_id() {
+        // Duplicate tool_use_id in same session is rejected.
+        let mgr = Arc::new(default_manager());
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "dedup-id".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+
+        let req1 = make_session_request("agent-1", "sess-dedup");
+        let id1 = mgr.submit_request(req1, deferred.clone()).unwrap();
+
+        // Same tool_use_id: rejected.
+        let req2 = make_session_request("agent-1", "sess-dedup");
+        let result = mgr.submit_request(req2, deferred.clone());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Duplicate"));
+
+        // Different tool_use_id: allowed even if same session.
+        let deferred2 = DeferredToolExecution {
+            agent_id: "agent-1".to_string(),
+            tool_use_id: "dedup-id-2".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "ls"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+        };
+        let req3 = make_session_request("agent-1", "sess-dedup");
+        let id3 = mgr.submit_request(req3, deferred2).unwrap();
+        assert_ne!(id1, id3);
+
+        // Cleanup.
+        let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
+        let _ = mgr.resolve(id3, ApprovalDecision::Denied, None, false, None);
     }
 }

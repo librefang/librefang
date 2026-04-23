@@ -155,6 +155,10 @@ body {
   animation: fade-in-scale 0.5s var(--apple-bounce);
 }
 
+.animate-shimmer {
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
 /* Chat message entrance — lighter than page transition: 220ms, no blur. */
 @keyframes message-in {
   from {

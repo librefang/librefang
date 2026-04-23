@@ -1,12 +1,16 @@
-//! Integration installer — one-click add/remove flow.
+//! Installer — pure transforms from MCP catalog entries to
+//! `McpServerConfigEntry` values that can be persisted into `config.toml`.
 //!
-//! Handles the complete flow: template lookup → credential resolution →
-//! OAuth if needed → write to integrations.toml → hot-reload daemon.
+//! No side effects — callers (API / CLI) decide when to store the returned
+//! server config and credentials. The old "integrations.toml" file is gone;
+//! all MCP server state lives in `config.toml` under `[[mcp_servers]]`.
 
+use crate::catalog::McpCatalog;
 use crate::credentials::CredentialResolver;
-use crate::registry::IntegrationRegistry;
-use crate::{ExtensionError, ExtensionResult, InstalledIntegration, IntegrationStatus};
-use chrono::Utc;
+use crate::{
+    ExtensionError, ExtensionResult, McpCatalogEntry, McpCatalogTransport, McpStatus, OAuthTemplate,
+};
+use librefang_types::config::{McpOAuthConfig, McpServerConfigEntry, McpTransportEntry};
 use std::collections::HashMap;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -14,43 +18,42 @@ use zeroize::Zeroizing;
 /// Result of an installation attempt.
 #[derive(Debug)]
 pub struct InstallResult {
-    /// Integration ID.
+    /// MCP server id (matches the new `McpServerConfigEntry.name`).
     pub id: String,
+    /// The `[[mcp_servers]]` entry the caller should persist into config.toml.
+    pub server: McpServerConfigEntry,
     /// Final status.
-    pub status: IntegrationStatus,
-    /// Number of MCP tools that will be available.
-    pub tool_count: usize,
+    pub status: McpStatus,
+    /// Names of required env vars that still have no credential.
+    pub missing_credentials: Vec<String>,
     /// Message to display to the user.
     pub message: String,
 }
 
-/// Install an integration.
+/// Resolve a catalog entry + provided credentials into a new
+/// `McpServerConfigEntry`.
 ///
-/// Steps:
-/// 1. Look up template in registry.
-/// 2. Check credentials (vault → .env → env → prompt).
-/// 3. If `--key` provided, store in vault.
-/// 4. If OAuth required, run PKCE flow.
-/// 5. Write to integrations.toml.
-/// 6. Return install result.
+/// This is a pure transform:
+/// 1. Look up the catalog template by id.
+/// 2. Optionally store provided creds in the vault.
+/// 3. Check which required env vars still have no credential.
+/// 4. Map the template transport + required env into a `McpServerConfigEntry`.
+///
+/// The caller is responsible for writing the returned entry to config.toml
+/// and triggering a kernel reload.
 pub fn install_integration(
-    registry: &mut IntegrationRegistry,
+    catalog: &McpCatalog,
     resolver: &mut CredentialResolver,
     id: &str,
     provided_keys: &HashMap<String, String>,
 ) -> ExtensionResult<InstallResult> {
     // 1. Look up template
-    let template = registry
-        .get_template(id)
+    let template = catalog
+        .get(id)
         .ok_or_else(|| ExtensionError::NotFound(id.to_string()))?
         .clone();
 
-    // Check not already installed
-    if registry.is_installed(id) {
-        return Err(ExtensionError::AlreadyInstalled(id.to_string()));
-    }
-
-    // 2. Store provided keys in vault
+    // 2. Store provided keys in vault (best effort)
     for (key, value) in provided_keys {
         if let Err(e) = resolver.store_in_vault(key, Zeroizing::new(value.clone())) {
             warn!("Could not store {} in vault: {}", key, e);
@@ -65,41 +68,29 @@ pub fn install_integration(
         .map(|e| e.name.as_str())
         .collect();
     let missing = resolver.missing_credentials(&required_keys);
-
-    // For provided keys, check them too
     let actually_missing: Vec<String> = missing
         .into_iter()
         .filter(|k| !provided_keys.contains_key(k))
         .collect();
 
     let status = if actually_missing.is_empty() {
-        IntegrationStatus::Ready
+        McpStatus::Ready
     } else {
-        IntegrationStatus::Setup
+        McpStatus::Setup
     };
 
-    // 4. Determine OAuth provider
-    let oauth_provider = template.oauth.as_ref().map(|o| o.provider.clone());
+    // 4. Build the McpServerConfigEntry
+    let server = catalog_entry_to_mcp_server(&template);
 
-    // 5. Write install record
-    let entry = InstalledIntegration {
-        id: id.to_string(),
-        installed_at: Utc::now(),
-        enabled: true,
-        oauth_provider,
-        config: HashMap::new(),
-    };
-    registry.install(entry)?;
-
-    // 6. Build result message
+    // 5. Build result message
     let message = match &status {
-        IntegrationStatus::Ready => {
+        McpStatus::Ready => {
             format!(
                 "{} added. MCP tools will be available as mcp_{}_*.",
                 template.name, id
             )
         }
-        IntegrationStatus::Setup => {
+        McpStatus::Setup => {
             let missing_labels: Vec<String> = actually_missing
                 .iter()
                 .filter_map(|key| {
@@ -123,109 +114,58 @@ pub fn install_integration(
 
     Ok(InstallResult {
         id: id.to_string(),
+        server,
         status,
-        tool_count: 0,
+        missing_credentials: actually_missing,
         message,
     })
 }
 
-/// Remove an installed integration.
-pub fn remove_integration(registry: &mut IntegrationRegistry, id: &str) -> ExtensionResult<String> {
-    let template = registry.get_template(id);
-    let name = template
-        .map(|t| t.name.clone())
-        .unwrap_or_else(|| id.to_string());
-
-    registry.uninstall(id)?;
-    let msg = format!("{name} removed.");
-    info!("{msg}");
-    Ok(msg)
-}
-
-/// List all integrations with their status.
-pub fn list_integrations(
-    registry: &IntegrationRegistry,
-    resolver: &CredentialResolver,
-) -> Vec<IntegrationListEntry> {
-    let mut entries = Vec::new();
-    for template in registry.list_templates() {
-        let installed = registry.get_installed(&template.id);
-        let status = match installed {
-            Some(inst) if !inst.enabled => IntegrationStatus::Disabled,
-            Some(_inst) => {
-                let required_keys: Vec<&str> = template
-                    .required_env
-                    .iter()
-                    .map(|e| e.name.as_str())
-                    .collect();
-                let missing = resolver.missing_credentials(&required_keys);
-                if missing.is_empty() {
-                    IntegrationStatus::Ready
-                } else {
-                    IntegrationStatus::Setup
-                }
-            }
-            None => IntegrationStatus::Available,
-        };
-
-        entries.push(IntegrationListEntry {
-            id: template.id.clone(),
-            name: template.name.clone(),
-            icon: template.icon.clone(),
-            category: template.category.to_string(),
-            status,
-            description: template.description.clone(),
-        });
+/// Convert a catalog entry into a fresh `McpServerConfigEntry`.
+///
+/// The resulting entry has `template_id` set to the catalog id so the
+/// kernel / dashboard can tell which entries came from the catalog.
+pub fn catalog_entry_to_mcp_server(entry: &McpCatalogEntry) -> McpServerConfigEntry {
+    let transport = match &entry.transport {
+        McpCatalogTransport::Stdio { command, args } => McpTransportEntry::Stdio {
+            command: command.clone(),
+            args: args.clone(),
+        },
+        McpCatalogTransport::Sse { url } => McpTransportEntry::Sse { url: url.clone() },
+        McpCatalogTransport::Http { url } => McpTransportEntry::Http { url: url.clone() },
+    };
+    let env: Vec<String> = entry.required_env.iter().map(|e| e.name.clone()).collect();
+    let oauth = entry.oauth.as_ref().map(oauth_template_to_config);
+    McpServerConfigEntry {
+        name: entry.id.clone(),
+        template_id: Some(entry.id.clone()),
+        transport: Some(transport),
+        timeout_secs: 30,
+        env,
+        headers: Vec::new(),
+        oauth,
+        taint_scanning: true,
     }
-    entries
 }
 
-/// Flat list entry for display.
-#[derive(Debug, Clone)]
-pub struct IntegrationListEntry {
-    pub id: String,
-    pub name: String,
-    pub icon: String,
-    pub category: String,
-    pub status: IntegrationStatus,
-    pub description: String,
+fn oauth_template_to_config(t: &OAuthTemplate) -> McpOAuthConfig {
+    McpOAuthConfig {
+        auth_url: Some(t.auth_url.clone()),
+        token_url: Some(t.token_url.clone()),
+        client_id: None,
+        scopes: t.scopes.clone(),
+        user_scopes: Vec::new(),
+    }
 }
 
-/// Search available integrations.
-pub fn search_integrations(
-    registry: &IntegrationRegistry,
-    query: &str,
-) -> Vec<IntegrationListEntry> {
-    registry
-        .search(query)
-        .into_iter()
-        .map(|t| {
-            let installed = registry.get_installed(&t.id);
-            let status = match installed {
-                Some(inst) if !inst.enabled => IntegrationStatus::Disabled,
-                Some(_) => IntegrationStatus::Ready,
-                None => IntegrationStatus::Available,
-            };
-            IntegrationListEntry {
-                id: t.id.clone(),
-                name: t.name.clone(),
-                icon: t.icon.clone(),
-                category: t.category.to_string(),
-                status,
-                description: t.description.clone(),
-            }
-        })
-        .collect()
-}
-
-/// Generate scaffold files for a new custom integration.
+/// Generate scaffold files for a new custom MCP server template.
 pub fn scaffold_integration(dir: &std::path::Path) -> ExtensionResult<String> {
-    let template = r#"# Custom Integration Template
-# Place this in ~/.librefang/integrations/ or use `librefang add --custom <path>`
+    let template = r#"# Custom MCP Server Template
+# Place this in ~/.librefang/mcp/catalog/ to make it available as a catalog entry.
 
-id = "my-integration"
-name = "My Integration"
-description = "A custom MCP server integration"
+id = "my-mcp"
+name = "My MCP Server"
+description = "A custom MCP server template"
 category = "devtools"
 icon = "🔧"
 tags = ["custom"]
@@ -248,16 +188,13 @@ unhealthy_threshold = 3
 setup_instructions = """
 1. Install the MCP server: npm install -g my-mcp-server
 2. Get your API key from https://example.com/api-keys
-3. Run: librefang add my-integration --key=<your-key>
+3. Run: librefang mcp add my-mcp --key=<your-key>
 """
 "#;
-    let path = dir.join("integration.toml");
+    let path = dir.join("mcp.toml");
     std::fs::create_dir_all(dir)?;
     std::fs::write(&path, template)?;
-    Ok(format!(
-        "Integration template created at {}",
-        path.display()
-    ))
+    Ok(format!("MCP server template created at {}", path.display()))
 }
 
 /// Generate scaffold files for a new skill.
@@ -298,112 +235,66 @@ You are an expert at [domain]. When the user asks about [topic], provide [behavi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::IntegrationRegistry;
+    use crate::catalog::McpCatalog;
 
     fn ensure_registry() {
         let _ = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
     }
 
     #[test]
-    fn install_and_remove() {
+    fn install_github_returns_mcp_server_entry() {
         ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
 
         let mut resolver = CredentialResolver::new(None, None);
-
-        // Install github (will be Setup status since no token)
-        let result =
-            install_integration(&mut registry, &mut resolver, "github", &HashMap::new()).unwrap();
+        let result = install_integration(&catalog, &mut resolver, "github", &HashMap::new())
+            .expect("install_integration failed");
         assert_eq!(result.id, "github");
+        assert_eq!(result.server.name, "github");
+        assert_eq!(result.server.template_id.as_deref(), Some("github"));
         // Status depends on whether GITHUB_PERSONAL_ACCESS_TOKEN is in env
-        assert!(
-            result.status == IntegrationStatus::Ready || result.status == IntegrationStatus::Setup
-        );
-
-        // Remove
-        let msg = remove_integration(&mut registry, "github").unwrap();
-        assert!(msg.contains("GitHub"));
-        assert!(!registry.is_installed("github"));
+        assert!(result.status == McpStatus::Ready || result.status == McpStatus::Setup);
     }
 
     #[test]
-    fn install_with_key() {
+    fn install_unknown_id_errors() {
         ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
         let mut resolver = CredentialResolver::new(None, None);
-
-        // Provide key directly
-        let mut keys = HashMap::new();
-        keys.insert("NOTION_API_KEY".to_string(), "ntn_test_key_123".to_string());
-
-        let result = install_integration(&mut registry, &mut resolver, "notion", &keys).unwrap();
-        assert_eq!(result.id, "notion");
-    }
-
-    #[test]
-    fn install_already_installed() {
-        ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-
-        let mut resolver = CredentialResolver::new(None, None);
-
-        install_integration(&mut registry, &mut resolver, "github", &HashMap::new()).unwrap();
-        let err = install_integration(&mut registry, &mut resolver, "github", &HashMap::new())
+        let err = install_integration(&catalog, &mut resolver, "does-not-exist", &HashMap::new())
             .unwrap_err();
-        assert!(err.to_string().contains("already"));
+        assert!(matches!(err, ExtensionError::NotFound(_)));
     }
 
     #[test]
-    fn remove_not_installed() {
+    fn install_stdio_template_produces_stdio_transport() {
         ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        let err = remove_integration(&mut registry, "github").unwrap_err();
-        assert!(err.to_string().contains("not installed"));
-    }
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
 
-    #[test]
-    fn list_integrations_all() {
-        ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-        let resolver = CredentialResolver::new(None, None);
-
-        let list = list_integrations(&registry, &resolver);
-        assert!(list.len() >= 20);
-        assert!(list
-            .iter()
-            .all(|e| e.status == IntegrationStatus::Available));
-    }
-
-    #[test]
-    fn search_integrations_query() {
-        ensure_registry();
-        let dir = tempfile::tempdir().unwrap();
-        let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_templates(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
-
-        let results = search_integrations(&registry, "git");
-        assert!(results.iter().any(|e| e.id == "github"));
-        assert!(results.iter().any(|e| e.id == "gitlab"));
+        let mut resolver = CredentialResolver::new(None, None);
+        let result =
+            install_integration(&catalog, &mut resolver, "github", &HashMap::new()).unwrap();
+        match &result.server.transport {
+            Some(McpTransportEntry::Stdio { command, .. }) => {
+                assert!(!command.is_empty());
+            }
+            other => panic!("expected stdio transport, got {other:?}"),
+        }
     }
 
     #[test]
     fn scaffold_integration_creates_files() {
         let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("my-integration");
+        let sub = dir.path().join("my-mcp");
         let msg = scaffold_integration(&sub).unwrap();
-        assert!(sub.join("integration.toml").exists());
-        assert!(msg.contains("integration.toml"));
+        assert!(sub.join("mcp.toml").exists());
+        assert!(msg.contains("mcp.toml"));
     }
 
     #[test]

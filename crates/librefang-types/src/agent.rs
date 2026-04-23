@@ -273,10 +273,11 @@ pub enum WebSearchAugmentationMode {
 }
 
 /// The current lifecycle state of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Agent has been created but not yet started.
+    #[default]
     Created,
     /// Agent is actively running and processing events.
     Running,
@@ -636,6 +637,20 @@ pub struct AgentManifest {
     /// Whether to generate workspace identity files (SOUL.md, USER.md, etc.) on creation.
     #[serde(default = "default_true")]
     pub generate_identity_files: bool,
+    /// Named shared workspaces this agent can access.
+    ///
+    /// Each entry maps a symbolic name to a directory path (relative to `workspaces_dir`)
+    /// and an access mode. Multiple agents can declare the same path — they share the
+    /// directory without identity-file collisions because identity files live in the
+    /// agent's private home (`.identity/`), not in the shared workspace.
+    ///
+    /// ```toml
+    /// [workspaces]
+    /// library  = { path = "shared/library",  mode = "rw" }
+    /// archive  = { path = "shared/archive",  mode = "r"  }
+    /// ```
+    #[serde(default)]
+    pub workspaces: HashMap<String, WorkspaceDecl>,
     /// Per-agent exec policy override. If None, uses global exec_policy.
     /// Accepts string shorthand ("allow", "deny", "full", "allowlist") or full table.
     #[serde(default, deserialize_with = "crate::serde_compat::exec_policy_lenient")]
@@ -686,6 +701,63 @@ pub struct AgentManifest {
     /// Useful for models that don't support tool/function calling (e.g. Ollama).
     #[serde(default)]
     pub web_search_augmentation: WebSearchAugmentationMode,
+    /// Whether this agent participates in background auto-dream consolidation.
+    /// When true AND the global `[auto_dream] enabled = true` config is set,
+    /// the scheduler periodically asks this agent to reflect on and
+    /// consolidate its own memory. Off by default — opt-in per agent because
+    /// consolidation costs tokens.
+    #[serde(default)]
+    pub auto_dream_enabled: bool,
+    /// Optional override for `[auto_dream] min_hours`. When `Some`, this
+    /// agent's time gate uses this value instead of the global setting —
+    /// useful for heterogeneous fleets where a chatty agent wants shorter
+    /// intervals and a quiet agent wants longer. `None` inherits the global.
+    #[serde(default)]
+    pub auto_dream_min_hours: Option<f64>,
+    /// Optional override for `[auto_dream] min_sessions`. Same semantics as
+    /// `auto_dream_min_hours`. `Some(0)` explicitly disables the session
+    /// gate for this agent (still subject to time / lock gates).
+    #[serde(default)]
+    pub auto_dream_min_sessions: Option<u32>,
+    /// Whether to surface tool execution progress (`🔧 tool_name`,
+    /// `⚠️ tool_name failed`) inside the channel reply. When `true`
+    /// (default), the streaming bridge injects short progress lines into
+    /// the user-facing text so they can see what the agent is doing.
+    /// Set to `false` for agents whose output should stay pristine —
+    /// e.g. agents posting to public timelines, or agents whose responses
+    /// are consumed by downstream parsers that would choke on the markers.
+    #[serde(default = "default_true")]
+    pub show_progress: bool,
+    /// Whether background skill evolution review runs after each turn.
+    /// Defaults to `true`. Set to `false` for A2A worker agents or any
+    /// agent where responsiveness to triggers matters more than automatic
+    /// skill distillation — skipping evolution means the agent never holds
+    /// the background LLM budget or concurrency semaphore after a turn.
+    #[serde(default = "default_true")]
+    pub auto_evolve: bool,
+}
+
+/// Access mode for a named workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    /// Full read-write access (default).
+    #[default]
+    #[serde(alias = "rw", alias = "read-write")]
+    ReadWrite,
+    /// Read-only access — write tool calls are rejected by the kernel.
+    #[serde(alias = "r", alias = "read", alias = "read-only")]
+    ReadOnly,
+}
+
+/// Declaration of a named workspace in `agent.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDecl {
+    /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
+    pub path: PathBuf,
+    /// Access mode. Defaults to read-write.
+    #[serde(default)]
+    pub mode: WorkspaceMode,
 }
 
 fn default_true() -> bool {
@@ -719,6 +791,7 @@ impl Default for AgentManifest {
             pinned_model: None,
             workspace: None,
             generate_identity_files: true,
+            workspaces: HashMap::new(),
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
@@ -731,6 +804,11 @@ impl Default for AgentManifest {
             context_injection: Vec::new(),
             is_hand: false,
             web_search_augmentation: WebSearchAugmentationMode::default(),
+            auto_dream_enabled: false,
+            auto_dream_min_hours: None,
+            auto_dream_min_sessions: None,
+            show_progress: true,
+            auto_evolve: true,
         }
     }
 }
@@ -862,6 +940,59 @@ pub struct AgentEntry {
     /// Whether this agent was spawned by a Hand (true) or is a regular agent (false).
     #[serde(default)]
     pub is_hand: bool,
+
+    // -----------------------------------------------------------------------
+    // Session auto-reset state (mirrors hermes-agent SessionEntry flags)
+    // -----------------------------------------------------------------------
+    /// When `true`, the next call to `execute_llm_agent` will force a hard
+    /// reset (cleared message history) before processing the message.
+    /// The session_id is kept; only the stored messages are wiped.
+    /// Set by operator action or stuck-loop recovery.  Takes priority over
+    /// `resume_pending`.
+    ///
+    /// Named `force_session_wipe` (not `suspended`) to avoid confusion with
+    /// `AgentState::Suspended` / `suspend_agent()`.
+    #[serde(default)]
+    pub force_session_wipe: bool,
+
+    /// When `true`, the agent was interrupted by a restart/shutdown but
+    /// recovery is expected.  Unlike `suspended`, the existing `session_id`
+    /// is preserved and the agent continues on the same transcript.
+    /// Cleared after the next successful turn.
+    #[serde(default)]
+    pub resume_pending: bool,
+
+    /// The reason for the most recent automatic session reset, if any.
+    /// `None` until the first auto-reset occurs.
+    #[serde(default)]
+    pub reset_reason: Option<crate::config::SessionResetReason>,
+}
+
+impl Default for AgentEntry {
+    fn default() -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: AgentId::default(),
+            name: String::new(),
+            manifest: AgentManifest::default(),
+            state: AgentState::Created,
+            mode: AgentMode::default(),
+            created_at: now,
+            last_active: now,
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::default(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            force_session_wipe: false,
+            resume_pending: false,
+            reset_reason: None,
+        }
+    }
 }
 
 /// A stored prompt version for an agent.
@@ -1333,6 +1464,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1397,6 +1529,7 @@ mod tests {
             onboarding_completed: false,
             onboarding_completed_at: None,
             is_hand: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();

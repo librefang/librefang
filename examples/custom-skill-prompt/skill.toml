@@ -6,7 +6,7 @@
 ## To test: librefang skill test ./examples/custom-skill-prompt \
 ##   --input '{"topic": "Q1 planning", "duration_minutes": "30"}'
 ##
-## For the full reference, see: docs/skill-development.md
+## For the full reference, see: https://docs.librefang.ai/agent/skills
 
 [skill]
 name = "meeting-agenda"

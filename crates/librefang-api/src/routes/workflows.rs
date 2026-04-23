@@ -12,7 +12,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
         .route(
             "/triggers/{id}",
-            axum::routing::delete(delete_trigger).put(update_trigger),
+            axum::routing::get(get_trigger)
+                .delete(delete_trigger)
+                .patch(update_trigger),
         )
         // Schedules
         .route(
@@ -97,7 +99,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::triggers::{TriggerId, TriggerPattern};
+use librefang_kernel::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
 };
@@ -935,13 +937,21 @@ pub async fn create_trigger(
     };
 
     let pattern: TriggerPattern = match req.get("pattern") {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(pat) => pat,
-            Err(e) => {
-                tracing::warn!("Invalid trigger pattern: {e}");
-                return ApiErrorResponse::bad_request("Invalid trigger pattern").into_json_tuple();
+        Some(p) => {
+            // Legacy clients send `"task_posted"` as a bare string, but the
+            // variant now carries an optional `assignee_match` field and
+            // expects the struct form `{"task_posted": {...}}`. Rewrite the
+            // bare strings to `{"<variant>": {}}` so both shapes parse.
+            let normalized = normalize_pattern_json(p.clone());
+            match serde_json::from_value(normalized) {
+                Ok(pat) => pat,
+                Err(e) => {
+                    tracing::warn!("Invalid trigger pattern: {e}");
+                    return ApiErrorResponse::bad_request("Invalid trigger pattern")
+                        .into_json_tuple();
+                }
             }
-        },
+        }
         None => {
             return ApiErrorResponse::bad_request("Missing 'pattern'").into_json_tuple();
         }
@@ -970,12 +980,30 @@ pub async fn create_trigger(
         },
     };
 
+    let cooldown_secs: Option<u64> = req["cooldown_secs"].as_u64();
+
+    let session_mode: Option<librefang_types::agent::SessionMode> =
+        match req.get("session_mode").and_then(|v| v.as_str()) {
+            None => None,
+            Some(s) => match serde_json::from_value(serde_json::json!(s)) {
+                Ok(m) => Some(m),
+                Err(_) => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "Invalid 'session_mode': '{s}' (expected 'persistent' or 'new')"
+                    ))
+                    .into_json_tuple();
+                }
+            },
+        };
+
     match state.kernel.register_trigger_with_target(
         agent_id,
         pattern,
         prompt_template,
         max_fires,
         target_agent,
+        cooldown_secs,
+        session_mode,
     ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({
@@ -1004,6 +1032,27 @@ pub async fn create_trigger(
         (status = 200, description = "List triggers", body = serde_json::Value)
     )
 )]
+/// Serialize a `Trigger` to a JSON value (shared by list and get endpoints).
+fn trigger_to_json(t: &Trigger) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": t.id.to_string(),
+        "agent_id": t.agent_id.to_string(),
+        "pattern": serde_json::to_value(&t.pattern).unwrap_or_default(),
+        "prompt_template": t.prompt_template,
+        "enabled": t.enabled,
+        "fire_count": t.fire_count,
+        "max_fires": t.max_fires,
+        "created_at": t.created_at.to_rfc3339(),
+        "cooldown_secs": t.cooldown_secs,
+        "session_mode": serde_json::to_value(t.session_mode).unwrap_or(serde_json::Value::Null),
+    });
+    if let Some(target) = &t.target_agent {
+        v["target_agent_id"] = serde_json::json!(target.to_string());
+    }
+    v
+}
+
+#[utoipa::path(get, path = "/api/triggers", tag = "workflows", params(("agent_id" = Option<String>, Query, description = "Filter by agent ID")), responses((status = 200, description = "List triggers", body = serde_json::Value)))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -1013,27 +1062,25 @@ pub async fn list_triggers(
         .and_then(|id| id.parse::<AgentId>().ok());
 
     let triggers = state.kernel.list_triggers(agent_filter);
-    let list: Vec<serde_json::Value> = triggers
-        .iter()
-        .map(|t| {
-            let mut v = serde_json::json!({
-                "id": t.id.to_string(),
-                "agent_id": t.agent_id.to_string(),
-                "pattern": serde_json::to_value(&t.pattern).unwrap_or_default(),
-                "prompt_template": t.prompt_template,
-                "enabled": t.enabled,
-                "fire_count": t.fire_count,
-                "max_fires": t.max_fires,
-                "created_at": t.created_at.to_rfc3339(),
-            });
-            if let Some(target) = &t.target_agent {
-                v["target_agent_id"] = serde_json::json!(target.to_string());
-            }
-            v
-        })
-        .collect();
+    let list: Vec<serde_json::Value> = triggers.iter().map(trigger_to_json).collect();
     let total = list.len();
     Json(serde_json::json!({"triggers": list, "total": total}))
+}
+
+#[utoipa::path(get, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger detail", body = serde_json::Value), (status = 404, description = "Not found")))]
+/// GET /api/triggers/:id — Fetch a single trigger by ID.
+pub async fn get_trigger(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let trigger_id = TriggerId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple(),
+    });
+    match state.kernel.get_trigger(trigger_id) {
+        Some(t) => (StatusCode::OK, Json(trigger_to_json(&t))),
+        None => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
+    }
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
@@ -1063,8 +1110,13 @@ pub async fn delete_trigger(
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
-/// PUT /api/triggers/:id — Update a trigger (enable/disable toggle).
-#[utoipa::path(put, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body = serde_json::Value, responses((status = 200, description = "Trigger updated", body = serde_json::Value)))]
+#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = serde_json::Value), (status = 404, description = "Not found")))]
+/// PATCH /api/triggers/:id — Partially update a trigger.
+///
+/// All body fields are optional. Only provided fields are changed.
+/// Supported fields: `pattern`, `prompt_template`, `enabled`, `max_fires`,
+/// `cooldown_secs` (pass `null` to clear), `session_mode` (pass `null` to clear),
+/// `target_agent_id` (pass `null` to clear, omit to leave unchanged).
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1072,24 +1124,93 @@ pub async fn update_trigger(
 ) -> impl IntoResponse {
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
-        }
+        Err(_) => return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple(),
     });
 
-    if let Some(enabled) = req.get("enabled").and_then(|v| v.as_bool()) {
-        if state.kernel.set_trigger_enabled(trigger_id, enabled) {
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::json!({"status": "updated", "trigger_id": id, "enabled": enabled}),
-                ),
-            )
-        } else {
-            ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
+    // Parse pattern if provided
+    let pattern = if req.get("pattern").is_some() && !req["pattern"].is_null() {
+        let normalized = normalize_pattern_json(req["pattern"].clone());
+        match serde_json::from_value::<TriggerPattern>(normalized) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                return ApiErrorResponse::bad_request(format!("Invalid pattern: {e}"))
+                    .into_json_tuple()
+            }
         }
     } else {
-        ApiErrorResponse::bad_request("Missing 'enabled' field").into_json_tuple()
+        None
+    };
+
+    // Parse session_mode: absent = no change, null = clear, string = set
+    let session_mode: Option<Option<librefang_types::agent::SessionMode>> =
+        if req.get("session_mode").is_none() {
+            None
+        } else if req["session_mode"].is_null() {
+            Some(None)
+        } else {
+            match serde_json::from_value(req["session_mode"].clone()) {
+                Ok(m) => Some(Some(m)),
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!("Invalid session_mode: {e}"))
+                        .into_json_tuple()
+                }
+            }
+        };
+
+    // Parse cooldown_secs: absent = no change, null = clear, number = set
+    let cooldown_secs: Option<Option<u64>> = if req.get("cooldown_secs").is_none() {
+        None
+    } else if req["cooldown_secs"].is_null() {
+        Some(None)
+    } else {
+        match req["cooldown_secs"].as_u64() {
+            Some(n) => Some(Some(n)),
+            None => {
+                return ApiErrorResponse::bad_request(
+                    "cooldown_secs must be a non-negative integer",
+                )
+                .into_json_tuple()
+            }
+        }
+    };
+
+    // Parse target_agent_id: absent = no change, null = clear, string = set
+    let target_agent: Option<Option<AgentId>> = if req.get("target_agent_id").is_none() {
+        None
+    } else if req["target_agent_id"].is_null() {
+        Some(None)
+    } else {
+        match req["target_agent_id"].as_str().and_then(|s| s.parse().ok()) {
+            Some(id) => Some(Some(id)),
+            None => {
+                return ApiErrorResponse::bad_request("Invalid 'target_agent_id'").into_json_tuple()
+            }
+        }
+    };
+
+    // Validate target agent exists when being set (mirrors POST validation)
+    if let Some(Some(target_id)) = target_agent {
+        if state.kernel.agent_registry().get(target_id).is_none() {
+            return ApiErrorResponse::bad_request(format!(
+                "target_agent_id '{target_id}' does not exist"
+            ))
+            .into_json_tuple();
+        }
+    }
+
+    let patch = TriggerPatch {
+        pattern,
+        prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),
+        enabled: req["enabled"].as_bool(),
+        max_fires: req["max_fires"].as_u64(),
+        cooldown_secs,
+        session_mode,
+        target_agent,
+    };
+
+    match state.kernel.update_trigger(trigger_id, patch) {
+        Some(t) => (StatusCode::OK, Json(trigger_to_json(&t))),
+        None => ApiErrorResponse::not_found("Trigger not found").into_json_tuple(),
     }
 }
 
@@ -1103,6 +1224,25 @@ pub async fn update_trigger(
 // Previously these read/wrote a separate `__librefang_schedules` JSON blob in
 // shared memory, which had no execution engine. Now they delegate to the real
 // CronScheduler so scheduled jobs actually fire via the kernel tick loop (#2024).
+
+/// Normalize a trigger-pattern JSON value so legacy and new shapes both parse.
+///
+/// Variants that gained optional fields after shipping need to accept both
+/// `"task_posted"` (the old bare-string form) and
+/// `{"task_posted": {...}}` (the new struct form). Rewrite bare strings of
+/// variants that carry optional data into empty-object form so serde
+/// deserialises the `#[serde(default)]` fields cleanly.
+///
+/// Currently `task_posted` is the only struct variant with optional fields;
+/// extend this match when other variants gain optional fields.
+fn normalize_pattern_json(value: serde_json::Value) -> serde_json::Value {
+    match value.as_str() {
+        Some(tag @ "task_posted") => {
+            serde_json::json!({ tag: {} })
+        }
+        _ => value,
+    }
+}
 
 /// Helper: parse a CronJobId from a string, returning an API error on failure.
 fn parse_cron_job_id(
@@ -1329,6 +1469,10 @@ pub async fn create_schedule(
         schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
+        peer_id: None,
+        session_mode: req["session_mode"]
+            .as_str()
+            .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok()),
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,

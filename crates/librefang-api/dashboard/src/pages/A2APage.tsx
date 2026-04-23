@@ -1,9 +1,10 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listA2AAgents, discoverA2AAgent, sendA2ATask, getA2ATaskStatus } from "../api";
-import type { A2AAgentItem, A2ATaskStatus } from "../api";
+import { sendA2ATask, getA2ATaskStatus } from "../lib/http/client";
+import type { A2AAgentItem, A2ATaskStatus } from "../lib/http/client";
+import { useA2AAgents } from "../lib/queries/network";
+import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -12,14 +13,10 @@ import { CardSkeleton } from "../components/ui/Skeleton";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Globe, Search, Send, ExternalLink, Clock, CheckCircle2, XCircle, Loader2, Plus } from "lucide-react";
 
-const REFRESH_MS = 15000;
-
 export function A2APage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
   const [discoverUrl, setDiscoverUrl] = useState("");
-  const [isDiscovering, setIsDiscovering] = useState(false);
   const [showDiscover, setShowDiscover] = useState(false);
   useCreateShortcut(() => setShowDiscover(true));
 
@@ -29,26 +26,19 @@ export function A2APage() {
   const [isSending, setIsSending] = useState(false);
   const [trackedTasks, setTrackedTasks] = useState<A2ATaskStatus[]>([]);
 
-  const agentsQuery = useQuery({
-    queryKey: ["a2a", "agents"],
-    queryFn: listA2AAgents,
-    refetchInterval: REFRESH_MS,
-  });
+  const agentsQuery = useA2AAgents();
+  const discoverMutation = useDiscoverA2AAgent();
 
   const agents = agentsQuery.data ?? [];
 
   async function handleDiscover() {
     if (!discoverUrl.trim()) return;
-    setIsDiscovering(true);
     try {
-      await discoverA2AAgent(discoverUrl.trim());
+      await discoverMutation.mutateAsync(discoverUrl.trim());
       setDiscoverUrl("");
       setShowDiscover(false);
-      void queryClient.invalidateQueries({ queryKey: ["a2a", "agents"] });
     } catch {
       // error handled by UI
-    } finally {
-      setIsDiscovering(false);
     }
   }
 
@@ -61,7 +51,7 @@ export function A2APage() {
         message: taskMessage.trim(),
       });
       // Track the task if we get an ID back
-      const taskId = (result as Record<string, unknown>).task_id as string | undefined;
+      const taskId = result.task_id as string | undefined;
       if (taskId) {
         setTrackedTasks((prev) => [
           { id: taskId, status: "pending", created_at: new Date().toISOString() },
@@ -124,10 +114,10 @@ export function A2APage() {
             />
             <button
               onClick={handleDiscover}
-              disabled={isDiscovering || !discoverUrl.trim()}
+              disabled={discoverMutation.isPending || !discoverUrl.trim()}
               className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
             >
-              {isDiscovering ? (
+              {discoverMutation.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Plus className="h-4 w-4" />
@@ -173,7 +163,7 @@ export function A2APage() {
                   <Card key={agent.url || idx} hover padding="md">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent/20 to-brand/20 flex items-center justify-center">
+                        <div className="w-10 h-10 rounded-xl bg-linear-to-br from-accent/20 to-brand/20 flex items-center justify-center">
                           <ExternalLink className="w-5 h-5 text-accent" />
                         </div>
                         <div className="min-w-0">

@@ -1,32 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { formatCost } from "../lib/format";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import type { UseQueryResult } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { router } from "../router";
 import {
-  activateHand,
-  deactivateHand,
-  listActiveHands,
-  listHands,
-  pauseHand,
-  resumeHand,
-  uninstallHand,
-  getHandStats,
-  getHandDetail,
-  getHandSettings,
-  setHandSecret,
-  updateHandSettings,
-  getHandSession,
-  sendHandMessage,
-  listCronJobs,
   type HandDefinitionItem,
   type HandInstanceItem,
   type HandStatsResponse,
   type HandSettingsResponse,
-  type HandSessionMessage,
   type CronJobItem,
-} from "../api";
+} from "../lib/http/client";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Input } from "../components/ui/Input";
@@ -43,31 +26,39 @@ import {
   Wrench,
   Activity,
   MessageCircle,
-  Send,
-  Bot,
-  User,
   AlertCircle,
+  FileText,
+  Plus,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Skeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { truncateId } from "../lib/string";
+import {
+  useHands,
+  useActiveHands,
+  useHandDetail,
+  useHandSettings as useHandSettingsQuery,
+  useHandStats,
+  useHandStatsBatch,
+  useHandManifestToml,
+} from "../lib/queries/hands";
 
-const REFRESH_MS = 15000;
+const TomlViewer = lazy(() => import("../components/TomlViewer").then(m => ({ default: m.TomlViewer })));
 
-/* ── Inject slideInRight keyframes once at module level ──── */
-if (typeof document !== "undefined" && !document.getElementById("hands-keyframes")) {
-  const style = document.createElement("style");
-  style.id = "hands-keyframes";
-  style.textContent = `
-    @keyframes slideInRight {
-      from { transform: translateX(100%); opacity: 0; }
-      to   { transform: translateX(0);    opacity: 1; }
-    }
-  `;
-  document.head.appendChild(style);
-}
+import {
+  useActivateHand,
+  useDeactivateHand,
+  usePauseHand,
+  useResumeHand,
+  useUninstallHand,
+  useSetHandSecret,
+  useUpdateHandSettings,
+} from "../lib/mutations/hands";
+import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
+import { ScheduleModal } from "../components/ui/ScheduleModal";
+import { useCronJobs } from "../lib/queries/runtime";
+
 
 
 /* ── Inline metrics for active hand cards ─────────────────── */
@@ -87,304 +78,6 @@ function HandMetricsInline({ metrics }: { metrics?: Record<string, { value?: unk
           <span className="text-brand/80">{String(m.value)}</span>
         </span>
       ))}
-    </div>
-  );
-}
-
-/* ── Chat panel for an active hand instance ──────────────── */
-
-interface ChatMsg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: Date;
-  isLoading?: boolean;
-  error?: string;
-  tokens?: { input?: number; output?: number };
-  cost_usd?: number;
-  blocks?: Array<
-    | { type: "text"; text: string }
-    | { type: "tool_use"; id: string; name: string; input: unknown }
-    | { type: "tool_result"; tool_use_id: string; name: string; content: string; is_error: boolean }
-  >;
-}
-
-function HandChatPanel({
-  instanceId,
-  handName,
-  onClose,
-}: {
-  instanceId: string;
-  handName: string;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    getHandSession(instanceId)
-      .then((data) => {
-        if (data.messages?.length) {
-          const hist: ChatMsg[] = data.messages.map((m: HandSessionMessage, i: number) => ({
-            id: `hist-${i}`,
-            role: m.role === "user" ? "user" as const : "assistant" as const,
-            content: m.content || "",
-            timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
-            blocks: m.blocks,
-          }));
-          setMessages(hist);
-        }
-      })
-      .catch(() => {});
-  }, [instanceId]);
-
-  useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
-    }
-  }, [messages]);
-
-  useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 100);
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-
-    const userMsg: ChatMsg = {
-      id: `u-${Date.now()}`,
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    };
-    const botMsg: ChatMsg = {
-      id: `b-${Date.now()}`,
-      role: "assistant",
-      content: "",
-      timestamp: new Date(),
-      isLoading: true,
-    };
-
-    setMessages((prev) => [...prev, userMsg, botMsg]);
-    setInput("");
-    setSending(true);
-
-    try {
-      const res = await sendHandMessage(instanceId, text);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id
-            ? {
-                ...m,
-                content: res.response || "",
-                isLoading: false,
-                tokens: { input: res.input_tokens, output: res.output_tokens },
-                cost_usd: res.cost_usd,
-              }
-            : m
-        )
-      );
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : "Error";
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id ? { ...m, isLoading: false, error: errMsg } : m
-        )
-      );
-    } finally {
-      setSending(false);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [input, sending, instanceId]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl backdrop-saturate-150"
-      onClick={onClose}
-    >
-      <div
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[92vw] h-[85vh] sm:h-[80vh] flex flex-col animate-fade-in-scale"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="px-5 py-3.5 border-b border-border-subtle flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-brand/15 text-brand flex items-center justify-center">
-              <MessageCircle className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold">{handName}</h3>
-              <p className="text-[9px] text-text-dim/60 font-mono">
-                {truncateId(instanceId, 12)}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-text-dim hover:text-text hover:bg-main transition-colors"
-            aria-label={t("common.close", { defaultValue: "Close" })}
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-          {messages.length === 0 && !sending && (
-            <div className="h-full flex flex-col items-center justify-center text-center">
-              <div className="w-14 h-14 rounded-xl bg-brand/10 flex items-center justify-center mb-3">
-                <Bot className="w-7 h-7 text-brand/60" />
-              </div>
-              <p className="text-sm font-bold">{handName}</p>
-              <p className="text-xs text-text-dim mt-1">{t("chat.welcome_system")}</p>
-            </div>
-          )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div className={`max-w-[85%] ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                <div className={`flex items-center gap-1.5 mb-1 ${msg.role === "user" ? "justify-end" : ""}`}>
-                  <div className={`h-5 w-5 rounded-md flex items-center justify-center ${
-                    msg.role === "user"
-                      ? "bg-brand text-white"
-                      : "bg-surface border border-border-subtle"
-                  }`}>
-                    {msg.role === "user" ? (
-                      <User className="h-2.5 w-2.5" />
-                    ) : (
-                      <Bot className="h-2.5 w-2.5 text-brand" />
-                    )}
-                  </div>
-                  <span className="text-[9px] text-text-dim/50">
-                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </div>
-                <div
-                  className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-brand text-white rounded-tr-sm"
-                      : msg.error
-                        ? "bg-error/10 border border-error/20 text-error rounded-tl-sm"
-                        : "bg-surface border border-border-subtle rounded-tl-sm"
-                  }`}
-                >
-                  {msg.isLoading ? (
-                    <div className="flex items-center gap-1 py-1">
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                      <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                    </div>
-                  ) : msg.error ? (
-                    <div className="flex items-start gap-1.5">
-                      <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                      <span>{msg.error}</span>
-                    </div>
-                  ) : msg.role === "user" ? (
-                    <span>{msg.content}</span>
-                  ) : msg.blocks?.length ? (
-                    <div className="space-y-2">
-                      {msg.blocks.map((block, bi) => {
-                        if (block.type === "text") {
-                          return (
-                            <MarkdownContent key={bi}>
-                              {block.text}
-                            </MarkdownContent>
-                          );
-                        }
-                        if (block.type === "tool_use") {
-                          return (
-                            <details key={bi} className="rounded-lg border border-brand/20 bg-brand/5 overflow-hidden">
-                              <summary className="px-2.5 py-1.5 text-[10px] font-bold text-brand cursor-pointer flex items-center gap-1.5 select-none">
-                                <Wrench className="w-3 h-3 shrink-0" />
-                                {block.name}
-                              </summary>
-                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all">
-                                {typeof block.input === "string" ? block.input : JSON.stringify(block.input, null, 2)}
-                              </pre>
-                            </details>
-                          );
-                        }
-                        if (block.type === "tool_result") {
-                          return (
-                            <details key={bi} className={`rounded-lg border overflow-hidden ${block.is_error ? "border-error/20 bg-error/5" : "border-success/20 bg-success/5"}`}>
-                              <summary className={`px-2.5 py-1.5 text-[10px] font-bold cursor-pointer flex items-center gap-1.5 select-none ${block.is_error ? "text-error" : "text-success"}`}>
-                                {block.is_error ? <XCircle className="w-3 h-3 shrink-0" /> : <CheckCircle2 className="w-3 h-3 shrink-0" />}
-                                {block.name || "result"}
-                              </summary>
-                              <pre className="px-2.5 pb-2 text-[9px] text-text-dim/70 font-mono overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
-                                {block.content}
-                              </pre>
-                            </details>
-                          );
-                        }
-                        return null;
-                      })}
-                    </div>
-                  ) : (
-                    <MarkdownContent>
-                      {msg.content}
-                    </MarkdownContent>
-                  )}
-                </div>
-                {msg.tokens?.output && !msg.isLoading && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <span className="text-[8px] text-text-dim/40 font-mono">
-                      {msg.tokens.output} tok
-                    </span>
-                    {msg.cost_usd !== undefined && msg.cost_usd > 0 && (
-                      <span className="text-[8px] text-success/60 font-mono">
-                        {formatCost(msg.cost_usd)}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <div ref={endRef} />
-        </div>
-
-        {/* Input */}
-        <div className="px-4 py-3 border-t border-border-subtle shrink-0">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex gap-2 items-end"
-          >
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={t("chat.input_placeholder_with_agent", { name: handName })}
-              disabled={sending}
-              rows={1}
-              className="flex-1 min-h-[40px] max-h-[100px] rounded-xl border border-border-subtle bg-main px-3 py-2.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40"
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || sending}
-              className="px-3.5 py-2.5 rounded-xl bg-brand text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-            >
-              <Send className="h-4 w-4" />
-            </button>
-          </form>
-        </div>
-      </div>
     </div>
   );
 }
@@ -419,18 +112,12 @@ function HandDetailPanel({
   const { t } = useTranslation();
   const isPaused = instance?.status === "paused";
 
-  const settingsQuery = useQuery({
-    queryKey: ["hands", "settings", hand.id],
-    queryFn: () => getHandSettings(hand.id),
-    enabled: !!hand.id,
-  });
+  const [showManifest, setShowManifest] = useState(false);
+  const manifestQuery = useHandManifestToml(hand.id, showManifest);
 
-  const statsQuery = useQuery({
-    queryKey: ["hands", "stats", instance?.instance_id],
-    queryFn: () => getHandStats(instance!.instance_id),
-    refetchInterval: REFRESH_MS,
-    enabled: !!instance?.instance_id,
-  });
+  const settingsQuery = useHandSettingsQuery(hand.id);
+
+  const statsQuery = useHandStats(instance?.instance_id ?? "");
 
   const settings: HandSettingsResponse = settingsQuery.data ?? {};
   const stats: HandStatsResponse = statsQuery.data ?? {};
@@ -512,6 +199,15 @@ function HandDetailPanel({
             {hand.description && (
               <p className="text-sm text-text-dim leading-relaxed">{hand.description}</p>
             )}
+
+            <button
+              type="button"
+              onClick={() => setShowManifest(true)}
+              className="text-[11px] font-bold text-text-dim hover:text-brand inline-flex items-center gap-1"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              {t("hands.view_manifest")}
+            </button>
 
             {/* Primary action bar */}
             <div className="flex items-center gap-2">
@@ -598,12 +294,24 @@ function HandDetailPanel({
               isActive={isActive}
               settings={settings}
               settingsQuery={settingsQuery}
-              stats={stats}
-              statsQuery={statsQuery}
             />
           </div>
         </div>
       </div>
+      <Suspense fallback={null}>
+        <TomlViewer
+          isOpen={showManifest}
+          onClose={() => setShowManifest(false)}
+          title={t("hands.manifest_title", { name: hand.name || hand.id })}
+          toml={manifestQuery.data}
+          downloadName={`${hand.id}.HAND.toml`}
+          error={
+            manifestQuery.error
+              ? (manifestQuery.error as Error).message ?? t("hands.manifest_error")
+              : null
+          }
+        />
+      </Suspense>
     </div>
   );
 }
@@ -614,8 +322,8 @@ function HandDetailPanel({
 
 function RequirementsForm({ handId, requirements }: { handId: string; requirements: HandDefinitionItem["requirements"] }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
+  const setSecret = useSetHandSecret();
   const [values, setValues] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     for (const r of requirements ?? []) {
@@ -632,9 +340,8 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
     if (!val) return;
     setSaving(key);
     try {
-      await setHandSecret(handId, key, val);
+      await setSecret.mutateAsync({ handId, key, value: val });
       addToast(t("common.success"), "success");
-      queryClient.invalidateQueries({ queryKey: ["hands"] });
     } catch (e: unknown) {
       addToast(e instanceof Error ? e.message : t("common.error"), "error");
     } finally {
@@ -684,31 +391,21 @@ function RequirementsForm({ handId, requirements }: { handId: string; requiremen
   );
 }
 
-function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, statsQuery }: {
+function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   hand: HandDefinitionItem; instance: HandInstanceItem | undefined; isActive: boolean;
-  settings: HandSettingsResponse; settingsQuery: any; stats: HandStatsResponse; statsQuery: any;
+  settings: HandSettingsResponse;
+  settingsQuery: UseQueryResult<HandSettingsResponse, Error>;
 }) {
   const { t } = useTranslation();
-  const hasMetrics = isActive && !statsQuery.isLoading && stats.metrics &&
-    Object.entries(stats.metrics).some(([, m]) => m.value != null && String(m.value) !== "-" && String(m.value) !== "");
 
   // Fetch hand detail with agents list
-  const detailQuery = useQuery({
-    queryKey: ["hands", "detail", hand.id],
-    queryFn: () => getHandDetail(hand.id),
-    enabled: !!hand.id,
-  });
+  const detailQuery = useHandDetail(hand.id);
   const detail = detailQuery.data as Record<string, unknown> | undefined;
   const workspaceAgents = (detail?.agents as { role: string; name: string; description?: string; coordinator?: boolean; provider: string; model: string; steps?: string[] }[] | undefined) ?? [];
 
   // Fetch cron jobs for this hand's agent
   const agentId = instance?.agent_id;
-  const cronJobsQuery = useQuery({
-    queryKey: ["cron-jobs", "hand", agentId],
-    queryFn: () => listCronJobs(agentId!),
-    enabled: isActive && !!agentId,
-    refetchInterval: 30000,
-  });
+  const cronJobsQuery = useCronJobs(isActive ? agentId : undefined);
   const cronJobs = cronJobsQuery.data ?? [];
 
   type Tab = "agents" | "settings" | "requirements" | "tools" | "schedules";
@@ -719,8 +416,6 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
     { id: "requirements", label: t("hands.requirements"), count: hand.requirements?.length, show: !!(hand.requirements && hand.requirements.length > 0) },
     { id: "tools", label: t("hands.tools"), count: hand.tools?.length, show: !!(hand.tools && hand.tools.length > 0) },
   ];
-  // Silence unused — hasMetrics is now surfaced via the hero metrics strip in HandDetailPanel
-  void hasMetrics;
   const visibleTabs = tabs.filter(t => t.show);
   const [activeTab, setActiveTab] = useState<Tab>(visibleTabs[0]?.id ?? "settings");
 
@@ -811,8 +506,14 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery, stats, 
           </div>
         )}
 
-        {activeTab === "schedules" && (
-          <HandSchedulesTab cronJobs={cronJobs} isLoading={cronJobsQuery.isLoading} onRefresh={() => cronJobsQuery.refetch()} />
+        {activeTab === "schedules" && agentId && (
+          <HandSchedulesTab
+            cronJobs={cronJobs}
+            isLoading={cronJobsQuery.isLoading}
+            onRefresh={() => cronJobsQuery.refetch()}
+            agentId={agentId}
+            handName={hand.name || hand.id}
+          />
         )}
       </div>
     </div>
@@ -833,34 +534,18 @@ function HandSettingsEditor({
   isActive: boolean;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
-  // Local draft — seeded from current_values, mutated by inputs, cleared on save.
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveOk, setSaveOk] = useState(false);
 
-  // Reset draft whenever the underlying settings change (e.g. after a refetch).
   useEffect(() => {
     setDraft({});
     setSaveOk(false);
     setSaveError(null);
   }, [settings]);
 
-  const saveMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => updateHandSettings(handId, payload),
-    onSuccess: () => {
-      setSaveOk(true);
-      setSaveError(null);
-      setDraft({});
-      queryClient.invalidateQueries({ queryKey: ["hands", "settings", handId] });
-      setTimeout(() => setSaveOk(false), 2500);
-    },
-    onError: (err: Error) => {
-      setSaveError(err.message || String(err));
-      setSaveOk(false);
-    },
-  });
+  const saveMutation = useUpdateHandSettings();
 
   if (isLoading) {
     return (
@@ -885,12 +570,25 @@ function HandSettingsEditor({
   };
 
   const handleSave = () => {
-    // Only send the keys the user actually changed.
     const payload: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(draft)) {
       payload[k] = v;
     }
-    saveMutation.mutate(payload);
+    saveMutation.mutate(
+      { handId, config: payload },
+      {
+        onSuccess: () => {
+          setSaveOk(true);
+          setSaveError(null);
+          setDraft({});
+          setTimeout(() => setSaveOk(false), 2500);
+        },
+        onError: (err: Error) => {
+          setSaveError(err.message || String(err));
+          setSaveOk(false);
+        },
+      },
+    );
   };
 
   return (
@@ -936,7 +634,7 @@ function HandSettingsEditor({
                   id={`setting-${key}`}
                   value={current}
                   disabled={!canEdit || saveMutation.isPending}
-                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  onChange={(e) => setDraft(prev => ({ ...prev, [key]: e.target.value }))}
                   className="w-full rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 text-xs font-mono disabled:opacity-50 focus:outline-none focus:border-brand"
                 >
                   {!current && <option value="">—</option>}
@@ -953,7 +651,7 @@ function HandSettingsEditor({
                   value={current}
                   disabled={!canEdit || saveMutation.isPending}
                   placeholder={rawDefault || undefined}
-                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                  onChange={(e) => setDraft(prev => ({ ...prev, [key]: e.target.value }))}
                   className="text-xs font-mono"
                 />
               )}
@@ -998,81 +696,218 @@ function HandSettingsEditor({
 
 /* ── Schedules tab content for a hand ─────────────────────── */
 
-function HandSchedulesTab({ cronJobs, isLoading, onRefresh }: {
+function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }: {
   cronJobs: CronJobItem[];
   isLoading: boolean;
   onRefresh: () => void;
+  agentId: string;
+  handName: string;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const toggleSchedule = useUpdateSchedule();
+  const deleteScheduleMut = useDeleteSchedule();
+  const createScheduleMut = useCreateSchedule();
+  const [showCreate, setShowCreate] = useState(false);
+  const [showCronPicker, setShowCronPicker] = useState(false);
+  const [name, setName] = useState("");
+  const [message, setMessage] = useState("");
+  const [cron, setCron] = useState("0 9 * * *");
+  const [cronTz, setCronTz] = useState<string | undefined>(undefined);
+
+  const resetForm = () => {
+    setShowCreate(false);
+    setName("");
+    setMessage("");
+    setCron("0 9 * * *");
+    setCronTz(undefined);
+  };
 
   const handleToggle = async (job: CronJobItem) => {
     if (!job.id) return;
     try {
-      const { updateSchedule } = await import("../api");
-      await updateSchedule(job.id, { enabled: !job.enabled });
-      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      await toggleSchedule.mutateAsync({ id: job.id, data: { enabled: !job.enabled } });
       onRefresh();
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
+    if (confirmDeleteId !== id) {
+      setConfirmDeleteId(id);
+      return;
+    }
     setConfirmDeleteId(null);
     try {
-      const { deleteSchedule } = await import("../api");
-      await deleteSchedule(id);
-      queryClient.invalidateQueries({ queryKey: ["cron-jobs", "hand"] });
+      await deleteScheduleMut.mutateAsync(id);
       onRefresh();
-    } catch (err: any) { addToast(err.message || t("common.error"), "error"); }
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
   };
 
-  if (isLoading) return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
+  const handleCreate = async () => {
+    if (!name.trim() || !message.trim()) return;
+    try {
+      await createScheduleMut.mutateAsync({
+        name: name.trim(),
+        cron,
+        tz: cronTz,
+        message: message.trim(),
+        enabled: true,
+        agent_id: agentId,
+      });
+      resetForm();
+      addToast(t("hands.schedule_created", { defaultValue: "Schedule created" }), "success");
+    } catch (err: unknown) {
+      addToast(err instanceof Error ? err.message : t("common.error"), "error");
+    }
+  };
 
-  if (cronJobs.length === 0) return <p className="text-xs text-text-dim/50 py-4 text-center">{t("scheduler.no_schedules", { defaultValue: "No scheduled tasks" })}</p>;
+  const inputCls = "w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand transition-colors";
+
+  if (isLoading) {
+    return <div className="flex items-center gap-2 text-text-dim/60 text-xs py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" /> {t("common.loading")}</div>;
+  }
 
   return (
     <div className="space-y-2">
-      {cronJobs.map((job) => {
-        const isEnabled = job.enabled !== false;
-        const schedule = typeof job.schedule === "string" ? job.schedule : (job.schedule as any)?.expr || (job.schedule as any)?.every_secs ? `every ${(job.schedule as any).every_secs}s` : "-";
-        return (
-          <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
-            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>
-              <Activity className="w-4 h-4" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
-              <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
-            </div>
-            <button
-              onClick={() => handleToggle(job)}
-              className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition-colors ${isEnabled ? "bg-success/15 text-success hover:bg-success/25" : "bg-main text-text-dim/50 hover:text-text-dim"}`}
-            >
-              {isEnabled ? "ON" : "OFF"}
-            </button>
-            {confirmDeleteId === job.id ? (
-              <div className="flex items-center gap-1">
-                <button onClick={() => handleDelete(job.id!)} className="px-2 py-1 rounded-md bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
-                <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-md bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
-              </div>
-            ) : (
-              <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title="Delete schedule">
-                <XCircle className="w-3.5 h-3.5" />
-              </button>
-            )}
+      {!showCreate ? (
+        <button
+          onClick={() => setShowCreate(true)}
+          className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand/40 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("hands.new_schedule", { defaultValue: "New schedule" })}
+        </button>
+      ) : (
+        <form
+          onSubmit={(e) => { e.preventDefault(); void handleCreate(); }}
+          className="rounded-xl border border-brand/30 bg-brand/[0.02] p-3 space-y-2.5"
+        >
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.job_name", { defaultValue: "Name" })}</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t("hands.schedule_name_placeholder", { defaultValue: "e.g. Daily status check" })}
+              className={inputCls}
+              autoFocus
+            />
           </div>
-        );
-      })}
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.target_agent", { defaultValue: "Target Agent" })}</label>
+            <div className="px-3 py-2 rounded-lg border border-border-subtle bg-main text-sm text-text-dim">
+              {handName}
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.message", { defaultValue: "Message" })}</label>
+            <textarea
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder={t("hands.schedule_message_placeholder", { defaultValue: "What should the hand do when this fires?" })}
+              rows={2}
+              className={`${inputCls} resize-none`}
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">{t("scheduler.cron_exp", { defaultValue: "Schedule" })}</label>
+            <button
+              type="button"
+              onClick={() => setShowCronPicker(true)}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg border border-border-subtle bg-main hover:border-brand transition-colors text-left"
+            >
+              <code className="text-xs font-mono text-text-dim">
+                {cron}{cronTz && cronTz !== "UTC" ? ` · ${cronTz}` : ""}
+              </code>
+              <span className="text-[10px] text-brand">{t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}</span>
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={!name.trim() || !message.trim() || createScheduleMut.isPending}
+              className="flex-1 px-3 py-1.5 rounded-lg bg-brand text-white text-xs font-bold hover:bg-brand/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {createScheduleMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mx-auto" /> : t("common.create", { defaultValue: "Create" })}
+            </button>
+            <button
+              type="button"
+              onClick={resetForm}
+              className="px-3 py-1.5 rounded-lg bg-main text-text-dim text-xs font-bold hover:text-text-main transition-colors"
+            >
+              {t("common.cancel")}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {cronJobs.length === 0 ? (
+        <p className="text-xs text-text-dim/50 py-4 text-center">{t("scheduler.no_schedules", { defaultValue: "No scheduled tasks" })}</p>
+      ) : (
+        cronJobs.map((job) => {
+          const isEnabled = job.enabled !== false;
+          const scheduleObj = typeof job.schedule === "object" && job.schedule !== null
+            ? job.schedule as { expr?: string; every_secs?: number }
+            : null;
+          const schedule = typeof job.schedule === "string"
+            ? job.schedule
+            : scheduleObj?.expr ?? (scheduleObj?.every_secs != null ? `every ${scheduleObj.every_secs}s` : "-");
+
+          return (
+            <div key={job.id} className={`flex items-center gap-3 p-3 rounded-xl border transition-colors ${isEnabled ? "border-border-subtle bg-main/30" : "border-border-subtle/50 bg-main/10 opacity-60"}`}>
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isEnabled ? "bg-brand/10 text-brand" : "bg-main text-text-dim/40"}`}>
+                <Activity className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
+                <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
+              </div>
+              <button
+                onClick={() => handleToggle(job)}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wide transition-colors ${isEnabled ? "bg-success/15 text-success hover:bg-success/25" : "bg-main text-text-dim/50 hover:text-text-dim"}`}
+              >
+                {isEnabled ? "ON" : "OFF"}
+              </button>
+              {confirmDeleteId === job.id ? (
+                <div className="flex items-center gap-1">
+                  <button onClick={() => handleDelete(job.id!)} className="px-2 py-1 rounded-md bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                  <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-md bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+                </div>
+              ) : (
+                <button onClick={() => handleDelete(job.id!)} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 transition-colors" title="Delete schedule">
+                  <XCircle className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          );
+        })
+      )}
+
+      {showCronPicker && (
+        <ScheduleModal
+          title={t("scheduler.pick_schedule", { defaultValue: "Pick schedule" })}
+          subtitle={handName}
+          initialCron={cron}
+          initialTz={cronTz}
+          onSave={(c, tz) => {
+            setCron(c);
+            setCronTz(tz);
+            setShowCronPicker(false);
+          }}
+          onClose={() => setShowCronPicker(false)}
+        />
+      )}
     </div>
   );
 }
 
 /* ── Active hand card (horizontal strip) ─────────────────── */
 
-function ActiveHandChip({
+const ActiveHandChip = React.memo(function ActiveHandChip({
   hand,
   instance,
   onChat,
@@ -1152,7 +987,7 @@ function ActiveHandChip({
       </div>
     </div>
   );
-}
+});
 
 /* ── Grid skeleton matching HandCard layout ──────────────── */
 
@@ -1187,7 +1022,7 @@ function HandCardGridSkeleton() {
 
 /* ── Hand card (grid item) ───────────────────────────────── */
 
-function HandCard({
+const HandCard = React.memo(function HandCard({
   hand,
   instance,
   isActive,
@@ -1236,6 +1071,7 @@ function HandCard({
       className={`group relative flex flex-col rounded-2xl border transition-all cursor-pointer ${stateClasses}`}
       onClick={() => onDetail(hand)}
       role="button"
+      aria-label={hand.name || hand.id}
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onDetail(hand); } }}
     >
@@ -1359,13 +1195,12 @@ function HandCard({
       </div>
     </div>
   );
-}
+});
 
 /* ── Main page ────────────────────────────────────────────── */
 
 export function HandsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const addToast = useUIStore((s) => s.addToast);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -1373,52 +1208,28 @@ export function HandsPage() {
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
   const navigate = useNavigate();
 
-  // Preload ChatPage chunk so navigate is instant
   useEffect(() => {
     router.preloadRoute({ to: "/chat", search: { agentId: undefined } }).catch(() => {});
   }, []);
 
-  const handsQuery = useQuery({
-    queryKey: ["hands", "list"],
-    queryFn: listHands,
-    refetchInterval: REFRESH_MS,
-  });
-  const activeQuery = useQuery({
-    queryKey: ["hands", "active"],
-    queryFn: listActiveHands,
-    refetchInterval: REFRESH_MS,
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: (id: string) => activateHand(id),
-  });
-  const deactivateMutation = useMutation({
-    mutationFn: (id: string) => deactivateHand(id),
-  });
-  const pauseMutation = useMutation({
-    mutationFn: (id: string) => pauseHand(id),
-  });
-  const resumeMutation = useMutation({
-    mutationFn: (id: string) => resumeHand(id),
-  });
+  const handsQuery = useHands();
+  const activeQuery = useActiveHands();
+  const activateMutation = useActivateHand();
+  const deactivateMutation = useDeactivateHand();
+  const pauseMutation = usePauseHand();
+  const resumeMutation = useResumeHand();
+  const uninstallMutation = useUninstallHand();
 
   const hands = handsQuery.data ?? [];
   const instances = activeQuery.data ?? [];
 
-  // Batch-fetch stats for all active instances (avoids N+1 queries)
+  const handleChat = useCallback((instanceId: string) => {
+    const inst = instances.find((i) => i.instance_id === instanceId);
+    navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
+  }, [instances, navigate]);
+
   const activeInstanceIds = useMemo(() => instances.map(i => i.instance_id).filter(Boolean), [instances]);
-  const allStatsQuery = useQuery({
-    queryKey: ["hands", "stats", "batch", activeInstanceIds],
-    queryFn: async () => {
-      const results: Record<string, HandStatsResponse> = {};
-      await Promise.all(activeInstanceIds.map(async id => {
-        try { results[id] = await getHandStats(id); } catch { /* skip */ }
-      }));
-      return results;
-    },
-    refetchInterval: REFRESH_MS,
-    enabled: activeInstanceIds.length > 0,
-  });
+  const allStatsQuery = useHandStatsBatch(activeInstanceIds);
   const statsByInstance = allStatsQuery.data ?? {};
 
   const activeHandIds = useMemo(
@@ -1441,6 +1252,15 @@ export function HandsPage() {
       if (h.category) cats.add(h.category);
     }
     return Array.from(cats).sort();
+  }, [hands]);
+
+  // Memoized category counts
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const h of hands) {
+      if (h.category) counts[h.category] = (counts[h.category] ?? 0) + 1;
+    }
+    return counts;
   }, [hands]);
 
   // Active hands paired with their definitions — used by the running strip
@@ -1482,7 +1302,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await activateMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");
@@ -1496,7 +1315,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await deactivateMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
       setDetailHand(null);
     } catch (e: unknown) {
@@ -1514,8 +1332,7 @@ export function HandsPage() {
     if (!window.confirm(confirmMsg)) return;
     setPendingId(handId);
     try {
-      await uninstallHand(handId);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
+      await uninstallMutation.mutateAsync(handId);
       addToast(t("common.success"), "success");
       setDetailHand(null);
     } catch (e: unknown) {
@@ -1530,7 +1347,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await pauseMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");
@@ -1544,7 +1360,6 @@ export function HandsPage() {
     setPendingId(id);
     try {
       await resumeMutation.mutateAsync(id);
-      await queryClient.invalidateQueries({ queryKey: ["hands"] });
       addToast(t("common.success"), "success");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : t("common.error");
@@ -1611,10 +1426,7 @@ export function HandsPage() {
                 hand={hand}
                 instance={instance}
                 metrics={statsByInstance[instance.instance_id]?.metrics}
-                onChat={(instanceId) => {
-                  const inst = instances.find((i) => i.instance_id === instanceId);
-                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-                }}
+                onChat={handleChat}
                 onDeactivate={handleDeactivate}
                 onDetail={setDetailHand}
                 isPending={pendingId === instance.instance_id}
@@ -1646,7 +1458,7 @@ export function HandsPage() {
               <span className="ml-1 opacity-50">({hands.length})</span>
             </button>
             {categories.map((cat) => {
-              const count = hands.filter((h) => h.category === cat).length;
+              const count = categoryCounts[cat] ?? 0;
               return (
                 <button
                   key={cat}
@@ -1706,10 +1518,7 @@ export function HandsPage() {
                 onActivate={handleActivate}
                 onDeactivate={(id) => handleDeactivate(id)}
                 onDetail={setDetailHand}
-                onChat={(instanceId) => {
-                  const inst = instances.find((i) => i.instance_id === instanceId);
-                  navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-                }}
+                onChat={handleChat}
                 isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
               />
             );
@@ -1729,10 +1538,7 @@ export function HandsPage() {
           onDeactivate={handleDeactivate}
           onPause={handlePause}
           onResume={handleResume}
-          onChat={(instanceId) => {
-            const inst = instances.find(i => i.instance_id === instanceId);
-            navigate({ to: "/chat", search: { agentId: inst?.agent_id || instanceId } });
-          }}
+          onChat={handleChat}
           onUninstall={handleUninstall}
           isPending={pendingId === detailHandLatest.id}
         />
@@ -1741,7 +1547,3 @@ export function HandsPage() {
     </div>
   );
 }
-
-// HandChatPanel is a self-contained side-panel chat; currently unused because
-// the page navigates to /chat instead. Kept for planned re-integration.
-void HandChatPanel;

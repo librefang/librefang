@@ -6,6 +6,7 @@ Skills are pluggable tool bundles that extend agent capabilities in LibreFang. A
 
 - [Overview](#overview)
 - [Skill Format](#skill-format)
+- [Skill Config Variables](#skill-config-variables)
 - [Python Skills](#python-skills)
 - [WASM Skills](#wasm-skills)
 - [Skill Requirements](#skill-requirements)
@@ -13,6 +14,7 @@ Skills are pluggable tool bundles that extend agent capabilities in LibreFang. A
 - [Publishing to FangHub](#publishing-to-fanghub)
 - [CLI Commands](#cli-commands)
 - [OpenClaw Compatibility](#openclaw-compatibility)
+- [Skill Self-Evolution](#skill-self-evolution)
 - [Best Practices](#best-practices)
 
 ---
@@ -161,6 +163,61 @@ Each `[[tools.provided]]` entry defines one tool that the skill provides:
 |-------|------|-------------|
 | `tools` | array | Built-in tools this skill needs the host to provide |
 | `capabilities` | array | Capability strings the agent must have |
+
+---
+
+## Skill Config Variables
+
+Skills can declare configuration variables in `skill.toml`. At agent startup, LibreFang resolves each variable from the user's `~/.librefang/config.toml` and injects the resolved values into the agent's system prompt, making them available to the skill without hard-coding secrets or environment-specific values.
+
+### Declaring variables in `skill.toml`
+
+Add one `[[config_vars]]` entry per variable:
+
+```toml
+[[config_vars]]
+key = "wiki.base_url"
+description = "Base URL of the internal wiki"
+default = "https://wiki.example.com"
+
+[[config_vars]]
+key = "db.host"
+description = "Database hostname"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | Yes | Dot-separated key in the form `<namespace>.<field>`. |
+| `description` | string | No | Human-readable description shown in the dashboard. |
+| `default` | string | No | Fallback value when the key is absent from the user's config. |
+
+### Storing values in `~/.librefang/config.toml`
+
+The namespace before the first dot maps to a TOML table under `[skills.config]`:
+
+```toml
+[skills.config.wiki]
+base_url = "https://wiki.corp.example.com"
+
+[skills.config.db]
+host = "postgres.internal"
+```
+
+### System prompt injection
+
+Resolved variables are appended to the system prompt as a labeled block before the skill's own prompt content:
+
+```
+## Skill Config Variables
+wiki.base_url = https://wiki.corp.example.com
+db.host = postgres.internal
+```
+
+### Resolution rules
+
+- **Default fallback**: If a key is not present in `~/.librefang/config.toml` but the skill declares a `default`, the default value is used.
+- **Missing without default**: If a key is absent from both the user config and the skill declaration (no `default`), the variable is silently omitted from the injected block.
+- **Deduplication**: When multiple installed skills declare the same key, the value from the **first** skill loaded takes precedence. Subsequent declarations of the same key are ignored for injection purposes, though each skill may still specify its own `default` for documentation.
 
 ---
 
@@ -580,6 +637,79 @@ librefang skill install /path/to/skill-directory
 ```
 
 Skills imported via `librefang migrate --from openfang` or `librefang migrate --from openclaw` are also scanned and reported in the migration report, with instructions for manual reinstallation.
+
+---
+
+## Skill Self-Evolution
+
+Agents can autonomously create, update, and refine skills based on their execution experience. When an agent discovers a reusable methodology through trial-and-error, it can save the approach as a skill for future reuse.
+
+### How It Works
+
+1. **Automatic detection**: After a complex task (5+ tool calls), the kernel evaluates whether the approach is worth saving as a skill via a background LLM review.
+2. **Agent tools**: Agents have direct access to evolution tools for creating and maintaining skills.
+3. **Hot-reload**: New or updated skills are available immediately -- no daemon restart required.
+4. **Security scanning**: All mutations pass through prompt injection detection. Critical threats trigger automatic rollback.
+
+### Evolution Tools
+
+| Tool | Purpose |
+|------|---------|
+| `skill_evolve_create` | Create a new prompt-only skill from a successful task approach |
+| `skill_evolve_update` | Rewrite a skill's prompt context entirely |
+| `skill_evolve_patch` | Targeted find-and-replace edit with fuzzy matching (tolerates whitespace/indent differences) |
+| `skill_evolve_delete` | Delete a locally-created skill (not marketplace installs) |
+| `skill_evolve_rollback` | Roll back to the previous version |
+| `skill_evolve_write_file` | Add supporting files (references, templates, scripts, assets) |
+| `skill_evolve_remove_file` | Remove a supporting file |
+
+### Version Management
+
+Each skill tracks its evolution in `.evolution.json` alongside `skill.toml`:
+
+- **Version history**: Up to 10 version entries with timestamps, changelogs, and content hashes.
+- **Rollback snapshots**: Previous prompt contexts are saved in `.rollback/` for easy recovery.
+- **Usage tracking**: `use_count` and `evolution_count` metrics per skill.
+
+### Fuzzy Patching
+
+`skill_evolve_patch` uses a 5-strategy matching pipeline (strict to loose):
+
+1. **Exact** -- literal substring match
+2. **Line-trimmed** -- trim leading/trailing whitespace per line
+3. **Whitespace-normalized** -- collapse whitespace runs
+4. **Indent-flexible** -- strip all leading whitespace
+5. **Block-anchor** -- match first+last lines, verify middle similarity &ge;60%
+
+This tolerates the formatting variance typical of LLM-generated edits.
+
+### Supporting Files
+
+Skills can include supporting files under four subdirectories:
+
+- `references/` -- API docs, external references
+- `templates/` -- Code or config templates
+- `scripts/` -- Helper scripts
+- `assets/` -- Images, data files
+
+Files are limited to 1 MiB each, path traversal is blocked, and content is security-scanned on write.
+
+### Dashboard
+
+The Skills page in the dashboard includes:
+
+- **Create Skill** button to create prompt-only skills from the web UI
+- **Skill Detail** modal showing version history, tools, supporting files, and usage metrics
+- **Category filtering** via the `?category=` query parameter
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/skills` | GET | List skills (supports `?category=` filter) |
+| `/api/skills/create` | POST | Create a skill via the evolution module |
+| `/api/skills/{name}` | GET | Get detailed skill info with evolution history |
+| `/api/skills/reload` | POST | Hot-reload the skill registry |
 
 ---
 

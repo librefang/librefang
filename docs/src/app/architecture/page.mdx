@@ -141,7 +141,16 @@ After running `librefang init`, the user data directory is created at `~/.libref
 │   └── integrations/          #   Integration configs
 ├── workspaces/
 │   ├── agents/                #   Active agent working directories
-│   └── hands/                 #   Active hand working directories
+│   │   └── <name>/            #     Per-agent home
+│   │       ├── .identity/     #       Identity files (SOUL.md, IDENTITY.md, …)
+│   │       ├── sessions/      #       Conversation history
+│   │       ├── memory/        #       Daily memory logs
+│   │       ├── data/          #       Agent-specific data
+│   │       ├── output/        #       Generated output files
+│   │       ├── skills/        #       Agent-specific skills
+│   │       └── logs/          #       Agent logs
+│   ├── hands/                 #   Active hand working directories
+│   └── shared/                #   Named shared workspaces (user-declared)
 ├── skills/                    # User-installed skills
 ├── plugins/                   # User-installed plugins
 ├── integrations.toml          # Configured integrations

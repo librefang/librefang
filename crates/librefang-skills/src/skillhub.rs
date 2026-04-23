@@ -332,8 +332,8 @@ impl SkillhubClient {
 
         // Client-side sort
         match sort {
-            "downloads" => data.skills.sort_by(|a, b| b.downloads.cmp(&a.downloads)),
-            "stars" => data.skills.sort_by(|a, b| b.stars.cmp(&a.stars)),
+            "downloads" => data.skills.sort_by_key(|b| std::cmp::Reverse(b.downloads)),
+            "stars" => data.skills.sort_by_key(|b| std::cmp::Reverse(b.stars)),
             "score" => data.skills.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)

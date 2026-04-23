@@ -1,0 +1,167 @@
+# Checkpoint Manager
+
+Before every `file_write` or `apply_patch` tool call, LibreFang automatically snapshots the
+affected working directory into a lightweight shadow Git repository. If an agent run goes
+wrong, you can inspect the full file history and restore any previous state without
+interrupting ongoing work in other sessions.
+
+## Included Topics
+
+- [Storage Layout](#storage-layout)
+- [Snapshot Naming](#snapshot-naming)
+- [Viewing Snapshots](#viewing-snapshots)
+- [Restoring a Snapshot](#restoring-a-snapshot)
+- [Exclusions and Size Limits](#exclusions-and-size-limits)
+- [Failure Behavior](#failure-behavior)
+- [Best Practices](#best-practices)
+
+---
+
+## Storage Layout
+
+```
+~/.librefang/checkpoints/
+  a3f2b91c4d8e7f05/    ← shadow repo for /home/user/myproject
+    .git/
+  8c14e30a2b9d6f71/    ← shadow repo for /tmp/scratch
+    .git/
+```
+
+Each working directory gets its own isolated shadow Git repository. The shadow repo tracks
+only the files that LibreFang has written — it does not mirror the entire project tree on
+every snapshot.
+
+---
+
+## Snapshot Naming
+
+The subdirectory name is the first **16 hex characters** of the SHA-256 hash of the
+absolute working directory path (UTF-8, no trailing slash). For example:
+
+```
+SHA-256("/home/user/myproject") = a3f2b91c4d8e7f050e...
+→ directory: ~/.librefang/checkpoints/a3f2b91c4d8e7f05/
+```
+
+This deterministic mapping means you can always locate the shadow repo for a known path
+without a registry lookup.
+
+---
+
+## Viewing Snapshots
+
+The shadow repo is a standard Git repository. Use `git log` directly to browse the history:
+
+```bash
+# Find the shadow repo for a project
+PROJECT_DIR="/home/user/myproject"
+HASH=$(python3 -c "
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])
+" "$PROJECT_DIR")
+
+SHADOW="$HOME/.librefang/checkpoints/$HASH"
+
+# List all snapshots
+git -C "$SHADOW" log --oneline
+
+# Show files changed in the latest snapshot
+git -C "$SHADOW" show --stat HEAD
+
+# Diff the last two snapshots
+git -C "$SHADOW" diff HEAD~1 HEAD
+```
+
+Each commit message records the agent ID, session ID, tool name (`file_write` or
+`apply_patch`), and a truncated preview of the target path — enough to correlate a snapshot
+with a specific agent run.
+
+There is no dedicated CLI subcommand for listing checkpoints in the current release.
+Direct `git` inspection of the shadow repo is the supported workflow.
+
+---
+
+## Restoring a Snapshot
+
+To restore the working directory to the state captured at a specific snapshot, use the
+`POST /api/checkpoints/restore` endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
+  -H "Content-Type: application/json" \
+  -d '{
+    "working_dir": "/home/user/myproject",
+    "commit":      "a3f2b91"
+  }'
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `working_dir` | yes | Absolute path of the project directory |
+| `commit` | yes | Full or abbreviated commit SHA from the shadow repo |
+
+The restore operation copies files from the shadow repo back to `working_dir`. It does
+**not** delete files that were created after the target snapshot — it only overwrites files
+that existed at snapshot time. Run `git -C "$SHADOW" show --name-only <commit>` to see
+exactly which files will be touched before restoring.
+
+A dedicated `librefang checkpoints restore` CLI subcommand is planned for a future release.
+
+---
+
+## Exclusions and Size Limits
+
+LibreFang skips snapshotting under two conditions:
+
+**Hard exclusions** — directories that are always skipped regardless of configuration:
+
+| Excluded path | Reason |
+|---|---|
+| `node_modules/` | Package cache, regenerable, typically hundreds of MB |
+| `target/` | Rust build artifacts |
+| `.venv/`, `venv/`, `env/` | Python virtual environments |
+| `.git/` | Would create a nested git repo inside the shadow repo |
+| `__pycache__/` | Python bytecode cache |
+| `dist/`, `build/` | Common compiled output directories |
+
+**File size limit** — individual files larger than **50 KB** are not committed to the shadow
+repo. LibreFang logs a `DEBUG` entry when a file is skipped for this reason. The `file_write`
+tool still completes normally; only the snapshot omits the oversized file.
+
+Custom exclusion rules (`.librefangignore`) are not supported in the current release.
+To exclude additional paths, avoid placing generated or binary files inside the working
+directory that LibreFang operates on.
+
+---
+
+## Failure Behavior
+
+Snapshot creation is best-effort:
+
+- If the shadow Git repo cannot be initialized (e.g. disk full, permission error), a `WARN`
+  is logged and the `file_write` or `apply_patch` tool proceeds without snapshotting.
+- If the `git commit` step inside the shadow repo fails, the same warn-and-continue policy
+  applies.
+- A failed snapshot never blocks or rolls back the tool call that triggered it.
+- Subsequent tool calls will retry snapshot creation — a one-time failure does not
+  permanently disable the checkpoint manager for a directory.
+
+---
+
+## Best Practices
+
+**Use the shadow repo as a safety net, not a primary backup.** The checkpoint manager is
+designed for short-term recovery within an agent session. For long-term history, commit your
+project's own Git repository regularly.
+
+**Keep working directories focused.** Because exclusions are path-prefix-based, putting a
+large monorepo as the agent's working directory means many files fall under excluded paths.
+Configure your agent's workspace to point at the specific subdirectory being modified.
+
+**Correlate commits with agent runs.** Each shadow commit message embeds the agent ID. If
+an unexpected change appears, run `git -C "$SHADOW" log --grep="<agent-id>"` to find the
+exact snapshots produced by that agent.
+
+**Restore before re-running.** If a run produces bad output, restore the snapshot before
+sending a corrective message. This ensures the agent sees a clean baseline and does not
+accumulate partial writes from the failed run.

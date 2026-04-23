@@ -1,0 +1,236 @@
+# Approvals & TOTP Second Factor
+
+Human-in-the-loop approvals let you keep an agent on a short leash: when it asks to run a
+sensitive tool, the request is held until you accept or reject it. The TOTP second factor
+adds a time-based one-time password check to high-risk actions so that a stolen API token
+alone is not enough to cause damage.
+
+## Included Topics
+
+- [Approval Policy](#approval-policy)
+- [Enabling TOTP](#enabling-totp)
+- [Dashboard Flow](#dashboard-flow)
+- [API Reference](#api-reference)
+- [Session-Scoped Batch Resolution](#session-scoped-batch-resolution)
+- [Recovery Codes](#recovery-codes)
+- [Hardening Checklist](#hardening-checklist)
+
+---
+
+## Approval Policy
+
+**Config:** `[approval]` section in `~/.librefang/config.toml`.
+**Source:** `librefang-types/src/approval.rs` (`ApprovalPolicy`).
+
+```toml
+[approval]
+# Tools that always require approval. `true` = default set, `false` = disable all gating.
+require_approval = ["shell_exec", "file_write", "file_delete", "apply_patch"]
+timeout_secs = 60                      # 10..=300
+auto_approve_autonomous = false        # auto-approve when agent runs unattended
+auto_approve = false                   # clears the require list at boot
+trusted_senders = []                   # user IDs that bypass the gate
+
+# Second factor
+second_factor = "none"                 # "none" | "totp" | "login" | "both"
+totp_issuer = "LibreFang"              # shown in authenticator apps
+totp_grace_period_secs = 30            # skip TOTP for follow-ups within this window
+totp_tools = []                        # empty = all gated tools require TOTP
+```
+
+### Second-factor scope
+
+| Value   | TOTP required for approvals | TOTP required for dashboard login |
+|---------|:-:|:-:|
+| `none`  | —  | —  |
+| `totp`  | yes | —  |
+| `login` | —  | yes |
+| `both`  | yes | yes |
+
+`totp_tools` accepts glob patterns (`shell_*`) — useful to gate only destructive tools with a
+second factor while leaving read-only tools on the simple approval gate.
+
+### Timeout fallback
+
+When an approval times out, the action falls through to `timeout_fallback`:
+
+- `reject` *(default)* — agent receives a rejection and halts.
+- `allow` — action proceeds. Only safe in fully-trusted autonomous setups.
+- `retry` — re-requests approval once more.
+
+---
+
+## Enabling TOTP
+
+The TOTP flow is entirely UI-driven in the dashboard, but the underlying
+endpoints work from any client.
+
+1. **Open Settings → Security → Second Factor.**
+2. Click **Enable TOTP**. The server calls `POST /api/approvals/totp/setup`
+   which generates a random base32 secret, stores it encrypted in the vault,
+   and returns an `otpauth://` URI plus a PNG QR code.
+3. Scan the QR in Google Authenticator, 1Password, Authy, or any RFC 6238 app.
+4. **Important:** copy the 10 recovery codes that appear once. They are shown
+   only at enrollment and are the only way back in if you lose the device.
+5. Enter a live 6-digit code to confirm enrollment
+   (`POST /api/approvals/totp/confirm`).  The secret becomes active only
+   after a successful confirmation.
+6. Flip `second_factor` in `config.toml` from `none` to `totp`, `login`, or
+   `both` and restart the daemon — or just set it through Settings.
+
+Until step 5 succeeds, the pending secret is inactive and can be discarded
+by calling setup again.
+
+---
+
+## Dashboard Flow
+
+The Approvals page (`/approvals`) shows three tabs:
+
+- **Pending** — live list of waiting requests with the agent, tool name,
+  risk level, and full payload. Click an entry to see the structured
+  arguments the agent intends to pass.
+- **Audit** — paginated audit log with decision, decider, and whether a
+  TOTP code was used (`second_factor_used = 1`).
+- **TOTP** — enrollment/revocation UI with the QR code, recovery codes,
+  and a "regenerate codes" action.
+
+When TOTP is enforced, the approval card shows a 6-digit input. The
+**Batch Approve** button is automatically disabled
+(`approvals.batch_disabled_totp`) to prevent mass approval with a single
+stolen code.
+
+**Modify & Retry.** Rejected tool calls can be edited and re-run from
+the approvals card. Useful when an agent asks for almost the right thing
+but needs a small parameter change (e.g. a different file path).
+
+---
+
+## API Reference
+
+All endpoints live under `/api/approvals`.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/approvals` | GET | List pending requests (add `?audit=1` for the log) |
+| `/api/approvals/{id}/approve` | POST | Approve (body `{ "totp_code": "123456" }` when enforced) |
+| `/api/approvals/{id}/reject` | POST | Reject with optional feedback |
+| `/api/approvals/totp/setup` | POST | Generate secret, QR code, and recovery codes |
+| `/api/approvals/totp/confirm` | POST | Confirm enrollment with a 6-digit code |
+| `/api/approvals/totp/status` | GET | `{ enrolled, confirmed, enforced, remaining_recovery_codes }` |
+| `/api/approvals/totp` | DELETE | Revoke enrollment (requires a valid TOTP or recovery code) |
+
+Approving with TOTP enforced:
+
+```bash
+curl -X POST "http://127.0.0.1:4545/api/approvals/${ID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+A successful verification starts a `totp_grace_period_secs` window during which
+subsequent approvals on the same session skip the TOTP check. This balances
+safety with usability during rapid iteration.
+
+---
+
+## Session-Scoped Batch Resolution
+
+**Source:** `librefang-api/src/routes/approvals.rs`
+
+When multiple agents run concurrently, each session may accumulate several
+pending approval requests at once.  The global `/api/approvals` endpoint
+operates across all pending requests regardless of which session created them.
+The session-scoped endpoints let you narrow the scope to a **single session**,
+making it practical to review and resolve an entire agent's pending queue
+without accidentally approving requests from unrelated sessions.
+
+### New Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/approvals/session/:session_id` | GET | List all pending approval requests belonging to `session_id` |
+| `/api/approvals/session/:session_id/approve_all` | POST | Approve every pending request in the session (body: `{ "totp_code": "…" }` when TOTP is enforced) |
+| `/api/approvals/session/:session_id/reject_all` | POST | Reject every pending request in the session with an optional `{ "reason": "…" }` |
+
+Example — approve everything queued for a session:
+
+```bash
+SESSION_ID="01J3WXYZ..."
+
+curl -X POST \
+  "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}/approve_all" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+Example — list pending requests for a session:
+
+```bash
+curl "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}"
+```
+
+### Difference from `/api/approvals/all`
+
+The existing `GET /api/approvals` endpoint (with no additional path segments)
+returns all pending requests across every active session and agent.  If you
+batch-approve using that list, you act on requests that may belong to entirely
+different agents running different tasks.
+
+The session-scoped endpoints operate **only** on requests whose
+`session_id` field matches the path parameter, giving you fine-grained control
+when multiple concurrent agents are all waiting for human input simultaneously.
+
+### `session_id` Field on Approval Requests
+
+`session_id` is an **optional** field on `ApprovalRequest`.  Approval requests
+created by code paths that predate the session-scoped feature do not carry a
+`session_id` and will never appear in the session-filtered list.  Those older
+requests remain fully accessible through the existing per-UUID endpoints:
+
+```bash
+# Still works for any approval regardless of session_id
+curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+
+---
+
+## Recovery Codes
+
+Ten single-use codes are generated at enrollment and stored in the vault as
+`totp_recovery_codes`. Each code:
+
+- is 10 alphanumeric characters, random;
+- is consumed on use (removed from the vault);
+- can be used in place of a TOTP code anywhere the endpoint accepts
+  `totp_code` — including the `DELETE /api/approvals/totp` revocation flow.
+
+The `GET /api/approvals/totp/status` response exposes `remaining_recovery_codes`
+so the dashboard can warn you before they run out. If they do, revoke and
+re-enroll — this regenerates a fresh set.
+
+---
+
+## Hardening Checklist
+
+1. Set `second_factor = "both"` on anything exposed to the network.
+2. Keep `require_approval` narrow but honest — list every tool that writes
+   to disk, executes shell, or hits a mutating API.
+3. Configure `trusted_senders` only for first-party automation, never for
+   shared webhook IDs.
+4. Use `totp_tools` to require the second factor on `shell_exec`,
+   `file_delete`, and `apply_patch` even when the broader approval list is
+   wider — a compromised first factor then still cannot run destructive tools.
+5. Prefer `timeout_fallback = "reject"` over `"allow"` in production.
+6. Store recovery codes in a password manager, not in the same place as the
+   API token. If both leak, TOTP adds nothing.
+7. Rotate the vault key (`LIBREFANG_VAULT_KEY`, 32 raw bytes) on
+   suspected compromise — this invalidates the stored TOTP secret and
+   forces re-enrollment.
+
+See also: [Security Operations](/security/operations) for loop-guard and
+session-repair guardrails, and the
+[Communication API](/integrations/api/communication) reference for the full
+approval request/response schema.

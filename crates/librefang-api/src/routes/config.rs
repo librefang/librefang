@@ -37,6 +37,99 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+/// Best-effort host identifier for the machine running the daemon.
+///
+/// Exposed only via authenticated endpoints (`/api/status`,
+/// `/api/dashboard/snapshot`) — deliberately **not** surfaced on the
+/// public `/api/version` endpoint, because hostname is a per-machine
+/// identifier that a remote scanner could correlate to a specific
+/// deployment target. `$HOSTNAME` is honoured first for parity with
+/// containers that synthesise it; `hostname(1)` is the POSIX fallback.
+/// Returns `None` only when both fail (rare).
+fn system_hostname() -> Option<String> {
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Best-effort RSS memory probe for the running process, in MB.
+///
+/// Shared between `/api/status` and `/api/dashboard/snapshot` so both
+/// endpoints surface the same number. Returns `None` on platforms where
+/// neither `ps` nor `tasklist` is available, or when parsing the output
+/// fails — callers should render a placeholder in that case rather than
+/// treating `0` as a real reading.
+fn current_process_rss_mb() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("tasklist")
+            .args([
+                "/FI",
+                &format!("PID eq {}", std::process::id()),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| {
+                // tasklist CSV: "name","pid","session","session#","mem usage"
+                let fields: Vec<&str> = s.trim().split(',').collect();
+                fields
+                    .last()
+                    .map(|v| {
+                        v.trim_matches('"')
+                            .replace(" K", "")
+                            .replace(",", "")
+                            .replace(" ", "")
+                    })
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|kb| kb / 1024)
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -81,54 +174,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // Get process RSS memory in MB (best-effort, cross-platform)
-    let memory_used_mb: Option<u64> = {
-        #[cfg(unix)]
-        {
-            std::process::Command::new("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|kb| kb / 1024)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            std::process::Command::new("tasklist")
-                .args([
-                    "/FI",
-                    &format!("PID eq {}", std::process::id()),
-                    "/FO",
-                    "CSV",
-                    "/NH",
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .and_then(|s| {
-                    // tasklist CSV: "name","pid","session","session#","mem usage"
-                    let fields: Vec<&str> = s.trim().split(',').collect();
-                    fields
-                        .last()
-                        .map(|v| {
-                            v.trim_matches('"')
-                                .replace(" K", "")
-                                .replace(",", "")
-                                .replace(" ", "")
-                        })
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map(|kb| kb / 1024)
-                })
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            None
-        }
-    };
+    let memory_used_mb = current_process_rss_mb();
 
     let cfg = state.kernel.config_snapshot();
     Json(serde_json::json!({
@@ -144,6 +190,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
+        "hostname": system_hostname(),
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
@@ -197,7 +244,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
 # Run `librefang init --upgrade` for full annotated config.
 
 log_level = "info"
-api_listen = "0.0.0.0:4545"
+api_listen = "127.0.0.1:4545"
 
 [default_model]
 provider = "{provider}"
@@ -775,6 +822,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
         "duplicate_threshold": config.proactive_memory.duplicate_threshold,
         "max_memories_per_agent": config.proactive_memory.max_memories_per_agent,
+    });
+
+    // ── Auto-Dream (background memory consolidation) ──
+    set!("auto_dream", {
+        "enabled": config.auto_dream.enabled,
+        "min_hours": config.auto_dream.min_hours,
+        "min_sessions": config.auto_dream.min_sessions,
+        "check_interval_secs": config.auto_dream.check_interval_secs,
+        "timeout_secs": config.auto_dream.timeout_secs,
+        "lock_dir": config.auto_dream.lock_dir,
     });
 
     // ── Network (redact shared_secret) ──
@@ -1651,6 +1708,14 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "duplicate_threshold": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
         "max_memories_per_agent": { "type": "number", "min": 0, "max": 100000, "step": 100 }
     }});
+    sec!("auto_dream", { "fields": {
+        "enabled": "boolean",
+        "min_hours": { "type": "number", "min": 0, "max": 168, "step": 0.5 },
+        "min_sessions": { "type": "number", "min": 0, "max": 1000, "step": 1 },
+        "check_interval_secs": { "type": "number", "min": 60, "max": 86400, "step": 60 },
+        "timeout_secs": { "type": "number", "min": 30, "max": 3600, "step": 30 },
+        "lock_dir": "string"
+    }});
     sec!("web", { "fields": {
         "search_provider": { "type": "select", "options": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"] },
         "cache_ttl_minutes": { "type": "number", "min": 0, "max": 10080, "step": 1 }
@@ -1927,22 +1992,53 @@ pub async fn config_set(
         }
     }
 
-    // Validate by parsing the result as KernelConfig before writing
+    // Validate by parsing the result as KernelConfig before writing.
+    // This is the *schema* check (types deserialize cleanly), not the
+    // *business* check (e.g. cross-field invariants).
     let new_toml_str = doc.to_string();
-    if let Err(e) = toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+    let mut parsed_config =
+        match toml::from_str::<librefang_types::config::KernelConfig>(&new_toml_str) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("invalid config after edit: {e}")
+                    })),
+                );
+            }
+        };
+
+    // Business-level validation BEFORE writing to disk. Without this
+    // check, edits like `network_enabled = true` (without setting
+    // `shared_secret`) would persist a definitely-broken config to disk
+    // and only fail at the post-write reload step, leaving the user
+    // with a `saved_reload_failed` status and a TOML file that will
+    // also fail the next daemon startup. Apply clamp_bounds first to
+    // mirror the reload-side preprocessing — otherwise a user-set
+    // out-of-range value would be flagged here even though reload
+    // would silently fix it.
+    parsed_config.clamp_bounds();
+    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed_config)
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "status": "error",
-                "error": format!("invalid config after edit: {e}")
+                "error": format!("invalid config: {}", errors.join("; "))
             })),
         );
     }
 
-    // Backup before write
-    let backup_path = config_path.with_extension("toml.bak");
+    // Backup under backups/ before write (single rolling copy).
     if config_path.exists() {
-        let _ = std::fs::copy(&config_path, &backup_path);
+        if let Some(home_dir) = config_path.parent() {
+            let backups_dir = home_dir.join("backups");
+            if std::fs::create_dir_all(&backups_dir).is_ok() {
+                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+            }
+        }
     }
 
     // Write back — preserves comments, whitespace, and key ordering
@@ -1954,16 +2050,30 @@ pub async fn config_set(
     }
 
     // Trigger reload
-    let reload_status = match state.kernel.reload_config().await {
-        Ok(plan) => {
-            if plan.restart_required {
-                "applied_partial"
-            } else {
-                "applied"
+    let (reload_status, reload_error): (&'static str, Option<String>) =
+        match state.kernel.reload_config().await {
+            Ok(plan) => {
+                let s = if plan.restart_required {
+                    "applied_partial"
+                } else {
+                    "applied"
+                };
+                (s, None)
             }
-        }
-        Err(_) => "saved_reload_failed",
-    };
+            Err(e) => {
+                // Surface the actual reload failure reason so the dashboard
+                // can show users what's wrong (e.g. "validation failed:
+                // network_enabled is true but shared_secret is empty"
+                // instead of an opaque "saved but reload failed"). The TOML
+                // file has already been written at this point, so leaving
+                // the user without a reason is doubly bad — they can't
+                // distinguish "transient kernel hiccup, restart will pick
+                // it up" from "permanently invalid config that breaks
+                // restart too".
+                tracing::warn!(error = %e, %path, "config reload failed after write");
+                ("saved_reload_failed", Some(e))
+            }
+        };
 
     state.kernel.audit().record(
         "system",
@@ -1972,10 +2082,11 @@ pub async fn config_set(
         "completed",
     );
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": reload_status, "path": path})),
-    )
+    let mut body = serde_json::json!({"status": reload_status, "path": path});
+    if let Some(err) = reload_error {
+        body["reload_error"] = serde_json::Value::String(err);
+    }
+    (StatusCode::OK, Json(body))
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
@@ -2093,14 +2204,25 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         .map(|s| s.len())
         .unwrap_or(0);
     let cfg = state.kernel.config_snapshot();
+    // Runtime stats shared with `/api/status` — the dashboard RuntimePage
+    // reads these out of the snapshot for its info panel and KPI tiles.
+    // Anything missing here renders as "-" on the page.
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+    let memory_used_mb = current_process_rss_mb();
     let status = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
         "active_agent_count": active_agent_count,
         "session_count": session_count,
+        "uptime_seconds": uptime_seconds,
+        "memory_used_mb": memory_used_mb,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
         "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "api_listen": cfg.api_listen,
+        "home_dir": state.kernel.home_dir().display().to_string(),
+        "log_level": cfg.log_level,
+        "hostname": system_hostname(),
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
     });
@@ -2119,7 +2241,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         };
         let mut agent_entries_visible: Vec<_> = agent_entries.iter().collect();
         // Sort by last_active descending — matches AgentsPage default query order.
-        agent_entries_visible.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        agent_entries_visible.sort_by_key(|b| std::cmp::Reverse(b.last_active));
         agent_entries_visible
             .iter()
             .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
@@ -2145,10 +2267,16 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         match cached {
             Some(n) => n,
             None => {
-                let skills_dir = state.kernel.home_dir().join("skills");
-                let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-                let _ = registry.load_all();
-                let n = registry.list().len();
+                // Use the kernel's LIVE registry so `skills.disabled` and
+                // `skills.extra_dirs` from config are honoured. The old
+                // fresh-registry path showed disabled skills in the count
+                // and missed extra_dirs entries.
+                let n = state
+                    .kernel
+                    .skill_registry_ref()
+                    .read()
+                    .map(|r| r.list().len())
+                    .unwrap_or(0);
                 *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some((n, std::time::Instant::now()));
                 n

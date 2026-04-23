@@ -341,6 +341,19 @@ fn payload_contains_pii(payload: &str) -> bool {
     if tokenish_mixed {
         return false;
     }
+    // Unix / Slack-style timestamps (e.g. "1747123456.789000") are pure
+    // digits with a single dot. Real phone numbers carry separators,
+    // parentheses, or a leading '+'. Exclude the timestamp shape so it
+    // doesn't trip phone_regex when shipped as MCP arguments like
+    // `message_ts`.
+    let is_numeric_timestamp = trimmed.matches('.').count() == 1
+        && trimmed.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && trimmed
+            .split_once('.')
+            .is_some_and(|(l, r)| l.len() >= 9 && !r.is_empty());
+    if is_numeric_timestamp {
+        return false;
+    }
     email_regex().is_match(payload)
         || phone_regex().is_match(payload)
         || credit_card_regex().is_match(payload)
@@ -559,6 +572,35 @@ mod tests {
     fn test_check_outbound_text_does_not_block_pii_for_agent_message_sink() {
         let sink = TaintSink::agent_message();
         assert!(check_outbound_text_violation("john@example.com", &sink).is_none());
+    }
+
+    #[test]
+    fn test_check_outbound_text_allows_slack_style_timestamp() {
+        // Slack / Unix timestamps like `1747123456.789000` are pure
+        // decimal with a single dot. `phone_regex` would otherwise
+        // match them and the mcp_tool_call sink would block the call
+        // as PII. Common MCP argument shapes like `message_ts`,
+        // `thread_ts`, `event_ts` must pass through.
+        let sink = TaintSink::mcp_tool_call();
+        for ts in ["1747123456.789000", "1234567890.123456", "999999999.000001"] {
+            assert!(
+                check_outbound_text_violation(ts, &sink).is_none(),
+                "timestamp must not be blocked as PII: {ts}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_outbound_text_still_blocks_phone_numbers_for_mcp_sink() {
+        // The timestamp allowlist must not swallow obvious phone
+        // shapes (separators, parens, leading '+').
+        let sink = TaintSink::mcp_tool_call();
+        for phone in ["+1-555-123-4567", "(555) 123-4567", "555.123.4567"] {
+            assert!(
+                check_outbound_text_violation(phone, &sink).is_some(),
+                "phone-shaped payload must still be blocked: {phone}"
+            );
+        }
     }
 
     #[test]

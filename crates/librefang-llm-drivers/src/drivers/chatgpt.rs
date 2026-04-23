@@ -1034,6 +1034,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text("Hello".to_string()),
                 pinned: false,
+                timestamp: None,
             }],
             tools: Vec::new(),
             max_tokens: 1024,
@@ -1044,6 +1045,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1062,11 +1064,13 @@ mod tests {
                     role: Role::System,
                     content: MessageContent::Text("System prompt.".to_string()),
                     pinned: false,
+                    timestamp: None,
                 },
                 Message {
                     role: Role::User,
                     content: MessageContent::Text("Hi".to_string()),
                     pinned: false,
+                    timestamp: None,
                 },
             ],
             tools: Vec::new(),
@@ -1078,6 +1082,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
@@ -1094,6 +1099,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
+                timestamp: None,
             }],
             tools: Vec::new(),
             max_tokens: 0,
@@ -1104,6 +1110,7 @@ mod tests {
             response_format: Some(ResponseFormat::Json),
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");
@@ -1119,6 +1126,7 @@ mod tests {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
+                timestamp: None,
             }],
             tools: Vec::new(),
             max_tokens: 0,
@@ -1139,6 +1147,7 @@ mod tests {
             }),
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         let instructions = api_req.instructions.expect("instructions");

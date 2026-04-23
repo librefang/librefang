@@ -1,16 +1,24 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatCost } from "../lib/format";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders, listActiveHands } from "../api";
+import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
+import { clearAgentHistory } from "../lib/http/client";
+import { useFullConfig } from "../lib/queries/config";
+import { useMediaProviders } from "../lib/queries/media";
+import { useModels } from "../lib/queries/models";
+import { usePendingApprovals } from "../lib/queries/approvals";
+import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { useActiveHandsWhen } from "../lib/queries/hands";
+import { approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -19,10 +27,36 @@ import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
+import {
+  useCreateAgentSession,
+  useDeleteAgentSession,
+  usePatchAgentConfig,
+  useResolveApproval,
+  useStopAgent,
+  useSwitchAgentSession,
+} from "../lib/mutations/agents";
 import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
+
+/**
+ * Format a chat message's timestamp for the message footer.
+ *
+ * Shows time only when the message is from today, otherwise prepends a
+ * short locale date so resumed sessions don't misleadingly show every
+ * message as if it arrived at "today, 3:45 PM" (#2934).
+ */
+function formatMessageTimestamp(ts: Date): string {
+  const now = new Date();
+  const sameDay =
+    ts.getFullYear() === now.getFullYear() &&
+    ts.getMonth() === now.getMonth() &&
+    ts.getDate() === now.getDate();
+  const time = ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  return `${ts.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
 
 interface ChatToolCall extends AgentTool {
   _call_id?: string;
@@ -53,23 +87,32 @@ const SLASH_COMMANDS = [
   { cmd: "/clear",   descKey: "cmd_clear",   noArgs: true },
   { cmd: "/agents",  descKey: "cmd_agents",  noArgs: true },
   { cmd: "/info",    descKey: "cmd_info",    noArgs: true },
-  { cmd: "/new",     descKey: "cmd_new",     noArgs: true },
-  { cmd: "/compact", descKey: "cmd_compact", noArgs: true },
-  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true },
-  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true },
-  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true },
-  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>" },
-  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true },
-  { cmd: "/context", descKey: "cmd_context", noArgs: true },
-  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]" },
-  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true },
-  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true },
-  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true },
-  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true },
+  { cmd: "/new",     descKey: "cmd_new",     noArgs: true, backend: true },
+  { cmd: "/compact", descKey: "cmd_compact", noArgs: true, backend: true },
+  { cmd: "/reset",   descKey: "cmd_reset",   noArgs: true, backend: true },
+  { cmd: "/reboot",  descKey: "cmd_reboot",  noArgs: true, backend: true },
+  { cmd: "/stop",    descKey: "cmd_stop",    noArgs: true, backend: true },
+  { cmd: "/model",   descKey: "cmd_model",   argsHint: "<provider/model>", backend: true },
+  { cmd: "/usage",   descKey: "cmd_usage",   noArgs: true, backend: true },
+  { cmd: "/context", descKey: "cmd_context", noArgs: true, backend: true },
+  { cmd: "/verbose", descKey: "cmd_verbose", argsHint: "[level]", backend: true },
+  { cmd: "/budget",  descKey: "cmd_budget",  noArgs: true, backend: true },
+  { cmd: "/peers",   descKey: "cmd_peers",   noArgs: true, backend: true },
+  { cmd: "/a2a",     descKey: "cmd_a2a",     noArgs: true, backend: true },
+  { cmd: "/queue",   descKey: "cmd_queue",   noArgs: true, backend: true },
 ];
 
 // Commands that require backend processing via WebSocket command protocol
-const BACKEND_COMMANDS = ["new", "reset", "reboot", "compact", "stop", "model", "usage", "context", "verbose", "budget", "peers", "a2a", "queue"];
+const BACKEND_COMMANDS = SLASH_COMMANDS.filter(c => c.backend).map(c => c.cmd.slice(1));
+
+const REMARK_PLUGINS = [remarkMath];
+const REHYPE_PLUGINS = [rehypeKatex];
+
+let _nextMessageId = 0;
+function makeMessageId(prefix: string): string {
+  _nextMessageId += 1;
+  return `${prefix}-${Date.now()}-${_nextMessageId}`;
+}
 
 
 // WebSocket hook with auto-reconnect
@@ -150,8 +193,9 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: any[] = [], sessionVersion = 0, onModelSwitch?: () => void) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void) {
   const { t } = useTranslation();
+  const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
@@ -167,6 +211,27 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       return next;
     });
   }, []);
+  // Tracks the bot message id of the most recent send per agent. Message
+  // handlers for an older turn must NOT clear `isLoading` when a newer turn
+  // is already in flight (user can now type + send while the previous turn's
+  // `response` event is still pending — see `ChatInput` inputDisabled split).
+  const latestTurnRef = useRef<Record<string, string>>({});
+  // Per-agent in-flight turn lifecycle state, hoisted out of sendMessage's
+  // closure so stopMessage can reach `cleanup`, `fallbackTimer`, and
+  // `responded`. Without this, stopMessage POSTs /stop but the WS fallback
+  // watchdog stays armed and 180s later re-sends the stopped message over
+  // HTTP (#2787 review).
+  const activeTurnsRef = useRef<Record<string, {
+    cleanup?: () => void;
+    fallbackTimer?: ReturnType<typeof setTimeout> | null;
+    responded: boolean;
+  }>>({});
+  const finishTurnIfCurrent = useCallback((agent: string, botId: string) => {
+    if (latestTurnRef.current[agent] === botId) {
+      setAgentLoading(agent, false);
+      delete latestTurnRef.current[agent];
+    }
+  }, [setAgentLoading]);
   // Garbage-collect loading flags for agents that no longer exist so the
   // map doesn't accumulate dead entries over a long session.
   useEffect(() => {
@@ -179,6 +244,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       }
       return changed ? next : prev;
     });
+
+    const latestTurns = latestTurnRef.current;
+    for (const id of Object.keys(latestTurns)) {
+      if (!alive.has(id)) delete latestTurns[id];
+    }
   }, [agents]);
   const { ws, wsConnected, onDropRef } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
@@ -216,13 +286,18 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
   const messagesRef = useRef<ChatMessage[]>(messages);
   messagesRef.current = messages;
   useEffect(() => {
+    if (!agentId) {
+      prevAgentRef.current = null;
+      return;
+    }
+
+    prevAgentRef.current = agentId;
+    const ownedAgentId = agentId;
+
     return () => {
-      if (prevAgentRef.current) {
-        sessionCache.set(prevAgentRef.current, messagesRef.current);
-      }
+      sessionCache.set(ownedAgentId, messagesRef.current);
     };
   }, [agentId]);
-  useEffect(() => { prevAgentRef.current = agentId; }, [agentId]);
 
   // Load history — use cache if available, otherwise fetch
   // sessionVersion changes force a fresh load (skip cache)
@@ -270,7 +345,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                   ? "system"
                   : "assistant",
               content,
-              timestamp: new Date(),
+              // Use the real server-side timestamp when available so
+              // resumed sessions render the original send time instead of
+              // the page-load time. Fall back to `now` only for messages
+              // persisted before the backend started stamping (#2934).
+              timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
               tools: msg.tools,
             }];
           });
@@ -284,9 +363,26 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           }
         }
       })
-      .catch(() => {})
+      .catch(() => { /* Session load failure — user will see empty chat */ })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
+
+  const clearHistory = useCallback(async () => {
+    if (!agentId) {
+      setMessages([]);
+      return;
+    }
+    try {
+      await clearAgentHistory(agentId);
+      sessionCache.delete(agentId);
+      if (prevAgentRef.current === agentId) {
+        messagesRef.current = [];
+      }
+      setMessages([]);
+    } catch (error) {
+      onClearError?.(error instanceof Error ? error.message : t("common.error"));
+    }
+  }, [agentId, onClearError, t]);
 
   // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
@@ -297,8 +393,8 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     if (trimmed.startsWith("/")) {
       const sysMsg = (text: string) => {
         setMessages(prev => [...prev,
-          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
-          { id: `sys-${Date.now()}`, role: "system" as const, content: text, timestamp: new Date() }
+          { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
+          { id: makeMessageId("sys"), role: "system" as const, content: text, timestamp: new Date() }
         ]);
       };
       if (trimmed === "/help") {
@@ -307,7 +403,10 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         ).join("\n"));
         return;
       }
-      if (trimmed === "/clear") { setMessages([]); return; }
+      if (trimmed === "/clear") {
+        void clearHistory();
+        return;
+      }
       if (trimmed === "/agents") {
         const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
         sysMsg(names || t("chat.no_agents_available"));
@@ -325,7 +424,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
       const cmdArgs = trimmed.slice(1 + cmd.length).trim();
       if (BACKEND_COMMANDS.includes(cmd)) {
         setMessages(prev => [...prev,
-          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
+          { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
         ]);
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
           const handleCmdResponse = (event: MessageEvent) => {
@@ -337,11 +436,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                 // /new and /reset clear the backend session, so clear frontend too
                 if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
                   setMessages([
-                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
                 } else {
                   setMessages(prev => [...prev,
-                    { id: `sys-${Date.now()}`, role: "system" as const, content: responseText, timestamp: new Date() },
+                    { id: makeMessageId("sys"), role: "system" as const, content: responseText, timestamp: new Date() },
                   ]);
                 }
                 // Refresh agent data so model/provider badge reflects the change
@@ -368,14 +467,14 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
     const sendAgentId = agentId;
 
     const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
+      id: makeMessageId("user"),
       role: "user",
       content: trimmed,
       timestamp: new Date(),
     };
 
     const botMsg: ChatMessage = {
-      id: `bot-${Date.now()}`,
+      id: makeMessageId("bot"),
       role: "assistant",
       content: "",
       timestamp: new Date(),
@@ -384,6 +483,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     setMessages(prev => [...prev, userMsg, botMsg]);
     setAgentLoading(sendAgentId, true);
+    latestTurnRef.current[sendAgentId] = botMsg.id;
 
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
@@ -418,20 +518,34 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
           m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
         ));
       } finally {
-        setAgentLoading(sendAgentId, false);
+        finishTurnIfCurrent(sendAgentId, botMsg.id);
       }
     };
 
     // Try WebSocket streaming first
     if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
       try {
-        let responded = false;
-        let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+        // Hoist per-turn lifecycle state onto the ref so stopMessage can tear
+        // down the WS listener + watchdog. Any prior entry for this agent
+        // should already have been cleaned up by its own terminal path, but
+        // be defensive and clear it.
+        const prevTurn = activeTurnsRef.current[sendAgentId];
+        if (prevTurn) {
+          prevTurn.responded = true;
+          if (prevTurn.fallbackTimer) clearTimeout(prevTurn.fallbackTimer);
+          prevTurn.cleanup?.();
+        }
+        const turn: {
+          cleanup?: () => void;
+          fallbackTimer?: ReturnType<typeof setTimeout> | null;
+          responded: boolean;
+        } = { responded: false, fallbackTimer: null };
+        activeTurnsRef.current[sendAgentId] = turn;
 
         const resetFallbackTimer = () => {
-          if (fallbackTimer) clearTimeout(fallbackTimer);
-          fallbackTimer = setTimeout(() => {
-            if (!responded) {
+          if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
+          turn.fallbackTimer = setTimeout(() => {
+            if (!turn.responded) {
               cleanup();
               sendViaHttp();
             }
@@ -439,11 +553,15 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
         };
 
         const cleanup = () => {
-          responded = true;
-          if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+          turn.responded = true;
+          if (turn.fallbackTimer) { clearTimeout(turn.fallbackTimer); turn.fallbackTimer = null; }
           onDropRef.current = null;
           ws.current?.removeEventListener("message", handleMessage);
+          if (activeTurnsRef.current[sendAgentId] === turn) {
+            delete activeTurnsRef.current[sendAgentId];
+          }
         };
+        turn.cleanup = cleanup;
 
         // Set up message handler for this response
         const handleMessage = (event: MessageEvent) => {
@@ -476,7 +594,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
             } else if (data.type === "tool_start") {
               // Agent started a tool call — add a running tool entry
               const toolName = typeof data.tool === "string" ? data.tool : "unknown";
-              const toolId = data.id || `tool-${Date.now()}`;
+              const toolId = data.id || makeMessageId("tool");
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? { ...m, tools: [...(m.tools || []), { name: toolName, running: true, expanded: false, is_error: false, input: undefined, result: undefined, _call_id: toolId }] }
@@ -520,19 +638,28 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
               }
             } else if (data.type === "silent_complete") {
               updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
-              setAgentLoading(sendAgentId, false);
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             } else if (data.type === "error") {
               const error = data.content || "WebSocket error";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
               ));
-              // Don't cleanup immediately — the agent may recover and send a final
-              // response. Shorten the inactivity window to 30s so the user isn't
-              // blocked forever if the agent truly failed.
-              if (fallbackTimer) clearTimeout(fallbackTimer);
-              fallbackTimer = setTimeout(() => {
-                if (!responded) { cleanup(); sendViaHttp(); }
+              // Release the loading flag so the send button re-enables and the
+              // "streaming" badge drops — the user just saw an error and
+              // should be able to retry immediately (#2745). Keep the WS
+              // listener + recovery fallback timer alive in case the agent
+              // does send a late `response` event; those handlers operate on
+              // the same botMsg.id and will overwrite the error state if
+              // recovery actually happens.
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
+              // Don't cleanup the listener immediately — the agent may recover
+              // and send a final response. Shorten the inactivity window to
+              // 30s so the WS doesn't stay half-open forever if the failure
+              // is terminal.
+              if (turn.fallbackTimer) clearTimeout(turn.fallbackTimer);
+              turn.fallbackTimer = setTimeout(() => {
+                if (!turn.responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
@@ -548,7 +675,7 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
                     }
                   : m
               ));
-              setAgentLoading(sendAgentId, false);
+              finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             }
           } catch {
@@ -561,8 +688,11 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
         // Register fallback: if WS drops mid-stream, retry via HTTP
         onDropRef.current = () => {
-          if (!responded) {
+          if (!turn.responded) {
             ws.current?.removeEventListener("message", handleMessage);
+            if (activeTurnsRef.current[sendAgentId] === turn) {
+              delete activeTurnsRef.current[sendAgentId];
+            }
             sendViaHttp();
           }
         };
@@ -586,11 +716,45 @@ function useChatMessages(agentId: string | null, agents: any[] = [], sessionVers
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory]);
 
-  const clearHistory = useCallback(() => setMessages([]), []);
+  // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
+  // the tokio task on the kernel side) and optimistically finalizes any
+  // streaming messages for this agent so the input re-enables immediately —
+  // we don't wait for the WS to emit a terminal event.
+  const stopMessage = useCallback(async () => {
+    if (!agentId) return;
+    const targetId = agentId;
+    updateAgentMessages(targetId, prev => prev.map(m =>
+      m.isStreaming ? { ...m, isStreaming: false } : m,
+    ));
+    const pendingBotId = latestTurnRef.current[targetId];
+    if (pendingBotId) finishTurnIfCurrent(targetId, pendingBotId);
+    // Tear down the in-flight WS turn: mark responded, clear the 180s/30s
+    // watchdog, and detach the message listener. Without this the watchdog
+    // would fire after the backend aborts (WS goes silent) and re-send the
+    // stopped message over HTTP (#2787 review).
+    const turn = activeTurnsRef.current[targetId];
+    if (turn) {
+      turn.responded = true;
+      if (turn.fallbackTimer) {
+        clearTimeout(turn.fallbackTimer);
+        turn.fallbackTimer = null;
+      }
+      turn.cleanup?.();
+      // cleanup() deletes the entry itself, but guard against custom
+      // cleanup implementations.
+      delete activeTurnsRef.current[targetId];
+    }
+    try {
+      await stopAgentMutation.mutateAsync(targetId);
+    } catch {
+      // Backend stop failure is non-fatal for the UI — the run may have
+      // completed between user click and request. UI is already unblocked.
+    }
+  }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, clearHistory, wsConnected };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -624,9 +788,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     return (
       <div className="flex justify-center py-6">
         <div className="flex items-center gap-4">
-          <div className="h-px w-16 bg-gradient-to-r from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-r from-transparent to-border-subtle" />
           <span className="text-[10px] font-medium text-text-dim/40 tracking-[0.2em] uppercase">{message.content}</span>
-          <div className="h-px w-16 bg-gradient-to-l from-transparent to-border-subtle" />
+          <div className="h-px w-16 bg-linear-to-l from-transparent to-border-subtle" />
         </div>
       </div>
     );
@@ -720,8 +884,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
-              remarkPlugins={[remarkMath]}
-              rehypePlugins={[rehypeKatex]}
+              remarkPlugins={REMARK_PLUGINS}
+              rehypePlugins={REHYPE_PLUGINS}
             >
               {displayContent}
             </MarkdownContent>
@@ -732,7 +896,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
         {/* Meta info + action buttons */}
         <div className={`flex items-center justify-between w-full mt-1.5 ${isUser ? "flex-row-reverse" : ""}`}>
           <div className="flex items-center gap-2 text-[10px] text-text-dim/50">
-            <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            <span>{formatMessageTimestamp(message.timestamp)}</span>
             {!message.isStreaming && usageFooter !== "off" && (() => {
               const showTokens = usageFooter === "full" || usageFooter === "tokens";
               const showCost = (usageFooter === "full" || usageFooter === "cost") && message.cost_usd !== undefined && message.cost_usd > 0;
@@ -803,7 +967,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
 });
 
 // Input box - with shortcut hints
-function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -826,12 +990,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
     [isSlashPrefix, message],
   );
 
-  const modelQuery = useQuery({
-    queryKey: ["models", "completion"],
-    queryFn: () => listModels(),
-    enabled: isModelArg,
-    staleTime: 60_000,
-  });
+  const modelQuery = useModels({}, { enabled: isModelArg });
 
   const modelArg = isModelArg ? message.slice(message.indexOf(" ") + 1).toLowerCase() : "";
   const filteredModels = useMemo(() => {
@@ -905,13 +1064,19 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
   }, [message]);
 
   const effectiveDisabled = disabled || !!authMissing;
+  // Textarea only locked while the agent is actively streaming text. Once the
+  // model emits `typing:stop` the user can start composing the next message
+  // even while background post-processing (memory save) is still running —
+  // the send button stays gated on `effectiveDisabled` until the `response`
+  // event arrives with final tokens/cost.
+  const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
       {/* Auth missing warning */}
       {authMissing && (
         <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
+          <AlertCircle className="h-4 w-4 shrink-0" />
           <span>{authStatus === "local_offline"
             ? t("chat.provider_offline", { provider: providerName || "unknown" })
             : t("chat.auth_missing", { provider: providerName || "unknown" })}</span>
@@ -995,7 +1160,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
               }
             }}
             placeholder={voiceInput.isRecording ? t("chat.voice_recording") : voiceInput.isTranscribing ? t("chat.voice_transcribing") : placeholder}
-            disabled={effectiveDisabled}
+            disabled={textareaDisabled}
             rows={1}
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
@@ -1004,7 +1169,7 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
           <button
             type="button"
             onClick={sttAvailable ? voiceInput.toggleRecording : undefined}
-            disabled={!sttAvailable || effectiveDisabled || voiceInput.isTranscribing}
+            disabled={!sttAvailable || textareaDisabled || voiceInput.isTranscribing}
             title={!sttAvailable ? t("chat.voice_not_configured") : voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
             className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
               voiceInput.isRecording
@@ -1017,29 +1182,44 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, authStatus, pro
             {voiceInput.isRecording ? <MicOff className="h-4 w-4" /> : voiceInput.isTranscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
           </button>
         )}
-        <button
-          type="submit"
-          disabled={!message.trim() || effectiveDisabled}
-          className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-        >
-          <Send className="h-4 w-4" />
-          <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
-            {t("chat.send_hint")}
-          </span>
-        </button>
+        {isStreaming && onStop ? (
+          <button
+            type="button"
+            onClick={onStop}
+            title={t("chat.stop_hint")}
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
+          >
+            <Square className="h-4 w-4 fill-current" />
+            <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
+              {t("chat.stop_hint")}
+            </span>
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!message.trim() || effectiveDisabled}
+            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+          >
+            <Send className="h-4 w-4" />
+            <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
+              {t("chat.send_hint")}
+            </span>
+          </button>
+        )}
       </div>
     </form>
   );
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   agentId: string; onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
+  onOpenConfig: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1048,10 +1228,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   // Model popover state
   const [modelOpen, setModelOpen] = useState(false);
   const modelRef = useRef<HTMLDivElement>(null);
-  const [models, setModels] = useState<ModelItem[]>([]);
   const [modelSearch, setModelSearch] = useState("");
-  const [modelLoading, setModelLoading] = useState(false);
-  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
   const [patchError, setPatchError] = useState<string | null>(null);
   const [patchPending, setPatchPending] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
@@ -1059,6 +1236,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+  const patchAgentConfigMutation = usePatchAgentConfig();
+  const modelsQuery = useModels(
+    { available: true },
+    {
+      enabled: modelOpen,
+      // Model picker opens on demand. Keep query idle until popover visible.
+      staleTime: 0,
+    },
+  );
 
   // Clear optimistic model once the real modelName catches up
   useEffect(() => {
@@ -1093,17 +1279,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     return () => document.removeEventListener("mousedown", handler);
   }, [modelOpen]);
 
-  // Fetch available models lazily when popover first opens
-  useEffect(() => {
-    if (!modelOpen || models.length > 0 || modelLoading) return;
-    setModelLoading(true);
-    setModelFetchError(null);
-    listModels({ available: true })
-      .then(res => setModels(res.models))
-      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
-      .finally(() => setModelLoading(false));
-  }, [modelOpen, models.length, modelLoading]);
-
+  const models = modelsQuery.data?.models ?? [];
+  const modelLoading = modelsQuery.isLoading || modelsQuery.isFetching;
+  const modelFetchError = modelsQuery.error ? t("chat.unable_to_load_models") : null;
   const visibleModels = useMemo(() => filterVisible(models, hiddenSet), [models, hiddenSet]);
 
   // Unique providers derived from loaded models, sorted alphabetically
@@ -1143,7 +1321,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     setPatchPending(true);
     setPatchError(null);
     try {
-      await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
+      await patchAgentConfigMutation.mutateAsync({
+        agentId,
+        config: { model: model.id, provider: model.provider },
+      });
       setModelOpen(false);
       setSelectedProvider("");
       setModelSearch("");
@@ -1157,7 +1338,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   }
 
   return (
-    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
@@ -1230,7 +1411,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   <div className="px-2.5 py-2 space-y-1.5">
                     <p className="text-xs text-error">{modelFetchError}</p>
                     <button
-                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      onClick={() => { void modelsQuery.refetch(); }}
                       className="text-[10px] text-brand hover:underline"
                     >
                       {t("chat.retry")}
@@ -1308,11 +1489,11 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             <div className="hidden sm:flex items-center gap-1.5">
               <button
                 onClick={() => {
-                  if (noKey && mode === "off") {
-                    // No search key configured — navigate to Config page Web section
-                    window.location.href = "/dashboard/config";
-                    return;
-                  }
+                    if (noKey && mode === "off") {
+                      // No search key configured — navigate to Config page Web section
+                      onOpenConfig();
+                      return;
+                    }
                   const cycle: Record<string, "off" | "auto" | "always"> = { off: "auto", auto: "always", always: "off" };
                   onWebSearchChange(cycle[mode] || "auto");
                 }}
@@ -1336,7 +1517,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               </button>
               {isActive && noKey && (
                 <button
-                  onClick={() => { window.location.href = "/dashboard/config"; }}
+                  onClick={onOpenConfig}
                   className="text-[9px] text-warning hover:text-warning/80 underline hidden xl:inline"
                 >
                   {t("chat.web_search_configure", { defaultValue: "Configure API key" })}
@@ -1448,17 +1629,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 // ---------------------------------------------------------------------------
 function useApprovalPoller(agentId: string | null) {
   const queryClient = useQueryClient();
-  const approvalsQuery = useQuery({
-    queryKey: ["approvals", "pending", agentId],
-    queryFn: () => listPendingApprovals(agentId!),
-    enabled: !!agentId,
-    refetchInterval: 5000,
+  const approvalsQuery = usePendingApprovals(agentId ?? undefined, {
+    enabled: Boolean(agentId), // Poll approvals only when chat has concrete agent selected.
   });
 
   const remove = useCallback((id: string) => {
     queryClient.setQueryData<ApprovalItem[]>(
-      ["approvals", "pending", agentId],
-      (prev) => prev?.filter((a) => a.id !== id) ?? [],
+      approvalKeys.pending(agentId),
+      (prev) => prev?.filter((a: ApprovalItem) => a.id !== id) ?? [],
     );
   }, [agentId, queryClient]);
 
@@ -1485,11 +1663,12 @@ function riskStyle(level?: string) {
 function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onResolved: (id: string) => void }) {
   const { t } = useTranslation();
   const [resolving, setResolving] = useState<"approve" | "deny" | null>(null);
+  const resolveApprovalMutation = useResolveApproval();
 
   const handleResolve = async (approved: boolean) => {
     setResolving(approved ? "approve" : "deny");
     try {
-      await resolveApproval(approval.id, approved);
+      await resolveApprovalMutation.mutateAsync({ id: approval.id, approved });
       onResolved(approval.id);
     } catch {
       // Approval may have already been resolved or timed out
@@ -1566,7 +1745,6 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 
 export function ChatPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const navigate = useNavigate();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
@@ -1574,6 +1752,10 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
+  const createSessionMutation = useCreateAgentSession();
+  const switchSessionMutation = useSwitchAgentSession();
+  const deleteSessionMutation = useDeleteAgentSession();
+  const patchAgentConfigMutation = usePatchAgentConfig();
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1582,11 +1764,7 @@ export function ChatPage() {
   }, [navigate]);
 
   // Check TTS provider availability
-  const mediaProvidersQuery = useQuery({
-    queryKey: ["media-providers"],
-    queryFn: listMediaProviders,
-    staleTime: 60000,
-  });
+  const mediaProvidersQuery = useMediaProviders();
   const ttsAvailable = useMemo(
     () => (mediaProvidersQuery.data ?? []).some(p => p.configured && p.capabilities.includes("text_to_speech")),
     [mediaProvidersQuery.data],
@@ -1601,7 +1779,7 @@ export function ChatPage() {
     }
   }, [addToast, t]);
 
-  const configQuery = useQuery({ queryKey: ["config"], queryFn: getFullConfig, staleTime: 60000 });
+  const configQuery = useFullConfig();
   const usageFooter = (configQuery.data as Record<string, unknown>)?.usage_footer as string | undefined ?? "full";
   const mediaConfigRaw = (configQuery.data as Record<string, unknown>)?.media as Record<string, unknown> | undefined;
   const sttAvailable = mediaConfigRaw?.stt_available === true;
@@ -1654,20 +1832,10 @@ export function ChatPage() {
     );
   }, [showHandAgents]);
 
-  const agentsQuery = useQuery({
-    queryKey: ["agents", "list", "chat", showHandAgents],
-    queryFn: () => listAgents({ includeHands: showHandAgents }),
-    staleTime: 30000,
-  });
+  const agentsQuery = useAgents({ includeHands: showHandAgents });
   // Check if web search is available (any search API key configured)
-  const webSearchAvailable = ((configQuery.data as any)?.web?.search_available === true);
-  const handsQuery = useQuery({
-    queryKey: ["hands", "active", "chat"],
-    queryFn: listActiveHands,
-    enabled: showHandAgents,
-    staleTime: 30000,
-    refetchInterval: 30000,
-  });
+  const webSearchAvailable = ((configQuery.data as Record<string, unknown>)?.web as Record<string, unknown> | undefined)?.search_available === true;
+  const handsQuery = useActiveHandsWhen(showHandAgents);
 
   const sortedAgents = useMemo(
     () =>
@@ -1701,12 +1869,18 @@ export function ChatPage() {
   );
   // Session state — bump version to force message reload after switch
   const [sessionVersion, setSessionVersion] = useState(0);
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
-    () => queryClient.invalidateQueries({ queryKey: ["agents", "list"] }),
+    () => void agentsQuery.refetch(),
+    (message) => addToast(message, "error"),
   );
+  // Track LLM text streaming (cleared on `typing:stop`) independently of
+  // `isLoading`, which stays true through post-processing until the final
+  // `response` event. Textarea unblocks as soon as streaming ends so the user
+  // can compose the next message immediately.
+  const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
@@ -1724,7 +1898,7 @@ export function ChatPage() {
       "",
     ];
     for (const m of messages) {
-      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as any).toISOString();
+      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as string).toISOString();
       const role = m.role === "assistant" ? agentName : m.role;
       lines.push(`### ${role} · ${ts}`);
       lines.push("");
@@ -1746,44 +1920,34 @@ export function ChatPage() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   // Per-agent session list
-  const sessionsQuery = useQuery({
-    queryKey: ["agent-sessions", selectedAgentId],
-    queryFn: () => listAgentSessions(selectedAgentId!),
-    enabled: !!selectedAgentId,
-    staleTime: 10_000,
-  });
+  const sessionsQuery = useAgentSessions(selectedAgentId);
   const activeSessionId = useMemo(() => {
-    const active = sessionsQuery.data?.find((s: any) => s.active);
+    const active = sessionsQuery.data?.find((s: SessionListItem) => s.active);
     return active?.session_id;
   }, [sessionsQuery.data]);
 
   const handleSwitchSession = useCallback(async (sessionId: string) => {
     if (!selectedAgentId) return;
-    await switchAgentSession(selectedAgentId, sessionId);
-    queryClient.invalidateQueries({ queryKey: ["agents"] });
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, queryClient]);
+  }, [selectedAgentId, switchSessionMutation]);
 
   const handleNewSession = useCallback(async () => {
     if (!selectedAgentId) return;
-    const result = await createAgentSession(selectedAgentId);
-    await switchAgentSession(selectedAgentId, result.session_id);
-    queryClient.invalidateQueries({ queryKey: ["agents"] });
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
+    const result = await createSessionMutation.mutateAsync({ agentId: selectedAgentId });
+    await switchSessionMutation.mutateAsync({ agentId: selectedAgentId, sessionId: result.session_id });
     setSessionVersion(v => v + 1);
-  }, [selectedAgentId, queryClient]);
+  }, [selectedAgentId, createSessionMutation, switchSessionMutation]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
-    await deleteSession(sessionId);
-    queryClient.invalidateQueries({ queryKey: ["agent-sessions", selectedAgentId] });
-  }, [selectedAgentId, queryClient]);
+    await deleteSessionMutation.mutateAsync({ sessionId, agentId: selectedAgentId });
+  }, [deleteSessionMutation, selectedAgentId]);
 
   // If the current selection is no longer visible (e.g. hand agents toggled
   // off while a hand-spawned agent was selected), clear it so the auto-select
@@ -1833,7 +1997,7 @@ export function ChatPage() {
     >
       <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
         selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
         {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
@@ -1848,10 +2012,10 @@ export function ChatPage() {
           <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
             {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </p>
-          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
-          {agent.auth_status === "configured_cli" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
-          {agent.auth_status === "auto_detected" && <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
-          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning flex-shrink-0" />}
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
+          {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
+          {agent.auth_status === "auto_detected" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
+          {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
         </div>
         {isCoordinator ? (
           <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
@@ -1863,7 +2027,7 @@ export function ChatPage() {
           </p>
         )}
       </div>
-      <ArrowRight className={`h-4 w-4 flex-shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+      <ArrowRight className={`h-4 w-4 shrink-0 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
     </button>
   );
 
@@ -1881,7 +2045,7 @@ export function ChatPage() {
             <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
-            onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+            onClick={() => void agentsQuery.refetch()}
             className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
@@ -1892,7 +2056,7 @@ export function ChatPage() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main flex-col">
+        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -1982,7 +2146,7 @@ export function ChatPage() {
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
-              onClear={clearHistory}
+              onClear={() => { void clearHistory(); }}
               onExport={handleExport}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
@@ -1993,15 +2157,18 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
-              onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+              onModelChange={() => void agentsQuery.refetch()}
+              onOpenConfig={() => navigate({ to: "/config" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               onWebSearchChange={async (mode) => {
                 try {
-                  await patchAgentConfig(selectedAgentId, { web_search_augmentation: mode });
-                  queryClient.invalidateQueries({ queryKey: ["agents", "list"] });
-                  queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] });
-                } catch {}
+                  await patchAgentConfigMutation.mutateAsync({
+                    agentId: selectedAgentId,
+                    config: { web_search_augmentation: mode },
+                  });
+                  await agentsQuery.refetch();
+                } catch { /* Config update failure — non-critical */ }
               }}
             />
           )}
@@ -2011,9 +2178,9 @@ export function ChatPage() {
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
-                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
+                <div className="absolute inset-0 bg-linear-to-b from-transparent via-transparent to-main/50" />
                 <div className="relative">
-                  <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
+                  <div className="w-24 h-24 rounded-3xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
                     <MessageCircle className="h-12 w-12 text-brand" />
                   </div>
                   <div className="absolute inset-0 rounded-3xl bg-brand/10 animate-pulse" />
@@ -2023,7 +2190,7 @@ export function ChatPage() {
               </div>
             ) : messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
+                <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
                   <Bot className="h-10 w-10 text-brand" />
                 </div>
                 <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
@@ -2058,8 +2225,11 @@ export function ChatPage() {
           <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
+              onStop={stopMessage}
+              isStreaming={isStreaming}
               disabled={isLoading}
-              placeholder={isLoading ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+              inputDisabled={isStreaming}
+              placeholder={isStreaming ? t("chat.generating") : selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
               authMissing={isAuthUnavailable(selectedAgent?.auth_status)}
               authStatus={selectedAgent?.auth_status}
               providerName={selectedAgent?.model_provider}
@@ -2072,3 +2242,4 @@ export function ChatPage() {
     </div>
   );
 }
+

@@ -4,6 +4,25 @@ LibreFang's memory system provides persistent storage, semantic search, and know
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Session Management](#session-management)
+- [Memory Operations](#memory-operations)
+- [Vector Search](#vector-search)
+- [Knowledge Graph](#knowledge-graph)
+- [Session Compaction](#session-compaction)
+- [Background Consolidation (Auto-Dream)](#background-consolidation-auto-dream)
+- [Memory Provider Plugin API](#memory-provider-plugin-api)
+- [Usage Tracking](#usage-tracking)
+- [API Endpoints](#api-endpoints)
+- [Best Practices](#best-practices)
+- [Troubleshooting](#troubleshooting)
+
+---
+
 ## Overview
 
 The LibreFang memory system includes:
@@ -12,6 +31,8 @@ The LibreFang memory system includes:
 - **Vector Embeddings** - Semantic search capability
 - **Knowledge Graph** - Entities and relationships
 - **Session Management** - Cross-channel memory
+- **Session Compaction** - Shrinks an active session when it grows past a threshold
+- **Auto-Dream** - Optional, opt-in background consolidation that asks agents to periodically reflect on and curate their own long-term memory. See [Background Consolidation (Auto-Dream)](#background-consolidation-auto-dream).
 - **Usage Tracking** - Cost and usage statistics
 
 <Note>
@@ -248,6 +269,133 @@ librefang session compaction-status
 2. **Extract Key Information**
 3. **Generate Summary**
 4. **Keep Tool Call History**
+
+---
+
+## Background Consolidation (Auto-Dream)
+
+Session compaction keeps a **single session** from overflowing. Auto-dream is a complementary mechanism that works at a longer time horizon: once in a while it wakes an opted-in agent up, hands it a four-phase prompt (Orient / Gather / Consolidate / Prune), and lets the agent curate its own long-term memory across recent sessions — upserting durable insights via `memory_store` and trimming stale entries.
+
+<Note>
+**Disabled by default.** Auto-dream spends real tokens on a recurring schedule, so both the global switch and every agent's opt-in flag are `false` unless you turn them on. See [`[auto_dream]`](/configuration/core#auto_dream) for the full reference.
+</Note>
+
+### Enabling it
+
+Two toggles must both be `true`:
+
+```toml
+# ~/.librefang/config.toml
+[auto_dream]
+enabled = true
+min_hours = 24         # earliest a given agent can re-dream
+min_sessions = 5       # require this much real activity since the last dream
+```
+
+```toml
+# agent manifest (.toml)
+auto_dream_enabled = true
+
+# Optional per-agent overrides of the global thresholds
+auto_dream_min_hours = 168      # weekly, for a quiet agent
+auto_dream_min_sessions = 1     # after every session, for a chatty one
+```
+
+### How a dream runs
+
+1. The primary trigger is the `AgentLoopEnd` hook — the moment an agent finishes a turn, the kernel evaluates its four gates in order: global enabled → time since last dream → session activity count → per-agent file lock. Any miss and the dream is skipped. A sparse backstop scheduler (default `check_interval_secs = 86400` / 1 day) covers opted-in agents that never turn (e.g. channel bots waiting on inbound traffic).
+2. On a pass, the agent is invoked as a **forked turn** off the canonical session via `kernel.run_forked_agent_streaming` — same system prompt, tools, and message prefix as the parent turn so Anthropic's prompt cache hits. Fork turns don't persist their messages back to canonical session, so the user's conversation history isn't polluted by consolidation chatter. A runtime tool allowlist (`memory_store` / `memory_recall` / `memory_list`) is enforced at execute time, not request-build time, so the schema stays byte-identical to the parent and cache alignment holds. Prompt-injected dreams that try a non-memory tool get a synthetic error back and can't actually invoke anything outside the allowlist.
+3. Streamed progress (phase, tool calls, memories touched, last turn preview, token/cost) is kept in a per-agent registry and surfaced via the status endpoint.
+4. On success the lock's mtime advances to "now" (driving the time gate); on failure or abort the mtime is rolled back so the next tick will retry.
+
+### Surfaces
+
+- **Web Dashboard** — Settings → Auto-Dream card renders one row per agent with an opt-in toggle, live status badge, "Dream now" and "Abort" buttons, and a progress preview while the dream is in flight.
+- **TUI** — `librefang` → Dashboard tab shows a compact DREAMS strip with per-agent status glyphs; hides itself when no agent has dreamed yet.
+- **HTTP API** — `GET /api/auto-dream/status`, `POST /api/auto-dream/agents/{id}/trigger`, `POST /api/auto-dream/agents/{id}/abort`, `PUT /api/auto-dream/agents/{id}/enabled`.
+- **Audit trail** — Every dream emits a `DreamConsolidation` audit event with phase, token usage, and USD cost.
+
+### Manual controls
+
+- `POST /api/auto-dream/agents/{id}/trigger` bypasses the time and session gates (still respects the lock and the opt-in flag).
+- `POST /api/auto-dream/agents/{id}/abort` cancels an in-flight manual dream and rolls the lock back so the time gate reopens.
+- Scheduled dreams run inline and cannot be interrupted individually — they'll hit `timeout_secs` (default 600s) or finish.
+
+See [`[auto_dream]`](/configuration/core#auto_dream) for every field, default, and manifest override, plus how the runtime tool allowlist is enforced.
+
+---
+
+## Memory Provider Plugin API
+
+The `MemoryProvider` trait allows integrating external memory backends — such as vector databases, knowledge graphs, or remote storage services — alongside LibreFang's built-in SQLite memory.
+
+### Architecture
+
+- There is always **one built-in provider** (the default SQLite-backed store). It cannot be removed.
+- At most **one external provider** can be registered at a time. External providers supplement the built-in store; they do not replace it.
+- If an external provider fails, the built-in provider continues operating normally. Errors from external providers are captured, logged at `WARN` level, and never propagated to the agent loop.
+
+### Trait interface
+
+```rust
+#[async_trait]
+pub trait MemoryProvider: Send + Sync {
+    /// A short, unique name for this provider (e.g. "pinecone", "weaviate").
+    fn name(&self) -> &str;
+
+    /// Returns `true` for the built-in provider, `false` for all external providers.
+    fn is_builtin(&self) -> bool;
+
+    /// Returns a text block to inject into the agent system prompt at session start,
+    /// or `None` if there is nothing to inject for this session.
+    async fn system_prompt_block(&self, session_id: &str) -> Option<String>;
+
+    /// Fetches relevant context for the given query string before an LLM call.
+    /// The returned string is appended to the context window.
+    async fn prefetch(&self, query: &str, session_id: &str) -> Result<String, MemoryError>;
+
+    /// Called after each agent turn completes. Use this hook to index new content,
+    /// synchronize state, or flush write buffers to the external backend.
+    async fn on_turn_complete(&self, session_id: &str, turn_summary: &str) -> Result<(), MemoryError>;
+}
+```
+
+### Registering an external provider
+
+Pass your implementation to the kernel's memory subsystem during initialization:
+
+```rust
+use librefang_memory::{MemoryManager, MemoryProvider};
+
+// Build your custom provider
+let my_provider: Arc<dyn MemoryProvider> = Arc::new(MyVectorDbProvider::new(config));
+
+// Register it with the memory manager
+memory_manager.set_external_provider(my_provider).await;
+```
+
+Only one external provider can be registered at a time. Calling `set_external_provider` again replaces the previous one.
+
+### Aggregated context with `prefetch_all`
+
+The memory manager exposes `prefetch_all(query, session_id)`, which calls `prefetch` on every registered provider and concatenates the results:
+
+```rust
+// Called internally by the agent loop before each LLM request
+let context = memory_manager.prefetch_all(&user_query, &session_id).await;
+```
+
+Results from each provider are separated by a blank line and prepended with the provider name as a label. If any provider returns an error, that provider's result is skipped (with a `WARN` log) and the remaining providers are still queried.
+
+### Error isolation
+
+External provider errors never surface to the agent or the user:
+
+1. `prefetch` errors → logged at `WARN`, empty string used for that provider's contribution.
+2. `on_turn_complete` errors → logged at `WARN`, silently dropped.
+3. `system_prompt_block` errors (panics) → caught at the call site, `None` returned.
+
+This design ensures that a misconfigured or temporarily unavailable external backend cannot disrupt the agent loop.
 
 ---
 

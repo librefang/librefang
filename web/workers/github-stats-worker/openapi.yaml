@@ -1,0 +1,368 @@
+# LibreFang Stats / Registry Proxy — public HTTP surface of the
+# github-stats-worker running at stats.librefang.ai.
+#
+# Browsers hit this worker from librefang.ai (and subdomains) instead of
+# the upstream GitHub and registry endpoints directly, which gives us
+# CORS headers, a single place to rate-limit, and stale-while-revalidate
+# caching that survives GitHub outages.
+openapi: 3.1.0
+info:
+  title: LibreFang Stats & Registry Worker
+  version: "1.0.0"
+  description: |
+    Cloudflare Worker that backs librefang.ai. Serves GitHub repo stats,
+    proxies the librefang-registry contents, records click telemetry, and
+    ingests client-side error reports.
+
+    All responses include `Access-Control-Allow-Origin: *`. `GET` and
+    `OPTIONS` are always accepted; `POST` is only accepted on endpoints
+    that explicitly document it.
+  contact:
+    name: LibreFang
+    url: https://github.com/librefang/librefang
+  license:
+    name: MIT
+servers:
+  - url: https://stats.librefang.ai
+    description: Production
+tags:
+  - name: github
+    description: GitHub repository metadata and releases
+  - name: registry
+    description: librefang-registry content + click telemetry
+  - name: errors
+    description: Client-side error ingestion
+paths:
+  /api/github:
+    get:
+      tags: [github]
+      summary: Aggregated GitHub stats for the main repository
+      description: |
+        Returns stars / forks / open issues / open PRs / cumulative
+        release downloads, plus a ~180-day star history. Cached in KV
+        for 30 minutes; pass `?refresh` to force a re-fetch.
+      parameters:
+        - in: query
+          name: refresh
+          required: false
+          schema: { type: string }
+          description: Any value forces a cache-busting re-fetch.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GitHubStats" }
+  /api/registry:
+    get:
+      tags: [registry]
+      summary: All registry items, grouped by category
+      description: |
+        Composite response combining every category index in the
+        librefang-registry repo. Cached in KV (1h fresh, 24h stale).
+      parameters:
+        - in: query
+          name: refresh
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegistryBundle" }
+  /api/registry/raw:
+    get:
+      tags: [registry]
+      summary: Proxy a single raw file from librefang-registry
+      description: |
+        Allowlisted to `hands|channels|providers|workflows|agents|plugins|skills|mcp`
+        top-level directories. Returns the file body as `text/plain`.
+        Rejects path traversal.
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+          example: skills/web-expert/SKILL.toml
+      responses:
+        "200":
+          description: Raw file body
+          content:
+            text/plain:
+              schema: { type: string }
+        "400":
+          description: Invalid or disallowed path
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Upstream file not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/registry/commit:
+    get:
+      tags: [registry]
+      summary: Last commit metadata for a registry file
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+          example: agents/trader/AGENT.toml
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommitInfo" }
+        "400":
+          description: Invalid path
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/registry/click:
+    post:
+      tags: [registry]
+      summary: Record a click on a registry item
+      description: |
+        Fire-and-forget telemetry: increments the per-item counter used
+        by `/api/registry/trending` and `/api/registry/metrics`. Rate-
+        limited per-IP to discourage abuse.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClickPayload" }
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+        "400":
+          description: Malformed body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/registry/trending:
+    get:
+      tags: [registry]
+      summary: Top items in a category by click count
+      parameters:
+        - in: query
+          name: category
+          required: true
+          schema:
+            type: string
+            enum: [hands, channels, providers, workflows, agents, plugins, skills, mcp]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Trending" }
+  /api/registry/metrics:
+    get:
+      tags: [registry]
+      summary: Aggregated registry click metrics
+      description: |
+        Per-category totals + top items across all categories. Used by
+        the public Metrics page (librefang.ai/metrics).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Metrics" }
+  /api/errors:
+    get:
+      tags: [errors]
+      summary: Recent client-side error reports
+      description: Returns the most recent error payloads ingested via POST.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [errors]
+                properties:
+                  errors:
+                    type: array
+                    items: { $ref: "#/components/schemas/ErrorReport" }
+    post:
+      tags: [errors]
+      summary: Ingest a client-side error report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ErrorReport" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+  /api/releases:
+    get:
+      tags: [github]
+      summary: Recent GitHub releases
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Release" }
+components:
+  schemas:
+    GitHubStats:
+      type: object
+      required: [stars, forks, issues, prs, downloads]
+      properties:
+        stars: { type: integer }
+        forks: { type: integer }
+        issues: { type: integer }
+        prs: { type: integer }
+        downloads: { type: integer, description: Cumulative asset downloads across releases. }
+        lastUpdate: { type: string, format: date-time }
+        starHistory:
+          type: array
+          items:
+            type: object
+            required: [date, stars]
+            properties:
+              date: { type: string, format: date }
+              stars: { type: integer }
+              forks: { type: integer }
+    RegistryBundle:
+      type: object
+      description: Each top-level key is a category; the value is the list of items in that category.
+      additionalProperties:
+        oneOf:
+          - { type: array, items: { $ref: "#/components/schemas/RegistryItem" } }
+          - { type: integer, description: '<category>Count field mirroring the array length.' }
+    RegistryItem:
+      type: object
+      required: [id, name, description, category, icon]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        icon: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        i18n:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              description: { type: string }
+    CommitInfo:
+      description: >
+        When no commit is found for a path (fresh entry with no git history
+        yet), the worker returns each field as null rather than omitting the
+        property. Strictly-generated clients must tolerate nulls here.
+      type: object
+      properties:
+        sha: { type: [string, "null"] }
+        author: { type: [string, "null"] }
+        date: { type: [string, "null"], format: date-time }
+        message: { type: [string, "null"] }
+        url: { type: [string, "null"], format: uri }
+    ClickPayload:
+      type: object
+      required: [category, id]
+      properties:
+        category:
+          type: string
+          enum: [hands, channels, providers, workflows, agents, plugins, skills, mcp]
+        id: { type: string }
+    Trending:
+      type: object
+      required: [category, top]
+      properties:
+        category: { type: string }
+        top:
+          type: array
+          items:
+            type: object
+            required: [id, clicks]
+            properties:
+              id: { type: string }
+              clicks: { type: integer }
+    Metrics:
+      type: object
+      required: [generatedAt, perCategory, topOverall, totalClicks]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        totalClicks: { type: integer }
+        perCategory:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              total: { type: integer }
+              items: { type: integer }
+        topOverall:
+          type: array
+          items:
+            type: object
+            required: [category, id, clicks]
+            properties:
+              category: { type: string }
+              id: { type: string }
+              clicks: { type: integer }
+    ErrorReport:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string, maxLength: 2000 }
+        stack: { type: string, maxLength: 4000 }
+        pathname: { type: string, maxLength: 256, description: Page pathname where the error surfaced. }
+        lang: { type: string, maxLength: 16, description: App language code. }
+        ua: { type: string, maxLength: 256, description: Browser user agent. }
+        at: { type: string, format: date-time, description: Server-assigned ingestion timestamp (response only). }
+    Release:
+      description: >
+        Passthrough of the upstream GitHub Releases API payload. Field names
+        and shape match GitHub's response verbatim — the worker does not
+        transform it, so consumers should treat this as the standard GitHub
+        release schema, not a LibreFang-specific envelope.
+      type: object
+      properties:
+        tag_name: { type: string, description: Git tag the release was cut from. }
+        name: { type: string, description: Display title of the release. }
+        published_at: { type: string, format: date-time }
+        html_url: { type: string, format: uri, description: GitHub URL for the release. }
+        body: { type: string, description: Release notes in GitHub-flavored Markdown. }
+        prerelease: { type: boolean }
+        draft: { type: boolean }
+        assets:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              browser_download_url: { type: string, format: uri }
+              download_count: { type: integer, minimum: 0 }
+              size: { type: integer, minimum: 0 }
+              content_type: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

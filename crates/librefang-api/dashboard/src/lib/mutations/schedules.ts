@@ -1,0 +1,97 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  createSchedule,
+  updateSchedule,
+  deleteSchedule,
+  runSchedule,
+  createTrigger,
+  updateTrigger,
+  deleteTrigger,
+} from "../http/client";
+import type { TriggerPatch, CreateTriggerPayload } from "../../api";
+import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
+
+// Schedules surface in two views: SchedulerPage (via useSchedules →
+// scheduleKeys) and HandsPage's cron widget (via useCronJobs → cronKeys).
+// Every write MUST invalidate both slices so acting from one page never
+// leaves the other showing stale data.
+function invalidateScheduleCaches(qc: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: scheduleKeys.all }),
+    qc.invalidateQueries({ queryKey: cronKeys.all }),
+    qc.invalidateQueries({ queryKey: workflowKeys.lists() }),
+  ]);
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createSchedule,
+    onSuccess: () => invalidateScheduleCaches(qc),
+  });
+}
+
+export function useUpdateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Parameters<typeof updateSchedule>[1] }) =>
+      updateSchedule(id, data),
+    onSuccess: () => invalidateScheduleCaches(qc),
+  });
+}
+
+export function useDeleteSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteSchedule,
+    onSuccess: () => invalidateScheduleCaches(qc),
+  });
+}
+
+export function useRunSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: runSchedule,
+    onSuccess: () => invalidateScheduleCaches(qc),
+  });
+}
+
+// Trigger writes must invalidate triggerKeys.all (not just the per-agent
+// sub-key) so that SchedulerPage — which queries triggerKeys.lists() without
+// an agentId — also refreshes.  triggerKeys.list(agentId) is a strictly
+// longer key; react-query prefix matching never reaches the shorter lists()
+// key from it.
+function invalidateTriggerCaches(qc: ReturnType<typeof useQueryClient>) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: triggerKeys.all }),
+    qc.invalidateQueries({ queryKey: cronKeys.all }),
+  ]);
+}
+
+export function useCreateTrigger() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CreateTriggerPayload) => createTrigger(payload),
+    onSuccess: () => invalidateTriggerCaches(qc),
+  });
+}
+
+export function useUpdateTrigger() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: TriggerPatch; agentId?: string }) =>
+      updateTrigger(id, data),
+    onSuccess: () => invalidateTriggerCaches(qc),
+  });
+}
+
+export function useDeleteTrigger() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string; agentId?: string }) => deleteTrigger(id),
+    onSuccess: (_data, { id }) => {
+      qc.removeQueries({ queryKey: triggerKeys.detail(id) });
+      return invalidateTriggerCaches(qc);
+    },
+  });
+}

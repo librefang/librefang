@@ -1,3 +1,5 @@
+import { ApiError } from "./lib/http/errors";
+
 export interface HealthCheck {
   name: string;
   status: string;
@@ -19,6 +21,10 @@ export interface StatusResponse {
   api_listen?: string;
   home_dir?: string;
   log_level?: string;
+  /** Machine hostname. Only populated on authenticated endpoints
+   *  (`/api/status`, `/api/dashboard/snapshot`) — `/api/version` is public
+   *  and deliberately omits it. */
+  hostname?: string;
   network_enabled?: boolean;
   terminal_enabled?: boolean;
   session_count?: number;
@@ -156,6 +162,66 @@ export interface SkillItem {
 export interface SkillsResponse {
   skills?: SkillItem[];
   total?: number;
+  categories?: string[];
+}
+
+// Skill evolution types
+export interface SkillVersionEntry {
+  version: string;
+  timestamp: string;
+  changelog: string;
+  content_hash: string;
+  author?: string | null;
+}
+
+export interface SkillEvolutionMeta {
+  versions: SkillVersionEntry[];
+  use_count: number;
+  /** Total version entries written, incl. initial creation. */
+  evolution_count: number;
+  /** Mutations after creation (update/patch/rollback). 0 on fresh skill. */
+  mutation_count: number;
+}
+
+export interface SkillToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface SkillDetail {
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  license: string;
+  tags: string[];
+  runtime: string;
+  tools: SkillToolInfo[];
+  has_prompt_context: boolean;
+  prompt_context_length: number;
+  prompt_context?: string | null;
+  source: any;
+  enabled: boolean;
+  path: string;
+  linked_files: Record<string, string[]>;
+  evolution: SkillEvolutionMeta;
+}
+
+export interface EvolutionResult {
+  success: boolean;
+  message: string;
+  skill_name: string;
+  version?: string;
+  /** Set only on patch ops: which fuzzy strategy matched. */
+  match_strategy?: "Exact" | "WhitespaceStripped" | "LineTrimmed" | "WhitespaceNormalized" | "IndentFlexible" | "BlockAnchor";
+  /** Set only on patch ops: replaced occurrence count. */
+  match_count?: number;
+  /** Post-op version-history size (includes initial creation). */
+  evolution_count?: number;
+  /** Post-op mutation counter (post-create edits only — 0 on fresh create). */
+  mutation_count?: number;
+  /** Post-op usage counter. */
+  use_count?: number;
 }
 
 export interface ProvidersResponse {
@@ -231,6 +297,9 @@ export interface AgentSessionMessage {
   content?: unknown;
   tools?: AgentTool[];
   images?: AgentSessionImage[];
+  /** RFC 3339 timestamp from the server; may be absent for messages
+   * persisted before the field was introduced. */
+  timestamp?: string;
 }
 
 export interface AgentSessionResponse {
@@ -284,6 +353,7 @@ export interface WorkflowItem {
   description?: string;
   steps?: number | WorkflowStep[];
   created_at?: string;
+  layout?: unknown;
 }
 
 export interface WorkflowRunItem {
@@ -319,6 +389,29 @@ export interface TriggerItem {
   fire_count?: number;
   max_fires?: number;
   created_at?: string;
+  target_agent_id?: string | null;
+  cooldown_secs?: number | null;
+  session_mode?: string | null;
+}
+
+export interface TriggerPatch {
+  pattern?: unknown;
+  prompt_template?: string;
+  enabled?: boolean;
+  max_fires?: number;
+  cooldown_secs?: number | null;
+  session_mode?: string | null;
+  target_agent_id?: string | null;
+}
+
+export interface CreateTriggerPayload {
+  agent_id: string;
+  pattern: unknown;
+  prompt_template: string;
+  max_fires?: number;
+  target_agent_id?: string;
+  cooldown_secs?: number;
+  session_mode?: string;
 }
 
 export interface CronJobItem {
@@ -623,7 +716,7 @@ export function buildAuthenticatedWebSocketUrl(path: string): string {
   return url.toString();
 }
 
-async function parseError(response: Response): Promise<Error> {
+async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
     _unauthorizedFired = true;
@@ -632,18 +725,20 @@ async function parseError(response: Response): Promise<Error> {
   }
   const text = await response.text();
   let message = response.statusText;
+  let code = `HTTP_${response.status}`;
   try {
     const json = JSON.parse(text) as Json;
     // Prefer the human-readable `detail` field over the machine-code `error` field
-    if (typeof (json as any).detail === "string") {
-      message = (json as any).detail;
+    if (typeof json.detail === "string") {
+      message = json.detail;
     } else if (typeof json.error === "string") {
       message = json.error;
+      code = json.error;
     }
   } catch {
     // ignore parse errors
   }
-  return new Error(message || `HTTP ${response.status}`);
+  return new ApiError(response.status, code, message || `HTTP ${response.status}`);
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -794,6 +889,32 @@ export async function patchAgentConfig(agentId: string, config: { max_tokens?: n
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
+/** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
+ * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
+ * which only accepts the model-tuning subset. */
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+export interface AgentToolsResponse {
+  tool_allowlist?: string[] | null;
+  tool_blocklist?: string[] | null;
+  disabled?: boolean;
+}
+
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+}
+
+export async function getAgentTools(agentId: string): Promise<AgentToolsResponse> {
+  return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
+}
+
+export async function updateAgentTools(agentId: string, payload: { tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+}
+
 export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
@@ -822,12 +943,7 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 }
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
-  const response = await fetch(`/api/templates/${encodeURIComponent(name)}/toml`);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Failed to fetch template: ${response.status}`);
-  }
-  return response.text();
+  return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1070,9 +1186,10 @@ export async function listSkills(): Promise<SkillItem[]> {
   return data.skills ?? [];
 }
 
-export async function listTools(): Promise<any[]> {
-  const data = await get<any>("/api/tools");
-  return data.tools ?? data ?? [];
+export async function listTools(): Promise<ToolDefinition[]> {
+  const data = await get<{ tools?: ToolDefinition[] } | ToolDefinition[]>("/api/tools");
+  if (Array.isArray(data)) return data;
+  return data.tools ?? [];
 }
 
 export async function installSkill(name: string, hand?: string): Promise<ApiActionResponse> {
@@ -1081,6 +1198,71 @@ export async function installSkill(name: string, hand?: string): Promise<ApiActi
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/skills/uninstall", { name });
+}
+
+// Skill evolution APIs
+export async function getSkillDetail(name: string): Promise<SkillDetail> {
+  return get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
+}
+
+export async function createSkill(params: {
+  name: string;
+  description: string;
+  prompt_context: string;
+  tags?: string[];
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>("/api/skills/create", params);
+}
+
+export async function reloadSkills(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/skills/reload", {});
+}
+
+// Skill evolution mutation APIs (dashboard Update/Patch/Rollback/Files flow)
+export async function evolveUpdateSkill(name: string, params: {
+  prompt_context: string;
+  changelog: string;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/update`, params);
+}
+
+export async function evolvePatchSkill(name: string, params: {
+  old_string: string;
+  new_string: string;
+  changelog: string;
+  replace_all?: boolean;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/patch`, params);
+}
+
+export async function evolveRollbackSkill(name: string): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/rollback`, {});
+}
+
+export async function evolveDeleteSkill(name: string): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/delete`, {});
+}
+
+export async function evolveWriteFile(name: string, params: {
+  path: string;
+  content: string;
+}): Promise<EvolutionResult> {
+  return post<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file`, params);
+}
+
+export async function evolveRemoveFile(name: string, path: string): Promise<EvolutionResult> {
+  return del<EvolutionResult>(`/api/skills/${encodeURIComponent(name)}/evolve/file?path=${encodeURIComponent(path)}`);
+}
+
+export interface SupportingFileContents {
+  name: string;
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
+export async function getSupportingFile(name: string, path: string): Promise<SupportingFileContents> {
+  return get<SupportingFileContents>(`/api/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`);
 }
 
 // ClawHub types
@@ -1138,6 +1320,32 @@ export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail>
 export async function clawhubInstall(slug: string, version?: string, hand?: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(
     "/api/clawhub/install",
+    { slug, version: version || "latest", hand },
+    LONG_RUNNING_TIMEOUT_MS
+  );
+}
+
+// ── ClawHub China mirror API (mirror-cn.clawhub.com) ──
+
+export async function clawhubCnBrowse(sort?: string, limit?: number, cursor?: string): Promise<ClawHubBrowseResponse> {
+  const params = new URLSearchParams();
+  if (sort) params.set("sort", sort);
+  if (limit) params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  return get<ClawHubBrowseResponse>(`/api/clawhub-cn/browse?${params}`);
+}
+
+export async function clawhubCnSearch(query: string): Promise<ClawHubBrowseResponse> {
+  return get<ClawHubBrowseResponse>(`/api/clawhub-cn/search?q=${encodeURIComponent(query)}`);
+}
+
+export async function clawhubCnGetSkill(slug: string): Promise<ClawHubSkillDetail> {
+  return get<ClawHubSkillDetail>(`/api/clawhub-cn/skill/${encodeURIComponent(slug)}`);
+}
+
+export async function clawhubCnInstall(slug: string, version?: string, hand?: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    "/api/clawhub-cn/install",
     { slug, version: version || "latest", hand },
     LONG_RUNNING_TIMEOUT_MS
   );
@@ -1242,19 +1450,19 @@ export async function createWorkflow(payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/workflows", payload);
 }
 
-export async function getWorkflow(workflowId: string): Promise<any> {
-  return get<any>(`/api/workflows/${encodeURIComponent(workflowId)}`);
+export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {
+  return get<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
 
 export async function runWorkflow(workflowId: string, input: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
-  }, 300000); // 5 min timeout — workflows run multiple LLM steps
+  }, LONG_RUNNING_TIMEOUT_MS); // 5 min timeout — workflows run multiple LLM steps
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
@@ -1271,7 +1479,7 @@ export async function updateWorkflow(workflowId: string, payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
-  layout?: any;
+  layout?: unknown;
 }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
@@ -1384,15 +1592,25 @@ export async function runSchedule(scheduleId: string): Promise<ApiActionResponse
 }
 
 export async function listTriggers(): Promise<TriggerItem[]> {
-  const data = await get<any>("/api/triggers");
-  return data.triggers ?? data ?? [];
+  const data = await get<{ triggers?: TriggerItem[] }>("/api/triggers");
+  return data.triggers ?? [];
+}
+
+export async function getTrigger(triggerId: string): Promise<TriggerItem> {
+  return get<TriggerItem>(`/api/triggers/${encodeURIComponent(triggerId)}`);
+}
+
+export async function createTrigger(
+  payload: CreateTriggerPayload
+): Promise<ApiActionResponse & { trigger_id?: string }> {
+  return post<ApiActionResponse & { trigger_id?: string }>("/api/triggers", payload);
 }
 
 export async function updateTrigger(
   triggerId: string,
-  payload: { enabled: boolean }
+  updates: TriggerPatch
 ): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`, payload);
+  return patch<ApiActionResponse>(`/api/triggers/${encodeURIComponent(triggerId)}`, updates);
 }
 
 export async function deleteTrigger(triggerId: string): Promise<ApiActionResponse> {
@@ -1550,8 +1768,14 @@ export async function getConfigSchema(): Promise<{ sections: Record<string, Conf
   return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
 }
 
-export async function setConfigValue(path: string, value: unknown): Promise<{ status: string; restart_required?: boolean }> {
-  return post<{ status: string; restart_required?: boolean }>("/api/config/set", { path, value });
+export async function setConfigValue(
+  path: string,
+  value: unknown,
+): Promise<{ status: string; restart_required?: boolean; reload_error?: string }> {
+  return post<{ status: string; restart_required?: boolean; reload_error?: string }>(
+    "/api/config/set",
+    { path, value },
+  );
 }
 
 export async function listBackups(): Promise<{ backups?: BackupItem[]; total?: number }> {
@@ -1814,10 +2038,12 @@ export async function getMemoryStats(agentId?: string): Promise<MemoryStatsRespo
 
 export async function addMemoryFromText(
   content: string,
-  agentId?: string
+  options: { level?: string; agentId?: string } = {}
 ): Promise<ApiActionResponse> {
+  const { level, agentId } = options;
   return post<ApiActionResponse>("/api/memory", {
     messages: [{ role: "user", content }],
+    ...(level ? { level } : {}),
     ...(agentId ? { agent_id: agentId } : {})
   });
 }
@@ -1888,7 +2114,11 @@ export async function resumeAgent(agentId: string): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/resume`, {});
 }
 
-export async function spawnAgent(req: { manifest_toml?: string; template?: string }): Promise<ApiActionResponse> {
+export async function spawnAgent(req: {
+  manifest_toml?: string;
+  template?: string;
+  name?: string;
+}): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/agents", req);
 }
 
@@ -1920,6 +2150,14 @@ export async function postCommsTask(payload: {
 export async function listHands(): Promise<HandDefinitionItem[]> {
   const data = await get<{ hands?: HandDefinitionItem[]; total?: number }>("/api/hands");
   return data.hands ?? [];
+}
+
+export async function getHandManifestToml(handId: string): Promise<string> {
+  return getText(`/api/hands/${encodeURIComponent(handId)}/manifest`);
+}
+
+export async function getRawConfigToml(): Promise<string> {
+  return getText("/api/config/export");
 }
 
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
@@ -2193,6 +2431,21 @@ export function clearApiKey() {
   localStorage.removeItem("librefang-api-key");
 }
 
+/** Invalidate the server-side session + cookie, then clear the local token.
+ *  Safe to call even when the token is already gone. */
+export async function dashboardLogout(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: authHeader(),
+    });
+  } catch {
+    // Network failure shouldn't block local cleanup — fall through.
+  }
+  clearApiKey();
+}
+
 export function hasApiKey(): boolean {
   const key = getStoredApiKey();
   return !!key && key.length > 0;
@@ -2236,8 +2489,8 @@ export async function dashboardLogin(username: string, password: string, totpCod
       setApiKey(data.token);
     }
     return data;
-  } catch (e: any) {
-    return { ok: false, error: e.message || "Network error" };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : "Network error" };
   }
 }
 
@@ -2482,8 +2735,13 @@ export async function createRegistryContent(
 // ---------------------------------------------------------------------------
 
 // ── MCP Servers API ─────────────────────────────────────────────────────
+//
+// The MCP API is unified under `/api/mcp/*` — both raw-configured servers
+// (from `config.toml`) and catalog-installed servers live in the same
+// `/api/mcp/servers` collection. `template_id` tracks provenance when a
+// server was installed from a catalog entry.
 
-export interface McpServerTransport {
+export interface McpTransport {
   type: "stdio" | "sse" | "http";
   command?: string;
   args?: string[];
@@ -2491,11 +2749,15 @@ export interface McpServerTransport {
 }
 
 export interface McpServerConfigured {
+  /** Stable identifier; falls back to `name` when the backend omits it. */
+  id?: string;
   name: string;
-  transport: McpServerTransport;
+  transport: McpTransport;
   timeout_secs?: number;
   env?: string[];
   headers?: string[];
+  /** Catalog template this server was installed from, when applicable. */
+  template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
 }
 
@@ -2517,9 +2779,13 @@ export async function listMcpServers(): Promise<McpServersResponse> {
   return get<McpServersResponse>("/api/mcp/servers");
 }
 
-// ── Registry Integrations (available MCP server templates) ────────
+export async function getMcpServer(id: string): Promise<McpServerConfigured> {
+  return get<McpServerConfigured>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
 
-export interface IntegrationRequiredEnv {
+// ── MCP Catalog (read-only browse of registry templates) ────────
+
+export interface McpCatalogRequiredEnv {
   name: string;
   label: string;
   help?: string;
@@ -2527,14 +2793,7 @@ export interface IntegrationRequiredEnv {
   get_url?: string;
 }
 
-export interface IntegrationTransport {
-  type: "stdio" | "sse" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-}
-
-export interface IntegrationTemplate {
+export interface McpCatalogEntry {
   id: string;
   name: string;
   description: string;
@@ -2542,34 +2801,91 @@ export interface IntegrationTemplate {
   category?: string;
   installed: boolean;
   tags?: string[];
-  transport?: IntegrationTransport;
-  required_env?: IntegrationRequiredEnv[];
+  transport?: McpTransport;
+  required_env?: McpCatalogRequiredEnv[];
   has_oauth?: boolean;
   setup_instructions?: string;
 }
 
-export interface AvailableIntegrationsResponse {
-  integrations: IntegrationTemplate[];
+export interface McpCatalogResponse {
+  entries: McpCatalogEntry[];
   count: number;
 }
 
-export async function listAvailableIntegrations(): Promise<AvailableIntegrationsResponse> {
-  return get<AvailableIntegrationsResponse>("/api/integrations/available");
+export async function listMcpCatalog(): Promise<McpCatalogResponse> {
+  return get<McpCatalogResponse>("/api/mcp/catalog");
 }
 
-export async function addMcpServer(server: Omit<McpServerConfigured, "name"> & { name: string }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/mcp/servers", server);
+export async function getMcpCatalogEntry(id: string): Promise<McpCatalogEntry> {
+  return get<McpCatalogEntry>(`/api/mcp/catalog/${encodeURIComponent(id)}`);
 }
 
-export async function updateMcpServer(name: string, server: Partial<McpServerConfigured>): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`, server);
+// ── MCP Server mutations ────────────────────────────────────────────────
+
+/** Install a server from a catalog template with the supplied credentials. */
+export type AddMcpServerFromTemplate = {
+  template_id: string;
+  credentials?: Record<string, string>;
+};
+
+/** Create a server from a raw spec (same shape as a configured entry). */
+export type AddMcpServerSpec = Omit<McpServerConfigured, "id"> & { name: string };
+
+/**
+ * Body is either `{ template_id, credentials }` to install a catalog entry,
+ * or a raw `McpServerConfigured` spec. The backend disambiguates by the
+ * presence of `template_id`.
+ */
+export async function addMcpServer(
+  body: AddMcpServerFromTemplate | AddMcpServerSpec,
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/servers", body);
 }
 
-export async function deleteMcpServer(name: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(name)}`);
+export async function updateMcpServer(
+  id: string,
+  server: Partial<McpServerConfigured>,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
-// MCP OAuth Auth
+export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+export async function reconnectMcpServer(id: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/reconnect`, {});
+}
+
+// ── MCP Health & Reload ────────────────────────────────────────────────
+
+export interface McpHealthEntry {
+  id: string;
+  status: string;
+  tool_count?: number;
+  last_ok?: string | null;
+  last_error?: string | null;
+  consecutive_failures?: number;
+  reconnecting?: boolean;
+  reconnect_attempts?: number;
+  connected_since?: string | null;
+}
+
+export interface McpHealthResponse {
+  health: McpHealthEntry[];
+  count: number;
+}
+
+export async function getMcpHealth(): Promise<McpHealthResponse> {
+  return get<McpHealthResponse>("/api/mcp/health");
+}
+
+export async function reloadMcp(): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP OAuth Auth ──────────────────────────────────────────────────────
+
 export interface McpAuthStatusResponse {
   server: string;
   auth: { state: string; auth_url?: string; message?: string };
@@ -2580,16 +2896,16 @@ export interface McpAuthStartResponse {
   server: string;
 }
 
-export async function getMcpAuthStatus(name: string): Promise<McpAuthStatusResponse> {
-  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/status`);
+export async function getMcpAuthStatus(id: string): Promise<McpAuthStatusResponse> {
+  return get<McpAuthStatusResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/status`);
 }
 
-export async function startMcpAuth(name: string): Promise<McpAuthStartResponse> {
-  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/start`, {});
+export async function startMcpAuth(id: string): Promise<McpAuthStartResponse> {
+  return post<McpAuthStartResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/start`, {});
 }
 
-export async function revokeMcpAuth(name: string): Promise<{ server: string; state: string }> {
-  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(name)}/auth/revoke`);
+export async function revokeMcpAuth(id: string): Promise<{ server: string; state: string }> {
+  return del<{ server: string; state: string }>(`/api/mcp/servers/${encodeURIComponent(id)}/auth/revoke`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2606,5 +2922,175 @@ export async function changePassword(
       ...(newPassword ? { new_password: newPassword } : {}),
       ...(newUsername ? { new_username: newUsername } : {}),
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Terminal (tmux windows)
+// ---------------------------------------------------------------------------
+
+export interface TerminalWindow {
+  id: string;
+  index: number;
+  name: string;
+  active: boolean;
+}
+
+export interface TerminalHealth {
+  ok: boolean;
+  tmux: boolean;
+  max_windows: number;
+  os: string;
+}
+
+export async function getTerminalHealth(): Promise<TerminalHealth> {
+  return get<TerminalHealth>("/api/terminal/health");
+}
+
+export async function listTerminalWindows(): Promise<TerminalWindow[]> {
+  const response = await fetch("/api/terminal/windows", {
+    headers: buildHeaders(),
+  });
+  if (!response.ok) throw await parseError(response);
+  const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
+  return Array.isArray(data) ? data : (data.windows ?? []);
+}
+
+export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
+  const response = await fetch("/api/terminal/windows", {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    {
+      method: "PATCH",
+      headers: buildHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function deleteTerminalWindow(windowId: string): Promise<void> {
+  const response = await fetch(
+    `/api/terminal/windows/${encodeURIComponent(windowId)}`,
+    { method: "DELETE", headers: buildHeaders() },
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+// ── Auto-Dream (background memory consolidation) ──────────────────────
+
+export type AutoDreamStatusName =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export interface AutoDreamTurn {
+  text: string;
+  tool_use_count: number;
+}
+
+/** Token accounting snapshot from a completed dream. Populated only on
+ * the `completed` status; absent for running / failed / aborted. The
+ * cache_* fields let the dashboard surface cache-hit rate so operators
+ * can see the forkedAgent cost savings in real terms. */
+export interface AutoDreamUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  iterations: number;
+  latency_ms: number;
+  cost_usd?: number;
+}
+
+export interface AutoDreamProgress {
+  task_id: string;
+  agent_id: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  status: AutoDreamStatusName;
+  phase: string;
+  tool_use_count: number;
+  memories_touched: string[];
+  turns: AutoDreamTurn[];
+  error: string | null;
+  usage?: AutoDreamUsage;
+}
+
+export interface AutoDreamAgentStatus {
+  agent_id: string;
+  agent_name: string;
+  auto_dream_enabled: boolean;
+  last_consolidated_at_ms: number;
+  /** Unix-ms when the time gate reopens. Omitted when the agent has never been dreamed. */
+  next_eligible_at_ms?: number;
+  /** Hours since last consolidation. Omitted when the agent has never been dreamed. */
+  hours_since_last?: number;
+  sessions_since_last: number;
+  /** Resolved min_hours (manifest override or global default). */
+  effective_min_hours: number;
+  /** Resolved min_sessions (manifest override or global default; 0 = gate disabled). */
+  effective_min_sessions: number;
+  lock_path: string;
+  progress: AutoDreamProgress | null;
+  can_abort: boolean;
+}
+
+export interface AutoDreamStatus {
+  enabled: boolean;
+  min_hours: number;
+  min_sessions: number;
+  check_interval_secs: number;
+  lock_dir: string;
+  agents: AutoDreamAgentStatus[];
+}
+
+export interface AutoDreamTriggerOutcome {
+  fired: boolean;
+  agent_id: string;
+  task_id: string | null;
+  reason: string;
+}
+
+export interface AutoDreamAbortOutcome {
+  aborted: boolean;
+  agent_id: string;
+  reason: string;
+}
+
+export async function getAutoDreamStatus(): Promise<AutoDreamStatus> {
+  return get<AutoDreamStatus>("/api/auto-dream/status");
+}
+
+export async function triggerAutoDream(agentId: string): Promise<AutoDreamTriggerOutcome> {
+  return post<AutoDreamTriggerOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/trigger`,
+    {},
+  );
+}
+
+export async function abortAutoDream(agentId: string): Promise<AutoDreamAbortOutcome> {
+  return post<AutoDreamAbortOutcome>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/abort`,
+    {},
+  );
+}
+
+export async function setAutoDreamEnabled(
+  agentId: string,
+  enabled: boolean,
+): Promise<{ agent_id: string; enabled: boolean }> {
+  return put<{ agent_id: string; enabled: boolean }>(
+    `/api/auto-dream/agents/${encodeURIComponent(agentId)}/enabled`,
+    { enabled },
   );
 }

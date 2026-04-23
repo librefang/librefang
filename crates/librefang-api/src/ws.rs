@@ -22,13 +22,13 @@ use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
 use librefang_runtime::kernel_handle::KernelHandle;
-use librefang_runtime::llm_driver::StreamEvent;
+use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_runtime::llm_errors;
 use librefang_types::agent::AgentId;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -735,6 +735,10 @@ async fn handle_text_message(
                 was_mentioned: false,
                 thread_id: None,
                 account_id: None,
+                // Dashboard chat shares storage with canonical `entry.session_id`
+                // so GET /session, list_agent_sessions, switch_agent_session,
+                // and agent_send all see the same conversation history.
+                use_canonical_session: true,
                 ..Default::default()
             };
             match state
@@ -756,6 +760,13 @@ async fn handle_text_message(
                     let debounce_chars = rl.rate_limit.ws_debounce_chars;
                     let debounce_ms = rl.rate_limit.ws_debounce_ms;
                     let show_thinking_stream = show_thinking;
+                    // Set by the stream forwarder when it maps the runtime's
+                    // `response_complete` phase to an early `typing:stop`.
+                    // The post-handle branch reads it to avoid sending a
+                    // duplicate `typing:stop` (an idempotent no-op on the
+                    // client, but a wasted WS frame + re-render).
+                    let early_stop_sent = Arc::new(AtomicBool::new(false));
+                    let early_stop_sent_stream = Arc::clone(&early_stop_sent);
                     let stream_task = tokio::spawn(async move {
                         let mut text_buffer = String::new();
                         let far_future = tokio::time::Instant::now() + Duration::from_secs(86400);
@@ -826,6 +837,12 @@ async fn handle_text_message(
                                                     vlevel,
                                                     show_thinking_stream,
                                                 ) {
+                                                    if let StreamEvent::PhaseChange { phase, .. } = &ev {
+                                                        if phase == PHASE_RESPONSE_COMPLETE {
+                                                            early_stop_sent_stream
+                                                                .store(true, Ordering::Release);
+                                                        }
+                                                    }
                                                     if send_json(&sender_stream, &json)
                                                         .await
                                                         .is_err()
@@ -859,21 +876,29 @@ async fn handle_text_message(
                             // `rx.recv()` return `None` and the task exits
                             // naturally.  We give it up to 5 s before aborting
                             // as a safety net.
-                            let drain_result =
-                                tokio::time::timeout(Duration::from_secs(30), stream_task).await;
-                            if drain_result.is_err() {
-                                warn!("stream forwarder did not finish within 30 s — sending response before abort");
+                            match tokio::time::timeout(Duration::from_secs(30), stream_task).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(join_err)) => {
+                                    warn!(error = %join_err, "stream forwarder join failed");
+                                }
+                                Err(_) => {
+                                    warn!("stream forwarder did not finish within 30 s — aborting before sending response");
+                                }
                             }
 
-                            // Send typing lifecycle: stop
-                            let _ = send_json(
-                                sender,
-                                &serde_json::json!({
-                                    "type": "typing",
-                                    "state": "stop",
-                                }),
-                            )
-                            .await;
+                            // Send typing lifecycle: stop (skipped if the
+                            // stream forwarder already emitted it via the
+                            // `response_complete` phase).
+                            if !early_stop_sent.load(Ordering::Acquire) {
+                                let _ = send_json(
+                                    sender,
+                                    &serde_json::json!({
+                                        "type": "typing",
+                                        "state": "stop",
+                                    }),
+                                )
+                                .await;
+                            }
 
                             // NO_REPLY: agent intentionally chose not to reply
                             if result.silent {
@@ -1335,11 +1360,25 @@ fn map_stream_event(
                 "is_error": is_error,
             })),
         },
-        StreamEvent::PhaseChange { phase, detail } => Some(serde_json::json!({
-            "type": "phase",
-            "phase": phase,
-            "detail": detail,
-        })),
+        StreamEvent::PhaseChange { phase, detail } => {
+            // Special case: `response_complete` fires when the LLM has emitted
+            // the final text but the agent loop is still doing post-processing
+            // (session save, proactive memory). Map to an early `typing:stop`
+            // so the dashboard can unblock the input while the later
+            // `response` event (with tokens/cost) is still in flight.
+            if phase == PHASE_RESPONSE_COMPLETE {
+                Some(serde_json::json!({
+                    "type": "typing",
+                    "state": "stop",
+                }))
+            } else {
+                Some(serde_json::json!({
+                    "type": "phase",
+                    "phase": phase,
+                    "detail": detail,
+                }))
+            }
+        }
         _ => None, // Skip ToolInputDelta, ContentComplete
     }
 }

@@ -239,6 +239,7 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
                 role,
                 content,
                 pinned: false,
+                timestamp: None,
             })
         })
         .collect()

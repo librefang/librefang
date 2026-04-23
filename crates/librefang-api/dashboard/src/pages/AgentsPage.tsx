@@ -1,12 +1,20 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatTime } from "../lib/datetime";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { loadDashboardSnapshot, getAgentDetail, AgentDetail, spawnAgent, suspendAgent, resumeAgent, patchAgentConfig,
-  listPromptVersions, listExperiments, activatePromptVersion, startExperiment, pauseExperiment, completeExperiment,
-  createPromptVersion, createExperiment, deletePromptVersion, PromptVersion, PromptExperiment, ExperimentVariantMetrics, getExperimentMetrics,
-  listModels, listProviders, listAgentTemplates, getAgentTemplateToml, deleteAgent, cloneAgent, resetAgentSession } from "../api";
+import {
+  type AgentDetail,
+  type PromptVersion,
+  type PromptExperiment,
+  type ExperimentVariantMetrics,
+  type ToolDefinition,
+  getAgentTemplateToml,
+  resetAgentSession,
+  getAgentTools,
+  listTools,
+  updateAgentTools,
+} from "../api";
+import { useQueryClient } from "@tanstack/react-query";
 import { isProviderAvailable } from "../lib/status";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -14,6 +22,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Modal } from "../components/ui/Modal";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
@@ -21,11 +30,46 @@ import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { useUIStore } from "../lib/store";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
-
-const REFRESH_MS = 5000;
+import { useDashboardSnapshot } from "../lib/queries/runtime";
+import { useProviders } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import { AgentManifestForm } from "../components/AgentManifestForm";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestExtras,
+  type ManifestFormState,
+} from "../lib/agentManifest";
+import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
+import {
+  agentQueries,
+  useAgentTemplates,
+  useExperimentMetrics,
+  useExperiments,
+  usePromptVersions,
+} from "../lib/queries/agents";
+import {
+  useActivatePromptVersion,
+  useCloneAgent,
+  useCompleteExperiment,
+  useCreateExperiment,
+  useCreatePromptVersion,
+  useDeleteAgent,
+  useDeletePromptVersion,
+  usePatchAgent,
+  usePatchAgentConfig,
+  usePauseExperiment,
+  useResumeAgent,
+  useSpawnAgent,
+  useStartExperiment,
+  useSuspendAgent,
+} from "../lib/mutations/agents";
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -34,13 +78,23 @@ export function AgentsPage() {
   const [detailAgent, setDetailAgent] = useState<AgentDetail | null>(null);
   const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const [createMode, setCreateMode] = useState<"template" | "toml">("template");
+  const [createMode, setCreateMode] = useState<"form" | "template" | "toml">("form");
   const [templateName, setTemplateName] = useState("");
+  const [templateCustomName, setTemplateCustomName] = useState("");
   const [manifestToml, setManifestToml] = useState("");
   const [templateTomlLoading, setTemplateTomlLoading] = useState(false);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [formErrors, setFormErrors] = useState<Set<string>>(new Set());
+  const [tomlParseError, setTomlParseError] = useState<string | null>(null);
   const [showPrompts, setShowPrompts] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   const [modelDraft, setModelDraft] = useState({ provider: "", model: "", max_tokens: "", temperature: "" });
+  // Inline-rename state for the detail/edit modal header. The agent name is
+  // the primary identifier in the UI and was previously read-only — now
+  // clicking the title swaps it for an input and PATCHes /agents/{id}.
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   // Destructive-action confirmation dialog. We set this instead of calling
   // window.confirm() so the dialog matches the rest of the dashboard
   // styling and can slide up as a bottom-sheet on mobile.
@@ -51,12 +105,21 @@ export function AgentsPage() {
     tone?: "default" | "destructive";
   } | null>(null);
   const [showHandAgents, setShowHandAgents] = useState(false);
+  const [showToolsEditor, setShowToolsEditor] = useState(false);
+  const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
+  const [toolAllowlistDraft, setToolAllowlistDraft] = useState<string[]>([]);
+  const [toolBlocklistDraft, setToolBlocklistDraft] = useState<string[]>([]);
+  const [toolsDisabledState, setToolsDisabledState] = useState(false);
+  const [toolsEditorLoading, setToolsEditorLoading] = useState(false);
+  const [toolsEditorSaving, setToolsEditorSaving] = useState(false);
+  const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
-  const queryClient = useQueryClient();
-  const templatesQuery = useQuery({ queryKey: ["agent-templates"], queryFn: listAgentTemplates, enabled: showCreate && createMode === "template" });
+  const templatesQuery = useAgentTemplates({
+    enabled: showCreate && createMode === "template",
+  });
   const localizedTemplates = useMemo(
     () =>
       (templatesQuery.data ?? []).map((template) => ({
@@ -72,41 +135,29 @@ export function AgentsPage() {
     () => localizedTemplates.find((template) => template.name === templateName) ?? null,
     [localizedTemplates, templateName],
   );
-  const spawnMutation = useMutation({
-    mutationFn: spawnAgent,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setShowCreate(false);
-      setTemplateName("");
-      setManifestToml("");
-      addToast(t("agents.spawn_success", { defaultValue: "Agent created" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.spawn_failed", { defaultValue: "Failed to create agent" }), "error"),
-  });
-  const deleteMutation = useMutation({
-    mutationFn: deleteAgent,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      setDetailAgent(null);
-      addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }), "error"),
-  });
+  const spawnMutation = useSpawnAgent();
+  const suspendMutation = useSuspendAgent();
+  const resumeMutation = useResumeAgent();
+  const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchAgentMutation = usePatchAgent();
+  const cloneMutation = useCloneAgent();
+  const qc = useQueryClient();
 
-  const patchAgentConfigMutation = useMutation({
-    mutationFn: ({ agentId, config }: { agentId: string; config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" } }) =>
-      patchAgentConfig(agentId, config),
-    onSuccess: (_, { agentId }) => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-      queryClient.invalidateQueries({ queryKey: ["agent-detail", agentId] });
-      setEditingModel(false);
-      if (detailAgent?.id === agentId) {
-        getAgentDetail(agentId).then(setDetailAgent).catch(() => {});
-      }
-      addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
-    },
-    onError: (e: any) => addToast(e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }), "error"),
-  });
+  const rawDeleteMutation = useDeleteAgent();
+  const deleteMutation = {
+    mutate: (agentId: string) =>
+      rawDeleteMutation.mutate(agentId, {
+        onSuccess: () => {
+          setDetailAgent(prev => prev?.id === agentId ? null : prev);
+          addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
+        },
+        onError: (e: Error) =>
+          addToast(
+            e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
+            "error",
+          ),
+      }),
+  };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
     return { ...agent, is_hand: agent.is_hand ?? fallback };
@@ -129,7 +180,121 @@ export function AgentsPage() {
   function closeDetailModal() {
     setDetailAgent(null);
     setEditingModel(false);
+    setEditingName(false);
+    closeToolsEditor();
   }
+
+  function startNameEdit() {
+    setNameDraft(detailAgent?.name ?? "");
+    setEditingName(true);
+  }
+
+  function cancelNameEdit() {
+    setEditingName(false);
+  }
+
+  function saveName() {
+    // Re-entrancy guard: Enter pressed twice in quick succession would
+    // otherwise queue a second PATCH for the same name, which the kernel's
+    // `update_name` rejects with `AgentAlreadyExists` (the name_index
+    // entry was just claimed by the first call) — surfacing as a
+    // misleading "Failed to rename" toast for the user. The Save button
+    // already has the same disable check; mirror it here for keyboard
+    // submits.
+    if (patchAgentMutation.isPending) return;
+    const trimmed = nameDraft.trim();
+    if (!detailAgent || !trimmed || trimmed === detailAgent.name) {
+      setEditingName(false);
+      return;
+    }
+    // Capture the agent id we're renaming. If the user closes this modal
+    // and opens a different agent before the mutation resolves, the
+    // onSuccess handler must NOT smuggle this rename's name onto the new
+    // agent's local state.
+    const targetId = detailAgent.id;
+    patchAgentMutation.mutate(
+      { agentId: targetId, body: { name: trimmed } },
+      {
+        onSuccess: () => {
+          // Optimistic local update so the header reflects the new name
+          // before the agents query refetch lands. Gate on id so a stale
+          // mutation completing after the user navigated to another
+          // agent doesn't overwrite that other agent's name.
+          setDetailAgent(prev =>
+            prev?.id === targetId ? { ...prev, name: trimmed } : prev,
+          );
+          setEditingName(false);
+          addToast(t("agents.rename_success", { defaultValue: "Agent renamed" }), "success");
+        },
+        onError: (e: Error) => {
+          addToast(
+            e?.message || t("agents.rename_failed", { defaultValue: "Failed to rename agent" }),
+            "error",
+          );
+        },
+      },
+    );
+  }
+
+  async function refreshDetailAgent(agentId: string, fallback?: boolean) {
+    try {
+      await qc.invalidateQueries({ queryKey: agentQueries.detail(agentId).queryKey });
+      const d = await qc.fetchQuery(agentQueries.detail(agentId));
+      setDetailAgent(mergeHandFlag(d, fallback));
+    } catch {
+      // keep current state when refresh fails
+    }
+  }
+
+  function closeToolsEditor() {
+    setShowToolsEditor(false);
+    setToolsEditorAgentId(null);
+    setToolsEditorLoading(false);
+    setToolsEditorSaving(false);
+    setAvailableToolNames([]);
+    setToolAllowlistDraft([]);
+    setToolBlocklistDraft([]);
+    setToolsDisabledState(false);
+  }
+
+  useEffect(() => {
+    if (!showToolsEditor || !toolsEditorAgentId) return;
+
+    let cancelled = false;
+
+    async function loadToolsEditorState() {
+      setToolsEditorLoading(true);
+      try {
+        const agentId = toolsEditorAgentId;
+        if (!agentId) return;
+        const [allTools, agentTools] = await Promise.all([
+          listTools(),
+          getAgentTools(agentId),
+        ]);
+        if (cancelled) return;
+        const names = Array.isArray(allTools)
+          ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
+          : [];
+        setAvailableToolNames(names);
+        setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
+        setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
+        setToolsDisabledState(Boolean(agentTools?.disabled));
+      } catch (err: any) {
+        if (cancelled) return;
+        addToast(err?.message || t("agents.tools_load_failed", { defaultValue: "Failed to load tools" }), "error");
+      } finally {
+        if (!cancelled) {
+          setToolsEditorLoading(false);
+        }
+      }
+    }
+
+    void loadToolsEditorState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToolsEditor, toolsEditorAgentId, addToast, t]);
 
   function saveModelEdit() {
     if (!detailAgent) return;
@@ -160,35 +325,121 @@ export function AgentsPage() {
       return;
     }
 
-    patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: patch });
+    patchAgentConfigMutation.mutate(
+      { agentId: detailAgent.id, config: patch },
+      {
+        onSuccess: async () => {
+          setEditingModel(false);
+          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+          addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
+        },
+        onError: (e: any) => {
+          addToast(
+            e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }),
+            "error",
+          );
+        },
+      },
+    );
   }
 
   // Share the snapshot query with OverviewPage — same cache key means React Query
   // deduplicates the poll when both pages are mounted, and agent counts on the
   // Overview tab stay in sync with this list automatically.
-  const agentsQuery = useQuery({
-    queryKey: ["dashboard", "snapshot"],
-    queryFn: loadDashboardSnapshot,
-    refetchInterval: REFRESH_MS,
-  });
+  const agentsQuery = useDashboardSnapshot();
 
-  const modelsQuery = useQuery({
-    queryKey: ["models", "list", modelDraft.provider],
-    queryFn: () => listModels({ provider: modelDraft.provider }),
-    enabled: !!modelDraft.provider.trim(),
-    staleTime: 60_000,
-  });
+  const modelsQuery = useModels(
+    { provider: modelDraft.provider },
+    { enabled: !!modelDraft.provider.trim() },
+  );
 
-  const providersQuery = useQuery({
-    queryKey: ["providers", "list"],
-    queryFn: listProviders,
-    staleTime: 60_000,
-  });
+  // Separate models query for the create-form's chosen provider. We don't
+  // reuse modelsQuery because that one is gated on the inline-edit widget's
+  // selection, which is unrelated to the create modal.
+  const formModelsQuery = useModels(
+    { provider: formState.model.provider },
+    { enabled: showCreate && createMode === "form" && !!formState.model.provider.trim() },
+  );
+
+  const providersQuery = useProviders();
 
   const configuredProviders = useMemo(
     () => (providersQuery.data ?? []).filter(p => isProviderAvailable(p.auth_status)),
     [providersQuery.data],
   );
+
+  // Form-mode option lists (only providers that have credentials configured).
+  const formProviderOptions = useMemo(
+    () => configuredProviders.map((p) => ({ name: p.id })),
+    [configuredProviders],
+  );
+  const formModelOptions = useMemo(
+    () =>
+      (formModelsQuery.data?.models ?? []).map((m) => ({
+        provider: m.provider,
+        id: m.id,
+      })),
+    [formModelsQuery.data?.models],
+  );
+  const serializedFormToml = useMemo(
+    () => serializeManifestForm(formState, formExtras),
+    [formState, formExtras],
+  );
+  const serializedFormMarkdown = useMemo(
+    () => generateManifestMarkdown(formState, formExtras),
+    [formState, formExtras],
+  );
+  const [previewTab, setPreviewTab] = useState<"toml" | "markdown">("toml");
+
+  // Single close path for the create modal so the X button, the
+  // Cancel button, and the onSuccess handler after spawn all clear the
+  // same transient state. Template selection + custom name are cleared
+  // here because they're per-attempt picks; form/TOML drafts persist so
+  // users can reopen the modal and resume where they left off.
+  const closeCreateModal = () => {
+    setShowCreate(false);
+    setFormErrors(new Set());
+    setTomlParseError(null);
+    setTemplateName("");
+    setTemplateCustomName("");
+    // Don't reset while a spawn is in flight — reset() flips isPending
+    // back to false, and since the fetch isn't actually aborted the user
+    // could reopen the modal and submit again before the first response
+    // lands, producing a duplicate-spawn "already exists" error (the
+    // exact bug #2741 was meant to fix). Once the original request
+    // settles, isPending goes false on its own.
+    if (!spawnMutation.isPending) {
+      spawnMutation.reset();
+    }
+  };
+
+  // Bidirectional Form ⇄ TOML sync. Going Form→TOML pushes the form's
+  // serialized output into the textarea so advanced users can keep editing.
+  // Going TOML→Form parses what's in the textarea, populating the form
+  // and stashing unmapped fields ([thinking], [tools.*], etc.) in extras
+  // so they survive a re-serialize.
+  const switchCreateMode = (next: "form" | "template" | "toml") => {
+    if (next === createMode) return;
+    if (next === "form" && manifestToml.trim() && manifestToml !== serializedFormToml) {
+      const parsed = parseManifestToml(manifestToml);
+      if (!parsed.ok) {
+        setTomlParseError(
+          parsed.line !== undefined
+            ? `Line ${parsed.line}:${parsed.column ?? 0} — ${parsed.message}`
+            : parsed.message,
+        );
+        return;
+      }
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setTomlParseError(null);
+    }
+    if (next === "toml" && createMode === "form") {
+      setManifestToml(serializedFormToml);
+      setTomlParseError(null);
+    }
+    setCreateMode(next);
+  };
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -238,32 +489,38 @@ export function AgentsPage() {
     }), [visibleAgents, search, stateFilter, sortBy]);
 
   const coreAgents = filteredAgents;
+  const conflictingToolNames = useMemo(
+    () => toolAllowlistDraft.filter((name) => toolBlocklistDraft.includes(name)),
+    [toolAllowlistDraft, toolBlocklistDraft],
+  );
 
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
     return (
-      <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
+      <Card key={agent.id} hover padding="lg" className={`cursor-pointer overflow-hidden min-w-0 ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
-        try { const d = await getAgentDetail(agent.id); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand }); }
+        try { const d = await qc.fetchQuery(agentQueries.detail(agent.id)); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail); }
         setDetailLoading(false);
       }}>
-        <div className="flex items-start justify-between gap-4 mb-5">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="relative">
-              <Avatar fallback={agent.name} size="lg" />
-              {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <h2 className="text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
-                {agent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
+        <div className="flex flex-col gap-3 mb-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="relative shrink-0">
+                <Avatar fallback={agent.name} size="lg" />
+                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
               </div>
-              <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <h2 className="text-sm sm:text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
+                  {agent.is_hand && <Badge variant="info" className="shrink-0">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
+                </div>
+                <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
+              </div>
             </div>
+            <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
+              {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
+            </Badge>
           </div>
-          <Badge variant={getStatusVariant(agent.state)} dot>
-            {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
-          </Badge>
         </div>
         <div className="space-y-2.5 mb-5">
           <div className="flex items-center gap-3 text-xs">
@@ -282,23 +539,24 @@ export function AgentsPage() {
             <span className="font-mono text-[10px]">{agent.last_active ? formatTime(agent.last_active) : t("common.never")}</span>
           </div>
         </div>
-        <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
+        <div className="pt-4 border-t border-border-subtle/30 flex flex-wrap gap-2">
           {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await resumeAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
-              <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await resumeMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+              <Play className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.resume")}</span>
             </Button>
           ) : (
-            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); try { await suspendAgent(agent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
-              <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
+            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await suspendMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+              <Pause className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.suspend")}</span>
             </Button>
           )}
-          <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
-            <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
+          <Button variant="primary" size="sm" className="flex-1 min-w-[100px]" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
+            <MessageCircle className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("common.interact")}</span>
           </Button>
           {!agent.is_hand && (
             <Button
               variant="secondary"
               size="sm"
+              className="shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
                 setConfirmDialog({
@@ -400,7 +658,7 @@ export function AgentsPage() {
       </div>
 
       {agentsQuery.isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
+        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : filteredAgents.length === 0 ? (
@@ -431,28 +689,112 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6 stagger-children">
+        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))] stagger-children">
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
-      {/* Agent Detail Modal */}
+      {/* Agent Detail / Edit Modal — uses the shared <Modal> shell with the
+          same `size="4xl"` as the Create modal so create and edit feel
+          uniform (issue #2798). The custom rich header (avatar, status,
+          inline rename) lives inside; <Modal> provides backdrop, focus
+          trap, Escape-to-close, mobile bottom-sheet, and standard sizing. */}
       {detailAgent && (() => {
         const detailState = ((detailAgent as any).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
         const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
+        // Only hand-managed sub-agents are locked from rename — their
+        // names are referenced by the parent hand and changing them
+        // would orphan the parent's call sites. Built-in templates
+        // (`assistant`, etc.) ARE renameable: a fresh agent spawned
+        // from a template is a regular user-owned agent that just
+        // happens to start with a translated display name. A previous
+        // i18n-key heuristic locked them too, which created a
+        // dead-end: rename to "assistant" → next open the agent looks
+        // built-in → rename UI disabled forever.
+        const lockRename = !!detailAgent.is_hand;
+        // Backdrop click closing while a rename PATCH is in flight
+        // would dismiss the modal but still toast "Agent renamed"
+        // afterward — confusing. Hold the backdrop until the user is
+        // out of the editing flow.
+        const lockBackdropDismiss = editingName || patchAgentMutation.isPending;
         return (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm" onClick={closeDetailModal}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <Modal
+          isOpen
+          onClose={closeDetailModal}
+          size="4xl"
+          hideCloseButton
+          disableBackdropClose={lockBackdropDismiss}
+        >
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="relative">
+                <div className="flex items-center gap-4 min-w-0 flex-1">
+                  <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
                     <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && detailState !== "crashed" ? "animate-pulse" : ""}`} />
                   </div>
-                  <div>
-                    <h3 className="text-lg font-black tracking-tight">{t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}</h3>
+                  <div className="min-w-0 flex-1">
+                    {editingName ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={nameDraft}
+                          onChange={e => setNameDraft(e.target.value)}
+                          onKeyDown={e => {
+                            // `isComposing` guard: in CJK IMEs Enter
+                            // confirms the candidate (pinyin → hanzi),
+                            // it does NOT submit. Without this check,
+                            // Chinese/Japanese users get their input
+                            // hijacked mid-composition.
+                            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                              saveName();
+                            } else if (e.key === "Escape") {
+                              // stopPropagation so this Escape only
+                              // cancels the inline edit — Modal also
+                              // listens for Escape on window and would
+                              // otherwise close the entire detail
+                              // modal at the same time.
+                              e.stopPropagation();
+                              cancelNameEdit();
+                            }
+                          }}
+                          className="px-2 py-1 rounded-lg border border-brand bg-main text-lg font-black tracking-tight outline-none focus:ring-2 focus:ring-brand/30 min-w-0 flex-1"
+                          aria-label={t("agents.edit_name", { defaultValue: "Agent name" })}
+                          maxLength={64}
+                        />
+                        <button
+                          onClick={saveName}
+                          disabled={patchAgentMutation.isPending || !nameDraft.trim() || nameDraft.trim() === detailAgent.name}
+                          className="px-3 py-1 rounded-lg text-xs font-bold bg-brand text-white hover:bg-brand/90 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        >
+                          {patchAgentMutation.isPending ? t("common.saving") : t("common.save")}
+                        </button>
+                        <button
+                          onClick={cancelNameEdit}
+                          className="px-3 py-1 rounded-lg text-xs font-bold bg-main hover:bg-main/80 text-text-dim border border-border-subtle shrink-0"
+                        >
+                          {t("common.cancel")}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={lockRename ? undefined : startNameEdit}
+                        disabled={lockRename}
+                        className={`group flex items-center gap-2 text-left max-w-full ${lockRename ? "cursor-default" : "cursor-text hover:text-brand transition-colors"}`}
+                        title={lockRename
+                          ? t("agents.rename_hand_disabled", { defaultValue: "Hand-managed agents cannot be renamed" })
+                          : t("agents.rename_hint", { defaultValue: "Click to rename" })}
+                      >
+                        <h3 className="text-lg font-black tracking-tight truncate">
+                          {t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
+                        </h3>
+                        {!lockRename && (
+                          <Pencil className="w-3 h-3 text-text-dim opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+                        )}
+                      </button>
+                    )}
                     <div className="flex items-center gap-2 mt-0.5">
                       <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
@@ -462,7 +804,7 @@ export function AgentsPage() {
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors shrink-0" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
               </div>
             </div>
             <div className="p-6 space-y-5">
@@ -593,7 +935,14 @@ export function AgentsPage() {
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        patchAgentConfigMutation.mutate({ agentId: detailAgent.id, config: { web_search_augmentation: mode } });
+                        patchAgentConfigMutation.mutate(
+                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                          {
+                            onSuccess: async () => {
+                              await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                            },
+                          },
+                        );
                       }}
                       className="w-28 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand text-right"
                     >
@@ -621,7 +970,22 @@ export function AgentsPage() {
                     {t("agents.capabilities")}
                   </h4>
                   <div className="flex flex-wrap gap-2">
-                    {detailAgent.capabilities.tools && <Badge variant="brand" dot>{t("agents.tools_cap")}</Badge>}
+                    {detailAgent.capabilities.tools && (
+                      <button
+                        type="button"
+                        className="inline-flex"
+                        aria-label={t("agents.tools_edit_aria", { defaultValue: "Edit tools" })}
+                        onClick={(e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setToolsEditorAgentId(detailAgent.id);
+                          setShowToolsEditor(true);
+                        }}
+                      >
+                        <Badge variant="brand" dot className="hover:bg-brand/20 transition-colors">
+                          {`${t("agents.tools_cap")} ✎`}
+                        </Badge>
+                      </button>
+                    )}
                     {detailAgent.capabilities.network && <Badge variant="brand" dot>{t("agents.network")}</Badge>}
                   </div>
                 </div>
@@ -703,17 +1067,17 @@ export function AgentsPage() {
                 {/* Management actions */}
                 <div className="grid grid-cols-4 gap-2">
                   {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
                       <Play className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.resume")}</span>
                     </Button>
                   ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); const d = await getAgentDetail(detailAgent.id); setDetailAgent(mergeHandFlag(d, detailAgent.is_hand)); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
+                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
                       <Pause className="w-4 h-4" />
                       <span className="text-[9px]">{t("agents.suspend")}</span>
                     </Button>
                   )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneAgent(detailAgent.id); queryClient.invalidateQueries({ queryKey: ["dashboard", "snapshot"] }); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
+                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneMutation.mutateAsync(detailAgent.id); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
                     <Copy className="w-4 h-4" />
                     <span className="text-[9px]">{t("agents.clone")}</span>
                   </Button>
@@ -727,8 +1091,7 @@ export function AgentsPage() {
                         message: t("agents.reset_confirm"),
                         onConfirm: async () => {
                           await resetAgentSession(detailAgent.id);
-                          const d = await getAgentDetail(detailAgent.id);
-                          setDetailAgent(mergeHandFlag(d, detailAgent.is_hand));
+                          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
                         },
                       })
                     }
@@ -763,68 +1126,337 @@ export function AgentsPage() {
                 </Button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
         );
       })()}
 
+      {/* Tools Editor Modal */}
+      {showToolsEditor && toolsEditorAgentId && (
+        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible>
+          <div className="p-6 space-y-5">
+            <div>
+              <p className="text-[11px] text-text-dim/70">
+                {t("agents.tools_editor_desc", { defaultValue: "Review the current tools state for this agent. Empty allowlist means no allow restriction; blocklist still removes selected tools." })}
+              </p>
+              {!toolsEditorLoading && (
+                <p className="mt-2 text-[10px] text-text-dim/50 font-mono">
+                  {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
+                </p>
+              )}
+            </div>
+
+            {toolsEditorLoading ? (
+              <div className="flex items-center gap-2 text-xs text-text-dim py-8 justify-center">
+                <Loader2 className="w-4 h-4 animate-spin" /> {t("common.loading")}
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl border border-border-subtle bg-main/40 px-4 py-3">
+                  <div>
+                    <div className="text-sm font-bold text-text">{t("agents.tools_disabled_label", { defaultValue: "Disable all tools" })}</div>
+                    <p className="mt-1 text-[11px] text-text-dim/70">
+                      {toolsDisabledState
+                        ? t("agents.tools_disabled_hint_active", { defaultValue: "Tools are disabled for this agent; editing allow/block filters is blocked here. Re-enable tools in the agent config to manage filters." })
+                        : t("agents.tools_disabled_hint", { defaultValue: "Tools are currently enabled. Allowlist and blocklist below control which tools remain available." })}
+                    </p>
+                  </div>
+                </div>
+
+                {toolsDisabledState && (
+                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
+                    {t("agents.tools_disabled_save_blocked", { defaultValue: "All tools are disabled for this agent. To re-enable tools, edit the agent manifest or config directly — this editor only manages allow/block filters." })}
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_allowlist_desc", { defaultValue: "These tools are explicitly allowed. Leave empty to allow all tools except blocked ones." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={toolAllowlistDraft}
+                    onChange={setToolAllowlistDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_blocklist_title", { defaultValue: "Blocklist" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_blocklist_desc", { defaultValue: "These tools are blocked even if they are present in the allowlist." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={toolBlocklistDraft}
+                    onChange={setToolBlocklistDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                {conflictingToolNames.length > 0 && (
+                  <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-[11px] text-warning">
+                    {t("agents.tools_conflict_warning", {
+                      defaultValue: "{{count}} tools are in both lists. Blocklist wins and those tools will be removed from the allowlist when you save.",
+                      count: conflictingToolNames.length,
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+
+            <div className="flex flex-col gap-2 pt-2">
+              {toolsDisabledState && (
+                <p className="text-center text-[10px] text-text-dim/50">
+                  {t("agents.tools_disabled_save_hint", { defaultValue: "Re-enable tools in the agent config to modify filters" })}
+                </p>
+              )}
+              <div className="flex gap-2">
+              <Button variant="primary" size="sm" className="flex-1" disabled={toolsEditorLoading || toolsEditorSaving || toolsDisabledState} onClick={async () => {
+                if (!toolsEditorAgentId) return;
+                setToolsEditorSaving(true);
+                try {
+                  const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
+                  await updateAgentTools(toolsEditorAgentId, {
+                    tool_allowlist: resolvedAllowlist,
+                    tool_blocklist: toolBlocklistDraft,
+                  });
+                  addToast(
+                    conflictingToolNames.length > 0
+                      ? t("agents.tools_saved_conflicts", { defaultValue: "Tools updated. Conflicts were resolved in favor of the blocklist." })
+                      : t("agents.tools_saved", { defaultValue: "Tools updated" }),
+                    "success",
+                  );
+                  qc.invalidateQueries({ queryKey: agentQueries.detail(toolsEditorAgentId).queryKey });
+                  if (detailAgent?.id === toolsEditorAgentId) {
+                    void refreshDetailAgent(toolsEditorAgentId);
+                  }
+                  closeToolsEditor();
+                } catch (err: any) {
+                  addToast(err?.message || t("agents.tools_save_failed", { defaultValue: "Failed to update tools" }), "error");
+                } finally {
+                  setToolsEditorSaving(false);
+                }
+              }}>
+                {toolsEditorSaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                {toolsEditorSaving ? t("common.saving") : t("common.save")}
+              </Button>
+              <Button variant="secondary" size="sm" onClick={closeToolsEditor}>
+                {t("common.cancel")}
+              </Button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
       {/* Create Agent Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("agents.create_agent")} size="lg">
+      <Modal
+        isOpen={showCreate}
+        onClose={closeCreateModal}
+        title={t("agents.create_agent")}
+        size="4xl"
+      >
         <div className="p-5 space-y-4">
-          {/* Mode tabs */}
+          {/* Mode tabs — switching between Form and TOML round-trips the
+              manifest in both directions. We only re-parse when content
+              actually differs, so re-clicking the same tab is a no-op. */}
           <div className="flex gap-2">
-            <button onClick={() => setCreateMode("template")}
+            <button onClick={() => switchCreateMode("form")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "form" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+              {t("agents.from_form")}
+            </button>
+            <button onClick={() => switchCreateMode("template")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_template")}
             </button>
-            <button onClick={() => setCreateMode("toml")}
+            <button onClick={() => switchCreateMode("toml")}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
               {t("agents.from_toml")}
             </button>
           </div>
+          {tomlParseError && (
+            // The error is set when leaving TOML→Form fails, so the user
+            // is bounced back to TOML; the message must show on the TOML
+            // tab too, otherwise the rejected switch is invisible.
+            <p className="text-xs text-error">
+              {t("agents.form.toml_parse_error", { msg: tomlParseError })}
+            </p>
+          )}
 
-          {createMode === "template" ? (
-            <div>
-              <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
-              <select value={templateName}
-                onChange={async e => {
-                  const selected = e.target.value;
-                  setTemplateName(selected);
-                  if (!selected) return;
+          {createMode === "form" ? (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4 max-h-[60vh] overflow-y-auto pr-1">
+              <AgentManifestForm
+                value={formState}
+                onChange={setFormState}
+                providers={formProviderOptions}
+                models={formModelOptions}
+                invalidFields={formErrors}
+                extras={formExtras}
+              />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("toml")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "toml"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_toml")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab("markdown")}
+                      className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
+                        previewTab === "markdown"
+                          ? "bg-brand text-white"
+                          : "text-text-dim hover:text-text"
+                      }`}
+                    >
+                      {t("agents.form.preview_markdown")}
+                    </button>
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const text =
+                          previewTab === "toml" ? serializedFormToml : serializedFormMarkdown;
+                        void navigator.clipboard.writeText(text).then(() =>
+                          addToast(t("agents.form.copied"), "success"),
+                        );
+                      }}
+                      className="text-[10px] font-bold text-text-dim hover:text-brand"
+                      title={t("agents.form.copy")}
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    {previewTab === "toml" && (
+                      <button
+                        type="button"
+                        onClick={() => switchCreateMode("toml")}
+                        className="text-[10px] font-bold text-brand hover:underline"
+                      >
+                        {t("agents.form.switch_to_toml")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <pre className="rounded-xl border border-border-subtle bg-main px-3 py-2 text-[11px] font-mono text-text-dim overflow-auto max-h-[55vh] whitespace-pre-wrap break-all">
+                  {previewTab === "toml" ? serializedFormToml : serializedFormMarkdown}
+                </pre>
+              </div>
+            </div>
+          ) : createMode === "template" ? (
+            <div className="space-y-3">
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
+                <select value={templateName}
+                  onChange={e => setTemplateName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
+                  <option value="">{t("agents.template_placeholder")}</option>
+                  {localizedTemplates.map(tmpl => (
+                    <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
+                  ))}
+                </select>
+                {selectedTemplate && (
+                  <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
+                    <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">
+                  {t("agents.template_custom_name", { defaultValue: "Agent Name (optional)" })}
+                </label>
+                <input
+                  type="text"
+                  value={templateCustomName}
+                  onChange={e => setTemplateCustomName(e.target.value)}
+                  placeholder={
+                    selectedTemplate?.name ??
+                    t("agents.template_custom_name_placeholder", {
+                      defaultValue: "Leave blank to use template default",
+                    })
+                  }
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand"
+                />
+                <p className="text-[10px] text-text-dim mt-1">
+                  {t("agents.template_custom_name_hint", {
+                    defaultValue: "Override the template's default name so you can run multiple agents from the same template.",
+                  })}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={!templateName || templateTomlLoading}
+                onClick={async () => {
+                  if (!templateName) return;
                   setTemplateTomlLoading(true);
                   try {
-                    const toml = await getAgentTemplateToml(selected);
-                    setManifestToml(toml);
+                    const toml = await getAgentTemplateToml(templateName);
+                    // Carry the user's custom name across when dropping into
+                    // TOML mode — otherwise the input they just typed gets
+                    // silently discarded and the template's original name wins.
+                    const customName = templateCustomName.trim();
+                    const patched = customName
+                      ? toml.replace(
+                          /^name\s*=\s*(?:"[^"]*"|'[^']*')/m,
+                          `name = "${customName.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
+                        )
+                      : toml;
+                    setManifestToml(patched);
                     setCreateMode("toml");
                   } catch {
-                    // Fetch failed — stay on template tab, fall back to template-name submit
+                    addToast(
+                      t("agents.loading_template_toml_failed", {
+                        defaultValue: "Failed to load template TOML",
+                      }),
+                      "error",
+                    );
                   } finally {
                     setTemplateTomlLoading(false);
                   }
                 }}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand">
-                <option value="">{t("agents.template_placeholder")}</option>
-                {localizedTemplates.map(tmpl => (
-                  <option key={tmpl.name} value={tmpl.name}>{tmpl.displayName}</option>
-                ))}
-              </select>
-              {selectedTemplate && (
-                <div className="mt-2 rounded-xl border border-border-subtle/60 bg-surface/60 px-3 py-2">
-                  <p className="text-xs font-bold text-text">{selectedTemplate.displayName}</p>
-                  <p className="mt-1 text-[11px] leading-relaxed text-text-dim">{selectedTemplate.displayDescription}</p>
-                </div>
-              )}
-              {templateTomlLoading && (
-                <p className="text-[10px] text-text-dim mt-1 flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
-                </p>
-              )}
+                className="text-[10px] font-bold text-brand hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
+              >
+                {templateTomlLoading ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {t("agents.loading_template_toml", { defaultValue: "Loading template…" })}
+                  </span>
+                ) : (
+                  t("agents.edit_template_toml", {
+                    defaultValue: "Edit TOML for advanced customization →",
+                  })
+                )}
+              </button>
             </div>
           ) : (
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
-              <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+              <textarea value={manifestToml} onChange={e => {
+                  setManifestToml(e.target.value);
+                  // Clear stale parse error so the user gets fresh feedback
+                  // on their next switch attempt instead of seeing a message
+                  // that may already be addressed.
+                  if (tomlParseError) setTomlParseError(null);
+                }}
                 placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
                 rows={12}
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
@@ -841,12 +1473,54 @@ export function AgentsPage() {
 
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
-              onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
-              disabled={spawnMutation.isPending || templateTomlLoading || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+              onClick={() => {
+                const onSuccess = () => {
+                  addToast(
+                    t("agents.agent_created", { defaultValue: "Agent created" }),
+                    "success",
+                  );
+                  closeCreateModal();
+                };
+                const onError = (e: Error) => {
+                  addToast(
+                    e?.message ||
+                      t("agents.create_failed", { defaultValue: "Failed to create agent" }),
+                    "error",
+                  );
+                };
+                if (createMode === "form") {
+                  const errors = validateManifestForm(formState);
+                  setFormErrors(new Set(errors));
+                  if (errors.length > 0) return;
+                  spawnMutation.mutate(
+                    { manifest_toml: serializedFormToml },
+                    { onSuccess, onError },
+                  );
+                  return;
+                }
+                const customName = templateCustomName.trim();
+                spawnMutation.mutate(
+                  createMode === "template"
+                    ? { template: templateName, ...(customName ? { name: customName } : {}) }
+                    : { manifest_toml: manifestToml },
+                  { onSuccess, onError },
+                );
+              }}
+              disabled={
+                spawnMutation.isPending ||
+                templateTomlLoading ||
+                (createMode === "form"
+                  ? !formState.name.trim() ||
+                    !formState.model.provider.trim() ||
+                    !formState.model.model.trim()
+                  : createMode === "template"
+                    ? !templateName.trim()
+                    : !manifestToml.trim())
+              }>
               {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
               {t("agents.create_agent")}
             </Button>
-            <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
+            <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
           </div>
         </div>
       </Modal>
@@ -873,7 +1547,6 @@ export function AgentsPage() {
 
 function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: string; agentName: string; onClose: () => void }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<"versions" | "experiments">("versions");
   const [showCreateVersion, setShowCreateVersion] = useState(false);
   const [showCreateExperiment, setShowCreateExperiment] = useState(false);
@@ -883,75 +1556,17 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
   const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
   const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
 
-  const versionsQuery = useQuery({
-    queryKey: ["prompt-versions", agentId],
-    queryFn: () => listPromptVersions(agentId),
-  });
+  const versionsQuery = usePromptVersions(agentId);
+  const experimentsQuery = useExperiments(activeTab === "experiments" ? agentId : "");
+  const metricsQuery = useExperimentMetrics(selectedMetrics ?? "");
 
-  const experimentsQuery = useQuery({
-    queryKey: ["experiments", agentId],
-    queryFn: () => listExperiments(agentId),
-    enabled: activeTab === "experiments"
-  });
-
-  const metricsQuery = useQuery({
-    queryKey: ["experiment-metrics", selectedMetrics],
-    queryFn: () => selectedMetrics ? getExperimentMetrics(selectedMetrics) : Promise.resolve([]),
-    enabled: !!selectedMetrics
-  });
-
-  const createVersionMutation = useMutation({
-    mutationFn: (data: { system_prompt: string; description?: string }) => 
-      createPromptVersion(agentId, { ...data, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] }); setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); }
-  });
-
-  const createExperimentMutation = useMutation({
-    mutationFn: (data: { name: string }) => {
-      const variants = selectedVariantIds.map((vId, i) => {
-        const ver = versions.find(v => v.id === vId);
-        return {
-          name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`,
-          prompt_version_id: vId,
-          description: ver ? `v${ver.version}` : undefined,
-        };
-      });
-      const split = Math.floor(100 / selectedVariantIds.length);
-      return createExperiment(agentId, {
-        ...data,
-        status: "draft" as const,
-        traffic_split: selectedVariantIds.map(() => split),
-        success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true },
-        variants,
-      });
-    },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["experiments", agentId] }); setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); }
-  });
-
-  const activateMutation = useMutation({
-    mutationFn: (versionId: string) => activatePromptVersion(versionId, agentId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
-  });
-
-  const startExpMutation = useMutation({
-    mutationFn: (expId: string) => startExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const pauseExpMutation = useMutation({
-    mutationFn: (expId: string) => pauseExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const completeExpMutation = useMutation({
-    mutationFn: (expId: string) => completeExperiment(expId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["experiments", agentId] })
-  });
-
-  const deleteVersionMutation = useMutation({
-    mutationFn: (versionId: string) => deletePromptVersion(versionId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["prompt-versions", agentId] })
-  });
+  const createVersionMutation = useCreatePromptVersion();
+  const createExperimentMutation = useCreateExperiment();
+  const activateMutation = useActivatePromptVersion();
+  const startExpMutation = useStartExperiment();
+  const pauseExpMutation = usePauseExperiment();
+  const completeExpMutation = useCompleteExperiment();
+  const deleteVersionMutation = useDeletePromptVersion();
 
   const versions = versionsQuery.data ?? [];
   const experiments = experimentsQuery.data ?? [];
@@ -1000,12 +1615,12 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         </div>
                         <div className="flex gap-2">
                           {!v.is_active && (
-                            <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate(v.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate({ versionId: v.id, agentId })}>
                               <Check className="w-3 h-3 mr-1" /> Activate
                             </Button>
                           )}
                           {!v.is_active && (
-                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate(v.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => deleteVersionMutation.mutate({ versionId: v.id, agentId })}>
                               <Trash2 className="w-3 h-3" />
                             </Button>
                           )}
@@ -1035,7 +1650,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ system_prompt: newPromptSystemPrompt, description: newPromptDescription })} disabled={!newPromptSystemPrompt.trim()}>
+                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim()}>
                         Create
                       </Button>
                       <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
@@ -1066,10 +1681,10 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate(exp.id)}><Play className="w-3 h-3 mr-1" />Start</Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate(exp.id)}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />Start</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
                           {(exp.status === "running" || exp.status === "paused") && (
-                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate(exp.id)}>
+                            <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate({ experimentId: exp.id, agentId })}>
                               <Check className="w-3 h-3 mr-1" />Complete
                             </Button>
                           )}
@@ -1152,7 +1767,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ name: newExperimentName })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
+                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
                         Create ({selectedVariantIds.length} variants)
                       </Button>
                       <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>

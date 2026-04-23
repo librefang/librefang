@@ -51,8 +51,13 @@ impl MemorySubstrate {
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
         let conn = Connection::open(db_path).map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-2000; \
+             PRAGMA mmap_size=0;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 
@@ -253,6 +258,32 @@ impl MemorySubstrate {
     /// Delete all sessions belonging to an agent.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         self.sessions.delete_agent_sessions(agent_id)
+    }
+
+    /// Count an agent's sessions touched after the given Unix-millis timestamp.
+    /// See [`SessionStore::count_agent_sessions_touched_since`] for semantics.
+    pub fn count_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+        exclude_session: Option<SessionId>,
+    ) -> LibreFangResult<u32> {
+        self.sessions
+            .count_agent_sessions_touched_since(agent_id, since_ms, exclude_session)
+    }
+
+    /// List an agent's session IDs touched after the given timestamp, newest
+    /// first, capped at `limit`. See
+    /// [`SessionStore::list_agent_sessions_touched_since`] for semantics.
+    pub fn list_agent_sessions_touched_since(
+        &self,
+        agent_id: AgentId,
+        since_ms: u64,
+        limit: u32,
+        exclude_session: Option<SessionId>,
+    ) -> LibreFangResult<Vec<String>> {
+        self.sessions
+            .list_agent_sessions_touched_since(agent_id, since_ms, limit, exclude_session)
     }
 
     /// Delete the canonical (cross-channel) session for an agent.
@@ -693,22 +724,35 @@ impl MemorySubstrate {
     }
 
     /// Claim the next pending task (optionally for a specific assignee). Returns task JSON or None.
-    pub async fn task_claim(&self, agent_id: &str) -> LibreFangResult<Option<serde_json::Value>> {
+    ///
+    /// `agent_id` must be the canonical UUID. `agent_name` is the human-readable
+    /// name for the same agent; tasks posted with a name (rather than UUID) in
+    /// `assigned_to` are also matched so that name-based assignments are never
+    /// silently dropped (fixes issue #2841).
+    pub async fn task_claim(
+        &self,
+        agent_id: &str,
+        agent_name: Option<&str>,
+    ) -> LibreFangResult<Option<serde_json::Value>> {
         let conn = Arc::clone(&self.conn);
         let agent_id = agent_id.to_string();
+        let agent_name = agent_name.unwrap_or("").to_string();
 
         tokio::task::spawn_blocking(move || {
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
-            // Find first pending task assigned to this agent, or any unassigned pending task
+            // Match tasks assigned to this agent by UUID *or* by name (tasks posted
+            // via the API or bridge tools may store the name rather than the UUID),
+            // plus any unassigned (empty assigned_to) pending tasks.
             let mut stmt = db.prepare(
                 "SELECT id, title, description, assigned_to, created_by, created_at
                  FROM task_queue
-                 WHERE status = 'pending' AND (assigned_to = ?1 OR assigned_to = '')
+                 WHERE status = 'pending'
+                   AND (assigned_to = ?1 OR assigned_to = ?2 OR assigned_to = '')
                  ORDER BY priority DESC, created_at ASC
                  LIMIT 1"
             ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-            let result = stmt.query_row(rusqlite::params![agent_id], |row| {
+            let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -720,11 +764,13 @@ impl MemorySubstrate {
             });
 
             match result {
-                Ok((id, title, description, assigned, created_by, created_at)) => {
-                    // Update status to in_progress
+                Ok((id, title, description, _assigned, created_by, created_at)) => {
+                    // Update status to in_progress and stamp `claimed_at` so the
+                    // stuck-task sweeper can TTL-reset workers that never complete.
+                    let claimed_at = chrono::Utc::now().to_rfc3339();
                     db.execute(
-                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2 WHERE id = ?1",
-                        rusqlite::params![id, agent_id],
+                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1",
+                        rusqlite::params![id, agent_id, claimed_at],
                     ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                     Ok(Some(serde_json::json!({
@@ -732,9 +778,10 @@ impl MemorySubstrate {
                         "title": title,
                         "description": description,
                         "status": "in_progress",
-                        "assigned_to": if assigned.is_empty() { &agent_id } else { &assigned },
+                        "assigned_to": agent_id,
                         "created_by": created_by,
                         "created_at": created_at,
+                        "claimed_at": claimed_at,
                     })))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -755,7 +802,7 @@ impl MemorySubstrate {
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3 WHERE id = ?1",
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, claimed_at = NULL WHERE id = ?1",
                 rusqlite::params![task_id, result, now],
             ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if rows == 0 {
@@ -802,7 +849,7 @@ impl MemorySubstrate {
             let rows = db
                 .execute(
                     "UPDATE task_queue \
-                     SET status = 'pending', result = NULL, completed_at = NULL \
+                     SET status = 'pending', result = NULL, completed_at = NULL, claimed_at = NULL \
                      WHERE id = ?1 AND status IN ('completed', 'failed')",
                     rusqlite::params![task_id],
                 )
@@ -822,11 +869,11 @@ impl MemorySubstrate {
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
                 Some(s) => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
                     vec![Box::new(s.clone())],
                 ),
                 None => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue ORDER BY created_at DESC",
+                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result, claimed_at FROM task_queue ORDER BY created_at DESC",
                     vec![],
                 ),
             };
@@ -844,6 +891,7 @@ impl MemorySubstrate {
                     "created_at": row.get::<_, String>(6).unwrap_or_default(),
                     "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
                     "result": row.get::<_, Option<String>>(8).unwrap_or(None),
+                    "claimed_at": row.get::<_, Option<String>>(9).unwrap_or(None),
                 }))
             }).map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -852,6 +900,171 @@ impl MemorySubstrate {
                 tasks.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
             }
             Ok(tasks)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Reset `in_progress` tasks whose worker stalled without calling
+    /// `task_complete` — fixes issue #2923. A task is considered stuck when
+    /// `claimed_at` is older than `ttl_secs` seconds from now.
+    ///
+    /// When `max_retries > 0`: tasks that have already been reset that many
+    /// times are marked `failed` instead of pending, preventing infinite retry
+    /// loops. Pass `0` to disable the cap (current default behaviour).
+    ///
+    /// Returns the list of reset task IDs so the caller can log / emit events.
+    pub async fn task_reset_stuck(
+        &self,
+        ttl_secs: u64,
+        max_retries: u32,
+    ) -> LibreFangResult<Vec<String>> {
+        let conn = Arc::clone(&self.conn);
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::from_std(std::time::Duration::from_secs(ttl_secs))
+                    .unwrap_or_else(|_| chrono::Duration::seconds(0));
+            let cutoff_str = cutoff.to_rfc3339();
+
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, COALESCE(retry_count, 0) FROM task_queue \
+                     WHERE status = 'in_progress' \
+                       AND claimed_at IS NOT NULL \
+                       AND claimed_at < ?1",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            let stuck: Vec<(String, u32)> = stmt
+                .query_map(rusqlite::params![cutoff_str], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if stuck.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut reset_ids = Vec::new();
+            for (id, retries) in &stuck {
+                let exhausted = max_retries > 0 && *retries >= max_retries;
+                if exhausted {
+                    db.execute(
+                        "UPDATE task_queue \
+                         SET status = 'failed', assigned_to = '', claimed_at = NULL, \
+                             retry_count = retry_count + 1 \
+                         WHERE id = ?1 AND status = 'in_progress'",
+                        rusqlite::params![id],
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                } else {
+                    db.execute(
+                        "UPDATE task_queue \
+                         SET status = 'pending', assigned_to = '', claimed_at = NULL, \
+                             retry_count = retry_count + 1 \
+                         WHERE id = ?1 AND status = 'in_progress'",
+                        rusqlite::params![id],
+                    )
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                }
+                reset_ids.push(id.clone());
+            }
+            Ok(reset_ids)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Get a single task by ID.
+    pub async fn task_get(&self, task_id: &str) -> LibreFangResult<Option<serde_json::Value>> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, title, description, status, assigned_to, created_by, \
+                     created_at, completed_at, result, claimed_at, \
+                     COALESCE(retry_count, 0) \
+                     FROM task_queue WHERE id = ?1",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let mut rows = stmt
+                .query_map(rusqlite::params![task_id], |row| {
+                    Ok(serde_json::json!({
+                        "id":           row.get::<_, String>(0)?,
+                        "title":        row.get::<_, String>(1).unwrap_or_default(),
+                        "description":  row.get::<_, String>(2).unwrap_or_default(),
+                        "status":       row.get::<_, String>(3)?,
+                        "assigned_to":  row.get::<_, String>(4).unwrap_or_default(),
+                        "created_by":   row.get::<_, String>(5).unwrap_or_default(),
+                        "created_at":   row.get::<_, String>(6).unwrap_or_default(),
+                        "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
+                        "result":       row.get::<_, Option<String>>(8).unwrap_or(None),
+                        "claimed_at":   row.get::<_, Option<String>>(9).unwrap_or(None),
+                        "retry_count":  row.get::<_, u32>(10).unwrap_or(0),
+                    }))
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            match rows.next() {
+                Some(Ok(v)) => Ok(Some(v)),
+                Some(Err(e)) => Err(LibreFangError::Memory(e.to_string())),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Update a task's status to `pending` (reset) or `cancelled`.
+    ///
+    /// Only `in_progress` / `pending` tasks can be reset to `pending`.
+    /// Any non-terminal task can be cancelled.
+    /// Returns `false` when the task was not found or the transition is invalid.
+    pub async fn task_update_status(
+        &self,
+        task_id: &str,
+        new_status: &str,
+    ) -> LibreFangResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+        let new_status = new_status.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let rows = match new_status.as_str() {
+                "pending" => db.execute(
+                    "UPDATE task_queue \
+                     SET status = 'pending', claimed_at = NULL, assigned_to = '' \
+                     WHERE id = ?1 AND status IN ('in_progress', 'failed')",
+                    rusqlite::params![task_id],
+                ),
+                "cancelled" => db.execute(
+                    "UPDATE task_queue \
+                     SET status = 'cancelled' \
+                     WHERE id = ?1 AND status NOT IN ('completed', 'cancelled')",
+                    rusqlite::params![task_id],
+                ),
+                _ => {
+                    return Err(LibreFangError::InvalidInput(format!(
+                        "Invalid status '{new_status}': only 'pending' and 'cancelled' are allowed"
+                    )))
+                }
+            }
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows > 0)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1037,8 +1250,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Claim the task
-        let claimed = substrate.task_claim("auditor").await.unwrap();
+        // Claim the task (name stored in assigned_to; pass matching name param)
+        let claimed = substrate
+            .task_claim("auditor", Some("auditor"))
+            .await
+            .unwrap();
         assert!(claimed.is_some());
         let claimed = claimed.unwrap();
         assert_eq!(claimed["id"], task_id);
@@ -1059,8 +1275,109 @@ mod tests {
     #[tokio::test]
     async fn test_task_claim_empty() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let claimed = substrate.task_claim("nobody").await.unwrap();
+        let claimed = substrate.task_claim("nobody", None).await.unwrap();
         assert!(claimed.is_none());
+    }
+
+    /// Tasks posted with an agent *name* in assigned_to must be claimable when
+    /// the claimer passes the corresponding UUID + name (issue #2841).
+    #[tokio::test]
+    async fn test_task_claim_by_name_when_posted_with_name() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        // External actor posts task using agent name (not UUID)
+        let task_id = substrate
+            .task_post(
+                "Analyse logs",
+                "Check for anomalies",
+                Some("researcher"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let fake_uuid = "4c549884-2aa1-4860-a5bb-f0aa35a1bf7e";
+
+        // Claim with UUID only — should NOT match name-stored task
+        let not_claimed = substrate.task_claim(fake_uuid, None).await.unwrap();
+        assert!(
+            not_claimed.is_none(),
+            "UUID-only claim should not match name-assigned task"
+        );
+
+        // Claim with UUID + matching name — should match
+        let claimed = substrate
+            .task_claim(fake_uuid, Some("researcher"))
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_some(),
+            "UUID+name claim must match name-assigned task"
+        );
+        let claimed = claimed.unwrap();
+        assert_eq!(claimed["id"], task_id);
+        assert_eq!(claimed["status"], "in_progress");
+        // assigned_to should be normalised to the claimer's UUID after claim
+        assert_eq!(claimed["assigned_to"], fake_uuid);
+    }
+
+    /// Stuck `in_progress` tasks (worker LLM stalled, no `task_complete` call)
+    /// must be automatically reset to `pending` once `claimed_at` is older than
+    /// the configured TTL (issue #2923 / #2926).
+    #[tokio::test]
+    async fn test_task_reset_stuck_expires_in_progress() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("Long task", "Takes forever", Some("worker"), None)
+            .await
+            .unwrap();
+
+        // Worker claims the task.
+        let claimed = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+        assert!(claimed.is_some());
+        assert_eq!(claimed.as_ref().unwrap()["status"], "in_progress");
+
+        // Simulate the worker stalling: back-date `claimed_at` to 5 minutes ago
+        // so a TTL of 60 s trips and a TTL of 3600 s does not.
+        {
+            let conn = substrate.conn.lock().unwrap();
+            let five_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+            conn.execute(
+                "UPDATE task_queue SET claimed_at = ?1 WHERE id = ?2",
+                rusqlite::params![five_min_ago, task_id],
+            )
+            .unwrap();
+        }
+
+        // With a 1 hour TTL, nothing should be reset (not stuck yet).
+        let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+        assert!(
+            reset.is_empty(),
+            "TTL larger than stall should not reset any task"
+        );
+        let still_in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert_eq!(still_in_progress.len(), 1);
+
+        // With a 60 s TTL, the stuck task should be flipped back to pending.
+        let reset = substrate.task_reset_stuck(60, 0).await.unwrap();
+        assert_eq!(reset, vec![task_id.clone()]);
+
+        let pending = substrate.task_list(Some("pending")).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["id"], task_id);
+        assert_eq!(pending[0]["assigned_to"], "");
+        assert!(
+            pending[0]["claimed_at"].is_null(),
+            "claimed_at must be cleared on auto-reset"
+        );
+        let in_progress = substrate.task_list(Some("in_progress")).await.unwrap();
+        assert!(in_progress.is_empty());
+
+        // Second sweep is a no-op — stuck task is already pending.
+        let reset_again = substrate.task_reset_stuck(60, 0).await.unwrap();
+        assert!(reset_again.is_empty());
     }
 
     #[tokio::test]

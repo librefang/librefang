@@ -40,12 +40,17 @@ rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 regex-lite = { workspace = true }
+regex = { workspace = true }
 cron = "0.16"
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[[bin]]
+name = "purge_sentinels"
+path = "bin/purge_sentinels.rs"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

@@ -1295,6 +1295,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let tools = convert_tools(&request);
@@ -1317,6 +1318,7 @@ mod tests {
             response_format: None,
             timeout_secs: None,
             extra_body: None,
+            agent_id: None,
         };
 
         let tools = convert_tools(&request);
@@ -1415,6 +1417,7 @@ mod tests {
                 role: Role::System,
                 content: MessageContent::Text("System prompt here.".to_string()),
                 pinned: false,
+                timestamp: None,
             },
             Message::user("Hi"),
         ];
@@ -1549,6 +1552,7 @@ mod tests {
                     })),
                 }]),
                 pinned: false,
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1561,6 +1565,7 @@ mod tests {
                     approval_request_id: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1599,6 +1604,7 @@ mod tests {
                     })),
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1672,6 +1678,7 @@ mod tests {
                     provider_metadata: None,
                 }]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 
@@ -1913,6 +1920,7 @@ mod tests {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(completion.content),
                 pinned: false,
+                timestamp: None,
             },
         ];
         let (contents, _) = convert_messages(&messages, &None);
@@ -2047,6 +2055,7 @@ mod tests {
                     },
                 ]),
                 pinned: false,
+                timestamp: None,
             },
         ];
 

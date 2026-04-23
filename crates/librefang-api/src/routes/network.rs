@@ -52,7 +52,7 @@ pub fn protocol_router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
@@ -867,6 +867,7 @@ pub async fn a2a_external_task_status(
 )]
 pub async fn mcp_http(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Gather all available tools (builtin + skills + MCP)
@@ -915,6 +916,61 @@ pub async fn mcp_http(
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
 
+        // Resolve the caller agent from the `X-LibreFang-Agent-Id` header,
+        // if any. When a CLI driver (e.g. claude-code's `--mcp-config`)
+        // re-exposes LibreFang tools to a spawned CLI, the driver writes
+        // the owning agent's ID into this header so we can rehydrate the
+        // ToolExecContext fields that the direct agent-loop path would
+        // populate (workspace_root, allowed_tools, allowed_skills,
+        // exec_policy, hand_allowed_env). Without it, every file/media/
+        // cron/schedule tool fails with "workspace sandbox not configured"
+        // or "Agent ID required" — issue #2699.
+        //
+        // Unauthenticated external MCP clients do not set this header and
+        // continue to run with `None` context: the fallback behaviour is
+        // unchanged.
+        let caller_entry = headers
+            .get("x-librefang-agent-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
+            .and_then(|id| state.kernel.agent_registry().get(id));
+
+        let caller_agent_id_string = caller_entry.as_ref().map(|e| e.id.to_string());
+        let workspace_root = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.workspace.as_deref());
+        // Build the allowed-tool-name list the same way the direct agent-loop
+        // path does: `kernel.available_tools(id)` already resolves declared
+        // tools + ToolProfile expansion + skill-evolution defaults + MCP
+        // server scoping + `tool_allowlist`/`tool_blocklist` + global
+        // `tool_policy` + the `ToolAll` capability + the browser toggle.
+        // Then mirror the kernel's per-message mode filter (Observe/Assist/
+        // Full) that `send_message` applies before handing tools to
+        // `run_agent_loop` (kernel/mod.rs:3997, 5148, 6852).
+        //
+        // Using `manifest.capabilities.tools` raw would silently break every
+        // agent that declares `capabilities.tools = []` (the common
+        // "unrestricted" default) because `execute_tool` treats `Some([])`
+        // as "deny all" — the exact symptom would be every tool coming back
+        // as "Permission denied" through the bridge even though the agent
+        // was allowed everything on the direct path.
+        let allowed_tools_vec = caller_entry.as_ref().map(|e| {
+            let tools = state.kernel.available_tools(e.id);
+            e.mode
+                .filter_tools((*tools).clone())
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<String>>()
+        });
+        let allowed_skills_vec = caller_entry.as_ref().map(|e| e.manifest.skills.clone());
+        let exec_policy = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.exec_policy.as_ref());
+        let hand_allowed_env: Option<Vec<String>> = caller_entry
+            .as_ref()
+            .and_then(|e| e.manifest.metadata.get("hand_allowed_env"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
         // Execute the tool via the kernel's tool runner
         let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
             state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
@@ -935,23 +991,28 @@ pub async fn mcp_http(
             tool_name,
             &arguments,
             Some(&kernel_handle),
-            None, // allowed_tools
-            None, // caller_agent_id
+            allowed_tools_vec.as_deref(),
+            caller_agent_id_string.as_deref(),
             Some(&skill_snapshot),
-            None, // allowed_skills
+            allowed_skills_vec.as_deref(),
             Some(state.kernel.mcp_connections_ref()),
             Some(state.kernel.web_tools()),
             Some(state.kernel.browser()),
-            None,
-            None,
+            hand_allowed_env.as_deref(),
+            workspace_root,
             Some(state.kernel.media()),
-            None, // media_drivers
-            None, // exec_policy
+            Some(state.kernel.media_drivers()),
+            exec_policy,
             tts_opt,
             docker_opt,
             Some(state.kernel.processes()),
+            None, // process_registry (network bridge doesn't run agent tools)
             None, // sender_id (MCP HTTP has no sender context)
             None, // channel
+            None, // checkpoint_manager (network bridge doesn't run agent tools)
+            None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
+            None, // session_id (MCP HTTP is not tied to a live session)
+            None, // dangerous_command_checker (no session-scoped checker here)
         )
         .await;
 
@@ -1099,6 +1160,62 @@ fn filter_to_comms_event(
             }),
             _ => None,
         },
+        EventPayload::System(sys) => {
+            use librefang_types::event::SystemEvent;
+            match sys {
+                SystemEvent::TaskPosted {
+                    task_id,
+                    title,
+                    assigned_to,
+                    created_by,
+                } => {
+                    let target_id = assigned_to.clone().unwrap_or_default();
+                    let source_id = created_by.clone().unwrap_or_default();
+                    Some(CommsEvent {
+                        id: event.id.to_string(),
+                        timestamp: event.timestamp.to_rfc3339(),
+                        kind: CommsEventKind::TaskPosted,
+                        source_id: source_id.clone(),
+                        source_name: resolve_name(&source_id),
+                        target_id: target_id.clone(),
+                        target_name: resolve_name(&target_id),
+                        detail: format!("Task posted: {} ({})", title, task_id),
+                    })
+                }
+                SystemEvent::TaskClaimed {
+                    task_id,
+                    claimed_by,
+                } => Some(CommsEvent {
+                    id: event.id.to_string(),
+                    timestamp: event.timestamp.to_rfc3339(),
+                    kind: CommsEventKind::TaskClaimed,
+                    source_id: claimed_by.clone(),
+                    source_name: resolve_name(claimed_by),
+                    target_id: String::new(),
+                    target_name: String::new(),
+                    detail: format!("Task claimed: {}", task_id),
+                }),
+                SystemEvent::TaskCompleted {
+                    task_id,
+                    completed_by,
+                    result,
+                } => Some(CommsEvent {
+                    id: event.id.to_string(),
+                    timestamp: event.timestamp.to_rfc3339(),
+                    kind: CommsEventKind::TaskCompleted,
+                    source_id: completed_by.clone(),
+                    source_name: resolve_name(completed_by),
+                    target_id: String::new(),
+                    target_name: String::new(),
+                    detail: format!(
+                        "Task completed: {} — {}",
+                        task_id,
+                        librefang_types::truncate_str(result, 200)
+                    ),
+                }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1411,7 +1528,6 @@ pub async fn comms_task(
 
     match state
         .kernel
-        .memory_substrate()
         .task_post(
             &req.title,
             &req.description,

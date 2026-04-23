@@ -1,7 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useCallback } from "react";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
-import { getNetworkStatus, listPeers } from "../api";
+import { useNetworkStatus, usePeers } from "../lib/queries/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -9,26 +9,19 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { Network, Globe, Server, Wifi, WifiOff, Hash, Clock } from "lucide-react";
 
-const REFRESH_MS = 10000;
-
 export function NetworkPage() {
   const { t } = useTranslation();
 
-  const statusQuery = useQuery({
-    queryKey: ["network", "status"],
-    queryFn: getNetworkStatus,
-    refetchInterval: REFRESH_MS,
-  });
-
-  const peersQuery = useQuery({
-    queryKey: ["peers", "list"],
-    queryFn: listPeers,
-    refetchInterval: REFRESH_MS,
-  });
+  const statusQuery = useNetworkStatus();
+  const peersQuery = usePeers();
 
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
-  const isLoading = statusQuery.isLoading || peersQuery.isLoading;
+  const isLoading = statusQuery.isPending || peersQuery.isPending;
+
+  const handleRefresh = useCallback(() => {
+    void Promise.all([statusQuery.refetch(), peersQuery.refetch()]);
+  }, [statusQuery, peersQuery]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -37,10 +30,7 @@ export function NetworkPage() {
         title={t("network.title")}
         subtitle={t("network.subtitle")}
         isFetching={statusQuery.isFetching || peersQuery.isFetching}
-        onRefresh={() => {
-          void statusQuery.refetch();
-          void peersQuery.refetch();
-        }}
+        onRefresh={handleRefresh}
         icon={<Network className="h-4 w-4" />}
         helpText={t("network.help")}
       />
@@ -99,9 +89,9 @@ export function NetworkPage() {
                 </div>
               </div>
               <p className="text-lg font-black mt-2">{status?.protocol_version || "-"}</p>
-              {status?.listen_addr && (
+              {status?.listen_addr ? (
                 <p className="text-[10px] text-text-dim font-mono mt-1">{status.listen_addr}</p>
-              )}
+              ) : null}
             </Card>
           </div>
 
@@ -124,14 +114,14 @@ export function NetworkPage() {
                   <Card key={peer.id} hover padding="md">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center">
+                        <div className="w-10 h-10 rounded-xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center">
                           <Server className="w-5 h-5 text-brand" />
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-bold truncate">{peer.name || peer.id}</p>
-                          {peer.addr && (
+                          {peer.addr ? (
                             <p className="text-[10px] text-text-dim font-mono">{peer.addr}</p>
-                          )}
+                          ) : null}
                         </div>
                       </div>
                       <Badge
@@ -141,20 +131,20 @@ export function NetworkPage() {
                         {peer.status || t("common.unknown")}
                       </Badge>
                     </div>
-                    {(peer.version || peer.last_seen) && (
+                    {(peer.version || peer.last_seen) ? (
                       <div className="flex items-center gap-3 mt-3 text-[10px] text-text-dim">
-                        {peer.version && (
+                        {peer.version ? (
                           <span className="flex items-center gap-1">
                             <Globe className="w-3 h-3" /> v{peer.version}
                           </span>
-                        )}
-                        {peer.last_seen && (
+                        ) : null}
+                        {peer.last_seen ? (
                           <span className="flex items-center gap-1">
                             <Clock className="w-3 h-3" /> {formatDateTime(peer.last_seen)}
                           </span>
-                        )}
+                        ) : null}
                       </div>
-                    )}
+                    ) : null}
                   </Card>
                 ))}
               </div>
