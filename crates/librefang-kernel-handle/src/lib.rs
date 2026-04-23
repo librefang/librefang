@@ -96,6 +96,13 @@ pub trait KernelHandle: Send + Sync {
     /// Retry a task by resetting it to pending. Returns true if reset.
     async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
 
+    /// Get a single task by ID including its result and retry_count.
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String>;
+
+    /// Update a task's status to `pending` (reset) or `cancelled`.
+    /// Returns true if the task was found and updated.
+    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String>;
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,

@@ -13364,18 +13364,14 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Task retry failed: {e}"))
     }
 
-    pub async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
         self.memory
             .task_get(task_id)
             .await
             .map_err(|e| format!("Task get failed: {e}"))
     }
 
-    pub async fn task_update_status(
-        &self,
-        task_id: &str,
-        new_status: &str,
-    ) -> Result<bool, String> {
+    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String> {
         self.memory
             .task_update_status(task_id, new_status)
             .await

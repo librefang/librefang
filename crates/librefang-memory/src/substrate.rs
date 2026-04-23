@@ -1322,7 +1322,7 @@ mod tests {
         }
 
         // With a 1 hour TTL, nothing should be reset (not stuck yet).
-        let reset = substrate.task_reset_stuck(3600).await.unwrap();
+        let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
         assert!(
             reset.is_empty(),
             "TTL larger than stall should not reset any task"
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(still_in_progress.len(), 1);
 
         // With a 60 s TTL, the stuck task should be flipped back to pending.
-        let reset = substrate.task_reset_stuck(60).await.unwrap();
+        let reset = substrate.task_reset_stuck(60, 0).await.unwrap();
         assert_eq!(reset, vec![task_id.clone()]);
 
         let pending = substrate.task_list(Some("pending")).await.unwrap();
@@ -1346,7 +1346,7 @@ mod tests {
         assert!(in_progress.is_empty());
 
         // Second sweep is a no-op — stuck task is already pending.
-        let reset_again = substrate.task_reset_stuck(60).await.unwrap();
+        let reset_again = substrate.task_reset_stuck(60, 0).await.unwrap();
         assert!(reset_again.is_empty());
     }
 
