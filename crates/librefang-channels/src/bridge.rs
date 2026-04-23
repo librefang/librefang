@@ -1778,6 +1778,14 @@ fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
 /// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
 /// channel doesn't supply a roster — the addressee guard then becomes a no-op
 /// (cannot fire false positives).
+fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
+    message
+        .metadata
+        .get("group_members")
+        .and_then(|v| serde_json::from_value::<Vec<GroupMember>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 fn extract_group_participants(message: &ChannelMessage) -> Vec<ParticipantRef> {
     message
         .metadata
@@ -1851,6 +1859,20 @@ fn build_sender_context(
         auto_route_confidence_threshold,
         auto_route_sticky_bonus,
         auto_route_divergence_count,
+        // Bot's own @username (e.g. "@rodelo_bot"), if available from metadata.
+        bot_username: message
+            .metadata
+            .get("bot_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        // Sender's @handle on the platform, when available.
+        sender_username: message
+            .metadata
+            .get("sender_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        // Known group members from the inbound payload (empty for DMs).
+        group_members: extract_group_members(message),
         // §C: forward roster from inbound payload (gateway populates via
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
@@ -2407,6 +2429,7 @@ async fn dispatch_message(
     }
 
     // Resolve target agent early so per-agent overrides can take priority
+    // over channel-level overrides (Option 2: agent controls its own behavior).
     let early_agent_id = resolve_or_fallback(message, handle, router).await;
 
     // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
