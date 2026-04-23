@@ -1071,19 +1071,18 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value =
-                        match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
-                            Ok(v) => ensure_object(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    tool = %call.function.name,
-                                    raw_args_len = call.function.arguments.len(),
-                                    error = %e,
-                                    "Malformed tool call arguments from LLM"
-                                );
-                                malformed_tool_input(&e, call.function.arguments.len())
-                            }
-                        };
+                    let input: serde_json::Value = match parse_tool_args(&call.function.arguments) {
+                        Ok(v) => ensure_object(v),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool = %call.function.name,
+                                raw_args_len = call.function.arguments.len(),
+                                error = %e,
+                                "Malformed tool call arguments from LLM"
+                            );
+                            malformed_tool_input(&e, call.function.arguments.len())
+                        }
+                    };
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -1637,19 +1636,18 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
-                let input: serde_json::Value =
-                    match serde_json::from_str::<serde_json::Value>(arguments) {
-                        Ok(v) => ensure_object(v),
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %name,
-                                raw_args_len = arguments.len(),
-                                error = %e,
-                                "Malformed tool call arguments from LLM stream"
-                            );
-                            malformed_tool_input(&e, arguments.len())
-                        }
-                    };
+                let input: serde_json::Value = match parse_tool_args(arguments) {
+                    Ok(v) => ensure_object(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %name,
+                            raw_args_len = arguments.len(),
+                            error = %e,
+                            "Malformed tool call arguments from LLM stream"
+                        );
+                        malformed_tool_input(&e, arguments.len())
+                    }
+                };
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1861,7 +1859,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         };
 
         // Parse args as JSON Value
-        let args_value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(args) {
+        let args_value: serde_json::Value = match parse_tool_args(args) {
             Ok(v) => ensure_object(v),
             Err(e) => {
                 tracing::warn!(
@@ -1948,6 +1946,48 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Parse tool call arguments that may have trailing non-JSON content.
+///
+/// Thinking models (DeepSeek-R1, Qwen 3.5, etc.) sometimes append reasoning
+/// tokens after the JSON object in the arguments buffer, producing strings like
+/// `{"query": "x"}\n\nI'll now search...`. `serde_json::from_str` rejects this
+/// with "trailing characters". This function finds the end of the first complete
+/// `{...}` JSON object via brace-depth tracking and parses only that slice.
+pub(crate) fn parse_tool_args(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    // Fast path: the whole string is valid JSON.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        return Ok(v);
+    }
+    // Slow path: find the end of the first complete `{...}` block.
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('{') {
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut prev_backslash = false;
+        for (i, ch) in trimmed.char_indices() {
+            if prev_backslash {
+                prev_backslash = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => prev_backslash = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let slice = &trimmed[..=i];
+                        return serde_json::from_str::<serde_json::Value>(slice);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Fall back to a full parse so the caller gets the original error.
+    serde_json::from_str::<serde_json::Value>(raw)
+}
+
 /// Marker key embedded in tool input when the LLM's streamed JSON was truncated.
 pub const TRUNCATED_ARGS_KEY: &str = "__args_truncated";
 
@@ -1975,6 +2015,35 @@ pub(crate) fn malformed_tool_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_tool_args_clean_json() {
+        let v = parse_tool_args(r#"{"query":"hello","limit":5}"#).unwrap();
+        assert_eq!(v["query"], "hello");
+        assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn test_parse_tool_args_trailing_reasoning() {
+        let raw = "{\"query\": \"TO-DO\", \"limit\": 10}\n\nI'll now search for the items.";
+        let v = parse_tool_args(raw).unwrap();
+        assert_eq!(v["query"], "TO-DO");
+        assert_eq!(v["limit"], 10);
+    }
+
+    #[test]
+    fn test_parse_tool_args_empty_object_with_trailing() {
+        let raw = "{}\n\nsome reasoning text here";
+        let v = parse_tool_args(raw).unwrap();
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_tool_args_nested_object_with_trailing() {
+        let raw = r#"{"a":{"b":1},"c":"d"} trailing text"#;
+        let v = parse_tool_args(raw).unwrap();
+        assert_eq!(v["c"], "d");
+    }
 
     #[test]
     fn test_openai_driver_creation() {

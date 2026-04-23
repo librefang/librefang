@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 20;
+const SCHEMA_VERSION: u32 = 21;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -89,6 +89,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 20 {
         migrate_v20(conn)?;
+    }
+
+    if current_version < 21 {
+        migrate_v21(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -664,6 +668,23 @@ fn migrate_v20(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (20, datetime('now'), 'Add claimed_at column to task_queue for stuck-task auto-reset')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 21: Add `retry_count` column to `task_queue` so the kernel sweep
+/// can enforce `max_retries` and mark exhausted tasks as `failed`.
+fn migrate_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "task_queue", "retry_count") {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (21, datetime('now'), 'Add retry_count column to task_queue for max_retries enforcement')",
         [],
     )?;
     Ok(())

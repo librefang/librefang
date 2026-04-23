@@ -1184,6 +1184,20 @@ pub async fn send_message(
     let thinking_override = req.thinking;
     let show_thinking = req.show_thinking.unwrap_or(true);
 
+    // Parse optional explicit session_id override from the request body.
+    let session_id_override = match req.session_id.as_deref() {
+        None => None,
+        Some(s) => match s.parse::<uuid::Uuid>() {
+            Ok(id) => Some(librefang_types::agent::SessionId(id)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
+                );
+            }
+        },
+    };
+
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
         state
@@ -1192,29 +1206,18 @@ pub async fn send_message(
             .await
     } else {
         let sender_context = request_sender_context(&req);
-        if let Some(sender) = sender_context.as_ref() {
-            state
-                .kernel
-                .send_message_with_sender_context_and_thinking(
-                    agent_id,
-                    &effective_message,
-                    sender,
-                    thinking_override,
-                )
-                .await
-        } else {
-            let kernel_handle: Arc<dyn KernelHandle> =
-                state.kernel.clone() as Arc<dyn KernelHandle>;
-            state
-                .kernel
-                .send_message_with_thinking_override(
-                    agent_id,
-                    &effective_message,
-                    Some(kernel_handle),
-                    thinking_override,
-                )
-                .await
-        }
+        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+        state
+            .kernel
+            .send_message_with_session_override(
+                agent_id,
+                &effective_message,
+                Some(kernel_handle),
+                sender_context.as_ref(),
+                thinking_override,
+                session_id_override,
+            )
+            .await
     };
 
     match result {
@@ -1279,6 +1282,8 @@ pub async fn send_message(
                 StatusCode::NOT_FOUND
             } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
                 StatusCode::TOO_MANY_REQUESTS
+            } else if format!("{e}").contains("belongs to a different agent") {
+                StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
@@ -1866,10 +1871,30 @@ pub async fn send_message_stream(
         }
     }
 
+    // Parse optional explicit session_id override from the request body.
+    let session_id_override = match req.session_id.as_deref() {
+        None => None,
+        Some(s) => match s.parse::<uuid::Uuid>() {
+            Ok(id) => Some(librefang_types::agent::SessionId(id)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
+                )
+                    .into_response();
+            }
+        },
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     let (rx, _handle) = match state
         .kernel
-        .send_message_streaming_with_routing(agent_id, &req.message, Some(kernel_handle))
+        .send_message_streaming_with_routing_and_session_override(
+            agent_id,
+            &req.message,
+            Some(kernel_handle),
+            session_id_override,
+        )
         .await
     {
         Ok(pair) => pair,
@@ -4811,6 +4836,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4829,6 +4855,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -4851,6 +4878,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: None,
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
@@ -4881,6 +4909,7 @@ mod tests {
             thinking: None,
             show_thinking: None,
             group_participants: Some(roster.clone()),
+            session_id: None,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants, roster);

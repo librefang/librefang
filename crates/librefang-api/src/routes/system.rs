@@ -160,11 +160,17 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Queue status
         .route("/queue/status", axum::routing::get(queue_status))
         // Task queue management
+        .route(
+            "/tasks",
+            axum::routing::get(task_queue_list_root),
+        )
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
         .route(
             "/tasks/{id}",
-            axum::routing::delete(task_queue_delete),
+            axum::routing::get(task_queue_get)
+                .patch(task_queue_patch)
+                .delete(task_queue_delete),
         )
         .route(
             "/tasks/{id}/retry",
@@ -4128,6 +4134,97 @@ pub async fn task_queue_retry(
                 "error": err_task_not_retryable
             })),
         ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// GET /api/tasks — List tasks with optional ?status=, ?assigned_to=, ?limit= filters.
+///
+/// This is the primary RESTful list endpoint. The legacy /api/tasks/list endpoint
+/// remains for backwards compatibility.
+pub async fn task_queue_list_root(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let status_filter = params.get("status").map(|s| s.as_str());
+    match state.kernel.task_list(status_filter).await {
+        Ok(mut tasks) => {
+            // Filter by assigned_to if provided
+            if let Some(assignee) = params.get("assigned_to") {
+                tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
+            }
+            // Apply limit
+            if let Some(limit_str) = params.get("limit") {
+                if let Ok(limit) = limit_str.parse::<usize>() {
+                    tasks.truncate(limit);
+                }
+            }
+            let total = tasks.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"tasks": tasks, "total": total})),
+            )
+        }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// GET /api/tasks/{id} — Get a single task by ID including its result.
+pub async fn task_queue_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let err_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-found")
+    };
+    match state.kernel.task_get(&id).await {
+        Ok(Some(task)) => (StatusCode::OK, Json(task)),
+        Ok(None) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// PATCH /api/tasks/{id} — Update task status.
+///
+/// Body: `{"status": "pending"}` or `{"status": "cancelled"}`
+/// - `pending`: resets a failed/in_progress task so it can be re-claimed
+/// - `cancelled`: cancels a pending/in_progress task
+pub async fn task_queue_patch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let err_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-found")
+    };
+    let new_status = match body["status"].as_str() {
+        Some(s @ ("pending" | "cancelled")) => s.to_string(),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Invalid status '{other}': only 'pending' and 'cancelled' are allowed")
+                })),
+            );
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'status' field"})),
+            );
+        }
+    };
+    match state.kernel.task_update_status(&id, &new_status).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"id": id, "status": new_status})),
+        ),
+        Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }

@@ -1290,7 +1290,7 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let _ = past; // keep the variable (documents intent) even if unused
 
-    let reset = mem.task_reset_stuck(1).await.expect("sweep");
+    let reset = mem.task_reset_stuck(1, 0).await.expect("sweep");
     assert_eq!(reset, vec![task_id.clone()], "stuck task should be reset");
 
     let pending = mem.task_list(Some("pending")).await.expect("list");
