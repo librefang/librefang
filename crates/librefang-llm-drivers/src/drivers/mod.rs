@@ -2,10 +2,8 @@
 //!
 //! Contains drivers for Anthropic Claude, Google Gemini, OpenAI-compatible APIs, and more.
 //! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, DeepInfra,
-//! Together, Mistral, Fireworks, Ollama, vLLM, Chutes.ai, Alibaba Coding Plan, and any
+//! Together, Mistral, Fireworks, Ollama, vLLM, Alibaba Coding Plan, and any
 //! OpenAI-compatible endpoint.
-
-pub mod aider;
 pub mod anthropic;
 pub mod chatgpt;
 pub mod claude_code;
@@ -123,8 +121,6 @@ pub enum ApiFormat {
     GeminiCli,
     /// Codex CLI subprocess.
     CodexCli,
-    /// Aider CLI subprocess.
-    Aider,
     /// ChatGPT with session token authentication.
     ChatGpt,
     /// GitHub Copilot with automatic token exchange.
@@ -330,16 +326,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
-        name: "ai21",
-        aliases: &[],
-        base_url: "https://api.ai21.com/studio/v1",
-        api_key_env: "AI21_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
         name: "cerebras",
         aliases: &[],
         base_url: "https://api.cerebras.ai/v1",
@@ -436,16 +422,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         api_key_env: "",
         key_required: false,
         api_format: ApiFormat::CodexCli,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "aider",
-        aliases: &[],
-        base_url: "",
-        api_key_env: "",
-        key_required: false,
-        api_format: ApiFormat::Aider,
         alt_api_key_env: None,
         hidden: false,
     },
@@ -564,26 +540,6 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         aliases: &[],
         base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
         api_key_env: "ALIBABA_CODING_PLAN_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "chutes",
-        aliases: &[],
-        base_url: "https://llm.chutes.ai/v1",
-        api_key_env: "CHUTES_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "venice",
-        aliases: &[],
-        base_url: "https://api.venice.ai/api/v1",
-        api_key_env: "VENICE_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -733,10 +689,6 @@ fn create_driver_from_entry(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
-        ApiFormat::Aider => Ok(Arc::new(aider::AiderDriver::new(
-            config.base_url.clone(),
-            config.skip_permissions,
-        ))),
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::with_proxy(
             api_key, base_url, proxy_url,
         ))),
@@ -793,13 +745,11 @@ fn create_driver_from_entry(
 /// - `lmstudio` — LM Studio (local)
 /// - `perplexity` — Perplexity AI (search-augmented)
 /// - `cohere` — Cohere (Command R)
-/// - `ai21` — AI21 Labs (Jamba)
 /// - `cerebras` — Cerebras (ultra-fast inference)
 /// - `sambanova` — SambaNova
 /// - `huggingface` — Hugging Face Inference API
 /// - `xai` — xAI (Grok)
 /// - `replicate` — Replicate
-/// - `chutes` — Chutes.ai (serverless open-source model inference)
 /// - `azure-openai` — Azure OpenAI Service (deployment-based URL, `api-key` header)
 /// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
 /// - `qwen` — Qwen / DashScope (use `provider_regions` for intl/us endpoints)
@@ -853,9 +803,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         message: format!(
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
-             cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             chutes, venice, azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
-             gemini-cli, codex-cli, aider, qwen, minimax, zhipu. \
+             cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
+             azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
+             gemini-cli, codex-cli, qwen, minimax, zhipu. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
@@ -944,7 +894,6 @@ pub fn cli_provider_available(name: &str) -> bool {
         "qwen-code" => qwen_code::qwen_code_available(),
         "gemini-cli" => gemini_cli::gemini_cli_available(),
         "codex-cli" => codex_cli::codex_cli_available(),
-        "aider" => aider::aider_available(),
         _ => false,
     }
 }
@@ -977,7 +926,7 @@ pub fn is_proxied_via_env(env_vars: &[&str], official_hosts: &[&str]) -> bool {
 pub fn is_cli_provider(name: &str) -> bool {
     matches!(
         name,
-        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli" | "aider"
+        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli"
     )
 }
 
@@ -1144,7 +1093,6 @@ mod tests {
         // New providers
         assert!(providers.contains(&"perplexity"));
         assert!(providers.contains(&"cohere"));
-        assert!(providers.contains(&"ai21"));
         assert!(providers.contains(&"cerebras"));
         assert!(providers.contains(&"sambanova"));
         assert!(providers.contains(&"huggingface"));
@@ -1163,16 +1111,14 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"alibaba-coding-plan"));
         assert!(providers.contains(&"deepinfra"));
-        assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
         assert!(providers.contains(&"qwen-code"));
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"codex-cli"));
-        assert!(providers.contains(&"aider"));
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 43);
+        assert_eq!(providers.len(), 39);
     }
 
     #[test]
