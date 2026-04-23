@@ -124,6 +124,12 @@ pub enum CronAction {
         model_override: Option<String>,
         /// Timeout in seconds (10..=600).
         timeout_secs: Option<u64>,
+        /// Optional pre-check script path. The script runs before the agent turn;
+        /// if its last non-empty stdout line is `{"wakeAgent": false}` the agent
+        /// call is skipped entirely (no LLM spend). Any other output, non-JSON, or
+        /// a missing `wakeAgent` key are treated as "wake normally".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_check_script: Option<String>,
     },
     /// Trigger a workflow execution by ID or name.
     Workflow {
