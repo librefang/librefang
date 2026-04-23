@@ -308,7 +308,12 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
         let api_key = self.api_key()?;
-        let model = request.model.as_deref().unwrap_or("default");
+        let model = request.model.as_deref().ok_or_else(|| {
+            MediaError::InvalidRequest(format!(
+                "'model' is required for the {} provider — specify the model name in your request",
+                self.provider
+            ))
+        })?;
 
         let size = if let (Some(w), Some(h)) = (request.width, request.height) {
             format!("{w}x{h}")
