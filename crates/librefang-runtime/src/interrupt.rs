@@ -48,6 +48,12 @@ use std::sync::Arc;
 #[derive(Clone, Debug, Default)]
 pub struct SessionInterrupt {
     flag: Arc<AtomicBool>,
+    /// Optional upstream flag observed by `is_cancelled()` but NOT affected
+    /// by `cancel()` on this handle. Used to implement one-way cascade from
+    /// a parent session to a subagent: parent cancel kills the child, but
+    /// cancelling the child has no effect on the parent. See
+    /// `new_with_upstream`.
+    upstream: Option<Arc<AtomicBool>>,
 }
 
 impl SessionInterrupt {
@@ -55,20 +61,37 @@ impl SessionInterrupt {
     pub fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
+            upstream: None,
+        }
+    }
+
+    /// Create a new interrupt whose `is_cancelled()` ALSO returns `true`
+    /// whenever `upstream` has been cancelled. `cancel()` on this handle
+    /// does not affect `upstream`.
+    ///
+    /// Use this when a subagent is invoked on behalf of a parent session
+    /// (e.g. `agent_send`, hand dispatch) and the subagent's loop should
+    /// abort as soon as the parent's `/stop` fires, without cancelling the
+    /// child's flag leaking back to the parent. See issue #3044.
+    pub fn new_with_upstream(upstream: &SessionInterrupt) -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            upstream: Some(Arc::clone(&upstream.flag)),
         }
     }
 
     /// Signal that the session should stop.
     ///
-    /// Idempotent — safe to call multiple times.
+    /// Idempotent — safe to call multiple times. Only affects this handle's
+    /// own flag; any `upstream` reference is read-only.
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Release);
     }
 
-    /// Returns `true` if [`cancel`](Self::cancel) has been called.
-    ///
-    /// Intended for polling inside tool execution hot-paths where the tool
-    /// wants to bail out early without blocking.
+    /// Returns `true` if [`cancel`](Self::cancel) has been called on this
+    /// handle, OR on the upstream handle (if any). Intended for polling
+    /// inside tool execution hot-paths where the tool wants to bail out
+    /// early without blocking.
     ///
     /// ```rust,ignore
     /// if interrupt.is_cancelled() {
@@ -78,12 +101,17 @@ impl SessionInterrupt {
     #[inline]
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Acquire)
+            || self
+                .upstream
+                .as_ref()
+                .is_some_and(|u| u.load(Ordering::Acquire))
     }
 
     /// Reset the interrupt flag so the handle can be reused for a new turn.
     ///
     /// Only call this when you are certain no outstanding tool futures are
-    /// still polling `is_cancelled()` on this handle.
+    /// still polling `is_cancelled()` on this handle. Does not touch the
+    /// upstream flag.
     pub fn reset(&self) {
         self.flag.store(false, Ordering::Release);
     }
@@ -94,9 +122,14 @@ impl SessionInterrupt {
     /// inherits the parent's cancellation without needing a separate channel.
     /// Cancelling the parent (or the child) raises the shared flag, so both
     /// will observe `is_cancelled() == true`.
+    ///
+    /// NOTE: unlike `new_with_upstream`, `child_token` is fully symmetric —
+    /// cancelling either side cancels both. Prefer `new_with_upstream` when
+    /// you need one-way cascade.
     pub fn child_token(&self) -> Self {
         Self {
             flag: Arc::clone(&self.flag),
+            upstream: self.upstream.clone(),
         }
     }
 }
@@ -157,5 +190,51 @@ mod tests {
         s1.cancel();
         assert!(s1.is_cancelled());
         assert!(!s2.is_cancelled(), "cancelling s1 must not affect s2");
+    }
+
+    // ── Upstream cascade (issue #3044 follow-up) ───────────────────────────
+
+    #[test]
+    fn upstream_cancel_cascades_to_child() {
+        let parent = SessionInterrupt::new();
+        let child = SessionInterrupt::new_with_upstream(&parent);
+        assert!(!child.is_cancelled());
+        parent.cancel();
+        assert!(child.is_cancelled(), "child must observe parent cancel");
+    }
+
+    #[test]
+    fn child_cancel_does_not_leak_to_upstream() {
+        let parent = SessionInterrupt::new();
+        let child = SessionInterrupt::new_with_upstream(&parent);
+        child.cancel();
+        assert!(child.is_cancelled());
+        assert!(
+            !parent.is_cancelled(),
+            "cancelling child must NOT cancel the parent"
+        );
+    }
+
+    #[test]
+    fn child_reset_does_not_affect_upstream() {
+        let parent = SessionInterrupt::new();
+        let child = SessionInterrupt::new_with_upstream(&parent);
+        parent.cancel();
+        assert!(child.is_cancelled());
+        child.reset(); // no-op on upstream
+        assert!(
+            child.is_cancelled(),
+            "child.reset() must not hide upstream cancel"
+        );
+    }
+
+    #[test]
+    fn multiple_siblings_share_upstream() {
+        let parent = SessionInterrupt::new();
+        let a = SessionInterrupt::new_with_upstream(&parent);
+        let b = SessionInterrupt::new_with_upstream(&parent);
+        parent.cancel();
+        assert!(a.is_cancelled());
+        assert!(b.is_cancelled());
     }
 }

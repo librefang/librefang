@@ -39,7 +39,13 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 /// Maximum iterations in the agent loop before giving up.
-const MAX_ITERATIONS: u32 = 50;
+///
+/// Single source of truth is `AutonomousConfig::DEFAULT_MAX_ITERATIONS` in
+/// `librefang-types` — kept as a local alias here so the hot-path branches
+/// in this file read as a plain constant instead of a fully-qualified
+/// path. Changing the policy value in one place propagates to both the
+/// runtime fallback and the manifest default.
+const MAX_ITERATIONS: u32 = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
 
 /// Maximum retries for rate-limited or overloaded API calls.
 const MAX_RETRIES: u32 = 3;
@@ -1336,6 +1342,16 @@ pub struct LoopOptions {
     /// `ToolExecutionContext` so that cancelling the parent session
     /// interrupts all its in-flight tools without affecting other sessions.
     pub interrupt: Option<crate::interrupt::SessionInterrupt>,
+    /// Operator-level override for the agent-loop iteration cap. Resolution
+    /// order when the loop starts:
+    /// 1. `manifest.autonomous.max_iterations` (per-agent)
+    /// 2. `opts.max_iterations` (operator / kernel config)
+    /// 3. `AutonomousConfig::DEFAULT_MAX_ITERATIONS` (library fallback)
+    ///
+    /// Kernel populates this from `KernelConfig.agent_max_iterations` so
+    /// operators can lower the default without recompiling or editing every
+    /// manifest. None → use the library fallback.
+    pub max_iterations: Option<u32>,
 }
 
 /// Result of an agent loop execution.
@@ -2809,11 +2825,12 @@ pub async fn run_agent_loop(
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -4120,11 +4137,12 @@ pub async fn run_agent_loop_streaming(
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -5695,7 +5713,34 @@ mod tests {
 
     #[test]
     fn test_max_iterations_constant() {
-        assert_eq!(MAX_ITERATIONS, 50);
+        assert_eq!(
+            MAX_ITERATIONS,
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    /// Resolve the iteration cap the same way `run_agent_loop` does: per-agent
+    /// manifest > operator LoopOptions > library default.
+    fn resolve_max_iterations(manifest_cap: Option<u32>, opts_cap: Option<u32>) -> u32 {
+        manifest_cap.or(opts_cap).unwrap_or(MAX_ITERATIONS)
+    }
+
+    #[test]
+    fn max_iterations_resolution_prefers_manifest_over_opts() {
+        assert_eq!(resolve_max_iterations(Some(7), Some(100)), 7);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_opts() {
+        assert_eq!(resolve_max_iterations(None, Some(100)), 100);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_default_when_nothing_set() {
+        assert_eq!(
+            resolve_max_iterations(None, None),
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
     }
 
     fn fake_tool(name: &str) -> ToolDefinition {
