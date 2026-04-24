@@ -1676,7 +1676,8 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Section grouping for the ConfigPage UI. Each entry carries the section key,
 /// the fields that belong to it, and any flags the UI cares about
 /// (root-level rendering, hot-reload safety).
-fn ui_sections_overlay() -> serde_json::Value {
+#[doc(hidden)]
+pub fn ui_sections_overlay() -> serde_json::Value {
     serde_json::json!([
         {
             "key": "general",
@@ -1725,7 +1726,8 @@ fn ui_sections_overlay() -> serde_json::Value {
 /// have to re-walk `$ref` chains). Carries numeric ranges, step granularity,
 /// curated select options (with human labels when applicable), and dynamic
 /// provider/model options sourced from the catalog.
-fn ui_options_overlay(
+#[doc(hidden)]
+pub fn ui_options_overlay(
     provider_options: Vec<String>,
     model_options: Vec<serde_json::Value>,
 ) -> serde_json::Value {
@@ -2067,7 +2069,8 @@ fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
 }
 
 /// Convert a serde_json::Value to a toml::Value.
-pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
+#[doc(hidden)]
+pub fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),
         serde_json::Value::Number(n) => {

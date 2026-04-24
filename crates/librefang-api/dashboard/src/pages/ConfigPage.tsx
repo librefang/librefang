@@ -92,10 +92,20 @@ function pickType(node: JsonSchema): string {
   return "string";
 }
 
-/** Unwrap `Option<T>` shapes. schemars emits
- *  `{anyOf: [{$ref|...}, {type: "null"}]}` for Option<T>, sometimes via
- *  oneOf. Strip the null variant and return the concrete branch. */
+/** Unwrap schemars wrapper shapes and return the concrete schema branch:
+ *
+ *  - `Option<T>` → `{anyOf|oneOf: [{$ref|…}, {type: "null"}]}` — pick non-null.
+ *  - Struct with default + description → `{description, default, allOf: [{$ref}]}`
+ *    — pick the single allOf branch (this is what schemars emits for required
+ *    struct fields carrying metadata the ref target doesn't have).
+ *
+ *  Called before reading `type` / `properties` / `items` on a field node. */
 function unwrapNullable(node: JsonSchema): JsonSchema {
+  // allOf pattern: metadata-wrapped single ref. No null branch to pick;
+  // just unwrap the first entry.
+  if (Array.isArray(node.allOf) && node.allOf.length > 0) {
+    return node.allOf[0];
+  }
   const branches = node.anyOf ?? node.oneOf;
   if (!Array.isArray(branches)) return node;
   const nonNull = branches.find((b) => b.type !== "null" && b.$ref !== undefined) ??
@@ -167,12 +177,25 @@ function resolveSectionFields(
 
   if (!desc.struct_field) return [];
   let target: JsonSchema | undefined = root.properties?.[desc.struct_field];
-  // schemars renders `Option<SomeConfig>` as {anyOf: [{$ref}, {type: "null"}]}.
-  // Unwrap the non-null branch so optional sub-struct sections (a2a,
-  // webhook_triggers, thinking, …) don't silently render as empty.
-  if (target && !target.$ref && Array.isArray(target.anyOf)) {
-    const nonNull = target.anyOf.find((a) => a.$ref || (a.type && a.type !== "null"));
-    if (nonNull) target = nonNull;
+  // schemars wraps struct fields in several shapes depending on whether
+  // they're optional and whether they carry metadata (default/description):
+  //   Option<T>          → {anyOf|oneOf: [{$ref}, {type: "null"}]}
+  //   T with metadata    → {description, default, allOf: [{$ref}]}
+  //   T without metadata → bare {$ref}
+  // Peel any of these wrappers so the real sub-struct's properties are
+  // visible to the section enumerator. Without this, ~52 of the ~60
+  // top-level struct fields (those schemars emits as allOf-wrapped) would
+  // render as empty sections in the UI.
+  if (target && !target.$ref) {
+    if (Array.isArray(target.allOf) && target.allOf.length > 0) {
+      target = target.allOf[0];
+    } else if (Array.isArray(target.anyOf)) {
+      const nonNull = target.anyOf.find((a) => a.$ref || (a.type && a.type !== "null"));
+      if (nonNull) target = nonNull;
+    } else if (Array.isArray(target.oneOf)) {
+      const nonNull = target.oneOf.find((a) => a.$ref || (a.type && a.type !== "null"));
+      if (nonNull) target = nonNull;
+    }
   }
   if (target?.$ref) target = resolveRef(root, target.$ref);
   if (!target?.properties) return [];
