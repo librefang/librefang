@@ -142,6 +142,25 @@ impl SurrealConnectionPool {
     /// Same conditions as [`Self::open`].
     #[cfg(feature = "surreal-backend")]
     pub async fn open_remote(&self, remote: &RemoteSurrealConfig) -> StorageResult<SurrealSession> {
+        // Warn when the operator has requested TLS skip-verify. The SurrealDB
+        // 3.0 SDK's `engine::any::connect` uses the underlying transport's
+        // default TLS policy and does not currently expose a certificate
+        // bypass via the URL or a builder; implementing a custom connector
+        // would require vendoring the transport crate. Until that work lands,
+        // we honour the config field by logging the intent and falling through
+        // to the standard TLS-verified connection.
+        if remote.tls_skip_verify {
+            tracing::warn!(
+                url = %remote.url,
+                "tls_skip_verify = true is configured but certificate \
+                 verification bypass is not yet implemented for the \
+                 SurrealDB 3.0 transport layer. The connection will use \
+                 the default TLS policy (verification enabled). \
+                 Set tls_skip_verify = false to suppress this warning, \
+                 or connect via plain ws:// / http:// for local/dev servers."
+            );
+        }
+
         let password = std::env::var(&remote.password_env)
             .map_err(|_| StorageError::MissingCredential {
                 name: remote.password_env.clone(),

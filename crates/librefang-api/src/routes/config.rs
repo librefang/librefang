@@ -2078,7 +2078,7 @@ pub async fn config_set(
     state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        format!("config set: {path}"),
+        &format!("config set: {path}"),
         "completed",
     );
 

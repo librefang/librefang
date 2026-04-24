@@ -3634,7 +3634,7 @@ pub async fn add_mcp_server(
     state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        format!("mcp_server added: {name}"),
+        &format!("mcp_server added: {name}"),
         "completed",
     );
 
@@ -3740,7 +3740,7 @@ pub async fn update_mcp_server(
     state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        format!("mcp_server updated: {name}"),
+        &format!("mcp_server updated: {name}"),
         "completed",
     );
 
@@ -3856,7 +3856,7 @@ pub async fn delete_mcp_server(
     state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        format!("mcp_server removed: {name}"),
+        &format!("mcp_server removed: {name}"),
         "completed",
     );
 
@@ -4320,10 +4320,10 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
     state.kernel.audit().record(
         // Dashboard calls don't have an agent_id — use a distinctive
         // actor so audit readers can tell user actions from agent ones.
-        "dashboard".to_string(),
+        "dashboard",
         librefang_runtime::audit::AuditAction::AgentMessage,
-        format!("skill_evolve:{action}:{skill_name}"),
-        detail.to_string(),
+        &format!("skill_evolve:{action}:{skill_name}"),
+        detail,
     );
 }
 

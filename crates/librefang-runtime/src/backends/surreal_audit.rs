@@ -400,12 +400,20 @@ async fn load_all(db: &Surreal<Any>) -> Result<Vec<AuditEntry>, String> {
 }
 
 /// Bridge a future onto the active tokio runtime from a synchronous
-/// trait method. Same shape as the SurrealDB memory backend.
+/// trait method. Falls back to a temporary runtime when called from
+/// a plain `#[test]` thread that has no active Tokio context.
 fn block_on<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::task::block_in_place(|| Handle::current().block_on(fut))
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build temporary tokio runtime")
+            .block_on(fut),
+    }
 }
 
 // ── Anchor I/O ─────────────────────────────────────────────────────────

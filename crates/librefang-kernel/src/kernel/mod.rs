@@ -21,6 +21,7 @@ use librefang_memory::MemorySubstrate;
 use librefang_runtime::agent_loop::{
     run_agent_loop, run_agent_loop_streaming, strip_provider_prefix, AgentLoopResult,
 };
+#[cfg(not(feature = "surreal-backend"))]
 use librefang_runtime::audit::AuditLog;
 use librefang_runtime::drivers;
 use librefang_runtime::kernel_handle::{self, KernelHandle};
@@ -307,8 +308,30 @@ pub struct LibreFangKernel {
     pub(crate) event_bus: EventBus,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
-    /// Memory substrate.
+    /// Memory substrate (SQLite — sessions, knowledge graph, semantic search,
+    /// proactive memory, usage tracking). Always present regardless of the
+    /// active storage backend.
     pub(crate) memory: Arc<MemorySubstrate>,
+    /// Backend-agnostic agent registry store.
+    ///
+    /// When the `surreal-backend` feature is active this is a
+    /// [`librefang_memory::SurrealMemoryBackend`]; otherwise it delegates to
+    /// the same [`MemorySubstrate`] as `self.memory` (via the
+    /// [`librefang_memory::MemoryBackend`] blanket impl on `MemorySubstrate`).
+    pub(crate) agent_store: Arc<dyn librefang_memory::MemoryBackend>,
+    /// SurrealDB connection pool shared across all Surreal-backed subsystems
+    /// (agent registry, audit, TOTP lockout, operational migrations).
+    /// Kept alive here so the pool is not dropped before the kernel shuts down.
+    #[cfg(feature = "surreal-backend")]
+    #[allow(dead_code)]
+    pub(crate) surreal_pool: Arc<librefang_storage::SurrealConnectionPool>,
+    /// Tokio runtime created during boot when no external runtime was present
+    /// (e.g. plain `#[test]`).  The SurrealDB client's internal async tasks are
+    /// owned by this runtime; dropping it would close the connection channels.
+    /// `None` in normal production code where the caller supplies the runtime.
+    #[cfg(feature = "surreal-backend")]
+    #[allow(dead_code)]
+    _surreal_runtime: Option<tokio::runtime::Runtime>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Concrete handle to the LLM-backed memory extractor used by
@@ -332,7 +355,12 @@ pub struct LibreFangKernel {
     /// Background agent executor.
     pub(crate) background: BackgroundExecutor,
     /// Merkle hash chain audit trail.
-    pub(crate) audit_log: Arc<AuditLog>,
+    ///
+    /// Holds a [`librefang_runtime::backends::SurrealAuditStore`] when the
+    /// `surreal-backend` feature is active, otherwise an [`AuditLog`]
+    /// (rusqlite-backed). Both implement
+    /// [`librefang_runtime::storage_backends::AuditStore`].
+    pub(crate) audit_log: Arc<dyn librefang_runtime::storage_backends::AuditStore>,
     /// Cost metering engine.
     pub(crate) metering: Arc<MeteringEngine>,
     /// Default LLM driver (from kernel config).
@@ -897,7 +925,7 @@ impl LibreFangKernel {
 
     /// Merkle hash chain audit trail.
     #[inline]
-    pub fn audit(&self) -> &Arc<AuditLog> {
+    pub fn audit(&self) -> &Arc<dyn librefang_runtime::storage_backends::AuditStore> {
         &self.audit_log
     }
 
@@ -1739,6 +1767,112 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // ---------------------------------------------------------------------------
+        // SurrealDB: open pool, run operational migrations, build agent_store.
+        //
+        // This block runs when the `surreal-backend` feature is compiled in.
+        // We use `tokio::task::block_in_place` because `boot_with_config` is a
+        // synchronous function called from within a multi-thread tokio runtime.
+        // All of the SurrealDB backend impls (SurrealAuditStore, SurrealMemoryBackend,
+        // SurrealTotpLockoutBackend) use the same blocking pattern, so running on a
+        // multi-thread runtime is an existing constraint for the surreal-backend path.
+        //
+        // Embedded-path absolutisation: when the storage config specifies a relative
+        // embedded path (e.g. `StorageConfig::default()` uses ".librefang"), resolve
+        // it against `data_dir` so that each kernel instance with a unique `data_dir`
+        // gets its own isolated SurrealDB directory. This is critical for test
+        // isolation — parallel test instances all start with `StorageConfig::default()`
+        // but each sets a distinct `data_dir` (a unique tempdir).
+        #[cfg(feature = "surreal-backend")]
+        if let librefang_storage::StorageBackendKind::Embedded { path } =
+            &mut config.storage.backend
+        {
+            if path.is_relative() {
+                *path = config.data_dir.join(&*path);
+            }
+        }
+
+        // All SurrealDB async initialisation runs in a single async block so that
+        // every operation shares the same executor.  When a Tokio runtime is already
+        // running (production), `block_in_place` yields the current thread to the
+        // scheduler while the block executes.  When there is no runtime (plain
+        // `#[test]`), we create a temporary single-threaded runtime, run the block,
+        // and then drop the runtime — but crucially the SurrealDB connection object
+        // is moved *out* of the block before the runtime is dropped, so the channel
+        // it holds stays alive inside the returned `SurrealSession`.
+        // `surreal_owned_rt` holds the `tokio::runtime::Runtime` when we create
+        // one ourselves (no caller-supplied runtime).  The SurrealDB client spawns
+        // background tasks in whichever runtime is active at `connect` time; if we
+        // drop that runtime the internal channels close and all operations fail.
+        // By storing the runtime inside the kernel struct we keep it alive for the
+        // kernel's lifetime.  In production the caller owns a runtime and this is
+        // `None`.
+        #[cfg(feature = "surreal-backend")]
+        let mut surreal_owned_rt: Option<tokio::runtime::Runtime> = None;
+
+        #[cfg(feature = "surreal-backend")]
+        let (surreal_pool, surreal_session, agent_store) = {
+            info!(
+                backend = ?config.storage.backend,
+                namespace = %config.storage.effective_namespace(),
+                database = %config.storage.effective_database(),
+                "Initialising SurrealDB storage backend"
+            );
+
+            // Capture config values needed inside the async block.
+            let storage_cfg = config.storage.clone();
+
+            // All SurrealDB async operations run in one block so they share the
+            // same executor / task-set. Errors are boxed to a common type so we
+            // can use `?` across the different crate error boundaries.
+            let init_fut = async move {
+                let pool = Arc::new(librefang_storage::SurrealConnectionPool::new());
+                let session = pool
+                    .open(&storage_cfg)
+                    .await
+                    .map_err(|e| format!("SurrealDB open: {e}"))?;
+
+                // Idempotent operational DDL migrations.
+                librefang_storage::migrations::apply_pending(
+                    session.client(),
+                    librefang_storage::migrations::OPERATIONAL_MIGRATIONS,
+                )
+                .await
+                .map_err(|e| format!("SurrealDB migrations: {e}"))?;
+
+                let backend = librefang_memory::SurrealMemoryBackend::new(session.clone())
+                    .await
+                    .map_err(|e| format!("SurrealDB agent store: {e}"))?;
+                let agent_store: Arc<dyn librefang_memory::MemoryBackend> =
+                    Arc::new(backend) as Arc<dyn librefang_memory::MemoryBackend>;
+
+                Ok::<_, String>((pool, session, agent_store))
+            };
+
+            let result = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => tokio::task::block_in_place(|| handle.block_on(init_fut)),
+                Err(_) => {
+                    // No caller-supplied runtime — create one and keep it alive in
+                    // `surreal_owned_rt` so the SurrealDB background tasks continue
+                    // to run for the kernel's lifetime.
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build tokio runtime for SurrealDB init");
+                    let result = rt.block_on(init_fut);
+                    surreal_owned_rt = Some(rt);
+                    result
+                }
+            };
+
+            let (pool, session, store) = result.map_err(KernelError::BootFailed)?;
+            info!("SurrealDB operational migrations applied; agent registry backend ready");
+            (pool, session, store)
+        };
+        #[cfg(not(feature = "surreal-backend"))]
+        let agent_store: Arc<dyn librefang_memory::MemoryBackend> =
+            Arc::clone(&memory) as Arc<dyn librefang_memory::MemoryBackend>;
+
         // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
         fn is_ollama_reachable() -> bool {
             std::net::TcpStream::connect_timeout(
@@ -2522,7 +2656,21 @@ impl LibreFangKernel {
             }
         }
 
-        // Initialize execution approval manager
+        // Initialize execution approval manager.
+        // When the surreal-backend feature is active we load TOTP lockout state
+        // from SurrealDB (migration 004_totp_lockout) and persist future changes
+        // there; otherwise we fall back to the SQLite usage connection.
+        #[cfg(feature = "surreal-backend")]
+        let approval_manager = {
+            let totp_backend = Box::new(crate::backends::SurrealTotpLockoutBackend::open(
+                &surreal_session,
+            ));
+            crate::approval::ApprovalManager::new_with_surreal(
+                config.approval.clone(),
+                totp_backend,
+            )
+        };
+        #[cfg(not(feature = "surreal-backend"))]
         let approval_manager = crate::approval::ApprovalManager::new_with_db(
             config.approval.clone(),
             memory.usage_conn(),
@@ -2613,6 +2761,23 @@ impl LibreFangKernel {
             Some(path) => config.data_dir.join(path),
             None => config.data_dir.join("audit.anchor"),
         };
+
+        // Build the audit log. When surreal-backend is active we use SurrealAuditStore
+        // (backed by the audit_entries table applied above in the operational
+        // migrations); otherwise we fall back to the rusqlite AuditLog anchored to the
+        // SQLite usage connection. Both implement `AuditStore`.
+        #[cfg(feature = "surreal-backend")]
+        let audit_log: Arc<dyn librefang_runtime::storage_backends::AuditStore> = {
+            let store = librefang_runtime::backends::SurrealAuditStore::open(&surreal_session)
+                .map_err(|e| KernelError::BootFailed(format!("SurrealDB audit store: {e}")))?
+                .with_anchor(audit_anchor_path);
+            Arc::new(store)
+        };
+        #[cfg(not(feature = "surreal-backend"))]
+        let audit_log: Arc<dyn librefang_runtime::storage_backends::AuditStore> = Arc::new(
+            AuditLog::with_db_anchored(memory.usage_conn(), audit_anchor_path),
+        );
+
         let hooks_dir = config.home_dir.join("hooks");
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
@@ -2623,6 +2788,11 @@ impl LibreFangKernel {
             event_bus: EventBus::new(),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            agent_store,
+            #[cfg(feature = "surreal-backend")]
+            surreal_pool,
+            #[cfg(feature = "surreal-backend")]
+            _surreal_runtime: surreal_owned_rt,
             proactive_memory: OnceLock::new(),
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
@@ -2631,10 +2801,7 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(
-                memory.usage_conn(),
-                audit_anchor_path,
-            )),
+            audit_log,
             metering,
             default_driver: driver,
             wasm_sandbox,
@@ -2765,8 +2932,8 @@ impl LibreFangKernel {
         // Initialize prompt store
         let _ = kernel.prompt_store.set(prompt_store);
 
-        // Restore persisted agents from SQLite
-        match kernel.memory.load_all_agents() {
+        // Restore persisted agents from the active backend (SurrealDB or SQLite)
+        match kernel.agent_store.load_all_agents() {
             Ok(agents) => {
                 let count = agents.len();
                 for entry in agents {
@@ -2798,7 +2965,7 @@ impl LibreFangKernel {
                     };
                     if source_path_changed {
                         entry.source_toml_path = Some(toml_path.clone());
-                        if let Err(e) = kernel.memory.save_agent(&entry) {
+                        if let Err(e) = kernel.agent_store.save_agent(&entry) {
                             warn!(
                                 agent = %name,
                                 "Failed to persist source_toml_path repoint: {e}"
@@ -2843,7 +3010,7 @@ impl LibreFangKernel {
                                             }
                                             entry.manifest = disk_manifest;
                                             // Persist the update back to DB
-                                            if let Err(e) = kernel.memory.save_agent(&entry) {
+                                            if let Err(e) = kernel.agent_store.save_agent(&entry) {
                                                 warn!(
                                                     agent = %name,
                                                     "Failed to persist TOML update: {e}"
@@ -3087,7 +3254,7 @@ impl LibreFangKernel {
                     continue;
                 }
                 if let Some(entry) = kernel.registry.get(agent_id) {
-                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                    if let Err(e) = kernel.agent_store.save_agent(&entry) {
                         warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
                     }
                 }
@@ -3422,8 +3589,8 @@ system_prompt = "You are a helpful assistant."
             self.registry.add_child(parent_id, agent_id);
         }
 
-        // Persist agent to SQLite so it survives restarts
-        self.memory
+        // Persist agent so it survives restarts
+        self.agent_store
             .save_agent(&entry)
             .map_err(KernelError::LibreFang)?;
 
@@ -3431,9 +3598,9 @@ system_prompt = "You are a helpful assistant."
 
         // SECURITY: Record agent spawn in audit trail
         self.audit_log.record(
-            agent_id.to_string(),
+            &agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentSpawn,
-            format!("name={name}, parent={parent:?}"),
+            &format!("name={name}, parent={parent:?}"),
             "ok",
         );
 
@@ -4238,7 +4405,7 @@ system_prompt = "You are a helpful assistant."
                         .swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
                         self.audit_log.record(
-                            agent_id.to_string(),
+                            &agent_id.to_string(),
                             librefang_runtime::audit::AuditAction::AgentMessage,
                             "agent loop skipped",
                             "No LLM provider configured — configure via dashboard settings",
@@ -4249,9 +4416,9 @@ system_prompt = "You are a helpful assistant."
 
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
-                    agent_id.to_string(),
+                    &agent_id.to_string(),
                     librefang_runtime::audit::AuditAction::AgentMessage,
-                    format!(
+                    &format!(
                         "tokens_in={}, tokens_out={}",
                         result.total_usage.input_tokens, result.total_usage.output_tokens
                     ),
@@ -4455,10 +4622,10 @@ system_prompt = "You are a helpful assistant."
                                 Ok(()) => {
                                     last_err.clear();
                                     audit_log_success.record(
-                                        agent_id_for_success.clone(),
+                                        &agent_id_for_success,
                                         librefang_runtime::audit::AuditAction::AgentMessage,
                                         "skill_review",
-                                        format!("completed after {attempts_used} attempt(s)"),
+                                        &format!("completed after {attempts_used} attempt(s)"),
                                     );
                                     break;
                                 }
@@ -4489,10 +4656,10 @@ system_prompt = "You are a helpful assistant."
                                 "Background skill review failed"
                             );
                             audit_log.record(
-                                agent_id_for_task,
+                                &agent_id_for_task,
                                 librefang_runtime::audit::AuditAction::AgentMessage,
                                 "skill_review",
-                                format!("failed after {attempts_used} attempt(s): {last_err}"),
+                                &format!("failed after {attempts_used} attempt(s): {last_err}"),
                             );
                         }
                     });
@@ -4503,10 +4670,10 @@ system_prompt = "You are a helpful assistant."
             Err(e) => {
                 // SECURITY: Record failed message in audit trail
                 self.audit_log.record(
-                    agent_id.to_string(),
+                    &agent_id.to_string(),
                     librefang_runtime::audit::AuditAction::AgentMessage,
                     "agent loop failed",
-                    format!("error: {e}"),
+                    &format!("error: {e}"),
                 );
 
                 // Record the failure in supervisor for health reporting
@@ -6338,7 +6505,7 @@ system_prompt = "You are a helpful assistant."
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
                     if let Some(updated) = self.registry.get(agent_id) {
-                        if let Err(e) = self.memory.save_agent(&updated) {
+                        if let Err(e) = self.agent_store.save_agent(&updated) {
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 error = %e,
@@ -7796,7 +7963,7 @@ system_prompt = "You are a helpful assistant."
 
         // Persist the updated entry
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            let _ = self.agent_store.save_agent(&entry);
         }
 
         // Clear canonical session to prevent memory poisoning from old model's responses
@@ -7896,7 +8063,7 @@ system_prompt = "You are a helpful assistant."
             // wipe the running window. Issue #2317.
             self.scheduler
                 .update_quota(agent_id, refreshed.manifest.resources.clone());
-            let _ = self.memory.save_agent(&refreshed);
+            let _ = self.agent_store.save_agent(&refreshed);
         }
 
         // Invalidate the per-agent tool cache so the new skill/MCP allowlist
@@ -7931,7 +8098,7 @@ system_prompt = "You are a helpful assistant."
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            let _ = self.agent_store.save_agent(&entry);
         }
 
         // Invalidate cached tool list — skill allowlist change affects available tools
@@ -7981,7 +8148,7 @@ system_prompt = "You are a helpful assistant."
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            let _ = self.agent_store.save_agent(&entry);
         }
 
         // Invalidate cached tool list — MCP server allowlist change affects available tools
@@ -8003,7 +8170,7 @@ system_prompt = "You are a helpful assistant."
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            let _ = self.agent_store.save_agent(&entry);
         }
 
         // Invalidate cached tool list — tool filter change affects available tools
@@ -8361,7 +8528,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Remove from persistent storage
-        let _ = self.memory.remove_agent(agent_id);
+        let _ = self.agent_store.remove_agent(agent_id);
 
         // Clean up proactive memories for this agent
         if let Some(pm) = self.proactive_memory.get() {
@@ -8373,9 +8540,9 @@ system_prompt = "You are a helpful assistant."
 
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
-            agent_id.to_string(),
+            &agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentKill,
-            format!("name={}", entry.name),
+            &format!("name={}", entry.name),
             "ok",
         );
 
@@ -10787,7 +10954,7 @@ system_prompt = "You are a helpful assistant."
             let _ = self.registry.set_state(entry.id, AgentState::Suspended);
             // Re-save with Suspended state for clean resume on next boot
             if let Some(updated) = self.registry.get(entry.id) {
-                let _ = self.memory.save_agent(&updated);
+                let _ = self.agent_store.save_agent(&updated);
             }
         }
 
@@ -13273,10 +13440,10 @@ impl LibreFangKernel {
                                 .entry(key.clone())
                                 .or_insert(value.clone());
                         }
-                        let _ = self.memory.save_agent(&e);
+                        let _ = self.agent_store.save_agent(&e);
                     }
                 } else if let Some(e) = self.registry.get(entry.id) {
-                    let _ = self.memory.save_agent(&e);
+                    let _ = self.agent_store.save_agent(&e);
                 }
             }
         }

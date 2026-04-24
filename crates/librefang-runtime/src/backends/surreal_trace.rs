@@ -235,7 +235,14 @@ fn block_on<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::task::block_in_place(|| Handle::current().block_on(fut))
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build temporary tokio runtime")
+            .block_on(fut),
+    }
 }
 
 #[cfg(test)]

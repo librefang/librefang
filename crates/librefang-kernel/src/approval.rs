@@ -37,6 +37,10 @@ pub struct ApprovalManager {
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
     audit_db: Option<Arc<StdMutex<Connection>>>,
+    /// SurrealDB-backed TOTP lockout persistence (surreal-backend).
+    /// When present, `persist_totp_lockout_save` / `persist_totp_lockout_clear`
+    /// delegate to this backend instead of `audit_db`.
+    totp_store: Option<Box<dyn crate::storage_backends::TotpLockoutBackend>>,
     /// TOTP grace period cache: sender_id → last successful verification time.
     totp_grace: StdMutex<HashMap<String, Instant>>,
     /// TOTP failure tracking: sender_id → (failure_count, lockout_start).
@@ -81,12 +85,13 @@ impl ApprovalManager {
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: None,
+            totp_store: None,
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
         }
     }
 
-    /// Create an approval manager with persistent audit logging.
+    /// Create an approval manager with persistent audit logging (SQLite backend).
     pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
         let failures = Self::load_totp_lockout(&conn);
         Self {
@@ -94,9 +99,79 @@ impl ApprovalManager {
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
+            totp_store: None,
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
         }
+    }
+
+    /// Create an approval manager with SurrealDB-backed TOTP lockout persistence.
+    ///
+    /// The `totp_backend` is used for `load_all` at startup (to restore lockout
+    /// state across daemon restarts) and for `upsert`/`clear` on every state
+    /// change.  The approval audit log (`audit_db`) remains SQLite-only until a
+    /// dedicated SurrealDB audit table is wired in a future phase.
+    pub fn new_with_surreal(
+        policy: ApprovalPolicy,
+        totp_backend: Box<dyn crate::storage_backends::TotpLockoutBackend>,
+    ) -> Self {
+        let failures = Self::load_totp_from_backend(totp_backend.as_ref());
+        Self {
+            pending: DashMap::new(),
+            recent: std::sync::Mutex::new(VecDeque::new()),
+            policy: std::sync::RwLock::new(policy),
+            audit_db: None,
+            totp_store: Some(totp_backend),
+            totp_grace: StdMutex::new(HashMap::new()),
+            totp_failures: StdMutex::new(failures),
+        }
+    }
+
+    /// Load persisted TOTP lockout state from a [`TotpLockoutBackend`].
+    ///
+    /// Rows whose lockout window has already elapsed are discarded so a daemon
+    /// restart does not extend the lockout beyond the original 5-minute window.
+    fn load_totp_from_backend(
+        store: &dyn crate::storage_backends::TotpLockoutBackend,
+    ) -> HashMap<String, (u32, Option<Instant>)> {
+        use crate::storage_backends::TotpLockoutRow;
+
+        let rows = match store.load_all() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to load TOTP lockout state from backend: {e}");
+                return HashMap::new();
+            }
+        };
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut map = HashMap::new();
+        for TotpLockoutRow {
+            sender_id,
+            failures,
+            locked_at_unix,
+        } in rows
+        {
+            let lockout_start = locked_at_unix.and_then(|ts| {
+                let ts = ts as u64;
+                let elapsed = now_unix.saturating_sub(ts);
+                if elapsed >= TOTP_LOCKOUT_SECS {
+                    None // Lockout has expired — don't restore
+                } else {
+                    Some(Instant::now() - std::time::Duration::from_secs(elapsed))
+                }
+            });
+            // If the lockout window expired during downtime, skip the row entirely.
+            if failures >= TOTP_MAX_FAILURES && lockout_start.is_none() {
+                continue;
+            }
+            map.insert(sender_id, (failures, lockout_start));
+        }
+        map
     }
 
     /// Load persisted TOTP lockout state from the database.
@@ -951,6 +1026,19 @@ impl ApprovalManager {
     }
 
     fn persist_totp_lockout_save(&self, sender_id: &str, failures: u32, locked_at: Option<i64>) {
+        // Prefer the SurrealDB backend when available.
+        if let Some(store) = &self.totp_store {
+            let row = crate::storage_backends::TotpLockoutRow {
+                sender_id: sender_id.to_string(),
+                failures,
+                locked_at_unix: locked_at,
+            };
+            if let Err(e) = store.upsert(&row) {
+                warn!("Failed to persist TOTP lockout to SurrealDB: {e}");
+            }
+            return;
+        }
+        // Fall back to SQLite.
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.lock() else { return };
         let _ = conn.execute(
@@ -964,6 +1052,14 @@ impl ApprovalManager {
     }
 
     fn persist_totp_lockout_clear(&self, sender_id: &str) {
+        // Prefer the SurrealDB backend when available.
+        if let Some(store) = &self.totp_store {
+            if let Err(e) = store.clear(sender_id) {
+                warn!("Failed to clear TOTP lockout from SurrealDB: {e}");
+            }
+            return;
+        }
+        // Fall back to SQLite.
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.lock() else { return };
         let _ = conn.execute(

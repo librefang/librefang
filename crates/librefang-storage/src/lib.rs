@@ -37,6 +37,7 @@ pub mod error;
 pub mod migrate;
 pub mod migrations;
 pub mod pool;
+pub mod provision;
 
 pub use config::{
     RemoteSurrealConfig, StorageBackendKind, StorageConfig, DEFAULT_DATABASE_NAME,
@@ -44,3 +45,4 @@ pub use config::{
 };
 pub use error::StorageError;
 pub use pool::{SurrealConnectionPool, SurrealSession};
+pub use provision::{provision_uar_namespace, ProvisionReceipt};

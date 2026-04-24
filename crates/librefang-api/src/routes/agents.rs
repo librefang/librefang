@@ -270,7 +270,7 @@ async fn resolve_manifest(
                     "system",
                     librefang_runtime::audit::AuditAction::AuthAttempt,
                     "manifest signature verification failed",
-                    format!("error: {e}"),
+                    &format!("error: {e}"),
                 );
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {

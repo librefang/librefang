@@ -478,8 +478,62 @@ pub async fn post_link_uar(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PostLinkUarBody>,
 ) -> impl IntoResponse {
-    // Phase 8 stub: write the UAR remote config block into config.toml.
-    // Full provisioning SQL (DEFINE NAMESPACE / DEFINE USER) lives in Phase 7b.
+    // Phase 7b: run DDL provisioning against the remote SurrealDB instance
+    // using the supplied root credentials, then write the application-level
+    // credentials into config.toml.
+    //
+    // The provisioning step is skipped (and a warning is logged) when the
+    // `surreal-backend` feature is not compiled in — in that case only the
+    // TOML write is performed so the config is at least recorded.
+
+    // -----------------------------------------------------------------------
+    // Step 1: DDL provisioning via root credentials.
+    // `root_pass_ref` is the name of an env var that holds the root password.
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "surreal-backend")]
+    {
+        info!(
+            url = %body.remote_url,
+            namespace = %body.namespace,
+            app_user = %body.app_user,
+            "Provisioning UAR namespace on remote SurrealDB"
+        );
+        match librefang_storage::provision_uar_namespace(
+            &body.remote_url,
+            &body.root_user,
+            &body.root_pass_ref,
+            &body.namespace,
+            &body.app_user,
+            &body.app_pass_ref,
+        )
+        .await
+        {
+            Ok(receipt) => {
+                info!(
+                    namespace = %receipt.namespace,
+                    app_user = %receipt.app_user,
+                    "UAR namespace provisioned successfully"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "UAR namespace provisioning failed");
+                return ApiErrorResponse::internal(format!("SurrealDB provisioning: {e}"))
+                    .into_response();
+            }
+        }
+    }
+
+    #[cfg(not(feature = "surreal-backend"))]
+    {
+        warn!(
+            "surreal-backend feature not compiled in; skipping DDL provisioning. \
+             Config TOML will be written but you must provision the namespace manually."
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 2: Write the application-level remote config into config.toml.
+    // -----------------------------------------------------------------------
     let cfg = state.kernel.config_snapshot();
     let config_path = cfg.data_dir.join("config.toml");
     let _lock = state.config_write_lock.lock().await;
@@ -496,7 +550,8 @@ pub async fn post_link_uar(
         doc.insert("uar", toml_edit::Item::Table(toml_edit::Table::new()));
     }
 
-    // Build [uar.remote] subtable
+    // Build [uar.remote] subtable with the application-level credentials.
+    // Root credentials are intentionally excluded — they are never persisted.
     let mut remote_tbl = toml_edit::Table::new();
     remote_tbl.insert(
         "url",
@@ -537,6 +592,7 @@ pub async fn post_link_uar(
             "namespace": body.namespace,
             "app_user": body.app_user,
             "memory_linked": body.also_link_memory,
+            "provisioned": cfg!(feature = "surreal-backend"),
         })),
     )
         .into_response()
