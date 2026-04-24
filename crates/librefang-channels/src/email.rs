@@ -220,7 +220,7 @@ fn fetch_unseen_emails(
 ) -> Result<Vec<(String, String, String, String)>, String> {
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
-    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
+    let tls = rustls_connector::RustlsConnector::new_with_platform_verifier()
         .map_err(|e| format!("TLS connector error: {e}"))?;
     let tls_stream = tls
         .connect(host, tcp)

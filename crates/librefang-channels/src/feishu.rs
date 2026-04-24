@@ -1146,9 +1146,7 @@ fn decrypt_feishu_payload(
     encrypt_key: &str,
 ) -> Result<serde_json::Value, String> {
     use base64::Engine;
-    // `cipher` 0.5 renamed BlockDecryptMut → BlockModeDecrypt and dropped the
-    // `_mut` suffix on the padded-buffer methods.
-    use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 
     let raw = base64::engine::general_purpose::STANDARD
         .decode(encrypted_payload.trim())

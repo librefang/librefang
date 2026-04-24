@@ -146,10 +146,7 @@ fn is_subscribe_success(frame: &serde_json::Value) -> bool {
 /// AES-CBC decrypt with PKCS#7 padding (32-byte block alignment).
 fn decrypt_aes_cbc(key: &[u8], encrypted_base64: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
-    // `cipher` 0.5: BlockDecryptMut → BlockModeDecrypt, and padded methods
-    // lost the `_mut` suffix. `new_from_slices` avoids the &[u8]→&Array
-    // `Into` bound that no longer exists in cipher 0.5's Array type.
-    use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 
     let mut encrypted = base64::engine::general_purpose::STANDARD
         .decode(encrypted_base64)
@@ -245,8 +242,7 @@ fn decode_wecom_payload(encoding_aes_key: &str, encrypted_payload: &str) -> Resu
 /// AES-CBC encrypt with PKCS#7 padding for building callback responses.
 #[allow(dead_code)] // used by build_encrypted_response (passive reply, not yet wired)
 fn encrypt_aes_cbc(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    // See `decrypt_aes_cbc` for the cipher 0.5 migration notes.
-    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
+use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
     if key.len() != 32 {
         return Err(format!(
