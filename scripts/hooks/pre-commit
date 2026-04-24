@@ -10,13 +10,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Regenerate openapi.json if API routes changed
+# Regenerate openapi.json if API routes changed. Fail the commit if
+# codegen fails — swallowing the error would let a stale spec land,
+# which defeats the purpose of the hook.
 if git diff --cached --name-only | grep -q "crates/librefang-api/src/routes/"; then
     echo "Regenerating openapi.json..."
-    if cargo xtask codegen --openapi 2>&1; then
-        git add openapi.json
-        echo "openapi.json updated and staged."
-    else
-        echo "Warning: openapi.json regeneration failed — committing with stale spec."
+    if ! cargo xtask codegen --openapi; then
+        echo "Error: openapi.json regeneration failed — fix build/codegen before committing."
+        exit 1
     fi
+    git add openapi.json
+    echo "openapi.json updated and staged."
 fi

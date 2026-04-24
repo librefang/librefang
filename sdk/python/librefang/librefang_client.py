@@ -284,8 +284,13 @@ class _ToolResource(_Resource):
     def get(self, name: str):
         return self._c._request("GET", f"/api/tools/{name}")
 
-    def invoke(self, name: str, tool_input: dict):
-        return self._c._request("POST", f"/api/tools/{name}/invoke", tool_input)
+    def invoke(self, name: str, tool_input: dict, agent_id: Optional[str] = None):
+        """Invoke a tool. Pass ``agent_id`` for approval-gated tools so the
+        server can later resolve the deferred execution to a real agent."""
+        path = f"/api/tools/{quote(name, safe='')}/invoke"
+        if agent_id:
+            path += f"?agent_id={quote(agent_id, safe='')}"
+        return self._c._request("POST", path, tool_input)
 
 
 # ── Model Resource ──────────────────────────────────────────────

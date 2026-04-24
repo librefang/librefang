@@ -55,13 +55,23 @@ impl Tools {
     }
 
     /// Invoke a tool by name with the given input.
+    ///
+    /// `agent_id` is forwarded as the `?agent_id=<uuid>` query parameter.
+    /// Required for approval-gated tools — the server returns 400 without
+    /// it because the approval subsystem cannot resolve a deferred
+    /// execution to an anonymous caller.
     pub async fn invoke(
         &self,
         name: &str,
         input: serde_json::Value,
+        agent_id: Option<&str>,
     ) -> Result<serde_json::Value> {
         let url = format!("{}/api/tools/{}/invoke", self.base_url, name);
-        let res = self.client.post(&url).json(&input).send().await?;
+        let mut req = self.client.post(&url);
+        if let Some(id) = agent_id {
+            req = req.query(&[("agent_id", id)]);
+        }
+        let res = req.json(&input).send().await?;
         let status = res.status();
         let body = res.text().await?;
         if !status.is_success() {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -487,8 +488,15 @@ func (r *ToolResource) Get(name string) (map[string]interface{}, error) {
 	return toMap(resp), err
 }
 
-func (r *ToolResource) Invoke(name string, input map[string]interface{}) (map[string]interface{}, error) {
-	resp, err := r.client.doRequest("POST", fmt.Sprintf("/api/tools/%s/invoke", name), input)
+// Invoke calls /api/tools/{name}/invoke. Pass a non-empty agentID for
+// approval-gated tools so the server can resolve the deferred execution
+// to a real agent; pass "" for tools that do not require approval.
+func (r *ToolResource) Invoke(name string, input map[string]interface{}, agentID string) (map[string]interface{}, error) {
+	path := fmt.Sprintf("/api/tools/%s/invoke", url.PathEscape(name))
+	if agentID != "" {
+		path += "?agent_id=" + url.QueryEscape(agentID)
+	}
+	resp, err := r.client.doRequest("POST", path, input)
 	return toMap(resp), err
 }
 
