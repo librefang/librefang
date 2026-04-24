@@ -53,6 +53,82 @@ impl SurrealProactiveMemoryBackend {
         self.extended = Some(storage);
         self
     }
+
+    /// Open the proactive memory backend and wire a [`surreal_memory::SurrealStorage`]
+    /// built from `storage_cfg` so that `consolidate()` → `expire_stale_memories()` is
+    /// fully active.  The `SurrealStorage` uses a noop embedding service because
+    /// consolidation only needs TTL eviction, not vector search.
+    ///
+    /// Call sites in `librefang-kernel` use this instead of calling
+    /// `SurrealStorage::new()` directly (which requires `surreal-memory` to be a
+    /// direct dependency of the kernel crate).
+    #[cfg(feature = "surreal-backend")]
+    pub async fn open_with_storage(
+        session: &SurrealSession,
+        storage_cfg: &librefang_storage::config::StorageConfig,
+    ) -> Result<Self, String> {
+        use surreal_memory::storage::surreal::{SurrealConfig, SurrealMode};
+
+        struct NoopEmbedding;
+        #[async_trait::async_trait]
+        impl surreal_memory::EmbeddingService for NoopEmbedding {
+            async fn embed(
+                &self,
+                _text: &str,
+            ) -> anyhow::Result<surreal_memory::embeddings::Embedding> {
+                Ok(vec![])
+            }
+            async fn embed_batch(
+                &self,
+                texts: Vec<String>,
+            ) -> anyhow::Result<Vec<surreal_memory::embeddings::Embedding>> {
+                Ok(texts.iter().map(|_| vec![]).collect())
+            }
+            fn dimensions(&self) -> usize {
+                0
+            }
+        }
+
+        let sm_config = match &storage_cfg.backend {
+            librefang_storage::config::StorageBackendKind::Embedded { path } => SurrealConfig {
+                mode: SurrealMode::Embedded,
+                endpoint: None,
+                embedded_path: Some(path.to_string_lossy().to_string()),
+                username: None,
+                password: None,
+                namespace: storage_cfg.effective_namespace().to_string(),
+                database: storage_cfg.effective_database().to_string(),
+                retry: surreal_memory::RetryConfig::default(),
+            },
+            librefang_storage::config::StorageBackendKind::Remote(remote) => {
+                let password = std::env::var(&remote.password_env).unwrap_or_default();
+                SurrealConfig {
+                    mode: SurrealMode::Server,
+                    endpoint: Some(remote.url.clone()),
+                    embedded_path: None,
+                    username: if remote.username.is_empty() {
+                        None
+                    } else {
+                        Some(remote.username.clone())
+                    },
+                    password: if password.is_empty() {
+                        None
+                    } else {
+                        Some(password)
+                    },
+                    namespace: remote.namespace.clone(),
+                    database: remote.database.clone(),
+                    retry: surreal_memory::RetryConfig::default(),
+                }
+            }
+        };
+
+        let storage = surreal_memory::SurrealStorage::new(&sm_config, Arc::new(NoopEmbedding))
+            .await
+            .map_err(|e| format!("SurrealStorage (proactive memory consolidation): {e}"))?;
+
+        Ok(Self::open(session).with_extended(Arc::new(storage)))
+    }
 }
 
 #[async_trait]

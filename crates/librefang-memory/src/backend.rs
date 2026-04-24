@@ -1,6 +1,6 @@
 //! Backend traits for memory subsystem storage — agent registry, sessions,
-//! key-value store, task queue, usage events, devices, and prompt versioning —
-//! all part of the `surrealdb-storage-swap` migration plan.
+//! key-value store, task queue, usage events, devices, prompt versioning, and
+//! knowledge graph — all part of the `surrealdb-storage-swap` migration plan.
 //!
 //! Each trait defines a minimal surface matching the calls the kernel and API
 //! layers make today.  Implementations exist for:
@@ -21,7 +21,7 @@ use uuid::Uuid;
 // Re-import Session from the session module so trait impls can use it.
 use crate::session::Session;
 use crate::usage::{ModelUsage, UsageRecord, UsageSummary};
-use librefang_types::memory::ConsolidationReport;
+use librefang_types::memory::{ConsolidationReport, Entity, GraphMatch, GraphPattern, Relation};
 
 // ── MemoryBackend ────────────────────────────────────────────────────────────
 
@@ -585,6 +585,53 @@ pub trait PromptBackend: Send + Sync {
         &self,
         experiment_id: Uuid,
     ) -> LibreFangResult<Vec<ExperimentVariantMetrics>>;
+}
+
+// ── KnowledgeBackend ──────────────────────────────────────────────────────────
+
+/// Backend-agnostic interface for the knowledge graph (entities + relations).
+///
+/// The kernel calls `add_entity`, `add_relation`, and `query_graph` through
+/// the `Memory` trait on `MemorySubstrate`.  This trait provides the same
+/// surface so a `SurrealKnowledgeBackend` can replace the SQLite path when
+/// `surreal-backend` is enabled.
+#[async_trait]
+pub trait KnowledgeBackend: Send + Sync {
+    /// Add (or upsert) an entity.  Returns the entity's ID.
+    async fn add_entity(&self, entity: Entity) -> LibreFangResult<String>;
+
+    /// Add a relation between two entities.  Returns the relation's ID.
+    async fn add_relation(&self, relation: Relation) -> LibreFangResult<String>;
+
+    /// Query the graph with a pattern filter.
+    async fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>>;
+
+    /// Delete all entities and relations belonging to an agent.
+    async fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64>;
+}
+
+#[async_trait]
+impl KnowledgeBackend for MemorySubstrate {
+    async fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
+        // Delegate to the Memory trait impl which calls KnowledgeStore::add_entity
+        librefang_types::memory::Memory::add_entity(self, entity).await
+    }
+
+    async fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
+        librefang_types::memory::Memory::add_relation(self, relation).await
+    }
+
+    async fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
+        librefang_types::memory::Memory::query_graph(self, pattern).await
+    }
+
+    async fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
+        let store = self.knowledge().clone();
+        let agent_id = agent_id.to_string();
+        tokio::task::spawn_blocking(move || store.delete_by_agent(&agent_id))
+            .await
+            .map_err(|e| librefang_types::error::LibreFangError::Internal(e.to_string()))?
+    }
 }
 
 impl PromptBackend for crate::prompt::PromptStore {

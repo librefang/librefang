@@ -11,6 +11,8 @@ pub mod surreal;
 #[cfg(feature = "surreal-backend")]
 pub mod surreal_device;
 #[cfg(feature = "surreal-backend")]
+pub mod surreal_knowledge;
+#[cfg(feature = "surreal-backend")]
 pub mod surreal_kv;
 #[cfg(feature = "surreal-backend")]
 pub mod surreal_proactive;
@@ -27,6 +29,8 @@ pub mod surreal_usage;
 pub use surreal::SurrealMemoryBackend;
 #[cfg(feature = "surreal-backend")]
 pub use surreal_device::SurrealDeviceStore;
+#[cfg(feature = "surreal-backend")]
+pub use surreal_knowledge::SurrealKnowledgeBackend;
 #[cfg(feature = "surreal-backend")]
 pub use surreal_kv::SurrealKvBackend;
 #[cfg(feature = "surreal-backend")]

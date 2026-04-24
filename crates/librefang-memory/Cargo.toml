@@ -17,6 +17,7 @@ surreal-backend = [
     "librefang-storage/surreal-backend",
     "dep:surrealdb",
     "dep:surreal-memory",
+    "dep:anyhow",
 ]
 sqlite-backend = ["librefang-storage/sqlite-backend"]
 
@@ -36,6 +37,7 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
 
+anyhow = { workspace = true, optional = true }
 surrealdb = { workspace = true, optional = true }
 surreal-memory = { workspace = true, optional = true }
 

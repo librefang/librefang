@@ -380,6 +380,11 @@ pub struct LibreFangKernel {
     /// `SurrealDeviceStore` when `surreal-backend` is enabled;
     /// `MemorySubstrate` (rusqlite) otherwise.
     pub(crate) device_store: Arc<dyn librefang_memory::DeviceBackend>,
+    /// Knowledge graph backend (entities + relations).
+    ///
+    /// `SurrealKnowledgeBackend` when `surreal-backend` is enabled;
+    /// `MemorySubstrate` (rusqlite) otherwise.
+    pub(crate) knowledge_backend: Arc<dyn librefang_memory::KnowledgeBackend>,
     /// Process supervisor.
     pub(crate) supervisor: Supervisor,
     /// Workflow engine.
@@ -1869,6 +1874,7 @@ impl LibreFangKernel {
             surreal_usage_store,
             surreal_device_store,
             surreal_prompt_store,
+            surreal_knowledge_backend,
         ) = {
             info!(
                 backend = ?config.storage.backend,
@@ -1915,8 +1921,20 @@ impl LibreFangKernel {
                     Arc::new(librefang_memory::SurrealKvBackend::open(&session));
                 let task_backend: Arc<dyn librefang_memory::TaskBackend> =
                     Arc::new(librefang_memory::SurrealTaskBackend::open(&session));
+
+                // Wire SurrealStorage with the proactive memory backend so that
+                // consolidate() → expire_stale_memories() targets the same
+                // namespace/database as all other backends.
+                // The SurrealStorage construction and NoopEmbedding are encapsulated
+                // inside librefang-memory so surreal-memory is not a direct
+                // dependency of librefang-kernel.
                 let proactive_backend: Arc<dyn librefang_memory::ProactiveMemoryBackend> = Arc::new(
-                    librefang_memory::SurrealProactiveMemoryBackend::open(&session),
+                    librefang_memory::SurrealProactiveMemoryBackend::open_with_storage(
+                        &session,
+                        &storage_cfg,
+                    )
+                    .await
+                    .map_err(|e| format!("proactive memory backend: {e}"))?,
                 );
                 let usage_store: Arc<dyn librefang_memory::UsageBackend> =
                     Arc::new(librefang_memory::SurrealUsageStore::open(&session));
@@ -1924,6 +1942,8 @@ impl LibreFangKernel {
                     Arc::new(librefang_memory::SurrealDeviceStore::open(&session));
                 let prompt_backend: Arc<dyn librefang_memory::PromptBackend> =
                     Arc::new(librefang_memory::SurrealPromptStore::open(&session));
+                let knowledge_backend: Arc<dyn librefang_memory::KnowledgeBackend> =
+                    Arc::new(librefang_memory::SurrealKnowledgeBackend::open(&session));
 
                 Ok::<_, String>((
                     pool,
@@ -1937,6 +1957,7 @@ impl LibreFangKernel {
                     usage_store,
                     device_store,
                     prompt_backend,
+                    knowledge_backend,
                 ))
             };
 
@@ -1956,11 +1977,24 @@ impl LibreFangKernel {
                 }
             };
 
-            let (pool, session, store, trace, sess, kv, task, proactive, usage, device, prompt) =
-                result.map_err(KernelError::BootFailed)?;
+            let (
+                pool,
+                session,
+                store,
+                trace,
+                sess,
+                kv,
+                task,
+                proactive,
+                usage,
+                device,
+                prompt,
+                knowledge,
+            ) = result.map_err(KernelError::BootFailed)?;
             info!("SurrealDB operational migrations applied; all storage backends ready");
             (
                 pool, session, store, trace, sess, kv, task, proactive, usage, device, prompt,
+                knowledge,
             )
         };
         #[cfg(not(feature = "surreal-backend"))]
@@ -1981,6 +2015,9 @@ impl LibreFangKernel {
         #[cfg(not(feature = "surreal-backend"))]
         let surreal_device_store: Arc<dyn librefang_memory::DeviceBackend> =
             Arc::clone(&memory) as Arc<dyn librefang_memory::DeviceBackend>;
+        #[cfg(not(feature = "surreal-backend"))]
+        let surreal_knowledge_backend: Arc<dyn librefang_memory::KnowledgeBackend> =
+            Arc::clone(&memory) as Arc<dyn librefang_memory::KnowledgeBackend>;
 
         // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
         fn is_ollama_reachable() -> bool {
@@ -2931,6 +2968,7 @@ impl LibreFangKernel {
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: prompt_store_backend,
             device_store: surreal_device_store,
+            knowledge_backend: surreal_knowledge_backend,
             supervisor,
             workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
             template_registry: WorkflowTemplateRegistry::new(),
@@ -14146,7 +14184,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
         entity: librefang_types::memory::Entity,
     ) -> Result<String, String> {
-        self.memory
+        self.knowledge_backend
             .add_entity(entity)
             .await
             .map_err(|e| format!("Knowledge add entity failed: {e}"))
@@ -14156,7 +14194,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
         relation: librefang_types::memory::Relation,
     ) -> Result<String, String> {
-        self.memory
+        self.knowledge_backend
             .add_relation(relation)
             .await
             .map_err(|e| format!("Knowledge add relation failed: {e}"))
@@ -14166,7 +14204,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-        self.memory
+        self.knowledge_backend
             .query_graph(pattern)
             .await
             .map_err(|e| format!("Knowledge query failed: {e}"))

@@ -7092,6 +7092,7 @@ dependencies = [
 name = "librefang-memory"
 version = "2026.4.23-beta4"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "librefang-storage",

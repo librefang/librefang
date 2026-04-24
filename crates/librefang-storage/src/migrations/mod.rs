@@ -78,4 +78,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "prompt_management_v1",
         sql: include_str!("sql/010_prompt_management.surql"),
     },
+    Migration {
+        version: 11,
+        name: "knowledge_graph_v1",
+        sql: include_str!("sql/011_knowledge_graph.surql"),
+    },
 ];

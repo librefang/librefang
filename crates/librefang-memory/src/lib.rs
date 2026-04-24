@@ -32,11 +32,13 @@ mod backend;
 pub mod backends;
 mod substrate;
 pub use backend::{
-    DeviceBackend, KvBackend, MemoryBackend, ProactiveMemoryBackend, PromptBackend, SessionBackend,
-    TaskBackend, UsageBackend,
+    DeviceBackend, KnowledgeBackend, KvBackend, MemoryBackend, ProactiveMemoryBackend,
+    PromptBackend, SessionBackend, TaskBackend, UsageBackend,
 };
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealDeviceStore;
+#[cfg(feature = "surreal-backend")]
+pub use backends::SurrealKnowledgeBackend;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealKvBackend;
 #[cfg(feature = "surreal-backend")]

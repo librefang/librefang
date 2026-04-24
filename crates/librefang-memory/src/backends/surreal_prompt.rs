@@ -6,6 +6,9 @@
 //! - `prompt_experiments`
 //! - `experiment_variants`
 //! - `experiment_metrics`
+//!
+//! All SurrealQL queries use parameterised bindings (`.bind()`) — no
+//! caller-supplied strings are interpolated directly into query text.
 
 use std::sync::Arc;
 
@@ -186,9 +189,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT * FROM prompt_versions WHERE agent_id = '{agent}' ORDER BY version DESC"
-                ))
+                .query(
+                    "SELECT * FROM prompt_versions \
+                     WHERE agent_id = $agent_id ORDER BY version DESC",
+                )
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB list_versions: {e}")))?;
             let rows: Vec<serde_json::Value> = res
@@ -217,9 +222,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT * FROM prompt_versions WHERE agent_id = '{agent}' AND is_active = true LIMIT 1"
-                ))
+                .query(
+                    "SELECT * FROM prompt_versions \
+                     WHERE agent_id = $agent_id AND is_active = true LIMIT 1",
+                )
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB get_active_version: {e}"))
@@ -237,18 +244,19 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             // Deactivate all versions for the agent first
             self.db
-                .query(format!(
-                    "UPDATE prompt_versions SET is_active = false WHERE agent_id = '{agent}'"
-                ))
+                .query(
+                    "UPDATE prompt_versions SET is_active = false \
+                     WHERE agent_id = $agent_id",
+                )
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB deactivate_versions: {e}"))
                 })?;
-            // Activate the target version
+            // Activate the target version using the SDK update API (no string interpolation)
             self.db
-                .query(format!(
-                    "UPDATE prompt_versions:{version_id} SET is_active = true"
-                ))
+                .update::<Option<serde_json::Value>>(("prompt_versions", version_id))
+                .merge(serde_json::json!({"is_active": true}))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB set_active_version: {e}"))
@@ -272,9 +280,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT count() AS cnt FROM prompt_versions WHERE agent_id = '{agent}' GROUP ALL"
-                ))
+                .query(
+                    "SELECT count() AS cnt FROM prompt_versions \
+                     WHERE agent_id = $agent_id GROUP ALL",
+                )
+                .bind(("agent_id", agent.clone()))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB count_versions: {e}")))?;
             let rows: Vec<serde_json::Value> = res
@@ -290,13 +300,15 @@ impl PromptBackend for SurrealPromptStore {
                 return Ok(());
             }
 
-            let excess = count - max_versions;
+            let excess = (count - max_versions) as i64;
             self.db
-                .query(format!(
+                .query(
                     "DELETE (SELECT id FROM prompt_versions \
-                     WHERE agent_id = '{agent}' AND is_active = false \
-                     ORDER BY version ASC LIMIT {excess})"
-                ))
+                     WHERE agent_id = $agent_id AND is_active = false \
+                     ORDER BY version ASC LIMIT $excess)",
+                )
+                .bind(("agent_id", agent))
+                .bind(("excess", excess))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB prune_versions: {e}")))?;
             Ok(())
@@ -345,9 +357,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT math::max(version) AS max_v FROM prompt_versions WHERE agent_id = '{agent}'"
-                ))
+                .query(
+                    "SELECT math::max(version) AS max_v FROM prompt_versions \
+                     WHERE agent_id = $agent_id",
+                )
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB get_latest_version_number: {e}"))
@@ -395,9 +409,8 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT * FROM prompt_experiments WHERE agent_id = '{agent}'"
-                ))
+                .query("SELECT * FROM prompt_experiments WHERE agent_id = $agent_id")
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB list_experiments: {e}")))?;
             let rows: Vec<serde_json::Value> = res
@@ -425,10 +438,10 @@ impl PromptBackend for SurrealPromptStore {
             .to_string();
         let exp_id = id.to_string();
         block_on(async {
+            // Use the SDK update API — no string interpolation into SurrealQL
             self.db
-                .query(format!(
-                    "UPDATE prompt_experiments:{exp_id} SET status = '{status_str}'"
-                ))
+                .update::<Option<serde_json::Value>>(("prompt_experiments", exp_id))
+                .merge(serde_json::json!({"status": status_str}))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB update_experiment_status: {e}"))
@@ -445,10 +458,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
+                .query(
                     "SELECT * FROM prompt_experiments \
-                     WHERE agent_id = '{agent}' AND status = 'running' LIMIT 1"
-                ))
+                     WHERE agent_id = $agent_id AND status = 'running' LIMIT 1",
+                )
+                .bind(("agent_id", agent))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB get_running_experiment: {e}"))
@@ -481,16 +495,23 @@ impl PromptBackend for SurrealPromptStore {
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB record_request: {e}")))?;
 
             if check.is_some() {
+                // Use type::thing() to construct the record reference without string interpolation
                 self.db
-                    .query(format!(
-                        "UPDATE experiment_metrics:{existing_id} SET \
+                    .query(
+                        "UPDATE type::thing('experiment_metrics', $id) SET \
                          total_requests += 1, \
-                         successful_requests += {success_delta}, \
-                         failed_requests += {failed_delta}, \
-                         total_latency_ms += {latency_ms}, \
-                         total_cost_usd += {cost_usd}, \
-                         last_updated = '{now}'"
-                    ))
+                         successful_requests += $succ, \
+                         failed_requests += $fail, \
+                         total_latency_ms += $lat, \
+                         total_cost_usd += $cost, \
+                         last_updated = $now",
+                    )
+                    .bind(("id", existing_id.clone()))
+                    .bind(("succ", success_delta))
+                    .bind(("fail", failed_delta))
+                    .bind(("lat", latency_ms as i64))
+                    .bind(("cost", cost_usd))
+                    .bind(("now", now.clone()))
                     .await
                     .map_err(|e| {
                         LibreFangError::Memory(format!("SurrealDB record_request update: {e}"))
@@ -526,9 +547,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT * FROM experiment_metrics WHERE variant_id = '{var_id}' LIMIT 1"
-                ))
+                .query(
+                    "SELECT * FROM experiment_metrics \
+                     WHERE variant_id = $variant_id LIMIT 1",
+                )
+                .bind(("variant_id", var_id))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB get_variant_metrics: {e}"))
@@ -599,9 +622,11 @@ impl PromptBackend for SurrealPromptStore {
         block_on(async {
             let mut res = self
                 .db
-                .query(format!(
-                    "SELECT * FROM experiment_metrics WHERE experiment_id = '{exp_id}'"
-                ))
+                .query(
+                    "SELECT * FROM experiment_metrics \
+                     WHERE experiment_id = $experiment_id",
+                )
+                .bind(("experiment_id", exp_id))
                 .await
                 .map_err(|e| {
                     LibreFangError::Memory(format!("SurrealDB get_experiment_metrics: {e}"))
