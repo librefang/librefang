@@ -1146,7 +1146,9 @@ fn decrypt_feishu_payload(
     encrypt_key: &str,
 ) -> Result<serde_json::Value, String> {
     use base64::Engine;
-    use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    // `cipher` 0.5 renamed BlockDecryptMut → BlockModeDecrypt and dropped the
+    // `_mut` suffix on the padded-buffer methods.
+    use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 
     let raw = base64::engine::general_purpose::STANDARD
         .decode(encrypted_payload.trim())
@@ -1168,7 +1170,7 @@ fn decrypt_feishu_payload(
     let key = Sha256::digest(encrypt_key.as_bytes());
     let decrypted = cbc::Decryptor::<aes::Aes256>::new_from_slices(&key, iv)
         .map_err(|error| format!("decrypt init failed: {error}"))?
-        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .decrypt_padded::<Pkcs7>(&mut buffer)
         .map_err(|error| format!("AES-CBC decrypt failed: {error}"))?;
 
     serde_json::from_slice::<serde_json::Value>(decrypted)
@@ -1756,7 +1758,7 @@ impl ChannelAdapter for FeishuAdapter {
 mod tests {
     use super::*;
     use base64::Engine;
-    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
 
     #[test]
     fn test_feishu_adapter_creation() {
@@ -1819,7 +1821,7 @@ mod tests {
         buffer[..plaintext.len()].copy_from_slice(&plaintext);
         let ciphertext = cbc::Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len())
+            .encrypt_padded::<Pkcs7>(&mut buffer, plaintext.len())
             .unwrap()
             .to_vec();
 

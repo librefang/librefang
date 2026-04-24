@@ -7033,6 +7033,7 @@ dependencies = [
  "futures-rustls",
  "log",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "rustls-platform-verifier 0.7.0",
  "rustls-webpki 0.103.13",
