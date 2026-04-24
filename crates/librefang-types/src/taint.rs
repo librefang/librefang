@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 /// Used by [`check_outbound_text_violation_with_skip`] to let callers opt out
 /// of individual rules without touching the main code path.  Per-tool,
 /// per-path exemptions in `McpTaintPolicy` map directly to these variants.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaintRuleId {
     /// Blocks the literal `Authorization:` header prefix.
@@ -41,7 +41,7 @@ pub enum TaintRuleId {
 }
 
 /// A classification label applied to data flowing through the system.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum TaintLabel {
     /// Data that originated from an external network request.
     ExternalNetwork,
@@ -68,7 +68,7 @@ impl fmt::Display for TaintLabel {
 }
 
 /// A value annotated with taint labels tracking its provenance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaintedValue {
     /// The actual string payload.
     pub value: String,

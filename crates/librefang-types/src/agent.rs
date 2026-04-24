@@ -134,7 +134,7 @@ pub enum HookEvent {
 }
 
 /// Unique identifier for an agent instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentId(pub Uuid);
 
 impl AgentId {

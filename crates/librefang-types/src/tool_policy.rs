@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Effect of a policy rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PolicyEffect {
     /// Allow the tool.
@@ -17,7 +17,7 @@ pub enum PolicyEffect {
 }
 
 /// A single tool policy rule with glob pattern support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolPolicyRule {
     /// Glob pattern to match tool names (e.g., "shell_*", "web_*", "mcp_github_*").
     pub pattern: String,
@@ -26,7 +26,7 @@ pub struct ToolPolicyRule {
 }
 
 /// Tool group — named collection of tool patterns.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolGroup {
     /// Group name (e.g., "web_tools", "code_tools").
     pub name: String,
@@ -35,7 +35,7 @@ pub struct ToolGroup {
 }
 
 /// Complete tool policy configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ToolPolicy {
     /// Agent-level rules (highest priority, checked first).
