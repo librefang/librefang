@@ -6,6 +6,13 @@
 //! LLM tests require GROQ_API_KEY. Non-LLM tests verify the kernel-level
 //! workflow wiring without making real API calls.
 
+// The E2E test below builds a deeply-nested future through the kernel ->
+// runtime -> agent_loop call chain. Each added field on LoopOptions /
+// SessionInterrupt makes the type-layout query a little deeper; the default
+// 128 overflows on some toolchains after issue #3044's interrupt cascade
+// changes. 256 gives us headroom without hiding real regressions.
+#![recursion_limit = "256"]
+
 use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
