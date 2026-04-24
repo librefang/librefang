@@ -13523,6 +13523,13 @@
       },
       "description": "Link understanding configuration."
     },
+    "local_probe_interval_secs": {
+      "default": 60,
+      "description": "Interval in seconds between reachability probes of local providers (Ollama, vLLM, LM Studio, lemonade).\n\nLower values make the dashboard react faster to `brew services start/stop ollama` at the cost of extra HTTP calls to `/api/tags`. 60 s is the default — it keeps the UI responsive without noticeably loading a local Ollama daemon. Dev machines flipping Ollama on/off frequently can drop to 10; long-lived production boxes can raise to 300+ since the state rarely changes.\n\nZero or values below the probe timeout (2 s) are treated as 60.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "log_dir": {
       "default": null,
       "description": "Custom log directory. When set, log files are written here instead of the default `~/.librefang/` directory.",
