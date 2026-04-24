@@ -106,7 +106,12 @@ function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender 
     };
   }
   if (primary === "array") {
-    return { type: node.items?.type === "string" ? "string[]" : "array" };
+    const itemType = node.items?.type;
+    if (itemType === "string") return { type: "string[]" };
+    // Array of structs (items has $ref or object type, e.g. OneOrMany<TelegramConfig>)
+    // must render as a JSON editor, not a comma-separated string input.
+    if (itemType === "object" || node.items?.$ref) return { type: "object" };
+    return { type: "array" };
   }
   if (primary === "object") return { type: "object" };
   return { type: "string" };
