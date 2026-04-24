@@ -116,6 +116,11 @@ function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender 
 
   // 3. Unwrap Option<T> / nullable shapes so we see the real type below.
   const effective = unwrapNullable(node);
+  // Bare `{$ref: ...}` with no type sibling means a direct reference to
+  // another struct. Today every config field wraps such refs in
+  // Option<>/OneOrMany<> so this branch is latent, but a future bare
+  // struct field should render as a JSON editor, not a text input.
+  if (effective.$ref && !effective.type) return { type: "object" };
   const primary = pickType(effective);
   if (primary === "boolean") return { type: "boolean" };
   if (primary === "integer" || primary === "number") {
