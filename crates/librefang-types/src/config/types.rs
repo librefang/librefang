@@ -6327,6 +6327,11 @@ impl Default for TerminalConfig {
 /// enabled = true
 /// allowlist = ["web_search", "web_fetch", "file_read"]
 /// ```
+///
+/// Pitfall: `allowlist = ["*"]` matches every tool and effectively turns
+/// the endpoint into "give API-key holders the same power as the kernel".
+/// Prefer narrow globs (`"file_*"`, `"web_*"`) — reserve `"*"` for
+/// trusted single-tenant dev environments.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolInvokeConfig {
     /// Master switch. When `false` (default) the endpoint rejects every

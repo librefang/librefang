@@ -43,6 +43,11 @@ impl Tools {
     }
 
     /// Get a single tool definition by name.
+    ///
+    /// Note: `name` is interpolated into the URL path verbatim. Tool names
+    /// are ASCII identifiers (`[A-Za-z0-9_]+`) in every driver today, so
+    /// percent-encoding is unnecessary and would pull in an extra dep.
+    /// If that ever changes, swap to `reqwest::Url` + `path_segments_mut`.
     pub async fn get(&self, name: &str) -> Result<ToolDefinition> {
         let url = format!("{}/api/tools/{}", self.base_url, name);
         let res = self.client.get(&url).send().await?;

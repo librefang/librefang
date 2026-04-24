@@ -211,3 +211,38 @@ async fn test_invoke_allowlisted_non_approval_tool_succeeds() {
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(body["is_error"], false, "body={body}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_invoke_file_read_uses_plumbed_workspace_root() {
+    // Guards the sandbox-context plumbing: if `workspace_root` is ever
+    // silently reverted to None in the handler, `file_read` returns
+    // "Workspace sandbox not configured" and this test flips to a 400.
+    let h = build_harness(ToolInvokeConfig {
+        enabled: true,
+        allowlist: vec!["file_read".into()],
+    })
+    .await;
+
+    // `effective_workspaces_dir()` defaults to `home_dir.join("workspaces")`,
+    // which the harness rooted at `tmp.path()`. Seed a file there and read it
+    // back through the REST endpoint.
+    let workspace_root = h.state.kernel.config_snapshot().effective_workspaces_dir();
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+    let file_path = workspace_root.join("hello.txt");
+    std::fs::write(&file_path, "integration-ok").expect("seed test file");
+
+    let (status, body) = invoke(
+        &h.app,
+        "file_read",
+        None,
+        serde_json::json!({"path": "hello.txt"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["is_error"], false, "body={body}");
+    assert_eq!(
+        body["content"].as_str(),
+        Some("integration-ok"),
+        "body={body}"
+    );
+}
