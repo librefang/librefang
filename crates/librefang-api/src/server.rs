@@ -1174,11 +1174,13 @@ pub async fn run_daemon(
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
 
-    // Auto-start observability stack (Prometheus + Grafana) if Docker is available
+    // Auto-start observability stack (OTLP collector + Prometheus + Grafana) if Docker is available
     let observability_started = if kernel.config_ref().telemetry.enabled {
-        match start_observability_stack() {
+        match start_observability_stack(kernel.home_dir()) {
             Ok(ObservabilityStartup::Started) => {
-                info!("Observability stack started (Prometheus :9090, Grafana :3000)");
+                info!(
+                    "Observability stack started (OTLP :4317/:4318, Prometheus :9090, Grafana :3000)"
+                );
                 true
             }
             Ok(ObservabilityStartup::DockerUnavailable) => {
@@ -1187,7 +1189,7 @@ pub async fn run_daemon(
             }
             Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
                 tracing::warn!(
-                    "Observability stack failed to start (likely a port conflict on 9090/3000 or an existing stack): {}",
+                    "Observability stack failed to start (likely a port conflict on 4317/9090/3000 or an existing stack): {}",
                     stderr.trim()
                 );
                 false
@@ -1339,7 +1341,7 @@ pub async fn run_daemon(
 
     // Stop observability stack
     if observability_started {
-        if let Err(e) = stop_observability_stack() {
+        if let Err(e) = stop_observability_stack(state.kernel.home_dir()) {
             tracing::warn!("Failed to stop observability stack: {e}");
         } else {
             info!("Observability stack stopped");
@@ -1386,8 +1388,73 @@ enum ObservabilityStartup {
     ComposeFailed { stderr: String },
 }
 
+/// Observability assets embedded at compile time. Written to
+/// `<home>/observability/` on boot so Docker Desktop (macOS) can bind-mount
+/// them from a path that is always in its File Sharing list (`~`). Avoids
+/// the `operation not permitted` failure we hit when the daemon runs from
+/// an external disk (`/Volumes/...`) that the user has not added manually.
+const OBSERVABILITY_ASSETS: &[(&str, &str)] = &[
+    (
+        "docker-compose.observability.yml",
+        include_str!("../../../deploy/docker-compose.observability.yml"),
+    ),
+    (
+        "prometheus/prometheus.yml",
+        include_str!("../../../deploy/prometheus/prometheus.yml"),
+    ),
+    (
+        "otel-collector/config.yaml",
+        include_str!("../../../deploy/otel-collector/config.yaml"),
+    ),
+    (
+        "grafana/provisioning/datasources/prometheus.yml",
+        include_str!("../../../deploy/grafana/provisioning/datasources/prometheus.yml"),
+    ),
+    (
+        "grafana/provisioning/dashboards/dashboard.yml",
+        include_str!("../../../deploy/grafana/provisioning/dashboards/dashboard.yml"),
+    ),
+    (
+        "grafana/dashboards/librefang.json",
+        include_str!("../../../deploy/grafana/dashboards/librefang.json"),
+    ),
+    (
+        "grafana/dashboards/librefang-llm.json",
+        include_str!("../../../deploy/grafana/dashboards/librefang-llm.json"),
+    ),
+    (
+        "grafana/dashboards/librefang-http.json",
+        include_str!("../../../deploy/grafana/dashboards/librefang-http.json"),
+    ),
+    (
+        "grafana/dashboards/librefang-cost.json",
+        include_str!("../../../deploy/grafana/dashboards/librefang-cost.json"),
+    ),
+    (
+        "grafana/dashboards/ollama.json",
+        include_str!("../../../deploy/grafana/dashboards/ollama.json"),
+    ),
+];
+
+/// Stage all embedded observability assets under `<home>/observability/`,
+/// overwriting on every call so upgrades ship new configs without
+/// manual intervention. Returns the staged compose file path.
+fn stage_observability_assets(home_dir: &Path) -> std::io::Result<std::path::PathBuf> {
+    let root = home_dir.join("observability");
+    for (rel, contents) in OBSERVABILITY_ASSETS {
+        let target = root.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, contents)?;
+    }
+    Ok(root.join("docker-compose.observability.yml"))
+}
+
 /// Check if Docker is available and start the observability stack.
-fn start_observability_stack() -> Result<ObservabilityStartup, Box<dyn std::error::Error>> {
+fn start_observability_stack(
+    home_dir: &Path,
+) -> Result<ObservabilityStartup, Box<dyn std::error::Error>> {
     // Check if docker CLI exists and daemon is reachable
     let docker_check = std::process::Command::new("docker")
         .arg("version")
@@ -1400,8 +1467,8 @@ fn start_observability_stack() -> Result<ObservabilityStartup, Box<dyn std::erro
         _ => return Ok(ObservabilityStartup::DockerUnavailable),
     }
 
-    // Find the compose file relative to the executable or well-known paths
-    let compose_file = find_compose_file()?;
+    let compose_file = stage_observability_assets(home_dir)
+        .map_err(|e| format!("failed to stage observability assets: {e}"))?;
 
     let output = std::process::Command::new("docker")
         .args(["compose", "-f"])
@@ -1419,9 +1486,14 @@ fn start_observability_stack() -> Result<ObservabilityStartup, Box<dyn std::erro
     }
 }
 
-/// Stop the observability stack.
-fn stop_observability_stack() -> Result<(), Box<dyn std::error::Error>> {
-    let compose_file = find_compose_file()?;
+/// Stop the observability stack using the staged compose file.
+fn stop_observability_stack(home_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let compose_file = home_dir
+        .join("observability")
+        .join("docker-compose.observability.yml");
+    if !compose_file.exists() {
+        return Ok(());
+    }
 
     std::process::Command::new("docker")
         .args(["compose", "-f"])
@@ -1433,30 +1505,6 @@ fn stop_observability_stack() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("docker compose down failed: {e}"))?;
 
     Ok(())
-}
-
-/// Locate the observability docker-compose file.
-fn find_compose_file() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    // Try relative to current exe
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            // Binary might be in target/release or target/debug
-            for ancestor in dir.ancestors().take(4) {
-                let candidate = ancestor.join("deploy/docker-compose.observability.yml");
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-
-    // Try current working directory
-    let cwd_candidate = std::path::PathBuf::from("deploy/docker-compose.observability.yml");
-    if cwd_candidate.exists() {
-        return Ok(cwd_candidate);
-    }
-
-    Err("Could not find deploy/docker-compose.observability.yml".into())
 }
 
 /// SECURITY: Restrict file permissions to owner-only (0600) on Unix.

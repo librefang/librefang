@@ -1,0 +1,35 @@
+# OpenTelemetry Collector config for LibreFang's local dev stack.
+#
+# Receives OTLP traces + metrics from LibreFang on 4317 (gRPC) / 4318 (HTTP)
+# and exposes a Prometheus scrape endpoint on 8889 for Prometheus to pick up
+# OTLP-delivered metrics. Traces are written to the collector's stdout via
+# the debug exporter — replace with a real backend (Tempo, Jaeger, …) when
+# you need trace search.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: normal
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
