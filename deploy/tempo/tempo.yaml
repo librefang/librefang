@@ -1,9 +1,15 @@
 # Grafana Tempo config for LibreFang's local dev stack.
 #
-# Single-binary mode with local filesystem storage. Receives traces from the
-# OpenTelemetry collector over OTLP/gRPC on port 4317 (inside the Docker
-# network — not exposed to the host; the host's 4317 is the collector).
-# Exposes a query API on 3200 that Grafana's Tempo datasource uses.
+# Minimal single-binary mode with local filesystem storage. Receives
+# traces from the OpenTelemetry collector over OTLP/gRPC on port 4317
+# (inside the Docker network — not exposed to the host; the host's 4317
+# is the collector). Exposes a query API on 3200 that Grafana's Tempo
+# datasource uses.
+#
+# Ingester flush cadence and compactor retention use built-in defaults.
+# To customize, add `ingester:` / `compactor:` sections — their nested
+# fields are strict, so check the Tempo docs for the exact schema your
+# image version accepts.
 
 server:
   http_listen_port: 3200
@@ -15,17 +21,10 @@ distributor:
         grpc:
           endpoint: 0.0.0.0:4317
 
-ingester:
-  max_block_duration: 5m
-
-compactor:
-  compaction:
-    block_retention: 24h   # keep local dev traces for a day; bump if needed
-
 storage:
   trace:
     backend: local
-    local:
-      path: /var/tempo/traces
     wal:
       path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
