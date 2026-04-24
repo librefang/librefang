@@ -2223,6 +2223,19 @@ pub struct KernelConfig {
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
     #[serde(default)]
     pub provider_api_keys: HashMap<String, String>,
+    /// Interval in seconds between reachability probes of local providers
+    /// (Ollama, vLLM, LM Studio, lemonade).
+    ///
+    /// Lower values make the dashboard react faster to `brew services
+    /// start/stop ollama` at the cost of extra HTTP calls to `/api/tags`.
+    /// 60 s is the default — it keeps the UI responsive without noticeably
+    /// loading a local Ollama daemon. Dev machines flipping Ollama on/off
+    /// frequently can drop to 10; long-lived production boxes can raise to
+    /// 300+ since the state rarely changes.
+    ///
+    /// Zero or values below the probe timeout (2 s) are treated as 60.
+    #[serde(default = "default_local_probe_interval_secs")]
+    pub local_probe_interval_secs: u64,
     /// Vertex AI provider configuration.
     #[serde(default)]
     pub vertex_ai: VertexAiConfig,
@@ -3958,6 +3971,7 @@ impl Default for KernelConfig {
             provider_request_timeout_secs: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
+            local_probe_interval_secs: default_local_probe_interval_secs(),
             vertex_ai: VertexAiConfig::default(),
             azure_openai: AzureOpenAiConfig::default(),
             oauth: OAuthConfig::default(),
@@ -4711,6 +4725,10 @@ pub struct WhatsAppConfig {
 
 fn default_conversation_ttl_hours() -> u32 {
     24
+}
+
+fn default_local_probe_interval_secs() -> u64 {
+    60
 }
 
 impl Default for WhatsAppConfig {

@@ -9956,11 +9956,18 @@ system_prompt = "You are a helpful assistant."
                             .map(|fb| fb.provider.to_lowercase()),
                     )
                     .collect();
+            // Probe interval comes from `[providers] local_probe_interval_secs`
+            // (default 60). Values below the 2s probe timeout are nonsensical
+            // — clamp to the default so a mis-configured TOML doesn't
+            // stampede the local daemon.
+            let probe_interval_secs = if cfg.local_probe_interval_secs >= 2 {
+                cfg.local_probe_interval_secs
+            } else {
+                60
+            };
             tokio::spawn(async move {
-                const LOCAL_PROBE_INTERVAL_SECS: u64 = 60;
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                    LOCAL_PROBE_INTERVAL_SECS,
-                ));
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
                 loop {
                     interval.tick().await;
                     if kernel.supervisor.is_shutting_down() {
@@ -15724,6 +15731,12 @@ pub async fn probe_and_update_local_provider(
 
 /// Probe every local provider once and update the catalog. Called from the
 /// periodic loop in `start_background_agents`.
+///
+/// Probes run concurrently via `join_all`. The total wall time of one cycle
+/// is bounded by the slowest probe (≤ 2 s per provider — see
+/// `PROBE_TIMEOUT_SECS` in `provider_health`) instead of the sum across
+/// providers, which matters when a local server is hung rather than simply
+/// offline.
 async fn probe_all_local_providers_once(
     kernel: &Arc<LibreFangKernel>,
     relevant_providers: &std::collections::HashSet<String>,
@@ -15743,10 +15756,15 @@ async fn probe_all_local_providers_once(
             .map(|p| (p.id.clone(), p.base_url.clone()))
             .collect()
     };
-    for (provider_id, base_url) in &local_providers {
+    let tasks = local_providers.into_iter().map(|(provider_id, base_url)| {
+        let kernel = Arc::clone(kernel);
         let is_relevant = relevant_providers.contains(&provider_id.to_lowercase());
-        let _ = probe_and_update_local_provider(kernel, provider_id, base_url, is_relevant).await;
-    }
+        async move {
+            let _ = probe_and_update_local_provider(&kernel, &provider_id, &base_url, is_relevant)
+                .await;
+        }
+    });
+    futures::future::join_all(tasks).await;
 }
 
 // --- OFP Wire Protocol integration ---
