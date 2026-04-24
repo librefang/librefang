@@ -63,8 +63,12 @@ class LibreFang:
         self.workflows = _WorkflowsResource(self)
 
 
-    def _request(self, method: str, path: str, body: Any = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
         url = self.base_url + path
+        if query:
+            filtered = {k: v for k, v in query.items() if v is not None}
+            if filtered:
+                url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, headers=self._headers, method=method)
         try:
@@ -78,9 +82,13 @@ class LibreFang:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
 
-    def _stream(self, method: str, path: str, body: Any = None) -> Generator[Dict, None, None]:
+    def _stream(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
         """SSE streaming — yields parsed JSON events."""
         url = self.base_url + path
+        if query:
+            filtered = {k: v for k, v in query.items() if v is not None}
+            if filtered:
+                url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
         headers = dict(self._headers)
         headers["Accept"] = "text/event-stream"
@@ -128,16 +136,16 @@ class _A2AResource(_Resource):
     def a2a_send_external(self, **data):
         return self._c._request("POST", "/api/a2a/send", data)
 
-    def a2a_external_task_status(self, id: str):
-        return self._c._request("GET", f"/api/a2a/tasks/{id}/status")
+    def a2a_external_task_status(self, id: str, url: Any = None):
+        return self._c._request("GET", f"/api/a2a/tasks/{id}/status", None, query={"url": url})
 
 
 # ── Agents Resource ────────────────────────────────────────────
 
 class _AgentsResource(_Resource):
 
-    def list_agents(self):
-        return self._c._request("GET", "/api/agents")
+    def list_agents(self, q: Any = None, status: Any = None, limit: Any = None, offset: Any = None, sort: Any = None, order: Any = None):
+        return self._c._request("GET", "/api/agents", None, query={"q": q, "status": status, "limit": limit, "offset": offset, "sort": sort, "order": order})
 
     def spawn_agent(self, **data):
         return self._c._request("POST", "/api/agents", data)
@@ -371,14 +379,14 @@ class _ChannelsResource(_Resource):
     def wechat_qr_start(self):
         return self._c._request("POST", "/api/channels/wechat/qr/start")
 
-    def wechat_qr_status(self):
-        return self._c._request("GET", "/api/channels/wechat/qr/status")
+    def wechat_qr_status(self, qr_code: Any = None):
+        return self._c._request("GET", "/api/channels/wechat/qr/status", None, query={"qr_code": qr_code})
 
     def whatsapp_qr_start(self):
         return self._c._request("POST", "/api/channels/whatsapp/qr/start")
 
-    def whatsapp_qr_status(self):
-        return self._c._request("GET", "/api/channels/whatsapp/qr/status")
+    def whatsapp_qr_status(self, session_id: Any = None):
+        return self._c._request("GET", "/api/channels/whatsapp/qr/status", None, query={"session_id": session_id})
 
     def configure_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/{name}/configure", data)
@@ -578,8 +586,8 @@ class _ModelsResource(_Resource):
 
 class _NetworkResource(_Resource):
 
-    def comms_events(self):
-        return self._c._request("GET", "/api/comms/events")
+    def comms_events(self, limit: Any = None):
+        return self._c._request("GET", "/api/comms/events", None, query={"limit": limit})
 
     def comms_events_stream(self) -> Generator[Dict, None, None]:
         return self._c._stream("GET", "/api/comms/events/stream")
@@ -627,14 +635,14 @@ class _PairingResource(_Resource):
 
 class _ProactiveMemoryResource(_Resource):
 
-    def memory_list(self):
-        return self._c._request("GET", "/api/memory")
+    def memory_list(self, category: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory", None, query={"category": category, "offset": offset, "limit": limit})
 
     def memory_add(self, **data):
         return self._c._request("POST", "/api/memory", data)
 
-    def memory_list_agent(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}")
+    def memory_list_agent(self, id: str, category: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "offset": offset, "limit": limit})
 
     def memory_reset_agent(self, id: str):
         return self._c._request("DELETE", f"/api/memory/agents/{id}")
@@ -654,8 +662,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_clear_level(self, id: str, level: str):
         return self._c._request("DELETE", f"/api/memory/agents/{id}/level/{level}")
 
-    def memory_search_agent(self, id: str):
-        return self._c._request("GET", f"/api/memory/agents/{id}/search")
+    def memory_search_agent(self, id: str, q: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "limit": limit})
 
     def memory_stats_agent(self, id: str):
         return self._c._request("GET", f"/api/memory/agents/{id}/stats")
@@ -672,8 +680,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_history(self, memory_id: str):
         return self._c._request("GET", f"/api/memory/items/{memory_id}/history")
 
-    def memory_search(self):
-        return self._c._request("GET", "/api/memory/search")
+    def memory_search(self, q: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "limit": limit})
 
     def memory_stats(self):
         return self._c._request("GET", "/api/memory/stats")
@@ -709,14 +717,14 @@ class _SessionsResource(_Resource):
 
 class _SkillsResource(_Resource):
 
-    def clawhub_browse(self):
-        return self._c._request("GET", "/api/clawhub/browse")
+    def clawhub_browse(self, q: Any = None):
+        return self._c._request("GET", "/api/clawhub/browse", None, query={"q": q})
 
     def clawhub_install(self, **data):
         return self._c._request("POST", "/api/clawhub/install", data)
 
-    def clawhub_search(self):
-        return self._c._request("GET", "/api/clawhub/search")
+    def clawhub_search(self, q: Any = None):
+        return self._c._request("GET", "/api/clawhub/search", None, query={"q": q})
 
     def clawhub_skill_detail(self, slug: str):
         return self._c._request("GET", f"/api/clawhub/skill/{slug}")
@@ -724,8 +732,8 @@ class _SkillsResource(_Resource):
     def clawhub_skill_code(self, slug: str):
         return self._c._request("GET", f"/api/clawhub/skill/{slug}/code")
 
-    def marketplace_search(self):
-        return self._c._request("GET", "/api/marketplace/search")
+    def marketplace_search(self, q: Any = None):
+        return self._c._request("GET", "/api/marketplace/search", None, query={"q": q})
 
     def list_skills(self):
         return self._c._request("GET", "/api/skills")
@@ -854,8 +862,8 @@ class _SystemResource(_Resource):
 
 class _ToolsResource(_Resource):
 
-    def invoke_tool(self, name: str, **data):
-        return self._c._request("POST", f"/api/tools/{name}/invoke", data)
+    def invoke_tool(self, name: str, agent_id: Any = None, **data):
+        return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
 
 
 # ── Webhooks Resource ──────────────────────────────────────────
@@ -909,8 +917,8 @@ class _WorkflowsResource(_Resource):
     def run_schedule(self, id: str):
         return self._c._request("POST", f"/api/schedules/{id}/run")
 
-    def list_triggers(self):
-        return self._c._request("GET", "/api/triggers")
+    def list_triggers(self, agent_id: Any = None):
+        return self._c._request("GET", "/api/triggers", None, query={"agent_id": agent_id})
 
     def create_trigger(self, **data):
         return self._c._request("POST", "/api/triggers", data)

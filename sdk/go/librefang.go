@@ -5,11 +5,13 @@ Do not edit manually. Run: python3 scripts/codegen-sdks.py
 package librefang
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -85,8 +87,29 @@ func New(baseURL string) *Client {
 	return c
 }
 
-func (c *Client) request(method, path string, body interface{}) (interface{}, error) {
-	url := c.BaseURL + path
+func (c *Client) withQuery(path string, query map[string]string) string {
+	if len(query) == 0 {
+		return path
+	}
+	vals := url.Values{}
+	for k, v := range query {
+		if v == "" {
+			continue
+		}
+		vals.Set(k, v)
+	}
+	q := vals.Encode()
+	if q == "" {
+		return path
+	}
+	if strings.Contains(path, "?") {
+		return path + "&" + q
+	}
+	return path + "?" + q
+}
+
+func (c *Client) request(method, path string, body interface{}, query map[string]string) (interface{}, error) {
+	urlStr := c.BaseURL + c.withQuery(path, query)
 	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -95,7 +118,7 @@ func (c *Client) request(method, path string, body interface{}) (interface{}, er
 		}
 		bodyBytes = b
 	}
-	req, err := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -122,17 +145,17 @@ func (c *Client) request(method, path string, body interface{}) (interface{}, er
 	return result, nil
 }
 
-func (c *Client) stream(method, path string, body interface{}) <-chan map[string]interface{} {
+func (c *Client) stream(method, path string, body interface{}, query map[string]string) <-chan map[string]interface{} {
 	ch := make(chan map[string]interface{})
 	go func() {
 		defer close(ch)
-		url := c.BaseURL + path
+		urlStr := c.BaseURL + c.withQuery(path, query)
 		var bodyBytes []byte
 		if body != nil {
 			b, _ := json.Marshal(body)
 			bodyBytes = b
 		}
-		req, _ := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+		req, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 		for k, v := range c.Headers {
 			req.Header.Set(k, v)
 		}
@@ -148,21 +171,19 @@ func (c *Client) stream(method, path string, body interface{}) <-chan map[string
 			ch <- map[string]interface{}{"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
 			return
 		}
-		buf := make([]byte, 4096)
+		// Accumulate partial lines across reads; SSE events can span chunks.
+		reader := bufio.NewReader(resp.Body)
 		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				for _, line := range strings.Split(string(buf[:n]), "\n") {
-					line = strings.TrimSpace(line)
-					if !strings.HasPrefix(line, "data: ") {
-						continue
-					}
-					data := strings.TrimPrefix(line, "data: ")
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "data: ") {
+					data := strings.TrimPrefix(trimmed, "data: ")
 					if data == "[DONE]" {
 						return
 					}
 					var event map[string]interface{}
-					if err := json.Unmarshal([]byte(data), &event); err != nil {
+					if jerr := json.Unmarshal([]byte(data), &event); jerr != nil {
 						ch <- map[string]interface{}{"raw": data}
 					} else {
 						ch <- event
@@ -170,7 +191,7 @@ func (c *Client) stream(method, path string, body interface{}) <-chan map[string
 				}
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
 	}()
@@ -211,195 +232,195 @@ func ToSlice(v interface{}) []map[string]interface{} {
 type A2AResource struct{ client *Client }
 
 func (r *A2AResource) A2AListExternalAgents() (interface{}, error) {
-	return r.client.request("GET", "/api/a2a/agents", nil)
+	return r.client.request("GET", "/api/a2a/agents", nil, nil)
 }
 
 func (r *A2AResource) A2AGetExternalAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/a2a/agents/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/a2a/agents/%s", id), nil, nil)
 }
 
 func (r *A2AResource) A2ADiscoverExternal(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/a2a/discover", data)
+	return r.client.request("POST", "/api/a2a/discover", data, nil)
 }
 
 func (r *A2AResource) A2ASendExternal(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/a2a/send", data)
+	return r.client.request("POST", "/api/a2a/send", data, nil)
 }
 
-func (r *A2AResource) A2AExternalTaskStatus(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/a2a/tasks/%s/status", id), nil)
+func (r *A2AResource) A2AExternalTaskStatus(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/a2a/tasks/%s/status", id), nil, query)
 }
 
 // ── Agents Resource
 
 type AgentsResource struct{ client *Client }
 
-func (r *AgentsResource) ListAgents() (interface{}, error) {
-	return r.client.request("GET", "/api/agents", nil)
+func (r *AgentsResource) ListAgents(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/agents", nil, query)
 }
 
 func (r *AgentsResource) SpawnAgent(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents", data)
+	return r.client.request("POST", "/api/agents", data, nil)
 }
 
 func (r *AgentsResource) BulkCreateAgents(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents/bulk", data)
+	return r.client.request("POST", "/api/agents/bulk", data, nil)
 }
 
 func (r *AgentsResource) BulkDeleteAgents() (interface{}, error) {
-	return r.client.request("DELETE", "/api/agents/bulk", nil)
+	return r.client.request("DELETE", "/api/agents/bulk", nil, nil)
 }
 
 func (r *AgentsResource) BulkStartAgents(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents/bulk/start", data)
+	return r.client.request("POST", "/api/agents/bulk/start", data, nil)
 }
 
 func (r *AgentsResource) BulkStopAgents(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/agents/bulk/stop", data)
+	return r.client.request("POST", "/api/agents/bulk/stop", data, nil)
 }
 
 func (r *AgentsResource) GetAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil, nil)
 }
 
 func (r *AgentsResource) KillAgent(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", id), nil, nil)
 }
 
 func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s", id), data, nil)
 }
 
 func (r *AgentsResource) CloneAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/clone", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/clone", id), data, nil)
 }
 
 func (r *AgentsResource) PatchAgentConfig(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/config", id), data)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/config", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentDeliveries(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", id), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentFiles(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files", id), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentFile(id string, filename string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentFile(id string, filename string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), data, nil)
 }
 
 func (r *AgentsResource) DeleteAgentFile(id string, filename string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil, nil)
 }
 
 func (r *AgentsResource) ClearAgentHistory(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/history", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/history", id), nil, nil)
 }
 
 func (r *AgentsResource) UpdateAgentIdentity(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/identity", id), data)
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/identity", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentMcpServers(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mcp_servers", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mcp_servers", id), data, nil)
 }
 
 func (r *AgentsResource) SendMessage(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/message", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/message", id), data, nil)
 }
 
 func (r *AgentsResource) SendMessageStream(id string, data map[string]interface{}) <-chan map[string]interface{} {
-	return r.client.stream("POST", fmt.Sprintf("/api/agents/%s/message/stream", id), data)
+	return r.client.stream("POST", fmt.Sprintf("/api/agents/%s/message/stream", id), data, nil)
 }
 
 func (r *AgentsResource) SetAgentMode(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mode", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mode", id), data, nil)
 }
 
 func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentSession(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, nil)
 }
 
 func (r *AgentsResource) CompactSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/compact", id), nil, nil)
 }
 
 func (r *AgentsResource) RebootSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reboot", id), nil, nil)
 }
 
 func (r *AgentsResource) ResetSession(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reset", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/session/reset", id), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentSessions(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions", id), nil, nil)
 }
 
 func (r *AgentsResource) CreateAgentSession(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions", id), data, nil)
 }
 
 func (r *AgentsResource) ImportSession(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/import", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/import", id), data, nil)
 }
 
 func (r *AgentsResource) ExportSession(id string, session_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil, nil)
 }
 
 func (r *AgentsResource) SwitchAgentSession(id string, session_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentSkills(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/skills", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/skills", id), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentSkills(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/skills", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/skills", id), data, nil)
 }
 
 func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", id), nil, nil)
 }
 
 func (r *AgentsResource) GetAgentTools(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/tools", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/tools", id), nil, nil)
 }
 
 func (r *AgentsResource) SetAgentTools(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/tools", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/tools", id), data, nil)
 }
 
 func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
 }
 
 func (r *AgentsResource) UpdateAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/update", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/update", id), data, nil)
 }
 
 func (r *AgentsResource) UploadFile(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/upload", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/upload", id), data, nil)
 }
 
 func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/uploads/%s", file_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/uploads/%s", file_id), nil, nil)
 }
 
 // ── Approvals Resource
@@ -407,23 +428,23 @@ func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
 type ApprovalsResource struct{ client *Client }
 
 func (r *ApprovalsResource) ListApprovals() (interface{}, error) {
-	return r.client.request("GET", "/api/approvals", nil)
+	return r.client.request("GET", "/api/approvals", nil, nil)
 }
 
 func (r *ApprovalsResource) CreateApproval(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/approvals", data)
+	return r.client.request("POST", "/api/approvals", data, nil)
 }
 
 func (r *ApprovalsResource) GetApproval(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/approvals/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/approvals/%s", id), nil, nil)
 }
 
 func (r *ApprovalsResource) ApproveRequest(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/approve", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/approve", id), data, nil)
 }
 
 func (r *ApprovalsResource) RejectRequest(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/reject", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/approvals/%s/reject", id), nil, nil)
 }
 
 // ── Auth Resource
@@ -431,31 +452,31 @@ func (r *ApprovalsResource) RejectRequest(id string) (interface{}, error) {
 type AuthResource struct{ client *Client }
 
 func (r *AuthResource) AuthCallback() (interface{}, error) {
-	return r.client.request("GET", "/api/auth/callback", nil)
+	return r.client.request("GET", "/api/auth/callback", nil, nil)
 }
 
 func (r *AuthResource) AuthCallbackPost(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/auth/callback", data)
+	return r.client.request("POST", "/api/auth/callback", data, nil)
 }
 
 func (r *AuthResource) AuthIntrospect(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/auth/introspect", data)
+	return r.client.request("POST", "/api/auth/introspect", data, nil)
 }
 
 func (r *AuthResource) AuthLogin() (interface{}, error) {
-	return r.client.request("GET", "/api/auth/login", nil)
+	return r.client.request("GET", "/api/auth/login", nil, nil)
 }
 
 func (r *AuthResource) AuthLoginProvider(provider string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/auth/login/%s", provider), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/auth/login/%s", provider), nil, nil)
 }
 
 func (r *AuthResource) AuthProviders() (interface{}, error) {
-	return r.client.request("GET", "/api/auth/providers", nil)
+	return r.client.request("GET", "/api/auth/providers", nil, nil)
 }
 
 func (r *AuthResource) AuthUserinfo() (interface{}, error) {
-	return r.client.request("GET", "/api/auth/userinfo", nil)
+	return r.client.request("GET", "/api/auth/userinfo", nil, nil)
 }
 
 // ── AutoDream Resource
@@ -463,19 +484,19 @@ func (r *AuthResource) AuthUserinfo() (interface{}, error) {
 type AutoDreamResource struct{ client *Client }
 
 func (r *AutoDreamResource) AutoDreamAbort(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/abort", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/abort", id), nil, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamSetEnabled(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/auto-dream/agents/%s/enabled", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/auto-dream/agents/%s/enabled", id), data, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamTrigger(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/trigger", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/auto-dream/agents/%s/trigger", id), nil, nil)
 }
 
 func (r *AutoDreamResource) AutoDreamStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/auto-dream/status", nil)
+	return r.client.request("GET", "/api/auto-dream/status", nil, nil)
 }
 
 // ── Budget Resource
@@ -483,39 +504,39 @@ func (r *AutoDreamResource) AutoDreamStatus() (interface{}, error) {
 type BudgetResource struct{ client *Client }
 
 func (r *BudgetResource) BudgetStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/budget", nil)
+	return r.client.request("GET", "/api/budget", nil, nil)
 }
 
 func (r *BudgetResource) UpdateBudget(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", "/api/budget", data)
+	return r.client.request("PUT", "/api/budget", data, nil)
 }
 
 func (r *BudgetResource) AgentBudgetRanking() (interface{}, error) {
-	return r.client.request("GET", "/api/budget/agents", nil)
+	return r.client.request("GET", "/api/budget/agents", nil, nil)
 }
 
 func (r *BudgetResource) AgentBudgetStatus(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/budget/agents/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/budget/agents/%s", id), nil, nil)
 }
 
 func (r *BudgetResource) UpdateAgentBudget(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data, nil)
 }
 
 func (r *BudgetResource) UsageStats() (interface{}, error) {
-	return r.client.request("GET", "/api/usage", nil)
+	return r.client.request("GET", "/api/usage", nil, nil)
 }
 
 func (r *BudgetResource) UsageByModel() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/by-model", nil)
+	return r.client.request("GET", "/api/usage/by-model", nil, nil)
 }
 
 func (r *BudgetResource) UsageDaily() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/daily", nil)
+	return r.client.request("GET", "/api/usage/daily", nil, nil)
 }
 
 func (r *BudgetResource) UsageSummary() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/summary", nil)
+	return r.client.request("GET", "/api/usage/summary", nil, nil)
 }
 
 // ── Channels Resource
@@ -523,39 +544,39 @@ func (r *BudgetResource) UsageSummary() (interface{}, error) {
 type ChannelsResource struct{ client *Client }
 
 func (r *ChannelsResource) ListChannels() (interface{}, error) {
-	return r.client.request("GET", "/api/channels", nil)
+	return r.client.request("GET", "/api/channels", nil, nil)
 }
 
 func (r *ChannelsResource) ReloadChannels() (interface{}, error) {
-	return r.client.request("POST", "/api/channels/reload", nil)
+	return r.client.request("POST", "/api/channels/reload", nil, nil)
 }
 
 func (r *ChannelsResource) WechatQrStart() (interface{}, error) {
-	return r.client.request("POST", "/api/channels/wechat/qr/start", nil)
+	return r.client.request("POST", "/api/channels/wechat/qr/start", nil, nil)
 }
 
-func (r *ChannelsResource) WechatQrStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/channels/wechat/qr/status", nil)
+func (r *ChannelsResource) WechatQrStatus(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/channels/wechat/qr/status", nil, query)
 }
 
 func (r *ChannelsResource) WhatsappQrStart() (interface{}, error) {
-	return r.client.request("POST", "/api/channels/whatsapp/qr/start", nil)
+	return r.client.request("POST", "/api/channels/whatsapp/qr/start", nil, nil)
 }
 
-func (r *ChannelsResource) WhatsappQrStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/channels/whatsapp/qr/status", nil)
+func (r *ChannelsResource) WhatsappQrStatus(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/channels/whatsapp/qr/status", nil, query)
 }
 
 func (r *ChannelsResource) ConfigureChannel(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/configure", name), data)
+	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/configure", name), data, nil)
 }
 
 func (r *ChannelsResource) RemoveChannel(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/configure", name), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/configure", name), nil, nil)
 }
 
 func (r *ChannelsResource) TestChannel(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/test", name), data)
+	return r.client.request("POST", fmt.Sprintf("/api/channels/%s/test", name), data, nil)
 }
 
 // ── Extensions Resource
@@ -563,19 +584,19 @@ func (r *ChannelsResource) TestChannel(name string, data map[string]interface{})
 type ExtensionsResource struct{ client *Client }
 
 func (r *ExtensionsResource) ListExtensions() (interface{}, error) {
-	return r.client.request("GET", "/api/extensions", nil)
+	return r.client.request("GET", "/api/extensions", nil, nil)
 }
 
 func (r *ExtensionsResource) InstallExtension(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/extensions/install", data)
+	return r.client.request("POST", "/api/extensions/install", data, nil)
 }
 
 func (r *ExtensionsResource) UninstallExtension(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/extensions/uninstall", data)
+	return r.client.request("POST", "/api/extensions/uninstall", data, nil)
 }
 
 func (r *ExtensionsResource) GetExtension(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/extensions/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/extensions/%s", name), nil, nil)
 }
 
 // ── Hands Resource
@@ -583,63 +604,63 @@ func (r *ExtensionsResource) GetExtension(name string) (interface{}, error) {
 type HandsResource struct{ client *Client }
 
 func (r *HandsResource) ListHands() (interface{}, error) {
-	return r.client.request("GET", "/api/hands", nil)
+	return r.client.request("GET", "/api/hands", nil, nil)
 }
 
 func (r *HandsResource) ListActiveHands() (interface{}, error) {
-	return r.client.request("GET", "/api/hands/active", nil)
+	return r.client.request("GET", "/api/hands/active", nil, nil)
 }
 
 func (r *HandsResource) InstallHand(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/hands/install", data)
+	return r.client.request("POST", "/api/hands/install", data, nil)
 }
 
 func (r *HandsResource) DeactivateHand(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/hands/instances/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/hands/instances/%s", id), nil, nil)
 }
 
 func (r *HandsResource) HandInstanceBrowser(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/browser", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/browser", id), nil, nil)
 }
 
 func (r *HandsResource) PauseHand(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/pause", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/pause", id), nil, nil)
 }
 
 func (r *HandsResource) ResumeHand(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/resume", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/instances/%s/resume", id), nil, nil)
 }
 
 func (r *HandsResource) HandStats(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/instances/%s/stats", id), nil, nil)
 }
 
 func (r *HandsResource) ReloadHands() (interface{}, error) {
-	return r.client.request("POST", "/api/hands/reload", nil)
+	return r.client.request("POST", "/api/hands/reload", nil, nil)
 }
 
 func (r *HandsResource) GetHand(hand_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/%s", hand_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/%s", hand_id), nil, nil)
 }
 
 func (r *HandsResource) ActivateHand(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/activate", hand_id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/activate", hand_id), data, nil)
 }
 
 func (r *HandsResource) CheckHandDeps(hand_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/check-deps", hand_id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/check-deps", hand_id), nil, nil)
 }
 
 func (r *HandsResource) InstallHandDeps(hand_id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/install-deps", hand_id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/hands/%s/install-deps", hand_id), nil, nil)
 }
 
 func (r *HandsResource) GetHandSettings(hand_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/settings", hand_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/hands/%s/settings", hand_id), nil, nil)
 }
 
 func (r *HandsResource) UpdateHandSettings(hand_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/settings", hand_id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/hands/%s/settings", hand_id), data, nil)
 }
 
 // ── Mcp Resource
@@ -647,43 +668,43 @@ func (r *HandsResource) UpdateHandSettings(hand_id string, data map[string]inter
 type McpResource struct{ client *Client }
 
 func (r *McpResource) ListMcpCatalog() (interface{}, error) {
-	return r.client.request("GET", "/api/mcp/catalog", nil)
+	return r.client.request("GET", "/api/mcp/catalog", nil, nil)
 }
 
 func (r *McpResource) GetMcpCatalogEntry(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/mcp/catalog/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/mcp/catalog/%s", id), nil, nil)
 }
 
 func (r *McpResource) McpHealthHandler() (interface{}, error) {
-	return r.client.request("GET", "/api/mcp/health", nil)
+	return r.client.request("GET", "/api/mcp/health", nil, nil)
 }
 
 func (r *McpResource) ReloadMcpHandler() (interface{}, error) {
-	return r.client.request("POST", "/api/mcp/reload", nil)
+	return r.client.request("POST", "/api/mcp/reload", nil, nil)
 }
 
 func (r *McpResource) ListMcpServers() (interface{}, error) {
-	return r.client.request("GET", "/api/mcp/servers", nil)
+	return r.client.request("GET", "/api/mcp/servers", nil, nil)
 }
 
 func (r *McpResource) AddMcpServer(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/mcp/servers", data)
+	return r.client.request("POST", "/api/mcp/servers", data, nil)
 }
 
 func (r *McpResource) GetMcpServer(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/mcp/servers/%s", name), nil, nil)
 }
 
 func (r *McpResource) UpdateMcpServer(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/mcp/servers/%s", name), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/mcp/servers/%s", name), data, nil)
 }
 
 func (r *McpResource) DeleteMcpServer(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s", name), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/mcp/servers/%s", name), nil, nil)
 }
 
 func (r *McpResource) ReconnectMcpServerHandler(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", name), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", name), nil, nil)
 }
 
 // ── Memory Resource
@@ -691,27 +712,27 @@ func (r *McpResource) ReconnectMcpServerHandler(name string) (interface{}, error
 type MemoryResource struct{ client *Client }
 
 func (r *MemoryResource) ExportAgentMemory(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/memory/export", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/memory/export", id), nil, nil)
 }
 
 func (r *MemoryResource) ImportAgentMemory(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/memory/import", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/memory/import", id), data, nil)
 }
 
 func (r *MemoryResource) GetAgentKv(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv", id), nil, nil)
 }
 
 func (r *MemoryResource) GetAgentKvKey(id string, key string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil, nil)
 }
 
 func (r *MemoryResource) SetAgentKvKey(id string, key string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), data, nil)
 }
 
 func (r *MemoryResource) DeleteAgentKvKey(id string, key string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/kv/%s", id, key), nil, nil)
 }
 
 // ── Models Resource
@@ -719,111 +740,111 @@ func (r *MemoryResource) DeleteAgentKvKey(id string, key string) (interface{}, e
 type ModelsResource struct{ client *Client }
 
 func (r *ModelsResource) CatalogStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/catalog/status", nil)
+	return r.client.request("GET", "/api/catalog/status", nil, nil)
 }
 
 func (r *ModelsResource) CatalogUpdate() (interface{}, error) {
-	return r.client.request("POST", "/api/catalog/update", nil)
+	return r.client.request("POST", "/api/catalog/update", nil, nil)
 }
 
 func (r *ModelsResource) ListModels() (interface{}, error) {
-	return r.client.request("GET", "/api/models", nil)
+	return r.client.request("GET", "/api/models", nil, nil)
 }
 
 func (r *ModelsResource) ListAliases() (interface{}, error) {
-	return r.client.request("GET", "/api/models/aliases", nil)
+	return r.client.request("GET", "/api/models/aliases", nil, nil)
 }
 
 func (r *ModelsResource) CreateAlias(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/models/aliases", data)
+	return r.client.request("POST", "/api/models/aliases", data, nil)
 }
 
 func (r *ModelsResource) DeleteAlias(alias string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/models/aliases/%s", alias), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/aliases/%s", alias), nil, nil)
 }
 
 func (r *ModelsResource) AddCustomModel(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/models/custom", data)
+	return r.client.request("POST", "/api/models/custom", data, nil)
 }
 
 func (r *ModelsResource) RemoveCustomModel(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/models/custom/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/models/custom/%s", id), nil, nil)
 }
 
 func (r *ModelsResource) GetModel(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/models/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/models/%s", id), nil, nil)
 }
 
 func (r *ModelsResource) ListProviders() (interface{}, error) {
-	return r.client.request("GET", "/api/providers", nil)
+	return r.client.request("GET", "/api/providers", nil, nil)
 }
 
 func (r *ModelsResource) CopilotOauthPoll(poll_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/providers/github-copilot/oauth/poll/%s", poll_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/providers/github-copilot/oauth/poll/%s", poll_id), nil, nil)
 }
 
 func (r *ModelsResource) CopilotOauthStart() (interface{}, error) {
-	return r.client.request("POST", "/api/providers/github-copilot/oauth/start", nil)
+	return r.client.request("POST", "/api/providers/github-copilot/oauth/start", nil, nil)
 }
 
 func (r *ModelsResource) GetProvider(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/providers/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/providers/%s", name), nil, nil)
 }
 
 func (r *ModelsResource) SetDefaultProvider(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/default", name), data)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/default", name), data, nil)
 }
 
 func (r *ModelsResource) SetProviderKey(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/key", name), data)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/key", name), data, nil)
 }
 
 func (r *ModelsResource) DeleteProviderKey(name string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/providers/%s/key", name), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/providers/%s/key", name), nil, nil)
 }
 
 func (r *ModelsResource) TestProvider(name string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/test", name), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/providers/%s/test", name), nil, nil)
 }
 
 func (r *ModelsResource) SetProviderUrl(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/url", name), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/providers/%s/url", name), data, nil)
 }
 
 // ── Network Resource
 
 type NetworkResource struct{ client *Client }
 
-func (r *NetworkResource) CommsEvents() (interface{}, error) {
-	return r.client.request("GET", "/api/comms/events", nil)
+func (r *NetworkResource) CommsEvents(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/comms/events", nil, query)
 }
 
 func (r *NetworkResource) CommsEventsStream() <-chan map[string]interface{} {
-	return r.client.stream("GET", "/api/comms/events/stream", nil)
+	return r.client.stream("GET", "/api/comms/events/stream", nil, nil)
 }
 
 func (r *NetworkResource) CommsSend(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/comms/send", data)
+	return r.client.request("POST", "/api/comms/send", data, nil)
 }
 
 func (r *NetworkResource) CommsTask(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/comms/task", data)
+	return r.client.request("POST", "/api/comms/task", data, nil)
 }
 
 func (r *NetworkResource) CommsTopology() (interface{}, error) {
-	return r.client.request("GET", "/api/comms/topology", nil)
+	return r.client.request("GET", "/api/comms/topology", nil, nil)
 }
 
 func (r *NetworkResource) NetworkStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/network/status", nil)
+	return r.client.request("GET", "/api/network/status", nil, nil)
 }
 
 func (r *NetworkResource) ListPeers() (interface{}, error) {
-	return r.client.request("GET", "/api/peers", nil)
+	return r.client.request("GET", "/api/peers", nil, nil)
 }
 
 func (r *NetworkResource) GetPeer(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/peers/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/peers/%s", id), nil, nil)
 }
 
 // ── Pairing Resource
@@ -831,99 +852,99 @@ func (r *NetworkResource) GetPeer(id string) (interface{}, error) {
 type PairingResource struct{ client *Client }
 
 func (r *PairingResource) PairingComplete(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/pairing/complete", data)
+	return r.client.request("POST", "/api/pairing/complete", data, nil)
 }
 
 func (r *PairingResource) PairingDevices() (interface{}, error) {
-	return r.client.request("GET", "/api/pairing/devices", nil)
+	return r.client.request("GET", "/api/pairing/devices", nil, nil)
 }
 
 func (r *PairingResource) PairingRemoveDevice(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/pairing/devices/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/pairing/devices/%s", id), nil, nil)
 }
 
 func (r *PairingResource) PairingNotify(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/pairing/notify", data)
+	return r.client.request("POST", "/api/pairing/notify", data, nil)
 }
 
 func (r *PairingResource) PairingRequest() (interface{}, error) {
-	return r.client.request("POST", "/api/pairing/request", nil)
+	return r.client.request("POST", "/api/pairing/request", nil, nil)
 }
 
 // ── ProactiveMemory Resource
 
 type ProactiveMemoryResource struct{ client *Client }
 
-func (r *ProactiveMemoryResource) MemoryList() (interface{}, error) {
-	return r.client.request("GET", "/api/memory", nil)
+func (r *ProactiveMemoryResource) MemoryList(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/memory", nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryAdd(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/memory", data)
+	return r.client.request("POST", "/api/memory", data, nil)
 }
 
-func (r *ProactiveMemoryResource) MemoryListAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s", id), nil)
+func (r *ProactiveMemoryResource) MemoryListAgent(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s", id), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryResetAgent(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s", id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryConsolidate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/consolidate", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/consolidate", id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryDuplicates(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/duplicates", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/duplicates", id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryExportAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/export", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/export", id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryImportAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/import", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/memory/agents/%s/import", id), data, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryClearLevel(id string, level string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/level/%s", id, level), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/agents/%s/level/%s", id, level), nil, nil)
 }
 
-func (r *ProactiveMemoryResource) MemorySearchAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/search", id), nil)
+func (r *ProactiveMemoryResource) MemorySearchAgent(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/search", id), nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryStatsAgent(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/stats", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/agents/%s/stats", id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryCleanup() (interface{}, error) {
-	return r.client.request("POST", "/api/memory/cleanup", nil)
+	return r.client.request("POST", "/api/memory/cleanup", nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryUpdate(memory_id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/memory/items/%s", memory_id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/memory/items/%s", memory_id), data, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryDelete(memory_id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/memory/items/%s", memory_id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/memory/items/%s", memory_id), nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryHistory(memory_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/items/%s/history", memory_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/items/%s/history", memory_id), nil, nil)
 }
 
-func (r *ProactiveMemoryResource) MemorySearch() (interface{}, error) {
-	return r.client.request("GET", "/api/memory/search", nil)
+func (r *ProactiveMemoryResource) MemorySearch(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/memory/search", nil, query)
 }
 
 func (r *ProactiveMemoryResource) MemoryStats() (interface{}, error) {
-	return r.client.request("GET", "/api/memory/stats", nil)
+	return r.client.request("GET", "/api/memory/stats", nil, nil)
 }
 
 func (r *ProactiveMemoryResource) MemoryGetUser(user_id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/memory/user/%s", user_id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/memory/user/%s", user_id), nil, nil)
 }
 
 // ── Sessions Resource
@@ -931,79 +952,79 @@ func (r *ProactiveMemoryResource) MemoryGetUser(user_id string) (interface{}, er
 type SessionsResource struct{ client *Client }
 
 func (r *SessionsResource) FindSessionByLabel(id string, label string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/by-label/%s", id, label), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/by-label/%s", id, label), nil, nil)
 }
 
 func (r *SessionsResource) ListSessions() (interface{}, error) {
-	return r.client.request("GET", "/api/sessions", nil)
+	return r.client.request("GET", "/api/sessions", nil, nil)
 }
 
 func (r *SessionsResource) SessionCleanup() (interface{}, error) {
-	return r.client.request("POST", "/api/sessions/cleanup", nil)
+	return r.client.request("POST", "/api/sessions/cleanup", nil, nil)
 }
 
 func (r *SessionsResource) GetSession(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/sessions/%s", id), nil, nil)
 }
 
 func (r *SessionsResource) DeleteSession(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/sessions/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/sessions/%s", id), nil, nil)
 }
 
 func (r *SessionsResource) SetSessionLabel(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/sessions/%s/label", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/sessions/%s/label", id), data, nil)
 }
 
 // ── Skills Resource
 
 type SkillsResource struct{ client *Client }
 
-func (r *SkillsResource) ClawhubBrowse() (interface{}, error) {
-	return r.client.request("GET", "/api/clawhub/browse", nil)
+func (r *SkillsResource) ClawhubBrowse(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/clawhub/browse", nil, query)
 }
 
 func (r *SkillsResource) ClawhubInstall(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/clawhub/install", data)
+	return r.client.request("POST", "/api/clawhub/install", data, nil)
 }
 
-func (r *SkillsResource) ClawhubSearch() (interface{}, error) {
-	return r.client.request("GET", "/api/clawhub/search", nil)
+func (r *SkillsResource) ClawhubSearch(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/clawhub/search", nil, query)
 }
 
 func (r *SkillsResource) ClawhubSkillDetail(slug string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s", slug), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s", slug), nil, nil)
 }
 
 func (r *SkillsResource) ClawhubSkillCode(slug string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s/code", slug), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/clawhub/skill/%s/code", slug), nil, nil)
 }
 
-func (r *SkillsResource) MarketplaceSearch() (interface{}, error) {
-	return r.client.request("GET", "/api/marketplace/search", nil)
+func (r *SkillsResource) MarketplaceSearch(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/marketplace/search", nil, query)
 }
 
 func (r *SkillsResource) ListSkills() (interface{}, error) {
-	return r.client.request("GET", "/api/skills", nil)
+	return r.client.request("GET", "/api/skills", nil, nil)
 }
 
 func (r *SkillsResource) CreateSkill(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/skills/create", data)
+	return r.client.request("POST", "/api/skills/create", data, nil)
 }
 
 func (r *SkillsResource) InstallSkill(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/skills/install", data)
+	return r.client.request("POST", "/api/skills/install", data, nil)
 }
 
 func (r *SkillsResource) UninstallSkill(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/skills/uninstall", data)
+	return r.client.request("POST", "/api/skills/uninstall", data, nil)
 }
 
 func (r *SkillsResource) ListTools() (interface{}, error) {
-	return r.client.request("GET", "/api/tools", nil)
+	return r.client.request("GET", "/api/tools", nil, nil)
 }
 
 func (r *SkillsResource) GetTool(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/tools/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/tools/%s", name), nil, nil)
 }
 
 // ── System Resource
@@ -1011,143 +1032,143 @@ func (r *SkillsResource) GetTool(name string) (interface{}, error) {
 type SystemResource struct{ client *Client }
 
 func (r *SystemResource) AuditRecent() (interface{}, error) {
-	return r.client.request("GET", "/api/audit/recent", nil)
+	return r.client.request("GET", "/api/audit/recent", nil, nil)
 }
 
 func (r *SystemResource) AuditVerify() (interface{}, error) {
-	return r.client.request("GET", "/api/audit/verify", nil)
+	return r.client.request("GET", "/api/audit/verify", nil, nil)
 }
 
 func (r *SystemResource) CreateBackup() (interface{}, error) {
-	return r.client.request("POST", "/api/backup", nil)
+	return r.client.request("POST", "/api/backup", nil, nil)
 }
 
 func (r *SystemResource) ListBackups() (interface{}, error) {
-	return r.client.request("GET", "/api/backups", nil)
+	return r.client.request("GET", "/api/backups", nil, nil)
 }
 
 func (r *SystemResource) DeleteBackup(filename string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/backups/%s", filename), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/backups/%s", filename), nil, nil)
 }
 
 func (r *SystemResource) ListBindings() (interface{}, error) {
-	return r.client.request("GET", "/api/bindings", nil)
+	return r.client.request("GET", "/api/bindings", nil, nil)
 }
 
 func (r *SystemResource) AddBinding(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/bindings", data)
+	return r.client.request("POST", "/api/bindings", data, nil)
 }
 
 func (r *SystemResource) RemoveBinding(index string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/bindings/%s", index), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/bindings/%s", index), nil, nil)
 }
 
 func (r *SystemResource) ListCommands() (interface{}, error) {
-	return r.client.request("GET", "/api/commands", nil)
+	return r.client.request("GET", "/api/commands", nil, nil)
 }
 
 func (r *SystemResource) GetCommand(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/commands/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/commands/%s", name), nil, nil)
 }
 
 func (r *SystemResource) GetConfig() (interface{}, error) {
-	return r.client.request("GET", "/api/config", nil)
+	return r.client.request("GET", "/api/config", nil, nil)
 }
 
 func (r *SystemResource) ConfigReload() (interface{}, error) {
-	return r.client.request("POST", "/api/config/reload", nil)
+	return r.client.request("POST", "/api/config/reload", nil, nil)
 }
 
 func (r *SystemResource) ConfigSchema() (interface{}, error) {
-	return r.client.request("GET", "/api/config/schema", nil)
+	return r.client.request("GET", "/api/config/schema", nil, nil)
 }
 
 func (r *SystemResource) ConfigSet(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/config/set", data)
+	return r.client.request("POST", "/api/config/set", data, nil)
 }
 
 func (r *SystemResource) Health() (interface{}, error) {
-	return r.client.request("GET", "/api/health", nil)
+	return r.client.request("GET", "/api/health", nil, nil)
 }
 
 func (r *SystemResource) HealthDetail() (interface{}, error) {
-	return r.client.request("GET", "/api/health/detail", nil)
+	return r.client.request("GET", "/api/health/detail", nil, nil)
 }
 
 func (r *SystemResource) QuickInit() (interface{}, error) {
-	return r.client.request("POST", "/api/init", nil)
+	return r.client.request("POST", "/api/init", nil, nil)
 }
 
 func (r *SystemResource) LogsStream() <-chan map[string]interface{} {
-	return r.client.stream("GET", "/api/logs/stream", nil)
+	return r.client.stream("GET", "/api/logs/stream", nil, nil)
 }
 
 func (r *SystemResource) PrometheusMetrics() (interface{}, error) {
-	return r.client.request("GET", "/api/metrics", nil)
+	return r.client.request("GET", "/api/metrics", nil, nil)
 }
 
 func (r *SystemResource) RunMigrate(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/migrate", data)
+	return r.client.request("POST", "/api/migrate", data, nil)
 }
 
 func (r *SystemResource) MigrateDetect() (interface{}, error) {
-	return r.client.request("GET", "/api/migrate/detect", nil)
+	return r.client.request("GET", "/api/migrate/detect", nil, nil)
 }
 
 func (r *SystemResource) MigrateScan(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/migrate/scan", data)
+	return r.client.request("POST", "/api/migrate/scan", data, nil)
 }
 
 func (r *SystemResource) ListProfiles() (interface{}, error) {
-	return r.client.request("GET", "/api/profiles", nil)
+	return r.client.request("GET", "/api/profiles", nil, nil)
 }
 
 func (r *SystemResource) GetProfile(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/profiles/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/profiles/%s", name), nil, nil)
 }
 
 func (r *SystemResource) QueueStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/queue/status", nil)
+	return r.client.request("GET", "/api/queue/status", nil, nil)
 }
 
 func (r *SystemResource) RestoreBackup(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/restore", data)
+	return r.client.request("POST", "/api/restore", data, nil)
 }
 
 func (r *SystemResource) SecurityStatus() (interface{}, error) {
-	return r.client.request("GET", "/api/security", nil)
+	return r.client.request("GET", "/api/security", nil, nil)
 }
 
 func (r *SystemResource) Shutdown() (interface{}, error) {
-	return r.client.request("POST", "/api/shutdown", nil)
+	return r.client.request("POST", "/api/shutdown", nil, nil)
 }
 
 func (r *SystemResource) Status() (interface{}, error) {
-	return r.client.request("GET", "/api/status", nil)
+	return r.client.request("GET", "/api/status", nil, nil)
 }
 
 func (r *SystemResource) ListAgentTemplates() (interface{}, error) {
-	return r.client.request("GET", "/api/templates", nil)
+	return r.client.request("GET", "/api/templates", nil, nil)
 }
 
 func (r *SystemResource) GetAgentTemplate(name string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", name), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
 func (r *SystemResource) Version() (interface{}, error) {
-	return r.client.request("GET", "/api/version", nil)
+	return r.client.request("GET", "/api/version", nil, nil)
 }
 
 func (r *SystemResource) ApiVersions() (interface{}, error) {
-	return r.client.request("GET", "/api/versions", nil)
+	return r.client.request("GET", "/api/versions", nil, nil)
 }
 
 // ── Tools Resource
 
 type ToolsResource struct{ client *Client }
 
-func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data)
+func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
 }
 
 // ── Webhooks Resource
@@ -1155,11 +1176,11 @@ func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}) (in
 type WebhooksResource struct{ client *Client }
 
 func (r *WebhooksResource) WebhookAgent(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/hooks/agent", data)
+	return r.client.request("POST", "/api/hooks/agent", data, nil)
 }
 
 func (r *WebhooksResource) WebhookWake(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/hooks/wake", data)
+	return r.client.request("POST", "/api/hooks/wake", data, nil)
 }
 
 // ── Workflows Resource
@@ -1167,98 +1188,98 @@ func (r *WebhooksResource) WebhookWake(data map[string]interface{}) (interface{}
 type WorkflowsResource struct{ client *Client }
 
 func (r *WorkflowsResource) ListCronJobs() (interface{}, error) {
-	return r.client.request("GET", "/api/cron/jobs", nil)
+	return r.client.request("GET", "/api/cron/jobs", nil, nil)
 }
 
 func (r *WorkflowsResource) CreateCronJob(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/cron/jobs", data)
+	return r.client.request("POST", "/api/cron/jobs", data, nil)
 }
 
 func (r *WorkflowsResource) UpdateCronJob(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s", id), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteCronJob(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/cron/jobs/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/cron/jobs/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) ToggleCronJob(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s/enable", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/cron/jobs/%s/enable", id), data, nil)
 }
 
 func (r *WorkflowsResource) CronJobStatus(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s/status", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/cron/jobs/%s/status", id), nil, nil)
 }
 
 func (r *WorkflowsResource) ListSchedules() (interface{}, error) {
-	return r.client.request("GET", "/api/schedules", nil)
+	return r.client.request("GET", "/api/schedules", nil, nil)
 }
 
 func (r *WorkflowsResource) CreateSchedule(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/schedules", data)
+	return r.client.request("POST", "/api/schedules", data, nil)
 }
 
 func (r *WorkflowsResource) GetSchedule(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/schedules/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/schedules/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateSchedule(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/schedules/%s", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/schedules/%s", id), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteSchedule(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/schedules/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/schedules/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) RunSchedule(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/schedules/%s/run", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/schedules/%s/run", id), nil, nil)
 }
 
-func (r *WorkflowsResource) ListTriggers() (interface{}, error) {
-	return r.client.request("GET", "/api/triggers", nil)
+func (r *WorkflowsResource) ListTriggers(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/triggers", nil, query)
 }
 
 func (r *WorkflowsResource) CreateTrigger(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/triggers", data)
+	return r.client.request("POST", "/api/triggers", data, nil)
 }
 
 func (r *WorkflowsResource) GetTrigger(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/triggers/%s", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/triggers/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) DeleteTrigger(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/triggers/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/triggers/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) UpdateTrigger(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PATCH", fmt.Sprintf("/api/triggers/%s", id), data)
+	return r.client.request("PATCH", fmt.Sprintf("/api/triggers/%s", id), data, nil)
 }
 
 func (r *WorkflowsResource) ListWorkflows() (interface{}, error) {
-	return r.client.request("GET", "/api/workflows", nil)
+	return r.client.request("GET", "/api/workflows", nil, nil)
 }
 
 func (r *WorkflowsResource) CreateWorkflow(data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", "/api/workflows", data)
+	return r.client.request("POST", "/api/workflows", data, nil)
 }
 
 func (r *WorkflowsResource) UpdateWorkflow(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/workflows/%s", id), data)
+	return r.client.request("PUT", fmt.Sprintf("/api/workflows/%s", id), data, nil)
 }
 
 func (r *WorkflowsResource) DeleteWorkflow(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/workflows/%s", id), nil)
+	return r.client.request("DELETE", fmt.Sprintf("/api/workflows/%s", id), nil, nil)
 }
 
 func (r *WorkflowsResource) RunWorkflow(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/run", id), data)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/run", id), data, nil)
 }
 
 func (r *WorkflowsResource) ListWorkflowRuns(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s/runs", id), nil)
+	return r.client.request("GET", fmt.Sprintf("/api/workflows/%s/runs", id), nil, nil)
 }
 
 func (r *WorkflowsResource) SaveWorkflowAsTemplate(id string) (interface{}, error) {
-	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/save-as-template", id), nil)
+	return r.client.request("POST", fmt.Sprintf("/api/workflows/%s/save-as-template", id), nil, nil)
 }
 

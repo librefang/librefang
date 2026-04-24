@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-codegen-sdks: auto-generates Python, JS, and Go SDKs from openapi.json.
+codegen-sdks: auto-generates Python, JS, Go, and Rust SDKs from openapi.json.
 
 Usage:
     python3 scripts/codegen-sdks.py           # regenerate all SDKs
@@ -68,8 +68,27 @@ def _js_path(path: str) -> str:
     """'/api/agents/{id}' → template literal body '/api/agents/${id}'"""
     return re.sub(r"\{(\w+)\}", r"${\1}", path)
 
+# Reserved identifiers by language — append trailing underscore to avoid collisions.
+_PY_RESERVED = {"class", "from", "import", "return", "lambda", "global", "None", "True", "False",
+                "and", "or", "not", "if", "else", "for", "while", "pass", "yield", "def"}
+_RUST_RESERVED = {"type", "match", "move", "mod", "ref", "trait", "impl", "use", "let",
+                  "self", "Self", "super", "crate", "fn", "if", "else", "for", "while",
+                  "loop", "return", "struct", "enum", "const", "static", "unsafe", "async",
+                  "await", "dyn", "where", "true", "false", "as", "in", "box", "pub"}
+
+def _py_safe(name: str) -> str:
+    return name + "_" if name in _PY_RESERVED else name
+
+def _rust_safe(name: str) -> str:
+    return name + "_" if name in _RUST_RESERVED else name
+
 
 # ── load operations ───────────────────────────────────────────────────────────
+
+def _query_params(op: dict) -> list:
+    """Extract ?name=... query parameter names from an operation."""
+    return [p["name"] for p in op.get("parameters", []) if p.get("in") == "query"]
+
 
 def load_ops() -> dict:
     data = json.loads(OPENAPI.read_text())
@@ -83,7 +102,10 @@ def load_ops() -> dict:
             if method not in ("get", "post", "put", "patch", "delete"):
                 continue
             op_id = op.get("operationId", "")
-            if not op_id or op_id in seen:
+            if not op_id:
+                continue
+            if op_id in seen:
+                print(f"warning: duplicate operationId '{op_id}' at {method.upper()} {path} — skipped", file=sys.stderr)
                 continue
             seen.add(op_id)
 
@@ -95,6 +117,7 @@ def load_ops() -> dict:
                     "path": path,
                     "op_id": op_id,
                     "params": _path_params(path),
+                    "query_params": _query_params(op),
                     "has_body": _has_body(op, method),
                     "is_stream": _is_stream(op),
                 })
@@ -147,8 +170,12 @@ class LibreFang:
         if headers:
             self._headers.update(headers)
 {resource_init}
-    def _request(self, method: str, path: str, body: Any = None) -> Any:
+    def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Any:
         url = self.base_url + path
+        if query:
+            filtered = {k: v for k, v in query.items() if v is not None}
+            if filtered:
+                url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
         req = Request(url, data=data, headers=self._headers, method=method)
         try:
@@ -162,9 +189,13 @@ class LibreFang:
             body_text = e.read().decode() if e.fp else ""
             raise LibreFangError(f"HTTP {e.code}: {body_text}", e.code, body_text) from e
 
-    def _stream(self, method: str, path: str, body: Any = None) -> Generator[Dict, None, None]:
+    def _stream(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
         """SSE streaming — yields parsed JSON events."""
         url = self.base_url + path
+        if query:
+            filtered = {k: v for k, v in query.items() if v is not None}
+            if filtered:
+                url += ("&" if "?" in url else "?") + urlencode(filtered, doseq=True)
         data = json.dumps(body).encode() if body is not None else None
         headers = dict(self._headers)
         headers["Accept"] = "text/event-stream"
@@ -219,31 +250,36 @@ def gen_python(tag_ops: dict) -> str:
         for op in ops:
             op_id = op["op_id"]
             params = op["params"]
+            query_params = op["query_params"]
             has_body = op["has_body"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
 
             sig_parts = ["self"] + [f"{p}: str" for p in params]
+            for qp in query_params:
+                sig_parts.append(f"{_py_safe(qp)}: Any = None")
             if has_body:
                 sig_parts.append("**data")
 
             sig = ", ".join(sig_parts)
             path_expr = f'f"{_py_path(path)}"' if params else f'"{path}"'
 
-            if is_stream:
-                ret_type = " -> Generator[Dict, None, None]"
+            ret_type = " -> Generator[Dict, None, None]" if is_stream else ""
+
+            body_arg = "data" if has_body else "None"
+            if query_params:
+                q_items = ", ".join(f'"{qp}": {_py_safe(qp)}' for qp in query_params)
+                query_arg = f", query={{{q_items}}}"
             else:
-                ret_type = ""
+                query_arg = ""
 
             out += f"\n    def {op_id}({sig}){ret_type}:\n"
-            if is_stream:
-                body_arg = ", data" if has_body else ""
-                out += f'        return self._c._stream("{http}", {path_expr}{body_arg})\n'
-            elif has_body:
-                out += f'        return self._c._request("{http}", {path_expr}, data)\n'
+            call = "_stream" if is_stream else "_request"
+            if has_body or query_params:
+                out += f'        return self._c.{call}("{http}", {path_expr}, {body_arg}{query_arg})\n'
             else:
-                out += f'        return self._c._request("{http}", {path_expr})\n'
+                out += f'        return self._c.{call}("{http}", {path_expr})\n'
 
         out += "\n"
 
@@ -287,10 +323,22 @@ class LibreFang {
 {resource_init}
   }
 
-  async _request(method, path, body) {
-    const url = this.baseUrl + path;
+  _withQuery(path, query) {
+    if (!query) return path;
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === null) continue;
+      params.append(k, String(v));
+    }
+    const q = params.toString();
+    if (!q) return path;
+    return path + (path.includes("?") ? "&" : "?") + q;
+  }
+
+  async _request(method, path, body, query) {
+    const url = this.baseUrl + this._withQuery(path, query);
     const opts = { method, headers: this._headers };
-    if (body !== undefined) opts.body = JSON.stringify(body);
+    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
     const text = await res.text();
     if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
@@ -298,11 +346,11 @@ class LibreFang {
     return ct.includes("application/json") ? JSON.parse(text) : text;
   }
 
-  async *_stream(method, path, body) {
-    const url = this.baseUrl + path;
+  async *_stream(method, path, body, query) {
+    const url = this.baseUrl + this._withQuery(path, query);
     const headers = Object.assign({}, this._headers, { Accept: "text/event-stream" });
     const opts = { method, headers };
-    if (body !== undefined) opts.body = JSON.stringify(body);
+    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
     if (!res.ok) {
       const text = await res.text();
@@ -352,6 +400,7 @@ def gen_js(tag_ops: dict) -> str:
         for op in ops:
             op_id = op["op_id"]
             params = op["params"]
+            query_params = op["query_params"]
             has_body = op["has_body"]
             is_stream = op["is_stream"]
             http = op["http"]
@@ -361,22 +410,24 @@ def gen_js(tag_ops: dict) -> str:
             js_params = list(params)
             if has_body:
                 js_params.append("data")
+            if query_params:
+                js_params.append("query")
             sig = ", ".join(js_params)
 
             path_expr = f"`{_js_path(path)}`" if params else f'"{path}"'
+            body_arg = "data" if has_body else "undefined"
+            query_arg = "query" if query_params else "undefined"
+            call = "_stream" if is_stream else "_request"
+            keyword = "async *" if is_stream else "async "
+            invoke = "yield* " if is_stream else "return "
 
-            if is_stream:
-                body_arg = ", data" if has_body else ", undefined"
-                out += f'\n  async *{js_method}({sig}) {{\n'
-                out += f'    yield* this._c._stream("{http}", {path_expr}{body_arg});\n'
-                out += "  }\n"
-            elif has_body:
-                out += f'\n  async {js_method}({sig}) {{\n'
-                out += f'    return this._c._request("{http}", {path_expr}, data);\n'
+            if has_body or query_params:
+                out += f'\n  {keyword}{js_method}({sig}) {{\n'
+                out += f'    {invoke}this._c.{call}("{http}", {path_expr}, {body_arg}, {query_arg});\n'
                 out += "  }\n"
             else:
-                out += f'\n  async {js_method}({sig}) {{\n'
-                out += f'    return this._c._request("{http}", {path_expr});\n'
+                out += f'\n  {keyword}{js_method}({sig}) {{\n'
+                out += f'    {invoke}this._c.{call}("{http}", {path_expr});\n'
                 out += "  }\n"
 
         out += "}\n\n"
@@ -395,11 +446,13 @@ Do not edit manually. Run: python3 scripts/codegen-sdks.py
 package librefang
 
 import (
+\t"bufio"
 \t"bytes"
 \t"encoding/json"
 \t"fmt"
 \t"io"
 \t"net/http"
+\t"net/url"
 \t"strings"
 )
 
@@ -435,8 +488,29 @@ func New(baseURL string) *Client {
 \treturn c
 }
 
-func (c *Client) request(method, path string, body interface{}) (interface{}, error) {
-\turl := c.BaseURL + path
+func (c *Client) withQuery(path string, query map[string]string) string {
+\tif len(query) == 0 {
+\t\treturn path
+\t}
+\tvals := url.Values{}
+\tfor k, v := range query {
+\t\tif v == "" {
+\t\t\tcontinue
+\t\t}
+\t\tvals.Set(k, v)
+\t}
+\tq := vals.Encode()
+\tif q == "" {
+\t\treturn path
+\t}
+\tif strings.Contains(path, "?") {
+\t\treturn path + "&" + q
+\t}
+\treturn path + "?" + q
+}
+
+func (c *Client) request(method, path string, body interface{}, query map[string]string) (interface{}, error) {
+\turlStr := c.BaseURL + c.withQuery(path, query)
 \tvar bodyBytes []byte
 \tif body != nil {
 \t\tb, err := json.Marshal(body)
@@ -445,7 +519,7 @@ func (c *Client) request(method, path string, body interface{}) (interface{}, er
 \t\t}
 \t\tbodyBytes = b
 \t}
-\treq, err := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+\treq, err := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 \tif err != nil {
 \t\treturn nil, err
 \t}
@@ -472,17 +546,17 @@ func (c *Client) request(method, path string, body interface{}) (interface{}, er
 \treturn result, nil
 }
 
-func (c *Client) stream(method, path string, body interface{}) <-chan map[string]interface{} {
+func (c *Client) stream(method, path string, body interface{}, query map[string]string) <-chan map[string]interface{} {
 \tch := make(chan map[string]interface{})
 \tgo func() {
 \t\tdefer close(ch)
-\t\turl := c.BaseURL + path
+\t\turlStr := c.BaseURL + c.withQuery(path, query)
 \t\tvar bodyBytes []byte
 \t\tif body != nil {
 \t\t\tb, _ := json.Marshal(body)
 \t\t\tbodyBytes = b
 \t\t}
-\t\treq, _ := http.NewRequest(method, url, bytes.NewReader(bodyBytes))
+\t\treq, _ := http.NewRequest(method, urlStr, bytes.NewReader(bodyBytes))
 \t\tfor k, v := range c.Headers {
 \t\t\treq.Header.Set(k, v)
 \t\t}
@@ -498,21 +572,19 @@ func (c *Client) stream(method, path string, body interface{}) <-chan map[string
 \t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
 \t\t\treturn
 \t\t}
-\t\tbuf := make([]byte, 4096)
+\t\t// Accumulate partial lines across reads; SSE events can span chunks.
+\t\treader := bufio.NewReader(resp.Body)
 \t\tfor {
-\t\t\tn, err := resp.Body.Read(buf)
-\t\t\tif n > 0 {
-\t\t\t\tfor _, line := range strings.Split(string(buf[:n]), "\\n") {
-\t\t\t\t\tline = strings.TrimSpace(line)
-\t\t\t\t\tif !strings.HasPrefix(line, "data: ") {
-\t\t\t\t\t\tcontinue
-\t\t\t\t\t}
-\t\t\t\t\tdata := strings.TrimPrefix(line, "data: ")
+\t\t\tline, err := reader.ReadString('\\n')
+\t\t\tif line != "" {
+\t\t\t\ttrimmed := strings.TrimSpace(line)
+\t\t\t\tif strings.HasPrefix(trimmed, "data: ") {
+\t\t\t\t\tdata := strings.TrimPrefix(trimmed, "data: ")
 \t\t\t\t\tif data == "[DONE]" {
 \t\t\t\t\t\treturn
 \t\t\t\t\t}
 \t\t\t\t\tvar event map[string]interface{}
-\t\t\t\t\tif err := json.Unmarshal([]byte(data), &event); err != nil {
+\t\t\t\t\tif jerr := json.Unmarshal([]byte(data), &event); jerr != nil {
 \t\t\t\t\t\tch <- map[string]interface{}{"raw": data}
 \t\t\t\t\t} else {
 \t\t\t\t\t\tch <- event
@@ -520,7 +592,7 @@ func (c *Client) stream(method, path string, body interface{}) <-chan map[string
 \t\t\t\t}
 \t\t\t}
 \t\t\tif err != nil {
-\t\t\t\tbreak
+\t\t\t\treturn
 \t\t\t}
 \t\t}
 \t}()
@@ -584,6 +656,7 @@ def gen_go(tag_ops: dict) -> str:
         for op in ops:
             op_id = op["op_id"]
             params = op["params"]
+            query_params = op["query_params"]
             has_body = op["has_body"]
             is_stream = op["is_stream"]
             http = op["http"]
@@ -591,27 +664,25 @@ def gen_go(tag_ops: dict) -> str:
 
             go_method = _op_pascal(op_id)
             go_params = [f"{p} string" for p in params]
+            if has_body:
+                go_params.append("data map[string]interface{}")
+            if query_params:
+                go_params.append("query map[string]string")
+            sig_args = ", ".join(go_params)
+
             go_path_fmt_str = _go_path(path)
+            fmt_args = "".join(f", {p}" for p in params)
+            path_expr = f'fmt.Sprintf("{go_path_fmt_str}"{fmt_args})' if params else f'"{path}"'
+            body_arg = "data" if has_body else "nil"
+            query_arg = "query" if query_params else "nil"
 
             if is_stream:
-                if has_body:
-                    go_params.append("data map[string]interface{}")
-                sig_args = ", ".join(go_params)
                 out += f"func (r *{cls}) {go_method}({sig_args}) <-chan map[string]interface{{}} {{\n"
-                fmt_args = "".join(f", {p}" for p in params)
-                path_expr = f'fmt.Sprintf("{go_path_fmt_str}"{fmt_args})' if params else f'"{path}"'
-                body_arg = "data" if has_body else "nil"
-                out += f'\treturn r.client.stream("{http}", {path_expr}, {body_arg})\n'
+                out += f'\treturn r.client.stream("{http}", {path_expr}, {body_arg}, {query_arg})\n'
                 out += "}\n\n"
             else:
-                if has_body:
-                    go_params.append("data map[string]interface{}")
-                sig_args = ", ".join(go_params)
                 out += f"func (r *{cls}) {go_method}({sig_args}) (interface{{}}, error) {{\n"
-                fmt_args = "".join(f", {p}" for p in params)
-                path_expr = f'fmt.Sprintf("{go_path_fmt_str}"{fmt_args})' if params else f'"{path}"'
-                body_arg = "data" if has_body else "nil"
-                out += f'\treturn r.client.request("{http}", {path_expr}, {body_arg})\n'
+                out += f'\treturn r.client.request("{http}", {path_expr}, {body_arg}, {query_arg})\n'
                 out += "}\n\n"
 
     return out
@@ -661,9 +732,15 @@ async fn do_req(
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
+    query: &[(&str, Option<&str>)],
 ) -> Result<Value> {
     let url = format!("{}{}", base_url, path);
     let req = client.request(method, &url);
+    let filtered: Vec<(&str, &str)> = query
+        .iter()
+        .filter_map(|(k, v)| v.map(|vv| (*k, vv)))
+        .collect();
+    let req = if filtered.is_empty() { req } else { req.query(&filtered) };
     let req = if let Some(b) = body { req.json(&b) } else { req };
     let res = req.send().await?;
     let status = res.status();
@@ -680,27 +757,57 @@ fn do_stream(
     path: String,
     method: reqwest::Method,
     body: Option<Value>,
+    query: Vec<(String, Option<String>)>,
 ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let url = format!("{}{}", base_url, path);
         let req = client.request(method, &url).header("Accept", "text/event-stream");
+        let filtered: Vec<(String, String)> = query
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|vv| (k, vv)))
+            .collect();
+        let req = if filtered.is_empty() { req } else { req.query(&filtered) };
         let req = if let Some(b) = body { req.json(&b) } else { req };
         let res = match req.send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => return,
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(serde_json::json!({
+                    "error": e.to_string(),
+                    "status": 0,
+                }));
+                return;
+            }
         };
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            let _ = tx.send(serde_json::json!({
+                "error": format!("HTTP {}: {}", status, body),
+                "status": status,
+            }));
+            return;
+        }
+        // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
+        // by chunk boundaries (from_utf8_lossy on individual chunks corrupts
+        // non-ASCII content). Split on newline, decode each complete line.
         let mut stream = res.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         while let Some(Ok(chunk)) = stream.next().await {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buffer.find('\\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
+            buffer.extend_from_slice(&chunk);
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
+                let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+                let line = match std::str::from_utf8(&line_bytes) {
+                    Ok(s) => s.trim(),
+                    Err(_) => continue,
+                };
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" { return; }
-                    if let Ok(v) = serde_json::from_str(data) {
-                        let _ = tx.send(v);
+                    match serde_json::from_str::<Value>(data) {
+                        Ok(v) => { let _ = tx.send(v); }
+                        Err(_) => {
+                            let _ = tx.send(serde_json::json!({"raw": data}));
+                        }
                     }
                 }
             }
@@ -765,18 +872,21 @@ def gen_rust(tag_ops: dict) -> str:
         for op in ops:
             op_id = op["op_id"]
             params = op["params"]
+            query_params = op["query_params"]
             has_body = op["has_body"]
             is_stream = op["is_stream"]
             http = op["http"]
             path = op["path"]
 
-            rust_params = [f"{p}: &str" for p in params]
+            rust_params = [f"{_rust_safe(p)}: &str" for p in params]
             if has_body:
                 rust_params.append("data: Value")
+            for qp in query_params:
+                rust_params.append(f"{_rust_safe(qp)}: Option<&str>")
             sig = ", ".join(["&self"] + rust_params)
 
             fmt_path = _rust_path_fmt(path)
-            fmt_args = "".join(f", {p}" for p in params)
+            fmt_args = "".join(f", {_rust_safe(p)}" for p in params)
             path_expr = (
                 f'format!("{fmt_path}"{fmt_args})'
                 if params
@@ -787,12 +897,27 @@ def gen_rust(tag_ops: dict) -> str:
             body_arg = "Some(data)" if has_body else "None"
 
             if is_stream:
+                if query_params:
+                    q_items = ", ".join(
+                        f'("{qp}".to_string(), {_rust_safe(qp)}.map(|s| s.to_string()))'
+                        for qp in query_params
+                    )
+                    query_arg = f"vec![{q_items}]"
+                else:
+                    query_arg = "Vec::new()"
                 out += f"\n    pub fn {op_id}({sig}) -> tokio::sync::mpsc::UnboundedReceiver<Value> {{\n"
-                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_expr}, {method_const}, {body_arg})\n"
+                out += f"        do_stream(self.client.clone(), self.base_url.clone(), {path_expr}, {method_const}, {body_arg}, {query_arg})\n"
                 out += "    }\n"
             else:
+                if query_params:
+                    q_items = ", ".join(
+                        f'("{qp}", {_rust_safe(qp)})' for qp in query_params
+                    )
+                    query_arg = f"&[{q_items}]"
+                else:
+                    query_arg = "&[]"
                 out += f"\n    pub async fn {op_id}({sig}) -> Result<Value> {{\n"
-                out += f"        do_req(&self.client, &self.base_url, {method_const}, &{path_expr}, {body_arg}).await\n"
+                out += f"        do_req(&self.client, &self.base_url, {method_const}, &{path_expr}, {body_arg}, {query_arg}).await\n"
                 out += "    }\n"
 
         out += "}\n\n"
