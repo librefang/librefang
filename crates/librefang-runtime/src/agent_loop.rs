@@ -671,6 +671,13 @@ struct ToolExecutionContext<'a> {
         Option<&'a Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>>,
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        tool.name = %tool_call.name,
+        tool.id = %tool_call.id,
+    ),
+)]
 async fn execute_single_tool_call(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
@@ -3717,6 +3724,15 @@ fn build_user_facing_llm_error(
     (classified.is_billing, LibreFangError::LlmDriver(user_msg))
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        llm.provider = provider.unwrap_or("unknown"),
+        llm.model = %request.model,
+        llm.messages = request.messages.len(),
+        llm.tools = request.tools.len(),
+    ),
+)]
 async fn call_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,

@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
@@ -6289,6 +6289,15 @@ system_prompt = "You are a helpful assistant."
 
     /// Execute the default LLM-based agent loop.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        skip_all,
+        fields(
+            agent.id = %agent_id,
+            agent.name = %entry.manifest.name,
+            message.len = message.len(),
+            channel = sender_context.map(|c| c.channel.as_str()).unwrap_or("direct"),
+        ),
+    )]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
