@@ -3139,6 +3139,36 @@ impl Drop for ForegroundTeeGuard {
 /// spawn a background thread that copies to both terminal and log file.
 #[cfg(unix)]
 fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
+    // Ensure the parent directory exists (e.g. `~/.librefang/logs/`) before we
+    // try to open the log file. Fresh installations and test environments may
+    // not have this directory yet.
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            // Report the failure on the real stderr (not yet redirected), then
+            // exit instead of limping forward into the silent-hang regime the
+            // old ordering produced.
+            eprintln!("Failed to create log directory {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+
+    // Open the log file BEFORE redirecting stdout/stderr. If the open panics
+    // (permissions, read-only fs, parent still missing, …) the panic message
+    // reaches the real stderr the user is watching. Previously we opened the
+    // file AFTER `dup2`, so a failure wrote its panic message into a pipe
+    // whose reader hadn't been spawned yet — the message was trapped in the
+    // pipe buffer and the process appeared to hang at "Starting daemon…".
+    let log_file = std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to open daemon log file {}: {e}", log_path.display());
+                std::process::exit(1);
+            }),
+    );
+
     // Create pipe for stdout+stderr (we'll write to it, background thread reads)
     let mut fds = [0i32, 0i32];
     unsafe {
@@ -3151,21 +3181,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
     let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
-    // Redirect stdout and stderr to the pipe
+    // Redirect stdout and stderr to the pipe. From here on any write to the
+    // standard streams goes through the pipe and must be drained by the
+    // read thread below — do not fail between this point and `thread::spawn`.
     unsafe {
         libc::dup2(pipe_write, libc::STDOUT_FILENO);
         libc::dup2(pipe_write, libc::STDERR_FILENO);
         libc::close(pipe_write);
     }
-
-    // Create log file (append mode)
-    let log_file = std::sync::Mutex::new(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .expect("daemon log file"),
-    );
 
     // Spawn background thread that reads from pipe and writes to both terminal and log
     std::thread::spawn(move || {
