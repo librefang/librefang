@@ -176,7 +176,17 @@ pub fn run(server_url: Option<String>, force_local: bool) {
 
     let show_connection_screen = matches!(mode, StartupMode::ConnectionScreen);
 
+    // Serve the connection screen HTML through a custom URI scheme instead of
+    // about:blank + document.write. The old approach no-ops on WebKitGTK 2.50
+    // (stock NixOS, current AppImage), leaving a blank window — see #3052.
     let mut builder = tauri::Builder::default()
+        .register_uri_scheme_protocol("lfconnect", |_ctx, _req| {
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(connection::connection_html().into_bytes())
+                .expect("connection response must build")
+        })
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init());
@@ -266,11 +276,14 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         ])
         .setup(move |app| {
             if show_connection_screen {
-                // Show the connection screen via about:blank + eval
-                let window = WebviewWindowBuilder::new(
+                let _window = WebviewWindowBuilder::new(
                     app,
                     "main",
-                    WebviewUrl::External("about:blank".parse().expect("Invalid about:blank URL")),
+                    WebviewUrl::CustomProtocol(
+                        "lfconnect://localhost/"
+                            .parse()
+                            .expect("lfconnect URL must parse"),
+                    ),
                 )
                 .title("LibreFang — Connect")
                 .inner_size(1280.0, 800.0)
@@ -278,13 +291,6 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 .center()
                 .visible(true)
                 .build()?;
-
-                // Inject the connection screen HTML into the blank page
-                let html = connection::connection_html();
-                let escaped = serde_json::to_string(&html).unwrap_or_default();
-                window.eval(format!(
-                    "document.open(); document.write({escaped}); document.close();"
-                ))?;
             } else {
                 // Direct mode — navigate to the resolved URL
                 let _window = WebviewWindowBuilder::new(
