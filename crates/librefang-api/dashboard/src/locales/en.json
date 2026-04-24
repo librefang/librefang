@@ -1955,7 +1955,7 @@
     "cmd_clear": "Clear chat history",
     "cmd_agents": "List available agents",
     "cmd_info": "Show current agent info",
-    "cmd_new": "Reset session (clear history)",
+    "cmd_new": "Start a new session (new session id)",
     "cmd_compact": "Compress context to save space",
     "cmd_reset": "Reset session (clear history)",
     "cmd_reboot": "Reboot session (clear context)",

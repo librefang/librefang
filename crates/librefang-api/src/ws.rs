@@ -1173,9 +1173,27 @@ async fn handle_command(
     verbose: &Arc<AtomicU8>,
 ) -> serde_json::Value {
     match cmd {
-        "new" | "reset" => match state.kernel.reset_session(agent_id) {
+        "new" => match state.kernel.create_agent_session(agent_id, None) {
+            Ok(info) => {
+                let sid = info
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                serde_json::json!({
+                    "type": "command_result",
+                    "command": "new",
+                    "message": "New session created.",
+                    "session_id": sid,
+                })
+            }
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
+            }
+        },
+        "reset" => match state.kernel.reset_session(agent_id) {
             Ok(()) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
+                serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },
