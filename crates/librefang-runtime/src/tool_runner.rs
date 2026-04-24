@@ -609,7 +609,7 @@ pub async fn execute_tool_raw(
         }
 
         // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, *kernel).await,
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
@@ -2529,6 +2529,7 @@ fn require_kernel(
 async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = input["agent_id"]
@@ -2563,7 +2564,14 @@ async fn tool_agent_send(
 
     AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(current_depth + 1), async {
-            kh.send_to_agent(agent_id, message).await
+            // When we know the caller, use the cascade-aware entry so a
+            // parent `/stop` propagates into the callee (issue #3044).
+            // System-initiated calls (caller_agent_id = None) fall back to
+            // the legacy path.
+            match caller_agent_id {
+                Some(parent) => kh.send_to_agent_as(agent_id, message, parent).await,
+                None => kh.send_to_agent(agent_id, message).await,
+            }
         })
         .await
 }

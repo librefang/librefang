@@ -36,6 +36,20 @@ pub trait KernelHandle: Send + Sync {
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
 
+    /// Like [`send_to_agent`](Self::send_to_agent), but records that the
+    /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
+    /// the parent cascades into the callee's loop (issue #3044). Defaults
+    /// to the plain `send_to_agent` behavior for implementations that
+    /// don't support cancel cascading.
+    async fn send_to_agent_as(
+        &self,
+        agent_id: &str,
+        message: &str,
+        _parent_agent_id: &str,
+    ) -> Result<String, String> {
+        self.send_to_agent(agent_id, message).await
+    }
+
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 

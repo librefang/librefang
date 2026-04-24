@@ -3680,6 +3680,37 @@ system_prompt = "You are a helpful assistant."
         .await
     }
 
+    /// Send a message to `agent_id` on behalf of `parent_agent_id`. If the
+    /// parent currently has an active session interrupt registered (i.e. is
+    /// mid-turn), it is threaded as an upstream signal to the child's loop
+    /// so a parent `/stop` cascades into the callee. When no parent
+    /// interrupt is registered (parent is idle, or caller is system-level),
+    /// behaves identically to [`Self::send_message`].
+    ///
+    /// Added for issue #3044 — previously a parent `agent_send`'ing to a
+    /// hand / subagent could not stop the child when the user cancelled,
+    /// because every new turn created a fresh, disconnected interrupt.
+    pub async fn send_message_as(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        parent_agent_id: AgentId,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        let upstream = self
+            .session_interrupts
+            .get(&parent_agent_id)
+            .map(|r| r.clone());
+        self.send_message_full_with_upstream(
+            agent_id, message, handle, None, None, None, None, None, upstream,
+        )
+        .await
+    }
+
     /// Send a message with a per-call deep-thinking override.
     ///
     /// `thinking_override`:
@@ -4146,6 +4177,37 @@ system_prompt = "You are a helpful assistant."
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full_with_upstream(
+            agent_id,
+            message,
+            kernel_handle,
+            content_blocks,
+            sender_context,
+            session_mode_override,
+            thinking_override,
+            session_id_override,
+            None,
+        )
+        .await
+    }
+
+    /// Same as [`Self::send_message_full`] but threads an optional upstream
+    /// [`SessionInterrupt`] so a parent session's `/stop` can cascade into
+    /// this subagent's loop (issue #3044). Used by `tool_agent_send` when
+    /// the caller agent's own interrupt should gate the callee.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_full_with_upstream(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        sender_context: Option<&SenderContext>,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+    ) -> KernelResult<AgentLoopResult> {
         // Acquire a shared read lock on the config reload barrier.
         // This is non-blocking under normal operation (many readers proceed in
         // parallel) but will briefly wait if a config hot-reload is in progress,
@@ -4210,6 +4272,7 @@ system_prompt = "You are a helpful assistant."
                     session_mode_override,
                     thinking_override,
                     session_id_override,
+                    upstream_interrupt,
                 )
                 .await
             }
@@ -6217,6 +6280,7 @@ system_prompt = "You are a helpful assistant."
         session_mode_override: Option<librefang_types::agent::SessionMode>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
+        upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -6768,8 +6832,14 @@ system_prompt = "You are a helpful assistant."
         // Session-scoped interrupt for tool-level cancellation.  Cloned into
         // each ToolExecutionContext so that cancelling the session (via
         // interrupt.cancel()) aborts in-flight tools without affecting other
-        // concurrent sessions.
-        let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+        // concurrent sessions. When this child turn was invoked on behalf of
+        // a parent session (e.g. via `agent_send` during a parent's tool
+        // batch), `upstream_interrupt` carries the parent's handle so a
+        // parent /stop cascades down to this subagent. See issue #3044.
+        let session_interrupt = match upstream_interrupt.as_ref() {
+            Some(up) => librefang_runtime::interrupt::SessionInterrupt::new_with_upstream(up),
+            None => librefang_runtime::interrupt::SessionInterrupt::new(),
+        };
         // Register in session_interrupts so stop_agent_run can call cancel()
         // even when the caller uses the non-streaming send_message() path.
         self.session_interrupts
@@ -13493,6 +13563,23 @@ impl KernelHandle for LibreFangKernel {
         let id = self.resolve_agent_identifier(agent_id)?;
         let result = self
             .send_message(id, message)
+            .await
+            .map_err(|e| format!("Send failed: {e}"))?;
+        Ok(result.response)
+    }
+
+    async fn send_to_agent_as(
+        &self,
+        agent_id: &str,
+        message: &str,
+        parent_agent_id: &str,
+    ) -> Result<String, String> {
+        let id = self.resolve_agent_identifier(agent_id)?;
+        let parent_id = parent_agent_id
+            .parse::<AgentId>()
+            .map_err(|e| format!("bad parent_agent_id: {e}"))?;
+        let result = self
+            .send_message_as(id, message, parent_id)
             .await
             .map_err(|e| format!("Send failed: {e}"))?;
         Ok(result.response)
