@@ -1243,6 +1243,14 @@ id = "acme"
         assert_eq!(vllm.auth_status, AuthStatus::NotRequired);
     }
 
+    /// Module-scope mutex for tests that mutate process env vars.
+    ///
+    /// `cargo test` runs tests in parallel by default, so any two tests
+    /// touching the same env var must share this lock — otherwise they race
+    /// on process-global state. Each test declaring its own `static` was the
+    /// earlier bug: two disjoint mutexes = no mutual exclusion.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Regression: a CLI login must NOT auto-configure the corresponding API
     /// provider. `anthropic` / `openai` / `gemini` / `qwen` only light up
     /// when the user sets their own API key. CLI logins surface via their
@@ -1254,10 +1262,6 @@ id = "acme"
     /// are naturally Missing.
     #[test]
     fn detect_auth_does_not_promote_api_providers_from_cli_login() {
-        use std::sync::Mutex;
-        // env mutations are process-global; serialise this test with any
-        // other env-touching test that may run in the same binary.
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let preserved: Vec<(&str, Option<String>)> = [
@@ -1306,12 +1310,11 @@ id = "acme"
     /// the user typed, not a CLI-credential borrow.
     #[test]
     fn google_api_key_alias_still_recognised_for_gemini() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let prev_gemini = std::env::var("GEMINI_API_KEY").ok();
         let prev_google = std::env::var("GOOGLE_API_KEY").ok();
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
         unsafe {
             std::env::remove_var("GEMINI_API_KEY");
             std::env::set_var("GOOGLE_API_KEY", "test-alias-key");
@@ -1322,6 +1325,7 @@ id = "acme"
         let gemini = catalog.get_provider("gemini").unwrap();
         assert_eq!(gemini.auth_status, AuthStatus::AutoDetected);
 
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
         unsafe {
             if let Some(v) = prev_gemini {
                 std::env::set_var("GEMINI_API_KEY", v);
