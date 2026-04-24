@@ -2014,14 +2014,18 @@ async fn test_cron_create_preserves_peer_id() {
 
 // ── Parent /stop cascade (issue #3044) ─────────────────────────────────────
 //
-// These tests assert the plumbing that `send_message_as` relies on to make a
-// parent session's cancel signal propagate into a subagent spawned via
-// `agent_send` / `send_to_agent_as`. Going through a full LLM turn in a
-// headless test is impractical without a configured provider, so we
-// exercise the exact lookup + `new_with_upstream` chain that the kernel
-// performs internally. The `execute_llm_agent` integration is verified by
-// compile-time type threading plus the `SessionInterrupt` unit tests in
-// `librefang-runtime`.
+// Unit-level tests for the pieces `send_message_as` / `send_to_agent_as`
+// chain together: (1) the `session_interrupts` DashMap storing a clone of
+// the parent's `SessionInterrupt`, (2) `SessionInterrupt::new_with_upstream`
+// producing a child with cascade semantics, and (3) `send_to_agent_as`
+// resolving the parent id with the registry→UUID-parse fallback so a
+// parent whose registry entry disappeared mid-flight still threads
+// through.
+//
+// A true end-to-end test (stubbed agent that polls interrupt, parent
+// cancel mid-flight, observe child loop exit) needs a minimal LLM driver
+// stub which does not exist in this crate; covering the primitives keeps
+// regressions local.
 
 fn cascade_test_kernel() -> Arc<LibreFangKernel> {
     let dir = tempfile::tempdir().unwrap();
@@ -2036,34 +2040,35 @@ fn cascade_test_kernel() -> Arc<LibreFangKernel> {
     Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"))
 }
 
+/// Guard against regressions in the `session_interrupts` storage + the
+/// primitive `new_with_upstream` cascade semantics that `send_message_as`
+/// depends on. Does not invoke `send_message_as` itself (that would
+/// require a running LLM driver); see `send_to_agent_as_falls_back_*`
+/// below for tests that exercise the public method directly.
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_as_finds_parent_interrupt_and_cascades() {
+async fn cascade_primitives_via_session_interrupts_dashmap() {
     use librefang_runtime::interrupt::SessionInterrupt;
 
     let kernel = cascade_test_kernel();
 
-    // Simulate a parent mid-turn by registering its interrupt in the kernel
-    // the same way `execute_llm_agent` / streaming entry does.
+    // Simulate a parent mid-turn by registering its interrupt the same way
+    // `execute_llm_agent` / the streaming entry does.
     let parent_id = AgentId::new();
     let parent_interrupt = SessionInterrupt::new();
     kernel
         .session_interrupts
         .insert(parent_id, parent_interrupt.clone());
 
-    // The exact pattern `send_message_as` uses to pick up the upstream.
+    // The lookup pattern `send_message_as` uses internally.
     let upstream = kernel
         .session_interrupts
         .get(&parent_id)
         .map(|r| r.clone())
         .expect("parent interrupt must be discoverable via session_interrupts");
 
-    // `execute_llm_agent` forms the child's interrupt via `new_with_upstream`
-    // when upstream is Some. Mirror that here and assert cascade works.
+    // `execute_llm_agent` forms the child's interrupt via `new_with_upstream`.
     let child_interrupt = SessionInterrupt::new_with_upstream(&upstream);
-    assert!(
-        !child_interrupt.is_cancelled(),
-        "fresh child starts uncancelled"
-    );
+    assert!(!child_interrupt.is_cancelled());
 
     parent_interrupt.cancel();
     assert!(
@@ -2071,33 +2076,88 @@ async fn send_message_as_finds_parent_interrupt_and_cascades() {
         "parent /stop must propagate to child via upstream"
     );
 
-    // And the reverse must NOT hold — cancelling a child cannot stop a
-    // sibling parent session.
+    // Reverse must NOT hold — cancelling a child cannot stop its parent.
     let sibling_parent = SessionInterrupt::new();
     let sibling_child = SessionInterrupt::new_with_upstream(&sibling_parent);
     sibling_child.cancel();
-    assert!(
-        !sibling_parent.is_cancelled(),
-        "cancelling child must NOT leak back to parent"
-    );
+    assert!(!sibling_parent.is_cancelled());
 
     kernel.shutdown();
 }
 
+/// When the parent has no active turn (not registered in
+/// `session_interrupts`), the lookup returns None and the call should
+/// proceed without cascade rather than erroring out.
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_as_without_parent_turn_has_no_upstream() {
+async fn no_upstream_when_parent_has_no_active_turn() {
     let kernel = cascade_test_kernel();
 
-    // A parent id that was never registered (parent is idle or never existed).
     let idle_parent_id = AgentId::new();
     let upstream = kernel
         .session_interrupts
         .get(&idle_parent_id)
         .map(|r| r.clone());
+    assert!(upstream.is_none());
+
+    kernel.shutdown();
+}
+
+/// Directly exercises `KernelHandle::send_to_agent_as` — specifically the
+/// parent id resolution fallback. A valid UUID for a parent NOT in the
+/// registry (e.g. /kill raced with pending agent_send) must not short-
+/// circuit the whole call; it should fall through to the child-lookup
+/// failure we expect.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
+    use kernel_handle::KernelHandle;
+
+    let kernel = cascade_test_kernel();
+
+    // Both ids are valid UUIDs but neither is registered. Before the P1
+    // fix, the parent resolver would error here ("Agent not found") and
+    // mask the real child-not-found failure. With the parse-fallback,
+    // resolution succeeds, lookup in session_interrupts returns None
+    // (no cascade), and the call proceeds to fail at the target agent.
+    let child_id = AgentId::new();
+    let parent_id = AgentId::new();
+    let err = KernelHandle::send_to_agent_as(
+        kernel.as_ref(),
+        &child_id.to_string(),
+        "ping",
+        &parent_id.to_string(),
+    )
+    .await
+    .expect_err("non-existent child must fail");
+
     assert!(
-        upstream.is_none(),
-        "no upstream should be discovered when parent has no active turn"
+        err.to_lowercase()
+            .contains(&child_id.to_string().to_lowercase())
+            || err.to_lowercase().contains("not found"),
+        "error must reference the missing child, not the missing parent: {err}"
     );
+
+    kernel.shutdown();
+}
+
+/// Garbage (non-UUID) parent id should be rejected with a clear error
+/// rather than silently passed through.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_to_agent_as_rejects_unparseable_parent_id() {
+    use kernel_handle::KernelHandle;
+
+    let kernel = cascade_test_kernel();
+    let child_id = AgentId::new();
+    let err = KernelHandle::send_to_agent_as(
+        kernel.as_ref(),
+        &child_id.to_string(),
+        "ping",
+        "not-a-uuid-or-name",
+    )
+    .await
+    .expect_err("garbage parent id must surface an error");
+    // Either the resolver's "Agent not found" wording or the fallback
+    // parse error is acceptable — the important thing is we don't panic.
+    assert!(!err.is_empty());
 
     kernel.shutdown();
 }

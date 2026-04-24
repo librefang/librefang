@@ -13582,12 +13582,21 @@ impl KernelHandle for LibreFangKernel {
         parent_agent_id: &str,
     ) -> Result<String, String> {
         let id = self.resolve_agent_identifier(agent_id)?;
-        // Resolve parent via the same identifier path as the target so
-        // callers can pass a name / alias and cascade still works. In
-        // practice `caller_agent_id` from `ToolExecContext` is always a
-        // canonical UUID, but staying symmetric prevents surprises for
-        // future call sites.
-        let parent_id = self.resolve_agent_identifier(parent_agent_id)?;
+        // Parent resolution: try the name/alias resolver first for ergonomics,
+        // but fall back to bare UUID parsing when the parent has been removed
+        // from the registry. A parent can legitimately disappear from the
+        // registry mid-flight (e.g. /kill racing with a pending agent_send
+        // response), while its `SessionInterrupt` is still live in
+        // `session_interrupts` because the in-flight turn holds a clone.
+        // Failing here would break the cascade contract "parent absent →
+        // no cascade but call proceeds" that `send_message_as` implements.
+        let parent_id = self
+            .resolve_agent_identifier(parent_agent_id)
+            .or_else(|_| {
+                parent_agent_id
+                    .parse::<AgentId>()
+                    .map_err(|e| format!("bad parent_agent_id: {e}"))
+            })?;
         let result = self
             .send_message_as(id, message, parent_id)
             .await
