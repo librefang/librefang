@@ -1760,11 +1760,16 @@ impl LibreFangKernel {
                 } else {
                     model_hint.to_string()
                 };
+                let auth_source = if env_var.is_empty() {
+                    "CLI login"
+                } else {
+                    env_var
+                };
                 info!(
                     provider = %provider,
                     model = %model,
-                    env_var = %env_var,
-                    "Auto-detected default provider from environment"
+                    auth_source = %auth_source,
+                    "Auto-detected default provider"
                 );
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
@@ -1984,11 +1989,16 @@ impl LibreFangKernel {
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
+                                let auth_source = if env_var.is_empty() {
+                                    "CLI login"
+                                } else {
+                                    env_var
+                                };
                                 info!(
                                     provider = %provider,
                                     model = %model,
-                                    "Auto-detected provider from {} — using as default",
-                                    env_var
+                                    auth_source = %auth_source,
+                                    "Auto-detected provider — using as default"
                                 );
                                 driver_chain.push(d);
                                 // Update the running config so agents get the right model
