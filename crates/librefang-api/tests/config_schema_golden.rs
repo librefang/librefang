@@ -64,15 +64,14 @@ fn normalize_volatile_defaults(value: &mut serde_json::Value) {
 }
 
 fn normalize_path_like(value: &mut serde_json::Value) {
+    // Heuristic: looks like an absolute path and contains `.librefang`
+    // (or a home-directory marker). Replace with a stable placeholder.
     match value {
-        serde_json::Value::String(s) => {
-            // Heuristic: looks like an absolute path and contains `.librefang`
-            // (or a home-directory marker). Replace with a stable placeholder.
+        serde_json::Value::String(s)
             if (s.starts_with('/') || s.contains(":\\") || s.contains(":/"))
-                && (s.contains(".librefang") || s.contains("/home/") || s.contains("/Users/"))
-            {
-                *s = "<home>/.librefang".into();
-            }
+                && (s.contains(".librefang") || s.contains("/home/") || s.contains("/Users/")) =>
+        {
+            *s = "<home>/.librefang".into();
         }
         serde_json::Value::Object(map) => {
             for (_, v) in map.iter_mut() {
