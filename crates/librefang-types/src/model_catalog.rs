@@ -96,6 +96,35 @@ impl fmt::Display for AuthStatus {
     }
 }
 
+/// Model modality — what kind of output the model produces.
+///
+/// Mirrors the `modality` field in the librefang-registry schema. Text models
+/// follow the usual chat/completion flow (context_window + max_output_tokens
+/// are required). Image and audio models are priced per-token but have no
+/// conventional context window, so their `context_window` / `max_output_tokens`
+/// fields may be zero/absent in the catalog TOML.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Modality {
+    /// Chat / completion / reasoning model. Default when the field is absent.
+    #[default]
+    Text,
+    /// Image-generation model (e.g. OpenAI gpt-image-2).
+    Image,
+    /// Speech / audio model (TTS, STT).
+    Audio,
+}
+
+impl fmt::Display for Modality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Modality::Text => write!(f, "text"),
+            Modality::Image => write!(f, "image"),
+            Modality::Audio => write!(f, "audio"),
+        }
+    }
+}
+
 /// A single model entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
@@ -111,14 +140,28 @@ pub struct ModelCatalogEntry {
     pub provider: String,
     /// Capability tier.
     pub tier: ModelTier,
-    /// Context window size in tokens.
+    /// Model modality. Defaults to `Text` when absent in the catalog TOML.
+    #[serde(default)]
+    pub modality: Modality,
+    /// Context window size in tokens. `0` or absent means "not applicable"
+    /// (image/audio models may omit this field in the registry).
+    #[serde(default)]
     pub context_window: u64,
-    /// Maximum output tokens.
+    /// Maximum output tokens. `0` or absent means "not applicable".
+    #[serde(default)]
     pub max_output_tokens: u64,
-    /// Cost per million input tokens (USD).
+    /// Cost per million input tokens (USD) — text tokens for image/audio models.
     pub input_cost_per_m: f64,
-    /// Cost per million output tokens (USD).
+    /// Cost per million output tokens (USD) — text tokens for image/audio models.
     pub output_cost_per_m: f64,
+    /// Cost per million image input tokens (USD). Only set for image/multimodal
+    /// models where image pixels are priced separately from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_cost_per_m: Option<f64>,
+    /// Cost per million image output tokens (USD). Only set for image-generation
+    /// models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_output_cost_per_m: Option<f64>,
     /// Whether the model supports tool/function calling.
     #[serde(default)]
     pub supports_tools: bool,
@@ -136,6 +179,13 @@ pub struct ModelCatalogEntry {
     pub aliases: Vec<String>,
 }
 
+impl ModelCatalogEntry {
+    /// Returns true if this entry is an image-generation model.
+    pub fn is_image_generation(&self) -> bool {
+        self.modality == Modality::Image
+    }
+}
+
 impl Default for ModelCatalogEntry {
     fn default() -> Self {
         Self {
@@ -143,10 +193,13 @@ impl Default for ModelCatalogEntry {
             display_name: String::new(),
             provider: String::new(),
             tier: ModelTier::default(),
+            modality: Modality::default(),
             context_window: 0,
             max_output_tokens: 0,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
+            image_input_cost_per_m: None,
+            image_output_cost_per_m: None,
             supports_tools: false,
             supports_vision: false,
             supports_streaming: false,
@@ -507,12 +560,60 @@ mod tests {
             supports_streaming: true,
             supports_thinking: true,
             aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: ModelCatalogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, entry.id);
         assert_eq!(parsed.tier, ModelTier::Smart);
         assert_eq!(parsed.aliases.len(), 2);
+    }
+
+    #[test]
+    fn test_image_generation_model_parses_without_context_window() {
+        // gpt-image-2 style entry: no context_window / max_output_tokens, has
+        // modality + image cost fields. Before the Modality + #[serde(default)]
+        // changes this panicked with "missing field `context_window`" and the
+        // whole providers/openai.toml would fail to parse, silently dropping
+        // every OpenAI model.
+        let toml_str = r#"
+id = "gpt-image-2"
+display_name = "GPT Image 2"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 5.00
+output_cost_per_m = 10.00
+image_input_cost_per_m = 8.00
+image_output_cost_per_m = 30.00
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+aliases = ["gpt-image-2-2026-04-21"]
+"#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("parse image model");
+        assert_eq!(entry.modality, Modality::Image);
+        assert!(entry.is_image_generation());
+        assert_eq!(entry.context_window, 0);
+        assert_eq!(entry.max_output_tokens, 0);
+        assert_eq!(entry.image_input_cost_per_m, Some(8.0));
+        assert_eq!(entry.image_output_cost_per_m, Some(30.0));
+    }
+
+    #[test]
+    fn test_text_model_defaults_to_text_modality() {
+        let toml_str = r#"
+id = "gpt-4.1"
+display_name = "GPT-4.1"
+tier = "frontier"
+context_window = 1047576
+max_output_tokens = 32768
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+"#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("parse text model");
+        assert_eq!(entry.modality, Modality::Text);
+        assert!(!entry.is_image_generation());
+        assert!(entry.image_input_cost_per_m.is_none());
     }
 
     #[test]
