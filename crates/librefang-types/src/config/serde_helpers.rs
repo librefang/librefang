@@ -69,18 +69,25 @@ impl<T> Default for OneOrMany<T> {
     }
 }
 
-/// Schema for `OneOrMany<T>` mirrors `Vec<T>` — JSON Schema consumers
-/// see an array of T, matching the serialized shape when len >= 2. When
-/// a TOML config contains a bare single-instance table we deserialize
-/// transparently; the schema expressed is still the multi-element array
-/// form (draft-07 has no clean way to say "single or array").
+/// JSON Schema for `OneOrMany<T>`. Matches the actual Serialize behavior —
+/// a single-element collection serializes as bare `T`; zero or >= 2 elements
+/// as `Vec<T>`. The schema expresses this as `oneOf: [T, array<T>]` so any
+/// consumer validating against the schema handles both shapes.
 impl<T: schemars::JsonSchema> schemars::JsonSchema for OneOrMany<T> {
     fn schema_name() -> String {
         format!("OneOrMany_{}", T::schema_name())
     }
 
     fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        <Vec<T>>::json_schema(gen)
+        let single = T::json_schema(gen);
+        let many = <Vec<T>>::json_schema(gen);
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
+                one_of: Some(vec![single, many]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
     }
 }
 

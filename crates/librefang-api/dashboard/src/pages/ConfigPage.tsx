@@ -81,7 +81,26 @@ type FieldRender = {
 function pickType(node: JsonSchema): string {
   // Arrayed `type: [..., "null"]` — skip "null" variant.
   const raw = Array.isArray(node.type) ? node.type.find((t) => t !== "null") ?? node.type[0] : node.type;
-  return typeof raw === "string" ? raw : "string";
+  if (typeof raw === "string") return raw;
+  // No concrete type AND no union shape → unknown schema construct.
+  // Warn once so unexpected shapes surface during dev rather than silently
+  // rendering as a text input.
+  if (!node.anyOf && !node.oneOf && !node.$ref && !Array.isArray(node.enum)) {
+    // eslint-disable-next-line no-console
+    console.warn("[ConfigPage] schema node missing 'type'; defaulting to string", node);
+  }
+  return "string";
+}
+
+/** Unwrap `Option<T>` shapes. schemars emits
+ *  `{anyOf: [{$ref|...}, {type: "null"}]}` for Option<T>, sometimes via
+ *  oneOf. Strip the null variant and return the concrete branch. */
+function unwrapNullable(node: JsonSchema): JsonSchema {
+  const branches = node.anyOf ?? node.oneOf;
+  if (!Array.isArray(branches)) return node;
+  const nonNull = branches.find((b) => b.type !== "null" && b.$ref !== undefined) ??
+    branches.find((b) => b.type !== "null");
+  return nonNull ?? node;
 }
 
 function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender {
@@ -95,22 +114,24 @@ function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender 
     return { type: "select", options: node.enum.map(String) };
   }
 
-  const primary = pickType(node);
+  // 3. Unwrap Option<T> / nullable shapes so we see the real type below.
+  const effective = unwrapNullable(node);
+  const primary = pickType(effective);
   if (primary === "boolean") return { type: "boolean" };
   if (primary === "integer" || primary === "number") {
     return {
       type: "number",
-      min: ui?.min ?? node.minimum,
-      max: ui?.max ?? node.maximum,
-      step: ui?.step ?? node.multipleOf,
+      min: ui?.min ?? effective.minimum ?? node.minimum,
+      max: ui?.max ?? effective.maximum ?? node.maximum,
+      step: ui?.step ?? effective.multipleOf ?? node.multipleOf,
     };
   }
   if (primary === "array") {
-    const itemType = node.items?.type;
+    const itemType = effective.items?.type;
     if (itemType === "string") return { type: "string[]" };
     // Array of structs (items has $ref or object type, e.g. OneOrMany<TelegramConfig>)
     // must render as a JSON editor, not a comma-separated string input.
-    if (itemType === "object" || node.items?.$ref) return { type: "object" };
+    if (itemType === "object" || effective.items?.$ref) return { type: "object" };
     return { type: "array" };
   }
   if (primary === "object") return { type: "object" };

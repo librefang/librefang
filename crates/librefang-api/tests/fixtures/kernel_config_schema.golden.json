@@ -6564,268 +6564,4106 @@
       }
     },
     "OneOrMany_BlueskyConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/BlueskyConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Bluesky/AT Protocol channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "app_password_env": {
+              "description": "Env var name holding the app password.",
+              "default": "BLUESKY_APP_PASSWORD",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identifier": {
+              "description": "Bluesky identifier (handle or DID).",
+              "default": "",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "service_url": {
+              "description": "PDS service URL.",
+              "default": "https://bsky.social",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BlueskyConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_DingTalkConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/DingTalkConfig"
-      }
+      "oneOf": [
+        {
+          "description": "DingTalk Robot API channel adapter configuration.\n\nSupports two receive modes: - **Stream** (default): Uses `app_key` / `app_secret` to open a long-lived WebSocket connection via the DingTalk Stream protocol. No public IP needed. - **Webhook** (legacy): HTTP server that receives callback POST requests. Requires `access_token` and `secret` for HMAC-SHA256 verification.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the webhook access token.",
+              "default": "DINGTALK_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "app_key_env": {
+              "description": "Env var name holding the DingTalk app key (stream mode).",
+              "default": "DINGTALK_APP_KEY",
+              "type": "string"
+            },
+            "app_secret_env": {
+              "description": "Env var name holding the DingTalk app secret (stream mode).",
+              "default": "DINGTALK_APP_SECRET",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "receive_mode": {
+              "description": "How to receive inbound messages (stream or webhook).",
+              "default": "stream",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DingTalkReceiveMode"
+                }
+              ]
+            },
+            "robot_code": {
+              "description": "Robot code for sending messages via the Open API (stream mode). If empty, falls back to app_key.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "secret_env": {
+              "description": "Env var name holding the signing secret.",
+              "default": "DINGTALK_SECRET",
+              "type": "string"
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook (webhook mode only).",
+              "default": 8457,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DingTalkConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_DiscordConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/DiscordConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Discord channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_guilds": {
+              "description": "Guild (server) IDs allowed to interact (empty = allow all). Accepts strings for consistency with other channel configs.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowed_users": {
+              "description": "User IDs allowed to interact (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token (NOT the token itself).",
+              "default": "DISCORD_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ignore_bots": {
+              "description": "Ignore messages from other bots (default: true). Set to false to allow bot-to-bot interactions in multi-agent setups.",
+              "default": true,
+              "type": "boolean"
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on WebSocket failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "intents": {
+              "description": "Gateway intents bitmask (default: 37376 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).",
+              "default": 37376,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on WebSocket failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "mention_patterns": {
+              "description": "Custom text patterns that trigger the bot (case-insensitive contains match). When any pattern matches the message content, the bot treats it as if it was mentioned. Example: `[\"hey bot\", \"!ask\"]`",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DiscordConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_DiscourseConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/DiscourseConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Discourse forum channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "api_key_env": {
+              "description": "Env var name holding the API key.",
+              "default": "DISCOURSE_API_KEY",
+              "type": "string"
+            },
+            "api_username": {
+              "description": "API username.",
+              "default": "system",
+              "type": "string"
+            },
+            "base_url": {
+              "description": "Discourse base URL.",
+              "default": "",
+              "type": "string"
+            },
+            "categories": {
+              "description": "Category slugs to monitor.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DiscourseConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_EmailConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/EmailConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Email (IMAP/SMTP) channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_senders": {
+              "description": "Only process emails from these senders (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "folders": {
+              "description": "IMAP folders to monitor.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "imap_host": {
+              "description": "IMAP server host.",
+              "default": "",
+              "type": "string"
+            },
+            "imap_port": {
+              "description": "IMAP port (993 for TLS).",
+              "default": 993,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "password_env": {
+              "description": "Env var name holding the password.",
+              "default": "EMAIL_PASSWORD",
+              "type": "string"
+            },
+            "poll_interval_secs": {
+              "description": "Poll interval in seconds.",
+              "default": 30,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "smtp_host": {
+              "description": "SMTP server host.",
+              "default": "",
+              "type": "string"
+            },
+            "smtp_port": {
+              "description": "SMTP port (587 for STARTTLS).",
+              "default": 587,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "username": {
+              "description": "Email address (used for both IMAP and SMTP).",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EmailConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_FeishuConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/FeishuConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Feishu/Lark Open Platform channel adapter configuration.\n\nFeishu (CN) and Lark (international) share the same API — set `region` to `\"intl\"` for Lark or `\"cn\"` (default) for Feishu. The `receive_mode` field controls whether the adapter uses a webhook HTTP server or a long-lived WebSocket connection (default) to receive events.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "app_id": {
+              "description": "Feishu app ID.",
+              "default": "",
+              "type": "string"
+            },
+            "app_secret_env": {
+              "description": "Env var name holding the app secret.",
+              "default": "FEISHU_APP_SECRET",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "encrypt_key": {
+              "description": "Encrypt key for webhook event decryption (webhook mode only).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "receive_mode": {
+              "description": "How to receive inbound events: `\"websocket\"` (default) or `\"webhook\"`.",
+              "default": "websocket",
+              "type": "string"
+            },
+            "region": {
+              "description": "API region: `\"cn\"` for Feishu (default) or `\"intl\"` for Lark.",
+              "default": "",
+              "type": "string"
+            },
+            "verification_token": {
+              "description": "Verification token for webhook event validation (webhook mode only).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook (only used when `receive_mode = \"webhook\"`).",
+              "default": 8453,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FeishuConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_FlockConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/FlockConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Flock bot channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "FLOCK_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8456,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FlockConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_GitterConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/GitterConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Gitter Streaming API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "room_id": {
+              "description": "Room ID to listen in.",
+              "default": "",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the auth token.",
+              "default": "GITTER_TOKEN",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GitterConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_GoogleChatConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/GoogleChatConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Google Chat channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "service_account_env": {
+              "description": "Env var name holding the service account JSON key.",
+              "default": "GOOGLE_CHAT_SERVICE_ACCOUNT",
+              "type": "string"
+            },
+            "service_account_key_path": {
+              "description": "Path to a Google service account JSON key file (alternative to env var). When set, JWT authentication is used to obtain OAuth2 access tokens.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "space_ids": {
+              "description": "Space IDs to listen in.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8444,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GoogleChatConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_GotifyConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/GotifyConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Gotify WebSocket channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "app_token_env": {
+              "description": "Env var name holding the app token (for sending).",
+              "default": "GOTIFY_APP_TOKEN",
+              "type": "string"
+            },
+            "client_token_env": {
+              "description": "Env var name holding the client token (for receiving).",
+              "default": "GOTIFY_CLIENT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "Gotify server URL.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GotifyConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_GuildedConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/GuildedConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Guilded bot channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "GUILDED_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_ids": {
+              "description": "Server IDs to listen in (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GuildedConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_IrcConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/IrcConfig"
-      }
+      "oneOf": [
+        {
+          "description": "IRC channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "channels": {
+              "description": "Channels to join (e.g., `[\"#librefang\", \"#general\"]`).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on connection failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on connection failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "nick": {
+              "description": "Bot nickname.",
+              "default": "librefang",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "password_env": {
+              "description": "Env var name holding the server password (optional).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "port": {
+              "description": "IRC server port.",
+              "default": 6667,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "server": {
+              "description": "IRC server hostname.",
+              "default": "irc.libera.chat",
+              "type": "string"
+            },
+            "use_tls": {
+              "description": "Use TLS (requires tokio-native-tls).",
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IrcConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_KeybaseConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/KeybaseConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Keybase chat channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_teams": {
+              "description": "Team names to listen in (empty = all DMs).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "paperkey_env": {
+              "description": "Env var name holding the paper key.",
+              "default": "KEYBASE_PAPERKEY",
+              "type": "string"
+            },
+            "username": {
+              "description": "Keybase username.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/KeybaseConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_LineConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/LineConfig"
-      }
+      "oneOf": [
+        {
+          "description": "LINE Messaging API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the channel access token.",
+              "default": "LINE_CHANNEL_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "channel_secret_env": {
+              "description": "Env var name holding the channel secret.",
+              "default": "LINE_CHANNEL_SECRET",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8450,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LineConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_LinkedInConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/LinkedInConfig"
-      }
+      "oneOf": [
+        {
+          "description": "LinkedIn Messaging API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the OAuth2 access token.",
+              "default": "LINKEDIN_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "organization_id": {
+              "description": "Organization ID for messaging.",
+              "default": "",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LinkedInConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_MastodonConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/MastodonConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Mastodon Streaming API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the access token.",
+              "default": "MASTODON_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "instance_url": {
+              "description": "Mastodon instance URL (e.g., `\"https://mastodon.social\"`).",
+              "default": "",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MastodonConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_MatrixConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/MatrixConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Matrix protocol channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the access token.",
+              "default": "MATRIX_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_rooms": {
+              "description": "Room IDs to listen in (empty = all joined rooms).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "auto_accept_invites": {
+              "description": "Whether to auto-accept room invites (default: false).",
+              "default": false,
+              "type": "boolean"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "homeserver_url": {
+              "description": "Matrix homeserver URL (e.g., `\"https://matrix.org\"`).",
+              "default": "https://matrix.org",
+              "type": "string"
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on sync failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on sync failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "user_id": {
+              "description": "Bot user ID (e.g., \"@librefang:matrix.org\").",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MatrixConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_MattermostConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/MattermostConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Mattermost channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_channels": {
+              "description": "Allowed channel IDs (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on WebSocket failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on WebSocket failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "Mattermost server URL (e.g., `\"https://mattermost.example.com\"`).",
+              "default": "",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "MATTERMOST_TOKEN",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MattermostConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_MessengerConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/MessengerConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Facebook Messenger Platform channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "page_token_env": {
+              "description": "Env var name holding the page access token.",
+              "default": "MESSENGER_PAGE_TOKEN",
+              "type": "string"
+            },
+            "verify_token_env": {
+              "description": "Env var name holding the webhook verify token.",
+              "default": "MESSENGER_VERIFY_TOKEN",
+              "type": "string"
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8452,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MessengerConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_MumbleConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/MumbleConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Mumble text chat channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "channel": {
+              "description": "Channel to join.",
+              "default": "",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "host": {
+              "description": "Mumble server hostname.",
+              "default": "",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "password_env": {
+              "description": "Env var name holding the server password.",
+              "default": "MUMBLE_PASSWORD",
+              "type": "string"
+            },
+            "port": {
+              "description": "Mumble server port.",
+              "default": 64738,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "username": {
+              "description": "Bot username.",
+              "default": "librefang",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MumbleConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_NextcloudConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/NextcloudConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Nextcloud Talk channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_rooms": {
+              "description": "Room tokens to listen in (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "Nextcloud server URL.",
+              "default": "",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the auth token.",
+              "default": "NEXTCLOUD_TOKEN",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NextcloudConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_NostrConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/NostrConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Nostr relay channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "private_key_env": {
+              "description": "Env var name holding the private key (nsec or hex).",
+              "default": "NOSTR_PRIVATE_KEY",
+              "type": "string"
+            },
+            "relays": {
+              "description": "Relay URLs to connect to.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NostrConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_NtfyConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/NtfyConfig"
-      }
+      "oneOf": [
+        {
+          "description": "ntfy.sh pub/sub channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "ntfy server URL.",
+              "default": "https://ntfy.sh",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the auth token (optional for public topics).",
+              "default": "NTFY_TOKEN",
+              "type": "string"
+            },
+            "topic": {
+              "description": "Topic to subscribe/publish to.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NtfyConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_PumbleConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/PumbleConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Pumble bot channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "PUMBLE_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8455,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PumbleConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_QqConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/QqConfig"
-      }
+      "oneOf": [
+        {
+          "description": "QQ Bot API v2 channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_users": {
+              "description": "QQ user IDs allowed to interact (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "app_id": {
+              "description": "QQ Bot application ID.",
+              "default": "",
+              "type": "string"
+            },
+            "app_secret_env": {
+              "description": "Env var name holding the app secret (NOT the secret itself).",
+              "default": "QQ_BOT_APP_SECRET",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/QqConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_RedditConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/RedditConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Reddit API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client_id": {
+              "description": "Reddit app client ID.",
+              "default": "",
+              "type": "string"
+            },
+            "client_secret_env": {
+              "description": "Env var name holding the client secret.",
+              "default": "REDDIT_CLIENT_SECRET",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "password_env": {
+              "description": "Env var name holding the bot password.",
+              "default": "REDDIT_PASSWORD",
+              "type": "string"
+            },
+            "subreddits": {
+              "description": "Subreddits to monitor.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "username": {
+              "description": "Reddit bot username.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RedditConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_RevoltConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/RevoltConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Revolt (Discord-like) channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "api_url": {
+              "description": "Revolt API URL.",
+              "default": "https://api.revolt.chat",
+              "type": "string"
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "REVOLT_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RevoltConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_RocketChatConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/RocketChatConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Rocket.Chat channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_channels": {
+              "description": "Allowed channel IDs (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "Rocket.Chat server URL.",
+              "default": "",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the auth token.",
+              "default": "ROCKETCHAT_TOKEN",
+              "type": "string"
+            },
+            "user_id": {
+              "description": "User ID for the bot.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RocketChatConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_SignalConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/SignalConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Signal channel adapter configuration (via signal-cli REST API).",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_users": {
+              "description": "Allowed phone numbers (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "api_url": {
+              "description": "URL of the signal-cli REST API (e.g., \"http://localhost:8080\").",
+              "default": "http://localhost:8080",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "phone_number": {
+              "description": "Registered phone number.",
+              "default": "",
+              "type": "string"
+            },
+            "poll_interval_secs": {
+              "description": "Poll interval in seconds for checking new messages (default: 2).",
+              "default": 2,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SignalConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_SlackConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/SlackConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Slack channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_channels": {
+              "description": "Channel IDs allowed to interact (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "app_token_env": {
+              "description": "Env var name holding the app-level token (xapp-) for Socket Mode.",
+              "default": "SLACK_APP_TOKEN",
+              "type": "string"
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token (xoxb-) for REST API.",
+              "default": "SLACK_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "force_flat_replies": {
+              "description": "When true, bot replies are posted as top-level channel messages instead of threaded replies. Defaults to `None` (i.e. use normal threading).",
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on WebSocket failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on WebSocket failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "unfurl_links": {
+              "description": "Whether to disable link unfurling (preview expansion) in sent messages. When set to `false`, Slack will not expand link previews. When `None` (default), Slack uses its own default behavior.",
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SlackConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_TeamsConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/TeamsConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Microsoft Teams (Bot Framework v3) channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_tenants": {
+              "description": "Allowed tenant IDs (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "app_id": {
+              "description": "Azure Bot App ID.",
+              "default": "",
+              "type": "string"
+            },
+            "app_password_env": {
+              "description": "Env var name holding the app password.",
+              "default": "TEAMS_APP_PASSWORD",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 3978,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TeamsConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_TelegramConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/TelegramConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Telegram channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_users": {
+              "description": "Telegram user IDs allowed to interact (empty = allow all). Accepts strings for consistency; numeric TOML integers are coerced to strings.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "api_url": {
+              "description": "Custom Telegram Bot API base URL for proxies or mirrors. Defaults to `https://api.telegram.org` when not set.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token (NOT the token itself).",
+              "default": "TELEGRAM_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on API failures (default: 1).",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "long_poll_timeout_secs": {
+              "description": "Long-poll timeout in seconds sent to getUpdates (default: 30).",
+              "default": 30,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on API failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "poll_interval_secs": {
+              "description": "Polling interval in seconds.",
+              "default": 1,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "thread_routes": {
+              "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
+              "default": {},
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TelegramConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_ThreemaConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ThreemaConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Threema Gateway channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "secret_env": {
+              "description": "Env var name holding the API secret.",
+              "default": "THREEMA_SECRET",
+              "type": "string"
+            },
+            "threema_id": {
+              "description": "Threema Gateway ID.",
+              "default": "",
+              "type": "string"
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8454,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ThreemaConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_TwistConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/TwistConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Twist API v3 channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_channels": {
+              "description": "Channel IDs to listen in (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "token_env": {
+              "description": "Env var name holding the API token.",
+              "default": "TWIST_TOKEN",
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "Workspace ID.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TwistConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_TwitchConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/TwitchConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Twitch chat channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "channels": {
+              "description": "Twitch channels to join (without #).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "nick": {
+              "description": "Bot nickname.",
+              "default": "librefang",
+              "type": "string"
+            },
+            "oauth_token_env": {
+              "description": "Env var name holding the OAuth token.",
+              "default": "TWITCH_OAUTH_TOKEN",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TwitchConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_ViberConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ViberConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Viber Bot API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "auth_token_env": {
+              "description": "Env var name holding the auth token.",
+              "default": "VIBER_AUTH_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the incoming webhook.",
+              "default": 8451,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "webhook_url": {
+              "description": "Webhook URL for receiving messages.",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ViberConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_VoiceConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/VoiceConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Voice channel adapter configuration.\n\nRuns a WebSocket server that accepts audio streams, transcribes via STT, sends text to the agent, and returns synthesized speech via TTS.\n\n```toml [channels.voice] listen_port = 4546 api_key_env = \"OPENAI_API_KEY\" stt_url = \"https://api.openai.com\" tts_url = \"https://api.openai.com\" tts_voice = \"alloy\" ```",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this voice instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "api_key_env": {
+              "description": "Env var name holding the API key for STT/TTS services.",
+              "default": "OPENAI_API_KEY",
+              "type": "string"
+            },
+            "buffer_threshold": {
+              "description": "Audio buffer threshold in bytes before triggering STT (default: 32768).",
+              "default": 32768,
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "default_agent": {
+              "description": "Default agent name to route voice messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "listen_port": {
+              "description": "WebSocket server listen port (default: 4546).",
+              "default": 4546,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "stt_url": {
+              "description": "Base URL for the STT (Speech-to-Text) API.",
+              "default": "https://api.openai.com",
+              "type": "string"
+            },
+            "tts_url": {
+              "description": "Base URL for the TTS (Text-to-Speech) API.",
+              "default": "https://api.openai.com",
+              "type": "string"
+            },
+            "tts_voice": {
+              "description": "TTS voice name (default: \"alloy\").",
+              "default": "alloy",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/VoiceConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_WeChatConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/WeChatConfig"
-      }
+      "oneOf": [
+        {
+          "description": "WeChat personal account (iLink protocol) adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_users": {
+              "description": "Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token from a previous QR login session. If the env var is set and non-empty, the adapter skips QR login.",
+              "default": "WECHAT_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "initial_backoff_secs": {
+              "description": "Initial backoff in seconds on API failures (default: 2).",
+              "default": 2,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "max_backoff_secs": {
+              "description": "Maximum backoff in seconds on API failures (default: 60).",
+              "default": 60,
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WeChatConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_WeComConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/WeComConfig"
-      }
+      "oneOf": [
+        {
+          "description": "WeCom intelligent bot adapter configuration.\n\nSupports two connection modes: - `websocket` (default): connects to `wss://openws.work.weixin.qq.com` - `callback`: starts an HTTP server to receive message callbacks",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bot_id": {
+              "description": "Bot ID obtained from the WeCom admin console.",
+              "default": "",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "encoding_aes_key_env": {
+              "description": "Env var name holding the EncodingAESKey (callback mode only).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "description": "Connection mode: \"websocket\" (default) or \"callback\".",
+              "default": "websocket",
+              "allOf": [
+                {
+                  "$ref": "#/definitions/WeComMode"
+                }
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "secret_env": {
+              "description": "Env var name holding the bot secret.",
+              "default": "WECOM_BOT_SECRET",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "Env var name holding the callback verification token (callback mode only).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "webhook_port": {
+              "description": "Port for the callback HTTP server (only used in callback mode).",
+              "default": 8454,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WeComConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_WebexConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/WebexConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Webex bot channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_rooms": {
+              "description": "Room IDs to listen in (empty = all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "bot_token_env": {
+              "description": "Env var name holding the bot token.",
+              "default": "WEBEX_BOT_TOKEN",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WebexConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_WebhookConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/WebhookConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Generic webhook channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "callback_url": {
+              "description": "URL to POST outgoing messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deliver": {
+              "description": "Target channel name for direct delivery (e.g. \"telegram\", \"discord\"). Required when `deliver_only` is true.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deliver_only": {
+              "description": "When true, incoming POST bodies are forwarded directly to the delivery target channel without invoking the LLM or any agent. Requires `deliver` to be set to a valid channel name (not \"log\").",
+              "default": false,
+              "type": "boolean"
+            },
+            "listen_port": {
+              "description": "Port to listen for incoming webhooks.",
+              "default": 8460,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "secret_env": {
+              "description": "Env var name holding the HMAC signing secret.",
+              "default": "WEBHOOK_SECRET",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WebhookConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_WhatsAppConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/WhatsAppConfig"
-      }
+      "oneOf": [
+        {
+          "description": "WhatsApp Cloud API channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "access_token_env": {
+              "description": "Env var name holding the access token (Cloud API mode).",
+              "default": "WHATSAPP_ACCESS_TOKEN",
+              "type": "string"
+            },
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_users": {
+              "description": "Allowed phone numbers (empty = allow all).",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "conversation_ttl_hours": {
+              "description": "Conversation tracker TTL in hours (Web gateway mode). Active stranger conversations expire after this period of inactivity.",
+              "default": 24,
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "gateway_url_env": {
+              "description": "Env var name holding the WhatsApp Web gateway URL (QR/Web mode). When set, outgoing messages are routed through the gateway instead of Cloud API.",
+              "default": "WHATSAPP_WEB_GATEWAY_URL",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "owner_numbers": {
+              "description": "Owner phone numbers for owner-routing mode (digits only, no '+' prefix). When set, messages from non-owner numbers are forwarded to the first owner number with sender context, and the sender receives an auto-ack.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "phone_number_id": {
+              "description": "WhatsApp Business phone number ID (Cloud API mode).",
+              "default": "",
+              "type": "string"
+            },
+            "verify_token_env": {
+              "description": "Env var name holding the webhook verify token (Cloud API mode).",
+              "default": "WHATSAPP_VERIFY_TOKEN",
+              "type": "string"
+            },
+            "webhook_port": {
+              "description": "Port to listen for webhook callbacks (Cloud API mode).",
+              "default": 8443,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WhatsAppConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_XmppConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/XmppConfig"
-      }
+      "oneOf": [
+        {
+          "description": "XMPP/Jabber channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "jid": {
+              "description": "JID (e.g., \"bot@jabber.org\").",
+              "default": "",
+              "type": "string"
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "password_env": {
+              "description": "Env var name holding the password.",
+              "default": "XMPP_PASSWORD",
+              "type": "string"
+            },
+            "port": {
+              "description": "XMPP server port.",
+              "default": 5222,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "rooms": {
+              "description": "MUC rooms to join.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "server": {
+              "description": "XMPP server hostname (defaults to JID domain).",
+              "default": "",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/XmppConfig"
+          }
+        }
+      ]
     },
     "OneOrMany_ZulipConfig": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ZulipConfig"
-      }
+      "oneOf": [
+        {
+          "description": "Zulip channel adapter configuration.",
+          "type": "object",
+          "properties": {
+            "account_id": {
+              "description": "Unique identifier for this bot instance (used for multi-bot routing).",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "api_key_env": {
+              "description": "Env var name holding the API key.",
+              "default": "ZULIP_API_KEY",
+              "type": "string"
+            },
+            "bot_email": {
+              "description": "Bot email address.",
+              "default": "",
+              "type": "string"
+            },
+            "default_agent": {
+              "description": "Default agent name to route messages to.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overrides": {
+              "description": "Per-channel behavior overrides.",
+              "default": {
+                "allowed_commands": [],
+                "auto_route": "off",
+                "auto_route_confidence_threshold": 6,
+                "auto_route_divergence_count": 2,
+                "auto_route_sticky_bonus": 4,
+                "auto_route_ttl_minutes": 30,
+                "blocked_commands": [],
+                "clear_done_reaction": false,
+                "disable_commands": false,
+                "dm_policy": "respond",
+                "group_policy": "mention_only",
+                "group_trigger_patterns": [],
+                "message_debounce_max_buffer": 64,
+                "message_debounce_max_ms": 30000,
+                "message_debounce_ms": 0,
+                "model": null,
+                "output_format": null,
+                "rate_limit_per_minute": 0,
+                "rate_limit_per_user": 0,
+                "reply_precheck": false,
+                "reply_precheck_model": null,
+                "system_prompt": null,
+                "threading": false,
+                "typing_mode": null,
+                "usage_footer": null
+              },
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ChannelOverrides"
+                }
+              ]
+            },
+            "server_url": {
+              "description": "Zulip server URL.",
+              "default": "",
+              "type": "string"
+            },
+            "streams": {
+              "description": "Streams to listen in.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ZulipConfig"
+          }
+        }
+      ]
     },
     "OutputFormat": {
       "description": "Output format hint for channel-specific message formatting.",
