@@ -7,7 +7,13 @@ import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
   AlertTriangle, X, Copy, Check, FileText,
 } from "lucide-react";
-import { type ConfigFieldSchema } from "../api";
+import {
+  type ConfigSchemaRoot,
+  type ConfigSectionDescriptor,
+  type JsonSchema,
+  type UiFieldOptions,
+  resolveRef,
+} from "../api";
 import {
   useConfigSchema,
   useFullConfig,
@@ -35,13 +41,11 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
 };
 
 // Explicit field ordering for sections where the server-side JSON schema
-// ordering is wrong for the user. The API serialises `sec.fields` via
-// serde_json's default BTreeMap, which alphabetises keys — so for sections
-// like `default_model` the user sees `model` before `provider`, even though
-// model is a cascaded filter of the selected provider (ConfigPage:679). The
-// rendering code falls back to the alphabetised order for any section not
-// listed here, so forgetting an entry is a no-op rather than a regression.
-// Closes #2746.
+// ordering is wrong for the user. `KernelConfig`'s `default_model` sub-struct
+// declares fields alphabetically via serde, so the user sees `model` before
+// `provider` even though model cascades from provider. The rendering code
+// falls back to the declared order for any section not listed here, so
+// forgetting an entry is a no-op rather than a regression. Closes #2746.
 const SECTION_FIELD_ORDER: Record<string, string[]> = {
   default_model: ["provider", "model", "api_key_env", "base_url"],
 };
@@ -60,14 +64,103 @@ function fieldLabelFallback(key: string): string {
     .replace(/\bMdns\b/g, "mDNS").replace(/\bTotp\b/g, "TOTP");
 }
 
-function resolveFieldType(
-  schema: string | ConfigFieldSchema
-): { type: string; options?: ConfigFieldSchema["options"]; min?: number; max?: number; step?: number } {
-  if (typeof schema === "string") return { type: schema };
-  return { type: schema.type || "string", options: schema.options, min: schema.min, max: schema.max, step: schema.step };
+/* ------------------------------------------------------------------ */
+/*  Draft-07 → UI type/options resolution                              */
+/* ------------------------------------------------------------------ */
+
+/** What the UI needs to render one field. Derived fresh from the schema each
+ *  render — no persistent view-model. */
+type FieldRender = {
+  type: string;
+  options?: UiFieldOptions["select"] | UiFieldOptions["select_objects"] | UiFieldOptions["number_select"];
+  min?: number;
+  max?: number;
+  step?: number;
+};
+
+function pickType(node: JsonSchema): string {
+  // Arrayed `type: [..., "null"]` — skip "null" variant.
+  const raw = Array.isArray(node.type) ? node.type.find((t) => t !== "null") ?? node.type[0] : node.type;
+  return typeof raw === "string" ? raw : "string";
 }
 
-function getNestedValue(obj: Record<string, unknown>, section: string, field: string, rootLevel?: boolean): unknown {
+function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender {
+  // 1. UI overlay wins when it specifies a select-family type.
+  if (ui?.select) return { type: "select", options: ui.select };
+  if (ui?.select_objects) return { type: "select", options: ui.select_objects };
+  if (ui?.number_select) return { type: "number_select", options: ui.number_select };
+
+  // 2. Native Rust enum → schema `enum` array → select.
+  if (Array.isArray(node.enum) && node.enum.length > 0) {
+    return { type: "select", options: node.enum.map(String) };
+  }
+
+  const primary = pickType(node);
+  if (primary === "boolean") return { type: "boolean" };
+  if (primary === "integer" || primary === "number") {
+    return {
+      type: "number",
+      min: ui?.min ?? node.minimum,
+      max: ui?.max ?? node.maximum,
+      step: ui?.step ?? node.multipleOf,
+    };
+  }
+  if (primary === "array") {
+    return { type: node.items?.type === "string" ? "string[]" : "array" };
+  }
+  if (primary === "object") return { type: "object" };
+  return { type: "string" };
+}
+
+/** Resolve a section descriptor to the concrete property map the UI renders.
+ *  Returns the ordered list of `[fieldKey, FieldRender]` plus the per-field
+ *  JSON-pointer path for `x-ui-options` lookup. */
+function resolveSectionFields(
+  root: ConfigSchemaRoot,
+  desc: ConfigSectionDescriptor,
+): Array<[string, FieldRender]> {
+  const uiOptions = root["x-ui-options"] ?? {};
+  const entries: Array<[string, FieldRender]> = [];
+
+  if (desc.root_level && desc.fields) {
+    // Root-level fields: read declared order from the descriptor so the UI
+    // follows intent, not the struct's serde ordering.
+    for (const fieldKey of desc.fields) {
+      const node = root.properties?.[fieldKey];
+      if (!node) continue;
+      const ui = uiOptions[`/${fieldKey}`];
+      entries.push([fieldKey, resolveFieldRender(node, ui)]);
+    }
+    return entries;
+  }
+
+  if (!desc.struct_field) return [];
+  let target: JsonSchema | undefined = root.properties?.[desc.struct_field];
+  if (target?.$ref) target = resolveRef(root, target.$ref);
+  if (!target?.properties) return [];
+
+  const declared = Object.entries(target.properties);
+  const order = SECTION_FIELD_ORDER[desc.key];
+  const ordered = order
+    ? [
+        ...order.map((k) => declared.find(([fk]) => fk === k)).filter((e): e is [string, JsonSchema] => !!e),
+        ...declared.filter(([fk]) => !order.includes(fk)),
+      ]
+    : declared;
+
+  for (const [fieldKey, node] of ordered) {
+    const ui = uiOptions[`/${desc.struct_field}/${fieldKey}`];
+    entries.push([fieldKey, resolveFieldRender(node, ui)]);
+  }
+  return entries;
+}
+
+function getNestedValue(
+  obj: Record<string, unknown>,
+  section: string,
+  field: string,
+  rootLevel?: boolean,
+): unknown {
   if (rootLevel) return obj[field];
   const sec = obj[section] as Record<string, unknown> | undefined;
   return sec?.[field];
@@ -98,6 +191,7 @@ const TYPE_COLORS: Record<string, string> = {
   boolean: "text-blue-500 bg-blue-500/10",
   number:  "text-purple-500 bg-purple-500/10",
   select:  "text-amber-500 bg-amber-500/10",
+  number_select: "text-amber-500 bg-amber-500/10",
   array:   "text-teal-500 bg-teal-500/10",
   "string[]": "text-teal-500 bg-teal-500/10",
   object:  "text-orange-500 bg-orange-500/10",
@@ -153,7 +247,7 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
   useEffect(() => {
     const incoming = value != null ? JSON.stringify(value, null, 2) : "";
     setText((prev) => {
-      try { if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev; } catch {}
+      try { if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev; } catch { /* empty */ }
       return incoming;
     });
   }, [value]);
@@ -193,12 +287,14 @@ function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown
 
 const SENSITIVE_PATTERNS = /api_key|secret|password|token_env|client_secret|credentials/i;
 
+type SelectOption = string | { id: string; name: string; provider: string } | { value: string; label: string };
+
 function ConfigFieldInput({
   fieldKey, fieldType, options, min, max, step, value, onChange,
 }: {
   fieldKey: string;
   fieldType: string;
-  options?: ConfigFieldSchema["options"];
+  options?: SelectOption[];
   min?: number;
   max?: number;
   step?: number;
@@ -210,7 +306,6 @@ function ConfigFieldInput({
     "w-full px-3 py-1.5 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
 
   if (fieldType === "boolean") {
-    // Wrap in a fixed-height container so it aligns with other input rows
     return (
       <div className="flex items-center h-[30px]">
         <button
@@ -224,12 +319,10 @@ function ConfigFieldInput({
   }
 
   if ((fieldType === "select" || fieldType === "number_select") && options) {
-    const normalizedOptions = options.map((o) => {
-      if (typeof o === "string") {
-        return { value: o, label: t(`config.${fieldKey}_${o}`, o) };
-      }
-      if ("value" in o && "label" in o) return { value: String((o as { value: unknown }).value), label: String((o as { label: unknown }).label) };
-      if ("id" in o) return { value: (o as { id: string; name?: string }).id, label: (o as { name?: string; id: string }).name ?? (o as { id: string }).id };
+    const normalizedOptions = options.map((o: SelectOption) => {
+      if (typeof o === "string") return { value: o, label: t(`config.${fieldKey}_${o}`, o) };
+      if ("value" in o && "label" in o) return { value: String(o.value), label: String(o.label) };
+      if ("id" in o) return { value: o.id, label: o.name ?? o.id };
       return { value: String(o), label: String(o) };
     });
     const rawValue = String(value ?? "");
@@ -308,7 +401,26 @@ export function ConfigPage({ category }: { category: string }) {
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
 
-  // ── Global keyboard shortcuts: / to focus search, Esc to clear ────
+  // ── Index section descriptors by key and resolve field lists. ──
+  const schemaRoot: ConfigSchemaRoot | undefined = schemaQuery.data;
+  const sectionsByKey = useMemo<Record<string, ConfigSectionDescriptor>>(() => {
+    const out: Record<string, ConfigSectionDescriptor> = {};
+    for (const desc of schemaRoot?.["x-sections"] ?? []) {
+      out[desc.key] = desc;
+    }
+    return out;
+  }, [schemaRoot]);
+
+  const resolvedFields = useMemo<Record<string, Array<[string, FieldRender]>>>(() => {
+    const out: Record<string, Array<[string, FieldRender]>> = {};
+    if (!schemaRoot) return out;
+    for (const desc of schemaRoot["x-sections"] ?? []) {
+      out[desc.key] = resolveSectionFields(schemaRoot, desc);
+    }
+    return out;
+  }, [schemaRoot]);
+
+  // ── Keyboard shortcuts: / to focus search, Esc to clear ────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -352,16 +464,15 @@ export function ConfigPage({ category }: { category: string }) {
       setPendingChanges((p) => {
         const next = { ...p, [path]: value };
         // Cascading: when provider changes in default_model, clear model if
-        // the current selection doesn't belong to the new provider.
+        // the current selection doesn't belong to the new provider. Pulls
+        // the model catalog straight from the x-ui-options overlay.
         if (sectionKey === "default_model" && fieldKey === "provider" && value) {
           const modelPath = "default_model.model";
           const currentModel = modelPath in p ? p[modelPath] : getNestedValue(configQuery.data ?? {}, "default_model", "model");
-          const modelOptions = (schemaQuery.data?.sections?.default_model?.fields?.model as ConfigFieldSchema)?.options;
+          const modelOptions = schemaRoot?.["x-ui-options"]?.["/default_model/model"]?.select_objects;
           if (modelOptions && currentModel) {
-            const modelBelongsToProvider = modelOptions.some((o: unknown) =>
-              typeof o === "object" && o !== null && "id" in o && "provider" in o
-              && (o as { id: string }).id === String(currentModel)
-              && (o as { provider: string }).provider === String(value)
+            const modelBelongsToProvider = modelOptions.some(
+              (m) => m.id === String(currentModel) && m.provider === String(value),
             );
             if (!modelBelongsToProvider) {
               next[modelPath] = null;
@@ -371,7 +482,7 @@ export function ConfigPage({ category }: { category: string }) {
         return next;
       });
     },
-    [configQuery.data, schemaQuery.data]
+    [configQuery.data, schemaRoot]
   );
 
   const saveMutation = useSetConfigValue({
@@ -482,9 +593,6 @@ export function ConfigPage({ category }: { category: string }) {
     if (entries.length === 0) return;
     setBatchSaving(true);
     try {
-      // Per-entry failures are folded into the successful batch result.
-      // Mutation-level failures are handled in the hook's onError; await here
-      // so batchSaving tracks the full request and no rejection is left unhandled.
       await batchSaveMutation.mutateAsync(entries.map(([path, value]) => ({ path, value })));
     } catch {
       // onError already mapped the batch-level failure into UI state.
@@ -530,9 +638,8 @@ export function ConfigPage({ category }: { category: string }) {
   }, [reloadStatus]);
 
   // ── Derived data ───────────────────────────────────────────────────
-  const allSections = schemaQuery.data?.sections ?? {};
   const config = configQuery.data ?? {};
-  const sectionKeys = (CATEGORY_SECTIONS[category] ?? []).filter((s) => s in allSections);
+  const sectionKeys = (CATEGORY_SECTIONS[category] ?? []).filter((s) => s in sectionsByKey);
   const categoryTitle = t(`config.cat_${category}`, sectionLabelFallback(category));
   const q = searchQuery.toLowerCase();
   const isSearching = q.length > 0;
@@ -543,28 +650,32 @@ export function ConfigPage({ category }: { category: string }) {
 
   // Which sections have pending changes (for tab dot indicators)
   const sectionHasPending = useCallback((sKey: string): boolean => {
-    const sec = allSections[sKey];
-    if (!sec) return false;
-    return Object.keys(pendingChanges).some((path) =>
-      sec.root_level ? path in sec.fields : path.startsWith(sKey + ".")
-    );
-  }, [allSections, pendingChanges]);
+    const desc = sectionsByKey[sKey];
+    if (!desc) return false;
+    return Object.keys(pendingChanges).some((path) => {
+      if (desc.root_level) {
+        return (resolvedFields[sKey] ?? []).some(([fKey]) => fKey === path);
+      }
+      return path.startsWith(sKey + ".");
+    });
+  }, [sectionsByKey, resolvedFields, pendingChanges]);
 
   const filteredSections = useMemo(() => {
     const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
-    if (!q) return keysToShow.map((sKey) => ({ sKey, fields: Object.keys(allSections[sKey]?.fields ?? {}) }));
+    if (!q) return keysToShow.map((sKey) => ({ sKey, fields: (resolvedFields[sKey] ?? []).map(([fk]) => fk) }));
     return keysToShow
       .map((sKey) => {
-        const sec = allSections[sKey];
-        if (!sec) return null;
+        if (!sectionsByKey[sKey]) return null;
         const sectionMatches = t(`config.sec_${sKey}`, sectionLabelFallback(sKey)).toLowerCase().includes(q) || sKey.includes(q);
-        const matchedFields = Object.keys(sec.fields).filter((fKey) =>
-          sectionMatches || fKey.includes(q) || t(`config.fld_${fKey}`, fieldLabelFallback(fKey)).toLowerCase().includes(q)
-        );
+        const matchedFields = (resolvedFields[sKey] ?? [])
+          .map(([fk]) => fk)
+          .filter((fKey) =>
+            sectionMatches || fKey.includes(q) || t(`config.fld_${fKey}`, fieldLabelFallback(fKey)).toLowerCase().includes(q)
+          );
         return matchedFields.length > 0 ? { sKey, fields: matchedFields } : null;
       })
       .filter((x): x is { sKey: string; fields: string[] } => x !== null);
-  }, [sectionKeys, allSections, q, effectiveTab]);
+  }, [sectionKeys, sectionsByKey, resolvedFields, q, effectiveTab, t]);
 
   // ── Loading / error states ─────────────────────────────────────────
   if (schemaQuery.isLoading || configQuery.isLoading) {
@@ -689,28 +800,14 @@ export function ConfigPage({ category }: { category: string }) {
           </div>
         )}
         {filteredSections.map(({ sKey, fields: visibleFields }) => {
-          const sec = allSections[sKey];
-          const rawFields = Object.entries(sec.fields);
-          type FieldEntry = (typeof rawFields)[number];
-          // Apply the per-section override (see SECTION_FIELD_ORDER docstring).
-          // Listed keys come first in the declared order; any un-listed keys
-          // keep their original (alphabetical) position at the tail.
-          const order = SECTION_FIELD_ORDER[sKey];
-          const allFields: FieldEntry[] = order
-            ? [
-                ...order
-                  .map((k) => rawFields.find(([fk]) => fk === k))
-                  .filter((e): e is FieldEntry => e !== undefined),
-                ...rawFields.filter(([fk]) => !order.includes(fk)),
-              ]
-            : rawFields;
+          const desc = sectionsByKey[sKey];
+          const allFields = resolvedFields[sKey] ?? [];
           const fieldsToShow = q
             ? allFields.filter(([fKey]) => visibleFields.includes(fKey))
             : allFields;
 
-          const hasBadges = sec.hot_reloadable || sec.root_level;
+          const hasBadges = desc.hot_reloadable || desc.root_level;
           const showSectionHeader = isSearching || hasBadges;
-
 
           return (
             <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
@@ -721,10 +818,10 @@ export function ConfigPage({ category }: { category: string }) {
                       {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
                     </span>
                   )}
-                  {sec.hot_reloadable && (
+                  {desc.hot_reloadable && (
                     <Badge variant="success"><Zap className="w-2.5 h-2.5 mr-0.5" />{t("config.hot_reload", "Hot Reload")}</Badge>
                   )}
-                  {sec.root_level && (
+                  {desc.root_level && (
                     <Badge variant="info">{t("config.root_level", "Root Level")}</Badge>
                   )}
                   <div className="ml-auto flex items-center gap-2">
@@ -733,13 +830,12 @@ export function ConfigPage({ category }: { category: string }) {
                         {fieldsToShow.length}/{allFields.length} {t("config.fields_unit")}
                       </span>
                     )}
-                    {/* Section-level reset: only show when any field in this section has a pending change */}
                     {fieldsToShow.some(([fKey]) => {
-                      const p = sec.root_level ? fKey : `${sKey}.${fKey}`;
+                      const p = desc.root_level ? fKey : `${sKey}.${fKey}`;
                       return p in pendingChanges;
                     }) && (
                       <button
-                        onClick={() => handleResetSection(sKey, fieldsToShow.map(([fKey]) => fKey), sec.root_level)}
+                        onClick={() => handleResetSection(sKey, fieldsToShow.map(([fKey]) => fKey), desc.root_level)}
                         className="text-[10px] text-text-dim hover:text-warning transition-colors flex items-center gap-1"
                         title={t("config.reset_section", "Reset section to defaults")}
                       >
@@ -751,30 +847,30 @@ export function ConfigPage({ category }: { category: string }) {
                 </div>
               )}
               <div className="divide-y divide-border-subtle/30">
-                {fieldsToShow.map(([fieldKey, fieldSchema]) => {
-                  const { type: fieldType, options: rawOptions, min, max, step } = resolveFieldType(fieldSchema);
-                  const path = sec.root_level ? fieldKey : `${sKey}.${fieldKey}`;
+                {fieldsToShow.map(([fieldKey, render]) => {
+                  const { type: fieldType, options: rawOptions, min, max, step } = render;
+                  const path = desc.root_level ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
-                    : getNestedValue(config, sKey, fieldKey, sec.root_level);
+                    : getNestedValue(config, sKey, fieldKey, desc.root_level);
                   const hasPending = path in pendingChanges;
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
                   const fieldDesc = t(`config.desc_${fieldKey}`, "");
                   const fieldLabel = t(`config.fld_${fieldKey}`, fieldLabelFallback(fieldKey));
 
-                  // Cascading filter: when editing model in default_model,
-                  // only show models matching the selected provider.
-                  let options = rawOptions;
-                  if (sKey === "default_model" && fieldKey === "model" && rawOptions) {
+                  // Cascading filter: when editing model in default_model, only show
+                  // models matching the selected provider.
+                  let options: SelectOption[] | undefined = rawOptions as SelectOption[] | undefined;
+                  if (sKey === "default_model" && fieldKey === "model" && options) {
                     const providerPath = "default_model.provider";
                     const selectedProvider = providerPath in pendingChanges
                       ? String(pendingChanges[providerPath] ?? "")
                       : String(getNestedValue(config, "default_model", "provider") ?? "");
                     if (selectedProvider) {
-                      options = rawOptions.filter((o) => {
+                      options = options.filter((o: SelectOption) => {
                         if (typeof o === "object" && o !== null && "provider" in o) {
-                          return (o as { provider: string }).provider === selectedProvider;
+                          return o.provider === selectedProvider;
                         }
                         return true;
                       });
@@ -783,7 +879,6 @@ export function ConfigPage({ category }: { category: string }) {
 
                   return (
                     <div key={fieldKey} className="flex items-start gap-4 px-5 py-3 group">
-                      {/* Label + key + type badge */}
                       <div className="w-44 shrink-0 pt-1">
                         <p className="text-xs font-semibold leading-tight">
                           <Highlight text={fieldLabel} query={q} />
@@ -798,7 +893,6 @@ export function ConfigPage({ category }: { category: string }) {
                           <FieldTypeBadge type={fieldType} />
                         </div>
                       </div>
-                      {/* Input + description below */}
                       <div className="flex-1 min-w-0 flex flex-col gap-1 pt-1">
                         <ConfigFieldInput
                           fieldKey={fieldKey}
@@ -808,13 +902,12 @@ export function ConfigPage({ category }: { category: string }) {
                           max={max}
                           step={step}
                           value={currentValue}
-                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, sec.root_level)}
+                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, desc.root_level)}
                         />
                         {fieldDesc && (
                           <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
                         )}
                       </div>
-                      {/* Actions */}
                       <div className="w-24 shrink-0 flex items-center justify-end gap-1">
                         {statusForField ? (
                           <span
@@ -826,7 +919,7 @@ export function ConfigPage({ category }: { category: string }) {
                         ) : hasPending ? (
                           <>
                             <button
-                              onClick={() => handleResetField(sKey, fieldKey, sec.root_level)}
+                              onClick={() => handleResetField(sKey, fieldKey, desc.root_level)}
                               className="p-1 rounded-md text-text-dim hover:text-warning hover:bg-surface-hover transition-colors"
                               title={t("config.reset_default", "Reset to default")}
                             >

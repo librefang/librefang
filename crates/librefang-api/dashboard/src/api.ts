@@ -1828,26 +1828,6 @@ export async function getConfigSchema(): Promise<ConfigSchemaRoot> {
   return get<ConfigSchemaRoot>("/api/config/schema");
 }
 
-/**
- * View-model shape ConfigPage consumes after the client-side projection
- * from draft-07 (see `lib/queries/config.ts`). NOT the wire format — the
- * wire format is `ConfigSchemaRoot`. This mirror stays here because many
- * pages/components reference these names from a shared import point.
- */
-export interface ConfigFieldSchema {
-  type?: string;
-  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
-  min?: number;
-  max?: number;
-  step?: number;
-}
-
-export interface ConfigSectionSchema {
-  fields: Record<string, string | ConfigFieldSchema>;
-  root_level?: boolean;
-  hot_reloadable?: boolean;
-}
-
 /** Resolve a `$ref` (e.g. `#/definitions/MemoryConfig`) in the root schema. */
 export function resolveRef(
   root: ConfigSchemaRoot,
