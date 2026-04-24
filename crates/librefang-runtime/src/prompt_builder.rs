@@ -375,10 +375,19 @@ execute it via the appropriate tool call (shell_exec, file_write, etc.). Never o
 code blocks — always call the tool instead.";
 
 /// Build the grouped tools section (Section 3).
+///
+/// When `tool_load` appears in `granted_tools`, the section is framed as a
+/// lazy-load catalog: only a handful of tools carry full JSON schemas in the
+/// request (see [`tool_runner::ALWAYS_NATIVE_TOOLS`]) and the rest are
+/// listed by name so the LLM can call `tool_load(name)` before using them.
+/// This keeps per-turn request payload ~1.5k tokens instead of ~6k when the
+/// agent has access to the full builtin catalog (issue #3044).
 pub fn build_tools_section(granted_tools: &[String]) -> String {
     if granted_tools.is_empty() {
         return String::new();
     }
+
+    let lazy_mode = granted_tools.iter().any(|t| t == "tool_load");
 
     // Group tools by category
     let mut groups: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
@@ -404,6 +413,21 @@ pub fn build_tools_section(granted_tools: &[String]) -> String {
             .collect();
         out.push_str(&descs.join(", "));
     }
+
+    if lazy_mode {
+        out.push_str(
+            "\n\n### Lazy Tool Loading\n\
+             Only a small set of tools is declared with full schemas up front \
+             (listed in the request). Any other tool from the catalog above is \
+             *available* but must be loaded before use:\n\
+             - `tool_search(query)` — find tools by keyword when you're unsure of the exact name.\n\
+             - `tool_load(name)` — fetch the full input schema. The tool becomes callable on the NEXT turn.\n\
+             \n\
+             Prefer the already-declared tools when they cover the task. Only reach for `tool_load` \
+             when you genuinely need a tool whose schema you haven't seen yet.",
+        );
+    }
+
     out
 }
 

@@ -81,6 +81,42 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 
+/// Lazy tool loading kicks in only when the agent's granted-tool set is
+/// larger than this threshold. Below this, it's cheaper and simpler to just
+/// ship everything — the agent has already been restricted (by profile or
+/// explicit `capabilities.tools`) and the payload is already small.
+///
+/// ~30 is roughly `ALWAYS_NATIVE_TOOLS.len() + 10`, so any agent with a
+/// trimmed-down profile (Coding = 5, Research = 4, Messaging = 6) stays
+/// well below and bypasses lazy mode entirely. Agents with access to the
+/// full ~75 builtin catalog (issue #3044's problem case) trigger lazy mode.
+const LAZY_TOOLS_THRESHOLD: usize = 30;
+
+/// Build the `tools` field for a `CompletionRequest`. When `lazy_mode` is on
+/// AND the granted-tool set is large enough to benefit, ship only the
+/// always-native subset plus any tools the LLM has loaded this turn via
+/// `tool_load(name)`. The LLM can discover + load more on-demand.
+///
+/// When lazy_mode is off, or the set is already small, pass everything
+/// through so behavior matches the eager baseline.
+fn resolve_request_tools(
+    available_tools: &[ToolDefinition],
+    session_loaded: &[ToolDefinition],
+    lazy_mode: bool,
+) -> Vec<ToolDefinition> {
+    if !lazy_mode || available_tools.len() <= LAZY_TOOLS_THRESHOLD {
+        return available_tools.to_vec();
+    }
+    let mut out = crate::tool_runner::select_native_tools(available_tools);
+    let seen: std::collections::HashSet<String> = out.iter().map(|t| t.name.clone()).collect();
+    for t in session_loaded {
+        if !seen.contains(&t.name) {
+            out.push(t.clone());
+        }
+    }
+    out
+}
+
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
 /// post-processing (session persistence, proactive memory extraction) lands
@@ -2586,6 +2622,17 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
+
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
     let sender_user_id: Option<String> = manifest
@@ -2996,7 +3043,7 @@ pub async fn run_agent_loop(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -3318,6 +3365,15 @@ pub async fn run_agent_loop(
                             Some(prev) => format!("{prev}\n\n{notice}"),
                             None => notice.clone(),
                         });
+                    }
+
+                    // Capture lazy-load side-channel from the tool_load meta-tool
+                    // (issue #3044). Tools registered this way become callable on
+                    // subsequent iterations of this loop.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
+                        }
                     }
 
                     // Layer 2: per-result budget — persist oversized outputs to disk.
@@ -3876,6 +3932,17 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
+
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
     let sender_user_id: Option<String> = manifest
@@ -4291,7 +4358,7 @@ pub async fn run_agent_loop_streaming(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -4657,6 +4724,15 @@ pub async fn run_agent_loop_streaming(
                             .is_err()
                         {
                             warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
+                    }
+
+                    // Capture lazy-load side-channel (issue #3044) — the
+                    // streaming path, same rationale as the non-streaming
+                    // version above.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
                         }
                     }
 

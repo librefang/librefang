@@ -8,7 +8,7 @@ use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::taint::{TaintLabel, TaintSink, TaintedValue};
-use librefang_types::tool::{ToolDefinition, ToolResult};
+use librefang_types::tool::{ToolDefinition, ToolExecutionStatus, ToolResult};
 use librefang_types::tool_compat::normalize_tool_name;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -358,6 +358,22 @@ pub async fn execute_tool_raw(
     // `ToolResult.owner_notice` and is consumed by `agent_loop.rs`.
     if tool_name == "notify_owner" {
         return tool_notify_owner(tool_use_id, input);
+    }
+
+    // Lazy tool loading meta-tools (issue #3044). `tool_load` carries the
+    // loaded schema via `ToolResult.loaded_tool` side-channel which the agent
+    // loop reads to extend the next request's tools list. Both are dispatched
+    // before the generic Result<String, String> wrapper so the side-channel
+    // survives.
+    if tool_name == "tool_load" {
+        let mut r = tool_meta_load(input);
+        r.tool_use_id = tool_use_id.to_string();
+        return r;
+    }
+    if tool_name == "tool_search" {
+        let mut r = tool_meta_search(input);
+        r.tool_use_id = tool_use_id.to_string();
+        return r;
     }
 
     let ToolExecContext {
@@ -1125,6 +1141,65 @@ pub async fn execute_tool(
         dangerous_command_checker,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
+}
+
+/// Tools that are always shipped as full JSON schemas in every LLM request,
+/// regardless of lazy-loading settings.
+///
+/// Rationale (issue #3044): shipping all ~75 builtin tool schemas on every
+/// turn burns ~6k tokens of request payload. Most conversations only use a
+/// handful of tools — and the ones below are the ones agents reach for most
+/// often, so it's worth paying their declaration cost upfront to avoid a
+/// `tool_load` round-trip on the common path.
+///
+/// Everything else in [`builtin_tool_definitions`] is available via the
+/// `tool_load(name)` meta-tool (declared as part of this list so the LLM can
+/// always discover new tools) and `tool_search(query)`.
+///
+/// Order matters only for readability in logs — the final list is a Vec, so
+/// the order is preserved into the request body.
+pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
+    // Meta: discovery + loading. Without these, the LLM cannot escape the
+    // lazy-load regime on its own.
+    "tool_load",
+    "tool_search",
+    // Memory: used on nearly every turn of a multi-turn conversation.
+    "memory_store",
+    "memory_recall",
+    "memory_list",
+    // Web: the most common "go find something" action.
+    "web_search",
+    "web_fetch",
+    // Files: reading is near-universal; writing and listing round out the
+    // core file-flow so agents don't round-trip to load each one.
+    "file_read",
+    // Agent-to-agent / messaging: common proactive output path.
+    "agent_send",
+    "agent_list",
+    "channel_send",
+    // Private channel to the owner — intentionally cheap so agents never
+    // skip using it because of declaration cost.
+    "notify_owner",
+    // Skill evolution helpers stay native because they're also in the
+    // always-available set enforced by the kernel.
+    "skill_read_file",
+    "skill_evolve_create",
+    "skill_evolve_update",
+    "skill_evolve_patch",
+    "skill_evolve_delete",
+    "skill_evolve_rollback",
+    "skill_evolve_write_file",
+    "skill_evolve_remove_file",
+];
+
+/// Select the subset of `all` whose names appear in [`ALWAYS_NATIVE_TOOLS`].
+/// Used by the agent loop to build the lazy-mode tools list.
+pub fn select_native_tools(all: &[ToolDefinition]) -> Vec<ToolDefinition> {
+    let want: std::collections::HashSet<&str> = ALWAYS_NATIVE_TOOLS.iter().copied().collect();
+    all.iter()
+        .filter(|t| want.contains(t.name.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Get definitions for all built-in tools.
@@ -2081,6 +2156,30 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["name", "path"]
             }),
         },
+        // --- Meta-tools: lazy tool loading (issue #3044) ---
+        ToolDefinition {
+            name: "tool_load".to_string(),
+            description: "Load the full JSON schema for a tool by name. Call this before using a tool that is listed in the catalog but not yet declared with a full schema. The loaded tool becomes callable on the next turn.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Tool name to load (e.g., 'file_write', 'browser_navigate')" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Find tools by keyword. Returns matching tool names and one-line hints from the full catalog.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Keyword(s) to match against tool names and descriptions (e.g., 'read file', 'screenshot')" },
+                    "limit": { "type": "integer", "description": "Max results (default 10)", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"]
+            }),
+        },
     ]
 }
 
@@ -2746,6 +2845,129 @@ fn tool_agent_kill(
 ///
 /// Errors are returned via `ToolResult.is_error = true` with a descriptive
 /// message; the model is expected to retry with corrected arguments.
+/// Meta-tool: load a tool's full schema by name (issue #3044). The returned
+/// schema is both printed into `content` for the LLM to read AND attached as
+/// `ToolResult.loaded_tool` so the agent loop can register it in the session's
+/// lazy-load cache — making the tool callable on the next turn.
+fn tool_meta_load(input: &serde_json::Value) -> ToolResult {
+    let name = input
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return ToolResult::error(
+            "".to_string(),
+            "tool_load requires a 'name' string".to_string(),
+        );
+    }
+    let all = builtin_tool_definitions();
+    match all.into_iter().find(|t| t.name == name) {
+        Some(def) => {
+            let schema = serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "input_schema": def.input_schema,
+            });
+            let content = format!(
+                "Loaded tool '{}'. Schema:\n{}\n\nYou can call this tool on your next turn.",
+                def.name,
+                serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string()),
+            );
+            ToolResult {
+                tool_use_id: String::new(),
+                content,
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                loaded_tool: Some(def),
+                ..Default::default()
+            }
+        }
+        None => ToolResult::error(
+            String::new(),
+            format!(
+                "Unknown tool '{}'. Call tool_search(query) to find available tools.",
+                name
+            ),
+        ),
+    }
+}
+
+/// Meta-tool: search the tool catalog by keyword (issue #3044). Returns a
+/// short list of matching tool names and one-line hints sourced from the
+/// prompt_builder catalog.
+fn tool_meta_search(input: &serde_json::Value) -> ToolResult {
+    let query = input
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if query.is_empty() {
+        return ToolResult::error(
+            String::new(),
+            "tool_search requires a non-empty 'query' string".to_string(),
+        );
+    }
+    let limit = input
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 50) as usize;
+
+    // Tokenize query — any token in the tool name, description, or hint makes a hit.
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    let mut matches: Vec<(usize, String, String)> = Vec::new();
+    for def in builtin_tool_definitions() {
+        let name_lc = def.name.to_lowercase();
+        let desc_lc = def.description.to_lowercase();
+        let hint = crate::prompt_builder::tool_hint(&def.name);
+        let hint_lc = hint.to_lowercase();
+        let score = tokens.iter().fold(0usize, |acc, tok| {
+            let tok = tok.trim();
+            if tok.is_empty() {
+                return acc;
+            }
+            acc + (name_lc.contains(tok) as usize) * 3
+                + (hint_lc.contains(tok) as usize) * 2
+                + (desc_lc.contains(tok) as usize)
+        });
+        if score > 0 {
+            matches.push((score, def.name, hint.to_string()));
+        }
+    }
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.truncate(limit);
+
+    if matches.is_empty() {
+        return ToolResult::ok(
+            String::new(),
+            format!(
+                "No tools matched '{}'. Browse the tool catalog in the system prompt.",
+                query
+            ),
+        );
+    }
+    let lines: Vec<String> = matches
+        .into_iter()
+        .map(|(_, name, hint)| {
+            if hint.is_empty() {
+                name
+            } else {
+                format!("{name}: {hint}")
+            }
+        })
+        .collect();
+    ToolResult::ok(
+        String::new(),
+        format!(
+            "Matches for '{}' (call tool_load(name) to get a tool's schema):\n{}",
+            query,
+            lines.join("\n")
+        ),
+    )
+}
+
 fn tool_notify_owner(tool_use_id: &str, input: &serde_json::Value) -> ToolResult {
     let reason = input
         .get("reason")
@@ -8128,6 +8350,119 @@ description = "test"
             assert!(r.is_error, "expected error for input {input:?}");
             assert!(r.owner_notice.is_none());
         }
+    }
+
+    // ── Lazy tool loading (issue #3044) ───────────────────────────────────
+
+    #[test]
+    fn test_tool_meta_load_returns_schema_and_side_channel() {
+        let input = serde_json::json!({"name": "file_write"});
+        let r = tool_meta_load(&input);
+        assert!(!r.is_error);
+        assert!(r.content.contains("file_write"));
+        assert!(r.content.contains("input_schema") || r.content.contains("content"));
+        // Side-channel must carry the full ToolDefinition for the agent loop.
+        let def = r
+            .loaded_tool
+            .expect("loaded_tool side-channel must be populated");
+        assert_eq!(def.name, "file_write");
+        assert!(!def.description.is_empty());
+    }
+
+    #[test]
+    fn test_tool_meta_load_rejects_unknown_name() {
+        let r = tool_meta_load(&serde_json::json!({"name": "not_a_real_tool"}));
+        assert!(r.is_error);
+        assert!(r.loaded_tool.is_none());
+        assert!(r.content.to_lowercase().contains("unknown"));
+    }
+
+    #[test]
+    fn test_tool_meta_load_rejects_missing_name() {
+        let r = tool_meta_load(&serde_json::json!({}));
+        assert!(r.is_error);
+        assert!(r.loaded_tool.is_none());
+    }
+
+    #[test]
+    fn test_tool_meta_search_finds_by_keyword() {
+        let r = tool_meta_search(&serde_json::json!({"query": "write"}));
+        assert!(!r.is_error);
+        assert!(r.content.contains("file_write") || r.content.contains("memory_store"));
+        assert!(r.loaded_tool.is_none()); // search doesn't load; only load loads.
+    }
+
+    #[test]
+    fn test_tool_meta_search_respects_limit() {
+        let r = tool_meta_search(&serde_json::json!({"query": "file", "limit": 2}));
+        assert!(!r.is_error);
+        // At most 2 result lines (header line + max 2 match lines).
+        let match_lines = r.content.lines().filter(|l| l.contains(": ")).count();
+        assert!(match_lines <= 2, "expected ≤2 matches, got {match_lines}");
+    }
+
+    #[test]
+    fn test_tool_meta_search_rejects_empty_query() {
+        let r = tool_meta_search(&serde_json::json!({"query": ""}));
+        assert!(r.is_error);
+    }
+
+    #[test]
+    fn test_always_native_tools_includes_meta_tools() {
+        // The meta-tools MUST be in the always-native set — otherwise the LLM
+        // can never escape eager mode when the loop trims the tool list.
+        assert!(ALWAYS_NATIVE_TOOLS.contains(&"tool_load"));
+        assert!(ALWAYS_NATIVE_TOOLS.contains(&"tool_search"));
+    }
+
+    #[test]
+    fn test_builtin_tool_definitions_declares_meta_tools() {
+        let defs = builtin_tool_definitions();
+        assert!(defs.iter().any(|t| t.name == "tool_load"));
+        assert!(defs.iter().any(|t| t.name == "tool_search"));
+    }
+
+    #[test]
+    fn test_select_native_tools_trims_to_native_set() {
+        let defs = builtin_tool_definitions();
+        let native = select_native_tools(&defs);
+        // Result is a subset of the full builtin set.
+        assert!(native.len() < defs.len());
+        // Every returned tool's name is in ALWAYS_NATIVE_TOOLS.
+        for t in &native {
+            assert!(
+                ALWAYS_NATIVE_TOOLS.contains(&t.name.as_str()),
+                "unexpected native tool: {}",
+                t.name
+            );
+        }
+        // Every name in ALWAYS_NATIVE_TOOLS that exists in builtins must be present.
+        let builtin_names: std::collections::HashSet<&str> =
+            defs.iter().map(|t| t.name.as_str()).collect();
+        for want in ALWAYS_NATIVE_TOOLS {
+            if builtin_names.contains(want) {
+                assert!(
+                    native.iter().any(|t| t.name == *want),
+                    "native set missing expected tool: {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lazy_mode_reduces_serialized_tool_payload() {
+        // Quantify the savings this PR is claiming (issue #3044). The lazy
+        // set serialized as JSON should be dramatically smaller than the
+        // full builtin set.
+        let full = builtin_tool_definitions();
+        let native = select_native_tools(&full);
+        let full_bytes = serde_json::to_vec(&full).unwrap().len();
+        let native_bytes = serde_json::to_vec(&native).unwrap().len();
+        // Expect at least a 50% reduction — in practice it's ~75%.
+        assert!(
+            native_bytes * 2 < full_bytes,
+            "native set ({native_bytes}B) should be less than half the full set ({full_bytes}B)"
+        );
     }
 }
 
