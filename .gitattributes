@@ -1,0 +1,6 @@
+# Force LF line endings on golden fixtures and other generated/compared
+# text artifacts so Windows git checkouts don't drift from CI on other OSes.
+# Without this, a Windows checkout would materialize CRLF and fixture-diff
+# tests would fail cross-platform. (Rust source + JSON are fine as-is; the
+# explicit `eol=lf` here is a safety rail for tests that byte-compare.)
+crates/librefang-api/tests/fixtures/*.json text eol=lf
