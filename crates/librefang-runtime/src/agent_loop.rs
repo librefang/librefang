@@ -93,18 +93,23 @@ pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
 const LAZY_TOOLS_THRESHOLD: usize = 30;
 
 /// Build the `tools` field for a `CompletionRequest`. When `lazy_mode` is on
-/// AND the granted-tool set is large enough to benefit, ship only the
-/// always-native subset plus any tools the LLM has loaded this turn via
-/// `tool_load(name)`. The LLM can discover + load more on-demand.
+/// AND the granted-tool set is large enough to benefit AND `tool_load` is
+/// actually reachable from the granted set, ship only the always-native
+/// subset plus any tools the LLM has loaded this turn via `tool_load(name)`.
+/// The LLM can discover + load more on-demand.
 ///
-/// When lazy_mode is off, or the set is already small, pass everything
-/// through so behavior matches the eager baseline.
+/// When lazy_mode is off, the set is already small, or `tool_load` is not in
+/// the allowlist (the LLM would have no way to pull a stripped tool back in),
+/// pass everything through so behavior matches the eager baseline. Missing
+/// `tool_load` in an allowlisted-but-over-threshold agent was a silent
+/// tool-disappearance bug — see issue #3044 follow-up review.
 fn resolve_request_tools(
     available_tools: &[ToolDefinition],
     session_loaded: &[ToolDefinition],
     lazy_mode: bool,
 ) -> Vec<ToolDefinition> {
-    if !lazy_mode || available_tools.len() <= LAZY_TOOLS_THRESHOLD {
+    let has_tool_load = available_tools.iter().any(|t| t.name == "tool_load");
+    if !lazy_mode || available_tools.len() <= LAZY_TOOLS_THRESHOLD || !has_tool_load {
         return available_tools.to_vec();
     }
     let mut out = crate::tool_runner::select_native_tools(available_tools);
@@ -618,6 +623,11 @@ struct ToolExecutionContext<'a> {
     session: &'a mut Session,
     kernel: Option<&'a Arc<dyn KernelHandle>>,
     available_tool_names: &'a [String],
+    /// Full `ToolDefinition` list for the agent's granted tools — needed so
+    /// the lazy-load meta-tools (`tool_load`, `tool_search`) can resolve
+    /// non-builtin entries (MCP, skills) against the agent's actual pool
+    /// rather than only the builtin catalog (issue #3044 follow-up).
+    available_tools: &'a [ToolDefinition],
     caller_id_str: &'a str,
     skill_registry: Option<&'a SkillRegistry>,
     allowed_skills: &'a [String],
@@ -819,6 +829,7 @@ async fn execute_single_tool_call(
             ctx.interrupt.clone(),
             Some(ctx.session.id.to_string()).as_deref(),
             ctx.dangerous_command_checker,
+            Some(ctx.available_tools),
         ),
     )
     .await
@@ -3325,6 +3336,7 @@ pub async fn run_agent_loop(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -4674,6 +4686,7 @@ pub async fn run_agent_loop_streaming(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -5683,6 +5696,41 @@ mod tests {
     #[test]
     fn test_max_iterations_constant() {
         assert_eq!(MAX_ITERATIONS, 50);
+    }
+
+    fn fake_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("fake {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn test_resolve_request_tools_falls_back_to_eager_when_tool_load_missing() {
+        // Regression for PR #3047 codex review P1: if an agent's allowlist
+        // is over the threshold but does NOT include `tool_load`, we must
+        // return the full eager list. Otherwise non-native tools get
+        // stripped with no recovery path and silently disappear.
+        let mut pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .collect();
+        // Sanity: tool_load is definitely not in the list.
+        assert!(!pool.iter().any(|t| t.name == "tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert_eq!(
+            resolved.len(),
+            pool.len(),
+            "lazy mode must bypass when tool_load is absent — got trimmed list"
+        );
+
+        // And with tool_load in the pool, lazy mode kicks in (as designed).
+        pool.push(fake_tool("tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert!(
+            resolved.len() < pool.len(),
+            "lazy mode should trim when tool_load is present"
+        );
     }
 
     #[test]

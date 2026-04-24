@@ -302,6 +302,13 @@ pub fn current_agent_depth() -> u32 {
 pub struct ToolExecContext<'a> {
     pub kernel: Option<&'a Arc<dyn KernelHandle>>,
     pub allowed_tools: Option<&'a [String]>,
+    /// Full `ToolDefinition` list for the agent's granted tools (builtin +
+    /// MCP + skills). When `Some`, lazy-load meta-tools (`tool_load`,
+    /// `tool_search`) consult this as the source of truth so non-builtin
+    /// tools remain loadable after the eager schema trim (issue #3044).
+    /// `None` falls back to the builtin catalog — kept for legacy/test call
+    /// sites that don't have the list on hand.
+    pub available_tools: Option<&'a [ToolDefinition]>,
     pub caller_agent_id: Option<&'a str>,
     pub skill_registry: Option<&'a SkillRegistry>,
     /// Skill allowlist for the calling agent. Empty slice = all skills allowed.
@@ -366,12 +373,12 @@ pub async fn execute_tool_raw(
     // before the generic Result<String, String> wrapper so the side-channel
     // survives.
     if tool_name == "tool_load" {
-        let mut r = tool_meta_load(input);
+        let mut r = tool_meta_load(input, ctx.available_tools);
         r.tool_use_id = tool_use_id.to_string();
         return r;
     }
     if tool_name == "tool_search" {
-        let mut r = tool_meta_search(input);
+        let mut r = tool_meta_search(input, ctx.available_tools);
         r.tool_use_id = tool_use_id.to_string();
         return r;
     }
@@ -379,6 +386,7 @@ pub async fn execute_tool_raw(
     let ToolExecContext {
         kernel,
         allowed_tools,
+        available_tools: _,
         caller_agent_id,
         skill_registry,
         allowed_skills,
@@ -992,6 +1000,7 @@ pub async fn execute_tool(
     dangerous_command_checker: Option<
         &Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
+    available_tools: Option<&[ToolDefinition]>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1119,6 +1128,7 @@ pub async fn execute_tool(
     let ctx = ToolExecContext {
         kernel,
         allowed_tools,
+        available_tools,
         caller_agent_id,
         skill_registry,
         allowed_skills,
@@ -2845,11 +2855,29 @@ fn tool_agent_kill(
 ///
 /// Errors are returned via `ToolResult.is_error = true` with a descriptive
 /// message; the model is expected to retry with corrected arguments.
+/// Resolve the pool `tool_load` / `tool_search` search against.
+///
+/// - `Some(pool)` — the agent's granted `ToolDefinition` list from the
+///   agent-loop (builtin + MCP + skills). Preferred source so MCP/skill tools
+///   can be loaded back after the eager-schema trim (issue #3044).
+/// - `None` / empty — fall back to the builtin catalog. Callers that don't
+///   have the granted list on hand (legacy `execute_tool` paths, unit tests)
+///   still get sensible behavior for builtin tools.
+fn meta_lookup_pool(available: Option<&[ToolDefinition]>) -> Vec<ToolDefinition> {
+    match available {
+        Some(list) if !list.is_empty() => list.to_vec(),
+        _ => builtin_tool_definitions(),
+    }
+}
+
 /// Meta-tool: load a tool's full schema by name (issue #3044). The returned
 /// schema is both printed into `content` for the LLM to read AND attached as
 /// `ToolResult.loaded_tool` so the agent loop can register it in the session's
 /// lazy-load cache — making the tool callable on the next turn.
-fn tool_meta_load(input: &serde_json::Value) -> ToolResult {
+fn tool_meta_load(
+    input: &serde_json::Value,
+    available_tools: Option<&[ToolDefinition]>,
+) -> ToolResult {
     let name = input
         .get("name")
         .and_then(|v| v.as_str())
@@ -2861,8 +2889,8 @@ fn tool_meta_load(input: &serde_json::Value) -> ToolResult {
             "tool_load requires a 'name' string".to_string(),
         );
     }
-    let all = builtin_tool_definitions();
-    match all.into_iter().find(|t| t.name == name) {
+    let pool = meta_lookup_pool(available_tools);
+    match pool.into_iter().find(|t| t.name == name) {
         Some(def) => {
             let schema = serde_json::json!({
                 "name": def.name,
@@ -2896,7 +2924,10 @@ fn tool_meta_load(input: &serde_json::Value) -> ToolResult {
 /// Meta-tool: search the tool catalog by keyword (issue #3044). Returns a
 /// short list of matching tool names and one-line hints sourced from the
 /// prompt_builder catalog.
-fn tool_meta_search(input: &serde_json::Value) -> ToolResult {
+fn tool_meta_search(
+    input: &serde_json::Value,
+    available_tools: Option<&[ToolDefinition]>,
+) -> ToolResult {
     let query = input
         .get("query")
         .and_then(|v| v.as_str())
@@ -2918,7 +2949,7 @@ fn tool_meta_search(input: &serde_json::Value) -> ToolResult {
     // Tokenize query — any token in the tool name, description, or hint makes a hit.
     let tokens: Vec<&str> = query.split_whitespace().collect();
     let mut matches: Vec<(usize, String, String)> = Vec::new();
-    for def in builtin_tool_definitions() {
+    for def in meta_lookup_pool(available_tools) {
         let name_lc = def.name.to_lowercase();
         let desc_lc = def.description.to_lowercase();
         let hint = crate::prompt_builder::tool_hint(&def.name);
@@ -6324,6 +6355,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -6363,6 +6395,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6399,6 +6432,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6435,6 +6469,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6470,6 +6505,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -6505,6 +6541,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6540,6 +6577,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6576,6 +6614,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6613,6 +6652,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -6676,6 +6716,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -6717,6 +6758,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6765,6 +6807,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -6814,6 +6857,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -6874,6 +6918,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -7070,6 +7115,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7128,6 +7174,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7345,6 +7392,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7388,6 +7436,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7431,6 +7480,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7483,6 +7533,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7539,6 +7590,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7638,6 +7690,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7680,6 +7733,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -7731,6 +7785,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should NOT be a permission-denied error
@@ -7772,6 +7827,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7813,6 +7869,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7853,6 +7910,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7893,6 +7951,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -8357,7 +8416,7 @@ description = "test"
     #[test]
     fn test_tool_meta_load_returns_schema_and_side_channel() {
         let input = serde_json::json!({"name": "file_write"});
-        let r = tool_meta_load(&input);
+        let r = tool_meta_load(&input, None);
         assert!(!r.is_error);
         assert!(r.content.contains("file_write"));
         assert!(r.content.contains("input_schema") || r.content.contains("content"));
@@ -8371,7 +8430,7 @@ description = "test"
 
     #[test]
     fn test_tool_meta_load_rejects_unknown_name() {
-        let r = tool_meta_load(&serde_json::json!({"name": "not_a_real_tool"}));
+        let r = tool_meta_load(&serde_json::json!({"name": "not_a_real_tool"}), None);
         assert!(r.is_error);
         assert!(r.loaded_tool.is_none());
         assert!(r.content.to_lowercase().contains("unknown"));
@@ -8379,14 +8438,14 @@ description = "test"
 
     #[test]
     fn test_tool_meta_load_rejects_missing_name() {
-        let r = tool_meta_load(&serde_json::json!({}));
+        let r = tool_meta_load(&serde_json::json!({}), None);
         assert!(r.is_error);
         assert!(r.loaded_tool.is_none());
     }
 
     #[test]
     fn test_tool_meta_search_finds_by_keyword() {
-        let r = tool_meta_search(&serde_json::json!({"query": "write"}));
+        let r = tool_meta_search(&serde_json::json!({"query": "write"}), None);
         assert!(!r.is_error);
         assert!(r.content.contains("file_write") || r.content.contains("memory_store"));
         assert!(r.loaded_tool.is_none()); // search doesn't load; only load loads.
@@ -8394,7 +8453,7 @@ description = "test"
 
     #[test]
     fn test_tool_meta_search_respects_limit() {
-        let r = tool_meta_search(&serde_json::json!({"query": "file", "limit": 2}));
+        let r = tool_meta_search(&serde_json::json!({"query": "file", "limit": 2}), None);
         assert!(!r.is_error);
         // At most 2 result lines (header line + max 2 match lines).
         let match_lines = r.content.lines().filter(|l| l.contains(": ")).count();
@@ -8403,7 +8462,7 @@ description = "test"
 
     #[test]
     fn test_tool_meta_search_rejects_empty_query() {
-        let r = tool_meta_search(&serde_json::json!({"query": ""}));
+        let r = tool_meta_search(&serde_json::json!({"query": ""}), None);
         assert!(r.is_error);
     }
 
@@ -8462,6 +8521,59 @@ description = "test"
         assert!(
             native_bytes * 2 < full_bytes,
             "native set ({native_bytes}B) should be less than half the full set ({full_bytes}B)"
+        );
+    }
+
+    #[test]
+    fn test_tool_meta_load_resolves_non_builtin_from_available_tools() {
+        // Regression for PR #3047 codex review P1: a non-builtin tool
+        // (MCP/skill-provided) must be loadable via tool_load as long as it
+        // exists in the agent's granted `available_tools` pool. Before the
+        // fix `tool_meta_load` only scanned `builtin_tool_definitions()`,
+        // so dynamic tools were stripped by lazy mode and unreachable.
+        let dynamic = ToolDefinition {
+            name: "mcp_custom_thing".to_string(),
+            description: "A dynamically-registered MCP tool".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            }),
+        };
+        let pool = vec![dynamic.clone()];
+        let r = tool_meta_load(
+            &serde_json::json!({"name": "mcp_custom_thing"}),
+            Some(&pool),
+        );
+        assert!(!r.is_error, "expected success, got: {}", r.content);
+        let loaded = r
+            .loaded_tool
+            .expect("loaded_tool must populate for granted non-builtin");
+        assert_eq!(loaded.name, "mcp_custom_thing");
+        assert_eq!(loaded.description, dynamic.description);
+    }
+
+    #[test]
+    fn test_tool_meta_search_scopes_to_available_tools_when_provided() {
+        // Search must also prefer the agent's granted pool so results never
+        // hallucinate tools the agent can't actually call.
+        let only = vec![ToolDefinition {
+            name: "mcp_unique_name_zzz".to_string(),
+            description: "keyword_zzz".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let r = tool_meta_search(&serde_json::json!({"query": "keyword_zzz"}), Some(&only));
+        assert!(!r.is_error);
+        assert!(
+            r.content.contains("mcp_unique_name_zzz"),
+            "expected the granted tool to appear, got: {}",
+            r.content
+        );
+        // builtin 'file_write' must NOT show up when the pool is scoped.
+        assert!(
+            !r.content.contains("file_write"),
+            "search leaked outside the supplied pool: {}",
+            r.content
         );
     }
 }
