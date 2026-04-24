@@ -62,6 +62,17 @@ impl ApiErrorResponse {
         }
     }
 
+    /// 403 Forbidden.
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: None,
+            r#type: None,
+            details: None,
+            status: StatusCode::FORBIDDEN,
+        }
+    }
+
     /// 409 Conflict.
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self {

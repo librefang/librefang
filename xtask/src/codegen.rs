@@ -14,14 +14,19 @@ pub struct CodegenArgs {
 fn generate_openapi(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Generating OpenAPI spec...");
 
-    // Run the openapi spec test which regenerates openapi.json
+    // Run the openapi spec test which regenerates openapi.json.
+    // The `--test openapi_spec_test` flag selects the integration test binary
+    // by file name; we don't also pass a name filter because the test
+    // function is `generate_openapi_json`, and an unmatched filter silently
+    // turns the command into a no-op that leaves a stale openapi.json on disk.
     let status = Command::new("cargo")
         .args([
             "test",
             "-p",
             "librefang-api",
+            "--test",
+            "openapi_spec_test",
             "--",
-            "openapi_spec",
             "--nocapture",
         ])
         .current_dir(root)

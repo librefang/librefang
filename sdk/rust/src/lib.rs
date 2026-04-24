@@ -32,11 +32,13 @@ pub mod agents;
 pub mod models;
 pub mod providers;
 pub mod skills;
+pub mod tools;
 
 pub use agents::Agents;
 pub use models::Models;
 pub use providers::Providers;
 pub use skills::Skills;
+pub use tools::Tools;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -59,6 +61,7 @@ pub struct LibreFang {
     skills: Arc<Skills>,
     models: Arc<Models>,
     providers: Arc<Providers>,
+    tools: Arc<Tools>,
 }
 
 impl LibreFang {
@@ -70,6 +73,7 @@ impl LibreFang {
         let skills = Arc::new(Skills::new(base_url.clone(), client.clone()));
         let models = Arc::new(Models::new(base_url.clone(), client.clone()));
         let providers = Arc::new(Providers::new(base_url.clone(), client.clone()));
+        let tools = Arc::new(Tools::new(base_url.clone(), client.clone()));
 
         Self {
             base_url,
@@ -78,6 +82,7 @@ impl LibreFang {
             skills,
             models,
             providers,
+            tools,
         }
     }
 
@@ -95,6 +100,10 @@ impl LibreFang {
 
     pub fn providers(&self) -> &Arc<Providers> {
         &self.providers
+    }
+
+    pub fn tools(&self) -> &Arc<Tools> {
+        &self.tools
     }
 
     pub fn base_url(&self) -> &str {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -480,6 +481,23 @@ type ToolResource struct{ client *Client }
 func (r *ToolResource) List() ([]map[string]interface{}, error) {
 	data, _ := r.client.doRequest("GET", "/api/tools", nil)
 	return getSlice(data, "tools"), nil
+}
+
+func (r *ToolResource) Get(name string) (map[string]interface{}, error) {
+	resp, err := r.client.doRequest("GET", fmt.Sprintf("/api/tools/%s", url.PathEscape(name)), nil)
+	return toMap(resp), err
+}
+
+// Invoke calls /api/tools/{name}/invoke. Pass a non-empty agentID for
+// approval-gated tools so the server can resolve the deferred execution
+// to a real agent; pass "" for tools that do not require approval.
+func (r *ToolResource) Invoke(name string, input map[string]interface{}, agentID string) (map[string]interface{}, error) {
+	path := fmt.Sprintf("/api/tools/%s/invoke", url.PathEscape(name))
+	if agentID != "" {
+		path += "?agent_id=" + url.QueryEscape(agentID)
+	}
+	resp, err := r.client.doRequest("POST", path, input)
+	return toMap(resp), err
 }
 
 // --- Model Resource ---

@@ -99,6 +99,7 @@ use crate::types;
         routes::create_skill,
         routes::list_tools,
         routes::get_tool,
+        routes::invoke_tool,
         routes::marketplace_search,
         routes::clawhub_search,
         routes::clawhub_browse,

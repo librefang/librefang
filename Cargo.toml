@@ -181,7 +181,9 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # Email (SMTP + IMAP)
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 imap = { version = "2", default-features = false }
-rustls-connector = "0.23"
+# `native-certs` is no longer a default feature in 0.23, but the
+# channels crate relies on the system trust store for IMAP/SMTP.
+rustls-connector = { version = "0.23", features = ["native-certs"] }
 mailparse = "0.16"
 
 # Internationalization (i18n)

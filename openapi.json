@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.15-beta22"
+    "version": "2026.4.23-beta4"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -2192,6 +2192,133 @@
           },
           "401": {
             "description": "Not authenticated"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/abort": {
+      "post": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_abort",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Abort outcome",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/enabled": {
+      "put": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_set_enabled",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Opt-in toggled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/agents/{id}/trigger": {
+      "post": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger outcome",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          }
+        }
+      }
+    },
+    "/api/auto-dream/status": {
+      "get": {
+        "tags": [
+          "auto_dream"
+        ],
+        "operationId": "auto_dream_status",
+        "responses": {
+          "200": {
+            "description": "Auto-dream status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           }
         }
       }
@@ -6520,13 +6647,80 @@
         }
       }
     },
+    "/api/tools/{name}/invoke": {
+      "post": {
+        "tags": [
+          "tools"
+        ],
+        "summary": "POST /api/tools/{name}/invoke — Invoke a kernel tool directly.",
+        "description": "External integrations (MCP bridges, scripts, automations) can call kernel\ntools without going through an agent loop. Fail-closed: the endpoint\nrejects every request unless the tool is listed in\n`[tool_invoke] allowlist` and `tool_invoke.enabled = true`. Pass\n`?agent_id=<uuid>` when invoking approval-gated tools so the approval\ncallback can resolve the correct agent; without an `agent_id` those\ntools are rejected to avoid orphaned deferred executions.",
+        "operationId": "invoke_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Tool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Caller agent UUID (required for approval-gated tools)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Tool execution result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Tool invocation failed or requires an agent context"
+          },
+          "403": {
+            "description": "Endpoint disabled or tool not in allowlist"
+          },
+          "404": {
+            "description": "Tool not found"
+          }
+        }
+      }
+    },
     "/api/triggers": {
       "get": {
         "tags": [
           "workflows"
         ],
-        "summary": "GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).",
         "operationId": "list_triggers",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "query",
+            "description": "Filter by agent ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "List triggers",
@@ -6568,12 +6762,12 @@
       }
     },
     "/api/triggers/{id}": {
-      "put": {
+      "get": {
         "tags": [
           "workflows"
         ],
-        "summary": "PUT /api/triggers/:id — Update a trigger (enable/disable toggle).",
-        "operationId": "update_trigger",
+        "summary": "GET /api/triggers/:id — Fetch a single trigger by ID.",
+        "operationId": "get_trigger",
         "parameters": [
           {
             "name": "id",
@@ -6585,22 +6779,17 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
-            "description": "Trigger updated",
+            "description": "Trigger detail",
             "content": {
               "application/json": {
                 "schema": {}
               }
             }
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       },
@@ -6624,6 +6813,46 @@
         "responses": {
           "200": {
             "description": "Trigger deleted"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PATCH /api/triggers/:id — Partially update a trigger.",
+        "description": "All body fields are optional. Only provided fields are changed.\nSupported fields: `pattern`, `prompt_template`, `enabled`, `max_fires`,\n`cooldown_secs` (pass `null` to clear), `session_mode` (pass `null` to clear),\n`target_agent_id` (pass `null` to clear, omit to leave unchanged).",
+        "operationId": "update_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Trigger ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated trigger",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }
@@ -7336,6 +7565,13 @@
             ],
             "description": "Optional sender display name."
           },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional explicit session ID (UUID string) to use for this message.\n\nWhen set, overrides the default session resolution (channel-derived or\nregistry canonical). Enables multi-tab / multi-session UIs where the\ncaller tracks which session each conversation belongs to.\n\nSafety: the server rejects a `session_id` that belongs to a different\nagent with 400 Bad Request."
+          },
           "show_thinking": {
             "type": [
               "boolean",
@@ -7417,7 +7653,7 @@
               "string",
               "null"
             ],
-            "description": "Optional private notice destined for the agent's owner DM,\nproduced when the model invoked the `notify_owner` tool during the\nturn. Channel adapters (e.g. whatsapp-gateway) MUST route this to\nthe owner's address (e.g. OWNER_JID) and NOT to the source chat.\nAdapters that don't support owner-side delivery should ignore it\n(Telegram/Discord/Slack continue to function unchanged)."
+            "description": "§A — Optional private notice destined for the agent's owner DM,\nproduced when the model invoked the `notify_owner` tool during the\nturn. Channel adapters (e.g. whatsapp-gateway) MUST route this to\nthe owner's address (e.g. OWNER_JID) and NOT to the source chat.\nAdapters that don't support owner-side delivery should ignore it\n(BC-01 — Telegram/Discord/Slack continue to function unchanged)."
           },
           "response": {
             "type": "string"
@@ -7608,6 +7844,17 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        }
+      },
+      "SetEnabledRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
           }
         }
       },

@@ -362,6 +362,22 @@ class ToolResource {
   async list() {
     return this._c._request("GET", "/api/tools");
   }
+
+  async get(name) {
+    return this._c._request("GET", "/api/tools/" + encodeURIComponent(name));
+  }
+
+  // Invoke a tool. `opts.agent_id` (optional) is sent as the `?agent_id=`
+  // query parameter — required by the server for approval-gated tools so
+  // the deferred execution can be attributed to a real agent.
+  async invoke(name, input, opts) {
+    let path = "/api/tools/" + encodeURIComponent(name) + "/invoke";
+    const agentId = opts && opts.agent_id;
+    if (agentId) {
+      path += "?agent_id=" + encodeURIComponent(agentId);
+    }
+    return this._c._request("POST", path, input);
+  }
 }
 
 // ── Model Resource ──────────────────────────────────────────────

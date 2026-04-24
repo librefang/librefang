@@ -40,6 +40,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Tools
         .route("/tools", axum::routing::get(list_tools))
         .route("/tools/{name}", axum::routing::get(get_tool))
+        .route("/tools/{name}/invoke", axum::routing::post(invoke_tool))
         // Session management
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/search", axum::routing::get(search_sessions))
@@ -220,7 +221,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
-use librefang_runtime::tool_runner::builtin_tool_definitions;
+use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::agent::AgentId;
 use librefang_types::agent::AgentManifest;
 use librefang_types::i18n::ErrorTranslator;
@@ -1049,6 +1050,183 @@ pub async fn get_tool(
 
     ApiErrorResponse::not_found(tr.t_args("api-error-tool-not-found", &[("name", &name)]))
         .into_json_tuple()
+}
+
+/// POST /api/tools/{name}/invoke — Invoke a kernel tool directly.
+///
+/// External integrations (MCP bridges, scripts, automations) can call kernel
+/// tools without going through an agent loop. Fail-closed: the endpoint
+/// rejects every request unless the tool is listed in
+/// `[tool_invoke] allowlist` and `tool_invoke.enabled = true`. Pass
+/// `?agent_id=<uuid>` when invoking approval-gated tools so the approval
+/// callback can resolve the correct agent; without an `agent_id` those
+/// tools are rejected to avoid orphaned deferred executions.
+#[utoipa::path(
+    post,
+    path = "/api/tools/{name}/invoke",
+    tag = "tools",
+    params(
+        ("name" = String, Path, description = "Tool name"),
+        ("agent_id" = Option<String>, Query, description = "Caller agent UUID (required for approval-gated tools)")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Tool execution result", body = serde_json::Value),
+        (status = 400, description = "Tool invocation failed or requires an agent context"),
+        (status = 403, description = "Endpoint disabled or tool not in allowlist"),
+        (status = 404, description = "Tool not found")
+    )
+)]
+pub async fn invoke_tool(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(input): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let lang_code = super::resolve_lang(lang.as_ref());
+
+    // `agent_id`, if supplied, MUST be a well-formed UUID regardless of
+    // whether the tool is approval-gated. A malformed id would flow into
+    // `caller_agent_id` as opaque bytes and surface later as garbage
+    // attribution on any tool that reads it for telemetry or audit.
+    // Reject it once, at the edge.
+    let caller_agent_id: Option<String> = match params.get("agent_id") {
+        Some(raw) if raw.parse::<uuid::Uuid>().is_ok() => Some(raw.clone()),
+        Some(_) => {
+            let t = ErrorTranslator::new(lang_code);
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
+        }
+        None => None,
+    };
+
+    // 1) Fail-closed allowlist check. Without an agent manifest gating which
+    //    tools the caller may run, any API-key holder would otherwise be able
+    //    to invoke every tool the kernel exposes.
+    let cfg = state.kernel.config_snapshot();
+    if !cfg.tool_invoke.permits(&name) {
+        let t = ErrorTranslator::new(lang_code);
+        let msg = if !cfg.tool_invoke.enabled {
+            t.t("api-error-tool-invoke-disabled")
+        } else {
+            t.t_args("api-error-tool-invoke-denied", &[("name", &name)])
+        };
+        return ApiErrorResponse::forbidden(msg).into_json_tuple();
+    }
+
+    // 2) Deterministic existence check: builtin, connected MCP servers, and
+    //    skill-provided tools are the three sources execute_tool dispatches
+    //    to. Doing this up front lets us return a clean 404 instead of
+    //    string-matching the downstream "Unknown tool:" error.
+    let tool_exists = builtin_tool_definitions().iter().any(|t| t.name == name)
+        || state
+            .kernel
+            .mcp_tools_ref()
+            .lock()
+            .map(|mcp_tools| mcp_tools.iter().any(|t| t.name == name))
+            .unwrap_or(false)
+        || state
+            .kernel
+            .skill_registry_ref()
+            .read()
+            .ok()
+            .is_some_and(|reg| reg.find_tool_provider(&name).is_some());
+    if !tool_exists {
+        let t = ErrorTranslator::new(lang_code);
+        return ApiErrorResponse::not_found(
+            t.t_args("api-error-tool-not-found", &[("name", &name)]),
+        )
+        .into_json_tuple();
+    }
+
+    // 3) Approval-gated tools need a caller_agent_id that the approval
+    //    subsystem can later look up. Without one, execute_tool would post
+    //    the deferred request with `agent_id = "unknown"` and the approval
+    //    could never resolve back to a real agent.
+    if state.kernel.approvals().requires_approval(&name) && caller_agent_id.is_none() {
+        let t = ErrorTranslator::new(lang_code);
+        return ApiErrorResponse::bad_request(
+            t.t_args("api-error-tool-requires-agent", &[("name", &name)]),
+        )
+        .into_json_tuple();
+    }
+
+    // 4) Snapshot the skill registry (so the RwLock guard does not cross the
+    //    `.await`) and resolve kernel-level sandbox defaults before dispatch.
+    let skill_snapshot = state
+        .kernel
+        .skill_registry_ref()
+        .read()
+        .ok()
+        .map(|g| g.snapshot());
+    let workspace_root = cfg.effective_workspaces_dir();
+    let exec_policy = cfg.exec_policy.clone();
+    let docker_config = cfg.docker.clone();
+    let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+
+    let result = execute_tool(
+        "rest-api",
+        &name,
+        &input,
+        Some(&kernel),
+        None, // allowed_tools — already enforced by tool_invoke.allowlist above
+        caller_agent_id.as_deref(),
+        skill_snapshot.as_ref(),
+        None, // allowed_skills — gated by allowlist above
+        Some(state.kernel.mcp_connections_ref()),
+        Some(state.kernel.web_tools()),
+        Some(state.kernel.browser()),
+        None, // allowed_env_vars
+        Some(workspace_root.as_path()),
+        Some(state.kernel.media()),
+        Some(state.kernel.media_drivers()),
+        Some(&exec_policy),
+        Some(state.kernel.tts()),
+        Some(&docker_config),
+        Some(state.kernel.processes()),
+        Some(state.kernel.process_registry()),
+        None, // sender_id
+        None, // channel
+        None, // checkpoint_manager — snapshotting is wired into agent loops
+        None, // interrupt — no session to cancel
+        None, // session_id
+        None, // dangerous_command_checker — session-scoped, not meaningful here
+    )
+    .await;
+
+    // Operator audit trail: every direct invocation bypasses the agent loop
+    // (and therefore the agent-side audit record) so we log who called what
+    // and how it finished. Detail carries the tool name; outcome carries
+    // "ok" / the downstream error. The caller_agent_id is used when
+    // supplied, otherwise a sentinel so the entry still attributes
+    // to "REST caller" rather than appearing as an orphaned agent id.
+    let audit_caller = caller_agent_id.as_deref().unwrap_or("rest-api:anonymous");
+    let audit_outcome = if result.is_error {
+        format!("error: {}", result.content)
+    } else {
+        "ok".to_string()
+    };
+    state.kernel.audit().record(
+        audit_caller,
+        librefang_runtime::audit::AuditAction::ToolInvoke,
+        &name,
+        audit_outcome,
+    );
+
+    let status = if result.is_error {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        Json(
+            serde_json::to_value(result).unwrap_or_else(
+                |_| serde_json::json!({"error": "Failed to serialize tool result"}),
+            ),
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -2330,6 +2330,12 @@ pub struct KernelConfig {
     /// Terminal / CLI access control configuration.
     #[serde(default)]
     pub terminal: TerminalConfig,
+    /// Direct tool-invocation endpoint allowlist. Fail-closed: the
+    /// `POST /api/tools/{name}/invoke` route rejects every request unless
+    /// `tool_invoke.enabled` is `true` and the tool name matches a pattern
+    /// in `tool_invoke.allowlist`.
+    #[serde(default)]
+    pub tool_invoke: ToolInvokeConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3953,6 +3959,7 @@ impl Default for KernelConfig {
             max_agent_call_depth: default_max_agent_call_depth(),
             max_request_body_bytes: default_max_request_body_bytes(),
             terminal: TerminalConfig::default(),
+            tool_invoke: ToolInvokeConfig::default(),
         }
     }
 }
@@ -6306,6 +6313,54 @@ impl Default for TerminalConfig {
     }
 }
 
+/// Configuration for `POST /api/tools/{name}/invoke`.
+///
+/// The direct-invoke endpoint bypasses the agent loop, so the usual
+/// capability gate (agent manifest `tools` list) does not apply. To avoid
+/// a situation where any holder of an API key can call any tool, this
+/// endpoint is fail-closed: disabled by default, and — when enabled — only
+/// the tools whose names match one of the glob patterns in `allowlist` may
+/// be executed.
+///
+/// ```toml
+/// [tool_invoke]
+/// enabled = true
+/// allowlist = ["web_search", "web_fetch", "file_read"]
+/// ```
+///
+/// Pitfall: `allowlist = ["*"]` matches every tool and effectively turns
+/// the endpoint into "give API-key holders the same power as the kernel".
+/// Prefer narrow globs (`"file_*"`, `"web_*"`) — reserve `"*"` for
+/// trusted single-tenant dev environments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolInvokeConfig {
+    /// Master switch. When `false` (default) the endpoint rejects every
+    /// request with 403 regardless of the allowlist.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Glob patterns of tool names that may be invoked via the REST
+    /// endpoint (e.g. `"web_*"`, `"file_read"`). Empty list denies all
+    /// invocations even when `enabled = true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowlist: Vec<String>,
+}
+
+impl ToolInvokeConfig {
+    /// Whether the endpoint is configured to accept `tool_name`.
+    ///
+    /// Returns `true` only when `enabled = true` AND at least one allowlist
+    /// pattern matches. Patterns use the same glob semantics as agent
+    /// capability grants (`*` wildcards).
+    pub fn permits(&self, tool_name: &str) -> bool {
+        self.enabled
+            && self
+                .allowlist
+                .iter()
+                .any(|pattern| crate::capability::glob_matches(pattern, tool_name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6587,5 +6642,84 @@ max_tokens_per_hour = 500000
         assert!(!tc.tmux_enabled);
         assert_eq!(tc.max_windows, 4);
         assert_eq!(tc.tmux_binary_path.as_deref(), Some("/usr/bin/tmux"));
+    }
+
+    // ---- ToolInvokeConfig tests ----
+
+    #[test]
+    fn test_tool_invoke_config_default_is_fail_closed() {
+        let c = ToolInvokeConfig::default();
+        assert!(!c.enabled, "tool_invoke must be disabled by default");
+        assert!(c.allowlist.is_empty());
+        assert!(
+            !c.permits("web_search"),
+            "default config must deny every tool"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_enabled_without_allowlist_denies_all() {
+        let c = ToolInvokeConfig {
+            enabled: true,
+            allowlist: Vec::new(),
+        };
+        assert!(
+            !c.permits("web_search"),
+            "empty allowlist denies all even when enabled"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_allowlist_without_enabled_denies_all() {
+        let c = ToolInvokeConfig {
+            enabled: false,
+            allowlist: vec!["web_search".to_string()],
+        };
+        assert!(
+            !c.permits("web_search"),
+            "disabled endpoint denies all regardless of allowlist"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_exact_match_and_glob() {
+        let c = ToolInvokeConfig {
+            enabled: true,
+            allowlist: vec!["web_search".to_string(), "file_*".to_string()],
+        };
+        assert!(c.permits("web_search"));
+        assert!(c.permits("file_read"));
+        assert!(c.permits("file_write"));
+        assert!(!c.permits("shell_exec"));
+        assert!(!c.permits("web_fetch"));
+    }
+
+    #[test]
+    fn test_kernel_config_includes_tool_invoke_default() {
+        let cfg = KernelConfig::default();
+        assert!(!cfg.tool_invoke.enabled);
+        assert!(cfg.tool_invoke.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_tool_invoke_config_empty_toml_uses_defaults() {
+        let c: ToolInvokeConfig = toml::from_str("").unwrap();
+        assert!(!c.enabled);
+        assert!(c.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_tool_invoke_config_toml_roundtrip() {
+        let toml_str = r#"
+            enabled = true
+            allowlist = ["web_search", "file_*"]
+        "#;
+        let c: ToolInvokeConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.allowlist, vec!["web_search", "file_*"]);
+
+        let back = toml::to_string(&c).unwrap();
+        let again: ToolInvokeConfig = toml::from_str(&back).unwrap();
+        assert_eq!(c, again);
     }
 }
