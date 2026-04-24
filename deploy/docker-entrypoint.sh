@@ -8,16 +8,22 @@ CONFIG="$DATA_DIR/config.toml"
 
 mkdir -p "$DATA_DIR"
 
+if [ "$(stat -c '%U' "$DATA_DIR" 2>/dev/null)" != "node" ]; then
+  chown -R node:node "$DATA_DIR"
+fi
+
 # Pre-create the logs directory so `librefang start --foreground` can open
 # its daily log file on a fresh container. The CLI also creates this dir
 # itself (see setup_foreground_tee), but we do it here too as defense in
 # depth — a missing logs dir previously caused the daemon to panic with
 # exit 101 silently (GH #3058).
-mkdir -p "$DATA_DIR/logs"
-
-if [ "$(stat -c '%U' "$DATA_DIR" 2>/dev/null)" != "node" ]; then
-  chown -R node:node "$DATA_DIR"
-fi
+#
+# Create as the node user so that on reused volumes (where $DATA_DIR is
+# already owned by node and the chown -R above is skipped) the new dir
+# isn't left as root:root 0755 — that would block `gosu node librefang`
+# from writing daemon-*.log and reproduce the same failure under a
+# different error code.
+gosu node mkdir -p "$DATA_DIR/logs"
 
 # First boot only. Subsequent boots skip init: the kernel re-syncs the
 # registry on its own at startup (see librefang-kernel/src/kernel.rs ~2054),
