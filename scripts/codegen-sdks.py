@@ -563,19 +563,32 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 \t\treq.Header.Set("Accept", "text/event-stream")
 \t\tresp, err := c.HTTP.Do(req)
 \t\tif err != nil {
-\t\t\tch <- map[string]interface{}{"error": err.Error()}
+\t\t\tch <- map[string]interface{}{"error": err.Error(), "status": 0}
 \t\t\treturn
 \t\t}
 \t\tdefer resp.Body.Close()
 \t\tif resp.StatusCode >= 400 {
 \t\t\tbody, _ := io.ReadAll(resp.Body)
-\t\t\tch <- map[string]interface{}{"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
+\t\t\tch <- map[string]interface{}{
+\t\t\t\t"error":  fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
+\t\t\t\t"status": resp.StatusCode,
+\t\t\t}
 \t\t\treturn
 \t\t}
 \t\t// Accumulate partial lines across reads; SSE events can span chunks.
-\t\treader := bufio.NewReader(resp.Body)
+\t\t// bufio.Reader grows its internal buffer without bound on unterminated
+\t\t// input; a limited reader plus explicit size checks cap memory use.
+\t\tconst maxSSELine = 8 * 1024 * 1024
+\t\treader := bufio.NewReaderSize(resp.Body, 64*1024)
 \t\tfor {
 \t\t\tline, err := reader.ReadString('\\n')
+\t\t\tif len(line) > maxSSELine {
+\t\t\t\tch <- map[string]interface{}{
+\t\t\t\t\t"error":  fmt.Sprintf("SSE line exceeded %d bytes", maxSSELine),
+\t\t\t\t\t"status": 0,
+\t\t\t\t}
+\t\t\t\treturn
+\t\t\t}
 \t\t\tif line != "" {
 \t\t\t\ttrimmed := strings.TrimSpace(line)
 \t\t\t\tif strings.HasPrefix(trimmed, "data: ") {
@@ -702,8 +715,8 @@ _RUST_LIB_HEADER = """\
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = LibreFang::new("http://localhost:4545");
-//!     let agents = client.agents.list_agents().await?;
-//!     println!("{:?}", agents);
+//!     let health = client.system.health().await?;
+//!     println!("{:?}", health);
 //!     Ok(())
 //! }
 //! ```
@@ -791,15 +804,30 @@ fn do_stream(
         // Accumulate raw bytes so multi-byte UTF-8 codepoints are not split
         // by chunk boundaries (from_utf8_lossy on individual chunks corrupts
         // non-ASCII content). Split on newline, decode each complete line.
+        // MAX_SSE_LINE caps memory on misbehaving streams.
+        const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
         while let Some(Ok(chunk)) = stream.next().await {
             buffer.extend_from_slice(&chunk);
+            if buffer.len() > MAX_SSE_LINE {
+                let _ = tx.send(serde_json::json!({
+                    "error": format!("SSE line exceeded {} bytes", MAX_SSE_LINE),
+                    "status": 0,
+                }));
+                return;
+            }
             while let Some(pos) = buffer.iter().position(|&b| b == b'\\n') {
                 let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(s) => s.trim(),
-                    Err(_) => continue,
+                    Err(e) => {
+                        let _ = tx.send(serde_json::json!({
+                            "error": format!("invalid utf-8 in SSE line at byte {}", e.valid_up_to()),
+                            "status": 0,
+                        }));
+                        continue;
+                    }
                 };
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" { return; }

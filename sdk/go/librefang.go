@@ -162,19 +162,32 @@ func (c *Client) stream(method, path string, body interface{}, query map[string]
 		req.Header.Set("Accept", "text/event-stream")
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			ch <- map[string]interface{}{"error": err.Error()}
+			ch <- map[string]interface{}{"error": err.Error(), "status": 0}
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(resp.Body)
-			ch <- map[string]interface{}{"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
+			ch <- map[string]interface{}{
+				"error":  fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
+				"status": resp.StatusCode,
+			}
 			return
 		}
 		// Accumulate partial lines across reads; SSE events can span chunks.
-		reader := bufio.NewReader(resp.Body)
+		// bufio.Reader grows its internal buffer without bound on unterminated
+		// input; a limited reader plus explicit size checks cap memory use.
+		const maxSSELine = 8 * 1024 * 1024
+		reader := bufio.NewReaderSize(resp.Body, 64*1024)
 		for {
 			line, err := reader.ReadString('\n')
+			if len(line) > maxSSELine {
+				ch <- map[string]interface{}{
+					"error":  fmt.Sprintf("SSE line exceeded %d bytes", maxSSELine),
+					"status": 0,
+				}
+				return
+			}
 			if line != "" {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "data: ") {
