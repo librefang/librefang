@@ -1848,6 +1848,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         overrides
     }
 
+    async fn agent_channel_overrides(
+        &self,
+        agent_id: AgentId,
+    ) -> Option<librefang_types::config::ChannelOverrides> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .and_then(|entry| entry.manifest.channel_overrides.clone())
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,

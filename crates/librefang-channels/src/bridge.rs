@@ -234,6 +234,13 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// When an agent declares `[channel_overrides]` in its `agent.toml`,
+    /// those values take priority over the channel-level overrides.
+    /// Returns `None` if the agent has no per-agent overrides configured.
+    async fn agent_channel_overrides(&self, _agent_id: AgentId) -> Option<ChannelOverrides> {
+        None
+    }
+
     /// Lightweight LLM classification: should the bot reply to this group message?
     ///
     /// Returns `true` if the bot should reply, `false` to stay silent.
@@ -2155,13 +2162,24 @@ async fn dispatch_message(
         }
     }
 
-    // Fetch per-channel overrides (if configured)
-    let overrides = handle
+    // Resolve target agent early so per-agent overrides can take priority
+    let early_agent_id = resolve_or_fallback(message, handle, router).await;
+
+    // Fetch overrides: agent-level (from agent.toml) wins, channel-level is fallback.
+    let channel_overrides = handle
         .channel_overrides(
             ct_str,
             message.metadata.get("account_id").and_then(|v| v.as_str()),
         )
         .await;
+    let overrides = if let Some(aid) = early_agent_id {
+        handle
+            .agent_channel_overrides(aid)
+            .await
+            .or(channel_overrides)
+    } else {
+        channel_overrides
+    };
     let channel_default_format = default_output_format_for_channel(ct_str);
     let output_format = overrides
         .as_ref()
@@ -2871,7 +2889,7 @@ async fn dispatch_message(
         }
     }
 
-    let agent_id = match resolve_or_fallback(message, handle, router).await {
+    let agent_id = match early_agent_id {
         Some(id) => id,
         None => {
             send_response(

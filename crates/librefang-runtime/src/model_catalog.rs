@@ -273,16 +273,11 @@ impl ModelCatalog {
             let has_cli_fallback = if suppressed {
                 false
             } else {
-                let aider_ok = || crate::drivers::cli_provider_available("aider");
                 match provider.id.as_str() {
-                    "anthropic" => {
-                        crate::drivers::cli_provider_available("claude-code") || aider_ok()
-                    }
-                    "gemini" => crate::drivers::cli_provider_available("gemini-cli") || aider_ok(),
-                    "openai" | "codex" => {
-                        crate::drivers::cli_provider_available("codex-cli") || aider_ok()
-                    }
-                    "qwen" => crate::drivers::cli_provider_available("qwen-code") || aider_ok(),
+                    "anthropic" => crate::drivers::cli_provider_available("claude-code"),
+                    "gemini" => crate::drivers::cli_provider_available("gemini-cli"),
+                    "openai" | "codex" => crate::drivers::cli_provider_available("codex-cli"),
+                    "qwen" => crate::drivers::cli_provider_available("qwen-code"),
                     _ => false,
                 }
             };
@@ -1377,7 +1372,6 @@ id = "acme"
         let catalog = test_catalog();
         assert!(catalog.get_provider("perplexity").is_some());
         assert!(catalog.get_provider("cohere").is_some());
-        assert!(catalog.get_provider("ai21").is_some());
         assert!(catalog.get_provider("cerebras").is_some());
         assert!(catalog.get_provider("sambanova").is_some());
         assert!(catalog.get_provider("huggingface").is_some());

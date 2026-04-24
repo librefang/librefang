@@ -54,8 +54,23 @@
           pango
         ]);
 
-        # Filter source to only include Rust-relevant files
-        src = craneLib.cleanCargoSource ./.;
+        # Filter source to include Rust files plus non-Rust assets needed at compile time
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./crates/librefang-types/locales
+            ./crates/librefang-api/static
+            ./crates/librefang-api/src/login_page.html
+            ./crates/librefang-cli/templates
+            ./crates/librefang-cli/locales
+            ./crates/librefang-desktop/tauri.conf.json
+            ./crates/librefang-desktop/capabilities
+            ./crates/librefang-desktop/icons
+            ./crates/librefang-desktop/gen
+            ./packages/whatsapp-gateway
+          ];
+        };
 
         commonArgs = {
           inherit src nativeBuildInputs buildInputs;

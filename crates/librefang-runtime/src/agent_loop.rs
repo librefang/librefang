@@ -1162,7 +1162,7 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
 fn needs_qualified_model_id(provider: &str) -> bool {
     matches!(
         provider,
-        "openrouter" | "together" | "fireworks" | "replicate" | "chutes" | "huggingface"
+        "openrouter" | "together" | "fireworks" | "replicate" | "huggingface"
     )
 }
 
@@ -8816,7 +8816,6 @@ mod tests {
         assert!(needs_qualified_model_id("together"));
         assert!(needs_qualified_model_id("fireworks"));
         assert!(needs_qualified_model_id("replicate"));
-        assert!(needs_qualified_model_id("chutes"));
         assert!(needs_qualified_model_id("huggingface"));
         assert!(!needs_qualified_model_id("openai"));
         assert!(!needs_qualified_model_id("anthropic"));
