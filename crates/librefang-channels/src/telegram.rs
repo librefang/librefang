@@ -1130,7 +1130,24 @@ impl TelegramAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            if !body_text.contains("message is not modified") {
+            if body_text.contains("message is not modified") {
+                // no-op
+            } else if status == reqwest::StatusCode::BAD_REQUEST
+                && body_text.contains("can't parse entities")
+            {
+                warn!("Telegram editMessageText (interactive) HTML rejected, retrying as plain text: {body_text}");
+                let plain_body = serde_json::json!({
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                    "reply_markup": { "inline_keyboard": keyboard },
+                });
+                let retry = self.client.post(&url).json(&plain_body).send().await?;
+                if !retry.status().is_success() {
+                    let retry_text = retry.text().await.unwrap_or_default();
+                    warn!("Telegram editMessageText (interactive) plain fallback also failed: {retry_text}");
+                }
+            } else {
                 warn!("Telegram editMessageText (interactive) failed ({status}): {body_text}");
             }
         }
@@ -1291,7 +1308,27 @@ impl TelegramAdapter {
             let body_text = resp.text().await.unwrap_or_default();
             // Telegram returns 400 "message is not modified" when text hasn't changed —
             // this is expected and harmless.
-            if !body_text.contains("message is not modified") {
+            if body_text.contains("message is not modified") {
+                // no-op
+            } else if status == reqwest::StatusCode::BAD_REQUEST
+                && body_text.contains("can't parse entities")
+            {
+                // HTML tag mismatch — retry without parse_mode so the user sees
+                // the response as plain text rather than losing it entirely.
+                warn!(
+                    "Telegram editMessageText HTML rejected, retrying as plain text: {body_text}"
+                );
+                let plain_body = serde_json::json!({
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                });
+                let retry = self.client.post(&url).json(&plain_body).send().await?;
+                if !retry.status().is_success() {
+                    let retry_text = retry.text().await.unwrap_or_default();
+                    warn!("Telegram editMessageText plain fallback also failed: {retry_text}");
+                }
+            } else {
                 warn!("Telegram editMessageText failed ({status}): {body_text}");
             }
         }

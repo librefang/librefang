@@ -1192,6 +1192,7 @@ pub async fn invoke_tool(
         None, // interrupt — no session to cancel
         None, // session_id
         None, // dangerous_command_checker — session-scoped, not meaningful here
+        None, // available_tools — lazy-load pool not applicable to REST bridge
     )
     .await;
 

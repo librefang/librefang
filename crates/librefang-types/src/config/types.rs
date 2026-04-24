@@ -1961,6 +1961,14 @@ pub struct KernelConfig {
     pub trusted_hosts: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
+    /// Operator override for the agent-loop iteration cap. When set, any
+    /// agent without its own `[autonomous] max_iterations` uses this value
+    /// instead of the compiled-in default
+    /// (`AutonomousConfig::DEFAULT_MAX_ITERATIONS`). Lower it when running
+    /// cheap models to bound cost per turn; raise it for long-horizon
+    /// autonomous agents. `None` means "use the compiled-in default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_max_iterations: Option<u32>,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -3869,6 +3877,7 @@ impl Default for KernelConfig {
             log_level: "info".to_string(),
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
+            agent_max_iterations: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
