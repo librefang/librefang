@@ -1187,7 +1187,7 @@ pub async fn run_daemon(
         match start_observability_stack(kernel.home_dir()) {
             Ok(ObservabilityStartup::Started) => {
                 info!(
-                    "Observability stack started (OTLP :4317/:4318, Prometheus :9090, Grafana :3000)"
+                    "Observability stack started (OTLP :4317/:4318, Tempo :3200, Prometheus :9090, Grafana :3000)"
                 );
                 true
             }
@@ -1197,7 +1197,7 @@ pub async fn run_daemon(
             }
             Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
                 tracing::warn!(
-                    "Observability stack failed to start (likely a port conflict on 4317/9090/3000 or an existing stack): {}",
+                    "Observability stack failed to start (likely a port conflict on 3000/3200/4317/9090 or an existing stack): {}",
                     stderr.trim()
                 );
                 false
@@ -1415,8 +1415,16 @@ const OBSERVABILITY_ASSETS: &[(&str, &str)] = &[
         include_str!("../../../deploy/otel-collector/config.yaml"),
     ),
     (
+        "tempo/tempo.yaml",
+        include_str!("../../../deploy/tempo/tempo.yaml"),
+    ),
+    (
         "grafana/provisioning/datasources/prometheus.yml",
         include_str!("../../../deploy/grafana/provisioning/datasources/prometheus.yml"),
+    ),
+    (
+        "grafana/provisioning/datasources/tempo.yml",
+        include_str!("../../../deploy/grafana/provisioning/datasources/tempo.yml"),
     ),
     (
         "grafana/provisioning/dashboards/dashboard.yml",

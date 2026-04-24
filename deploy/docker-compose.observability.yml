@@ -13,6 +13,23 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - tempo
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: librefang-tempo
+    # 3200 (HTTP query API) is exposed so Grafana's Tempo datasource can
+    # reach it through the Docker network. Tempo's OTLP receiver on 4317
+    # is NOT exposed to the host — the host's 4317 is the OTel collector;
+    # the collector forwards traces to tempo:4317 internally.
+    ports:
+      - "3200:3200"
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
     restart: unless-stopped
 
   prometheus:
@@ -43,8 +60,10 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
+      - tempo
     restart: unless-stopped
 
 volumes:
   prometheus-data:
+  tempo-data:
   grafana-data:

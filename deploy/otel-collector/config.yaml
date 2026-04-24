@@ -1,10 +1,8 @@
 # OpenTelemetry Collector config for LibreFang's local dev stack.
 #
-# Receives OTLP traces + metrics from LibreFang on 4317 (gRPC) / 4318 (HTTP)
-# and exposes a Prometheus scrape endpoint on 8889 for Prometheus to pick up
-# OTLP-delivered metrics. Traces are written to the collector's stdout via
-# the debug exporter — replace with a real backend (Tempo, Jaeger, …) when
-# you need trace search.
+# Receives OTLP traces + metrics from LibreFang on 4317 (gRPC) / 4318 (HTTP).
+# - Traces fan out to Tempo (for Grafana search) AND stdout (debug visibility).
+# - Metrics are exposed on the Prometheus scrape endpoint :8889.
 
 receivers:
   otlp:
@@ -22,13 +20,20 @@ exporters:
     verbosity: normal
   prometheus:
     endpoint: 0.0.0.0:8889
+  # Forward traces to Tempo over OTLP/gRPC (inside the compose network).
+  # `tls.insecure` because Tempo's OTLP receiver is plaintext on the
+  # internal network — traces never leave the docker bridge.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, otlp/tempo]
     metrics:
       receivers: [otlp]
       processors: [batch]
