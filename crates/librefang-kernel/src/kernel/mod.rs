@@ -15400,6 +15400,9 @@ impl LibreFangKernel {
         librefang_runtime::tool_runner::ToolExecContext {
             kernel: Some(kernel_handle),
             allowed_tools: deferred.allowed_tools.as_deref(),
+            // Deferred resume path has no live agent-loop context, so the
+            // lazy-load meta-tools fall back to the builtin catalog.
+            available_tools: None,
             caller_agent_id: Some(deferred.agent_id.as_str()),
             skill_registry: Some(skill_snapshot),
             // Deferred tools have already passed the approval gate; skill
