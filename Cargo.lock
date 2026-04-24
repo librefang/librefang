@@ -3997,6 +3997,7 @@ dependencies = [
  "portable-pty",
  "reqwest 0.13.2",
  "rustix",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
