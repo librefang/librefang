@@ -39,7 +39,13 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 /// Maximum iterations in the agent loop before giving up.
-const MAX_ITERATIONS: u32 = 50;
+///
+/// Single source of truth is `AutonomousConfig::DEFAULT_MAX_ITERATIONS` in
+/// `librefang-types` — kept as a local alias here so the hot-path branches
+/// in this file read as a plain constant instead of a fully-qualified
+/// path. Changing the policy value in one place propagates to both the
+/// runtime fallback and the manifest default.
+const MAX_ITERATIONS: u32 = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
 
 /// Maximum retries for rate-limited or overloaded API calls.
 const MAX_RETRIES: u32 = 3;
@@ -80,6 +86,47 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Marker included in timeout error messages when partial output was delivered.
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
+
+/// Lazy tool loading kicks in only when the agent's granted-tool set is
+/// larger than this threshold. Below this, it's cheaper and simpler to just
+/// ship everything — the agent has already been restricted (by profile or
+/// explicit `capabilities.tools`) and the payload is already small.
+///
+/// ~30 is roughly `ALWAYS_NATIVE_TOOLS.len() + 10`, so any agent with a
+/// trimmed-down profile (Coding = 5, Research = 4, Messaging = 6) stays
+/// well below and bypasses lazy mode entirely. Agents with access to the
+/// full ~75 builtin catalog (issue #3044's problem case) trigger lazy mode.
+const LAZY_TOOLS_THRESHOLD: usize = 30;
+
+/// Build the `tools` field for a `CompletionRequest`. When `lazy_mode` is on
+/// AND the granted-tool set is large enough to benefit AND `tool_load` is
+/// actually reachable from the granted set, ship only the always-native
+/// subset plus any tools the LLM has loaded this turn via `tool_load(name)`.
+/// The LLM can discover + load more on-demand.
+///
+/// When lazy_mode is off, the set is already small, or `tool_load` is not in
+/// the allowlist (the LLM would have no way to pull a stripped tool back in),
+/// pass everything through so behavior matches the eager baseline. Missing
+/// `tool_load` in an allowlisted-but-over-threshold agent was a silent
+/// tool-disappearance bug — see issue #3044 follow-up review.
+fn resolve_request_tools(
+    available_tools: &[ToolDefinition],
+    session_loaded: &[ToolDefinition],
+    lazy_mode: bool,
+) -> Vec<ToolDefinition> {
+    let has_tool_load = available_tools.iter().any(|t| t.name == "tool_load");
+    if !lazy_mode || available_tools.len() <= LAZY_TOOLS_THRESHOLD || !has_tool_load {
+        return available_tools.to_vec();
+    }
+    let mut out = crate::tool_runner::select_native_tools(available_tools);
+    let seen: std::collections::HashSet<String> = out.iter().map(|t| t.name.clone()).collect();
+    for t in session_loaded {
+        if !seen.contains(&t.name) {
+            out.push(t.clone());
+        }
+    }
+    out
+}
 
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
@@ -582,6 +629,11 @@ struct ToolExecutionContext<'a> {
     session: &'a mut Session,
     kernel: Option<&'a Arc<dyn KernelHandle>>,
     available_tool_names: &'a [String],
+    /// Full `ToolDefinition` list for the agent's granted tools — needed so
+    /// the lazy-load meta-tools (`tool_load`, `tool_search`) can resolve
+    /// non-builtin entries (MCP, skills) against the agent's actual pool
+    /// rather than only the builtin catalog (issue #3044 follow-up).
+    available_tools: &'a [ToolDefinition],
     caller_id_str: &'a str,
     skill_registry: Option<&'a SkillRegistry>,
     allowed_skills: &'a [String],
@@ -783,6 +835,7 @@ async fn execute_single_tool_call(
             ctx.interrupt.clone(),
             Some(ctx.session.id.to_string()).as_deref(),
             ctx.dangerous_command_checker,
+            Some(ctx.available_tools),
         ),
     )
     .await
@@ -1289,6 +1342,16 @@ pub struct LoopOptions {
     /// `ToolExecutionContext` so that cancelling the parent session
     /// interrupts all its in-flight tools without affecting other sessions.
     pub interrupt: Option<crate::interrupt::SessionInterrupt>,
+    /// Operator-level override for the agent-loop iteration cap. Resolution
+    /// order when the loop starts:
+    /// 1. `manifest.autonomous.max_iterations` (per-agent)
+    /// 2. `opts.max_iterations` (operator / kernel config)
+    /// 3. `AutonomousConfig::DEFAULT_MAX_ITERATIONS` (library fallback)
+    ///
+    /// Kernel populates this from `KernelConfig.agent_max_iterations` so
+    /// operators can lower the default without recompiling or editing every
+    /// manifest. None → use the library fallback.
+    pub max_iterations: Option<u32>,
 }
 
 /// Result of an agent loop execution.
@@ -2586,6 +2649,17 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
+
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
     let sender_user_id: Option<String> = manifest
@@ -2751,11 +2825,12 @@ pub async fn run_agent_loop(
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -2996,7 +3071,7 @@ pub async fn run_agent_loop(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -3278,6 +3353,7 @@ pub async fn run_agent_loop(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -3318,6 +3394,15 @@ pub async fn run_agent_loop(
                             Some(prev) => format!("{prev}\n\n{notice}"),
                             None => notice.clone(),
                         });
+                    }
+
+                    // Capture lazy-load side-channel from the tool_load meta-tool
+                    // (issue #3044). Tools registered this way become callable on
+                    // subsequent iterations of this loop.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
+                        }
                     }
 
                     // Layer 2: per-result budget — persist oversized outputs to disk.
@@ -3876,6 +3961,17 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
+
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
     let sender_user_id: Option<String> = manifest
@@ -4041,11 +4137,12 @@ pub async fn run_agent_loop_streaming(
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -4291,7 +4388,7 @@ pub async fn run_agent_loop_streaming(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
@@ -4607,6 +4704,7 @@ pub async fn run_agent_loop_streaming(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -4657,6 +4755,15 @@ pub async fn run_agent_loop_streaming(
                             .is_err()
                         {
                             warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
+                    }
+
+                    // Capture lazy-load side-channel (issue #3044) — the
+                    // streaming path, same rationale as the non-streaming
+                    // version above.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
                         }
                     }
 
@@ -5606,7 +5713,69 @@ mod tests {
 
     #[test]
     fn test_max_iterations_constant() {
-        assert_eq!(MAX_ITERATIONS, 50);
+        assert_eq!(
+            MAX_ITERATIONS,
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    /// Resolve the iteration cap the same way `run_agent_loop` does: per-agent
+    /// manifest > operator LoopOptions > library default.
+    fn resolve_max_iterations(manifest_cap: Option<u32>, opts_cap: Option<u32>) -> u32 {
+        manifest_cap.or(opts_cap).unwrap_or(MAX_ITERATIONS)
+    }
+
+    #[test]
+    fn max_iterations_resolution_prefers_manifest_over_opts() {
+        assert_eq!(resolve_max_iterations(Some(7), Some(100)), 7);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_opts() {
+        assert_eq!(resolve_max_iterations(None, Some(100)), 100);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_default_when_nothing_set() {
+        assert_eq!(
+            resolve_max_iterations(None, None),
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    fn fake_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("fake {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn test_resolve_request_tools_falls_back_to_eager_when_tool_load_missing() {
+        // Regression for PR #3047 codex review P1: if an agent's allowlist
+        // is over the threshold but does NOT include `tool_load`, we must
+        // return the full eager list. Otherwise non-native tools get
+        // stripped with no recovery path and silently disappear.
+        let mut pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .collect();
+        // Sanity: tool_load is definitely not in the list.
+        assert!(!pool.iter().any(|t| t.name == "tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert_eq!(
+            resolved.len(),
+            pool.len(),
+            "lazy mode must bypass when tool_load is absent — got trimmed list"
+        );
+
+        // And with tool_load in the pool, lazy mode kicks in (as designed).
+        pool.push(fake_tool("tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert!(
+            resolved.len() < pool.len(),
+            "lazy mode should trim when tool_load is present"
+        );
     }
 
     #[test]

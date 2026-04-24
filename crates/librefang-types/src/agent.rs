@@ -94,11 +94,19 @@ pub struct AutonomousConfig {
     pub heartbeat_channel: Option<String>,
 }
 
+impl AutonomousConfig {
+    /// Default cap on LLM iterations per agent-loop invocation. Policy
+    /// constant shared with `librefang-runtime` — see `agent_loop::MAX_ITERATIONS`
+    /// which re-exports this value so the runtime's own fallback path
+    /// stays in lockstep with the manifest default.
+    pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+}
+
 impl Default for AutonomousConfig {
     fn default() -> Self {
         Self {
             quiet_hours: None,
-            max_iterations: 50,
+            max_iterations: Self::DEFAULT_MAX_ITERATIONS,
             max_restarts: 10,
             heartbeat_interval_secs: 30,
             heartbeat_timeout_secs: None,
@@ -1198,10 +1206,17 @@ mod tests {
     #[test]
     fn test_autonomous_config_defaults() {
         let cfg = AutonomousConfig::default();
-        assert_eq!(cfg.max_iterations, 50);
+        assert_eq!(cfg.max_iterations, AutonomousConfig::DEFAULT_MAX_ITERATIONS);
         assert_eq!(cfg.max_restarts, 10);
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         assert!(cfg.quiet_hours.is_none());
+    }
+
+    #[test]
+    fn test_default_max_iterations_is_policy_constant() {
+        // Tripwire: if anyone changes the policy cap, at least one test must
+        // break so a second reviewer sees the intent.
+        assert_eq!(AutonomousConfig::DEFAULT_MAX_ITERATIONS, 50);
     }
 
     #[test]

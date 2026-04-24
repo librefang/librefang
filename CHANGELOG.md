@@ -5,6 +5,85 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.24] - 2026-04-24
+
+### Added
+
+- Per-tool timeout overrides via [tool_timeouts] (#2990) (@houko)
+- Attach to remote CDP endpoint instead of spawning Chromium (#2991) (@houko)
+- Attach to remote CDP endpoint instead of spawning Chromium (#2993) (@houko)
+- Configurable cron session size limit (#2994) (@houko)
+- REST API for task_queue + max_retries TTL enforcement (#2997) (@houko)
+- Generic OpenAI-compat driver for user-defined image providers (#2998) (@houko)
+- Per-tool / per-path taint policy with TaintRuleId skip API (#2999) (@houko)
+- Per-tab session_id on WebSocket + URL-driven ChatPage (incremental on #2989) (#3001) (@neo-wanderer)
+- Vacuum sqlite after session prune at startup (#3002) (@houko)
+- Add TransformToolResult hook for plugin tool-result rewriting (#3003) (@houko)
+- Add per-provider request_timeout_secs config (#3004) (@houko)
+- Preserve @mention context and show reaction processing state (#3005) (@houko)
+- Write compaction summaries in the user's conversation language (#3007) (@houko)
+- Add media attachment delivery support (#3008) (@houko)
+- Add reactions_enabled toggle for processing state indicators (#3009) (@houko)
+- Add wakeAgent gate for cron script pre-check (#3010) (@houko)
+- Add deliver_only mode for zero-LLM push notifications (#3011) (@houko)
+- Add send_voice and dm/group message policies (#3012) (@houko)
+- Per-agent ChannelOverrides in AgentManifest (#3020) (@DaBlitzStein)
+- Tee foreground daemon logs to timestamped daily files (#3022) (@houko)
+- Add POST /api/tools/{name}/invoke for direct tool execution (#3025) (@houko)
+- Auto-generate Python/JS/Go/Rust SDKs from openapi.json (#3046) (@houko)
+- Lazy tool loading via tool_load/tool_search (closes #3044) (#3047) (@houko)
+
+### Fixed
+
+- Resolve 2937, build of both librefang-cli and librefang-desktop on NixOS (#2974) (@FrantaNautilus)
+- Infer Ollama model capabilities from families metadata (#2987) (@houko)
+- Include stdio server arg paths in MCP roots capability (#2988) (@houko)
+- Per-request session_id override on message send (#2989) (@houko)
+- Inject bot aliases into reply_precheck classifier prompt (#2992) (@houko)
+- Tolerate trailing reasoning tokens in tool call arguments (#2995) (@houko)
+- Detect vision/embedding capabilities for Ollama local models (#2996) (@houko)
+- Fix connection screen IPC on Windows + add uninstall button (#3000) (@houko)
+- Restore audit polling to 30s, drop expensive verify refetchInterval (#3006) (@houko)
+- Add missing task_get and task_update_status to stub KernelHandle impls (#3013) (@houko)
+- Guard max_tokens against zero to prevent HTTP 400 (#3014) (@houko)
+- Retry LLM stream on transient errors and add SSL/TLS error patterns (#3015) (@houko)
+- Detect macOS Chrome .app bundle for browser hand (#3021) (@houko)
+- Gate foreground tee behind #[cfg(unix)]; fix clippy warnings (#3024) (@houko)
+- Cascade parent /stop into agent_send subagents (#3044 follow-up) (#3048) (@houko)
+- Add plaintext fallback when editMessageText HTML is rejected (#3051) (@DaBlitzStein)
+
+### Changed
+
+- Add QueryOverrides support, use withOverrides consistently (#2981) (@leszek3737)
+
+### Performance
+
+- Optimize React components (#2979) (@leszek3737)
+- Narrow mutation cache invalidation and fix missing invalidations (#2980) (@leszek3737)
+
+### Maintenance
+
+- Remove deprecated providers ai21, aider, chutes, venice (#3023) (@houko)
+- Bump actions/cache from 4 to 5 (#3026) (@app/dependabot)
+- Bump rustls from 0.23.37 to 0.23.39 (#3027) (@app/dependabot)
+- Bump webpki-roots from 1.0.6 to 1.0.7 (#3028) (@app/dependabot)
+- Bump tokio from 1.50.0 to 1.52.1 (#3029) (@app/dependabot)
+- Bump cbc from 0.1.2 to 0.2.0 (#3030) (@app/dependabot)
+- Bump aes from 0.8.4 to 0.9.0 (#3031) (@app/dependabot)
+- Bump tauri-plugin-dialog from 2.6.0 to 2.7.0 (#3032) (@app/dependabot)
+- Bump semver from 1.0.27 to 1.0.28 (#3033) (@app/dependabot)
+- Bump rmcp from 1.3.0 to 1.5.0 (#3034) (@app/dependabot)
+- Bump tauri-plugin-single-instance from 2.4.0 to 2.4.1 (#3035) (@app/dependabot)
+- Bump wasmtime from 43.0.1 to 44.0.0 (#3036) (@app/dependabot)
+- Bump open from 5.3.3 to 5.3.4 (#3037) (@app/dependabot)
+- Bump rustix from 0.38.44 to 1.1.4 (#3038) (@app/dependabot)
+- Bump lettre from 0.11.20 to 0.11.21 (#3039) (@app/dependabot)
+- Bump uuid from 1.23.0 to 1.23.1 (#3040) (@app/dependabot)
+- Bump rustls-connector from 0.22.0 to 0.23.0 (#3041) (@app/dependabot)
+- Bump axum from 0.8.8 to 0.8.9 (#3042) (@app/dependabot)
+- Bump seccompiler from 0.4.0 to 0.5.0 (#3043) (@app/dependabot)
+
+
 ## [2026.4.23] - 2026-04-23
 
 ### Added

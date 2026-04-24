@@ -79,6 +79,13 @@ pub struct ToolResult {
     /// LLM cannot see (or echo) the private text it just sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_notice: Option<String>,
+    /// Side-channel carrying a tool schema that should be registered in the
+    /// session's lazy-loaded tool cache so it becomes callable on the next
+    /// turn. Populated by the `tool_load` meta-tool (issue #3044); consumed
+    /// by the agent loop. Independent of `content`, which also carries the
+    /// schema JSON for the LLM to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_tool: Option<ToolDefinition>,
 }
 
 impl ToolResult {
@@ -114,6 +121,7 @@ impl ToolResult {
             approval_request_id: Some(request_id),
             tool_name: Some(tool_name),
             owner_notice: None,
+            loaded_tool: None,
         }
     }
 
