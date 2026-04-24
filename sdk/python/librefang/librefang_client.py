@@ -282,7 +282,7 @@ class _ToolResource(_Resource):
         return self._c._request("GET", "/api/tools")
 
     def get(self, name: str):
-        return self._c._request("GET", f"/api/tools/{name}")
+        return self._c._request("GET", f"/api/tools/{quote(name, safe='')}")
 
     def invoke(self, name: str, tool_input: dict, agent_id: Optional[str] = None):
         """Invoke a tool. Pass ``agent_id`` for approval-gated tools so the

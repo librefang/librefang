@@ -364,7 +364,7 @@ class ToolResource {
   }
 
   async get(name) {
-    return this._c._request("GET", "/api/tools/" + name);
+    return this._c._request("GET", "/api/tools/" + encodeURIComponent(name));
   }
 
   // Invoke a tool. `opts.agent_id` (optional) is sent as the `?agent_id=`

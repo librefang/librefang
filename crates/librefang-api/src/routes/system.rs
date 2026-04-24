@@ -1085,7 +1085,21 @@ pub async fn invoke_tool(
     Json(input): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let lang_code = super::resolve_lang(lang.as_ref());
-    let caller_agent_id: Option<String> = params.get("agent_id").cloned();
+
+    // `agent_id`, if supplied, MUST be a well-formed UUID regardless of
+    // whether the tool is approval-gated. A malformed id would flow into
+    // `caller_agent_id` as opaque bytes and surface later as garbage
+    // attribution on any tool that reads it for telemetry or audit.
+    // Reject it once, at the edge.
+    let caller_agent_id: Option<String> = match params.get("agent_id") {
+        Some(raw) if raw.parse::<uuid::Uuid>().is_ok() => Some(raw.clone()),
+        Some(_) => {
+            let t = ErrorTranslator::new(lang_code);
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
+        }
+        None => None,
+    };
 
     // 1) Fail-closed allowlist check. Without an agent manifest gating which
     //    tools the caller may run, any API-key holder would otherwise be able
@@ -1098,9 +1112,7 @@ pub async fn invoke_tool(
         } else {
             t.t_args("api-error-tool-invoke-denied", &[("name", &name)])
         };
-        return ApiErrorResponse::bad_request(msg)
-            .with_status(StatusCode::FORBIDDEN)
-            .into_json_tuple();
+        return ApiErrorResponse::forbidden(msg).into_json_tuple();
     }
 
     // 2) Deterministic existence check: builtin, connected MCP servers, and
@@ -1129,21 +1141,15 @@ pub async fn invoke_tool(
     }
 
     // 3) Approval-gated tools need a caller_agent_id that the approval
-    //    subsystem can later look up. A valid UUID query parameter is
-    //    required — without one, execute_tool would post the deferred
-    //    request with `agent_id = "unknown"` and the approval could never
-    //    resolve back to a real agent.
-    if state.kernel.approvals().requires_approval(&name) {
-        let agent_ok = caller_agent_id
-            .as_deref()
-            .is_some_and(|id| id.parse::<uuid::Uuid>().is_ok());
-        if !agent_ok {
-            let t = ErrorTranslator::new(lang_code);
-            return ApiErrorResponse::bad_request(
-                t.t_args("api-error-tool-requires-agent", &[("name", &name)]),
-            )
-            .into_json_tuple();
-        }
+    //    subsystem can later look up. Without one, execute_tool would post
+    //    the deferred request with `agent_id = "unknown"` and the approval
+    //    could never resolve back to a real agent.
+    if state.kernel.approvals().requires_approval(&name) && caller_agent_id.is_none() {
+        let t = ErrorTranslator::new(lang_code);
+        return ApiErrorResponse::bad_request(
+            t.t_args("api-error-tool-requires-agent", &[("name", &name)]),
+        )
+        .into_json_tuple();
     }
 
     // 4) Snapshot the skill registry (so the RwLock guard does not cross the

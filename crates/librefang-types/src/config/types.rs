@@ -6695,4 +6695,26 @@ max_tokens_per_hour = 500000
         assert!(!cfg.tool_invoke.enabled);
         assert!(cfg.tool_invoke.allowlist.is_empty());
     }
+
+    #[test]
+    fn test_tool_invoke_config_empty_toml_uses_defaults() {
+        let c: ToolInvokeConfig = toml::from_str("").unwrap();
+        assert!(!c.enabled);
+        assert!(c.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_tool_invoke_config_toml_roundtrip() {
+        let toml_str = r#"
+            enabled = true
+            allowlist = ["web_search", "file_*"]
+        "#;
+        let c: ToolInvokeConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.allowlist, vec!["web_search", "file_*"]);
+
+        let back = toml::to_string(&c).unwrap();
+        let again: ToolInvokeConfig = toml::from_str(&back).unwrap();
+        assert_eq!(c, again);
+    }
 }

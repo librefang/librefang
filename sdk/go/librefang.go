@@ -484,7 +484,7 @@ func (r *ToolResource) List() ([]map[string]interface{}, error) {
 }
 
 func (r *ToolResource) Get(name string) (map[string]interface{}, error) {
-	resp, err := r.client.doRequest("GET", fmt.Sprintf("/api/tools/%s", name), nil)
+	resp, err := r.client.doRequest("GET", fmt.Sprintf("/api/tools/%s", url.PathEscape(name)), nil)
 	return toMap(resp), err
 }
 
