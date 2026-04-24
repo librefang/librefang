@@ -141,6 +141,13 @@ function resolveSectionFields(
 
   if (!desc.struct_field) return [];
   let target: JsonSchema | undefined = root.properties?.[desc.struct_field];
+  // schemars renders `Option<SomeConfig>` as {anyOf: [{$ref}, {type: "null"}]}.
+  // Unwrap the non-null branch so optional sub-struct sections (a2a,
+  // webhook_triggers, thinking, …) don't silently render as empty.
+  if (target && !target.$ref && Array.isArray(target.anyOf)) {
+    const nonNull = target.anyOf.find((a) => a.$ref || (a.type && a.type !== "null"));
+    if (nonNull) target = nonNull;
+  }
   if (target?.$ref) target = resolveRef(root, target.$ref);
   if (!target?.properties) return [];
 

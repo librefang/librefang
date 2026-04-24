@@ -1776,6 +1776,7 @@ export interface JsonSchema {
   enum?: unknown[];
   oneOf?: JsonSchema[];
   allOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
   properties?: Record<string, JsonSchema>;
   additionalProperties?: boolean | JsonSchema;
   items?: JsonSchema;
