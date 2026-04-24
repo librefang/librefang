@@ -2936,7 +2936,7 @@ fn tool_meta_search(input: &serde_json::Value) -> ToolResult {
             matches.push((score, def.name, hint.to_string()));
         }
     }
-    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
     matches.truncate(limit);
 
     if matches.is_empty() {
