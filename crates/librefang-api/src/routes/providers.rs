@@ -1120,19 +1120,14 @@ pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (env_var, base_url, key_required, auth_status) = {
+    let (env_var, base_url, key_required) = {
         let catalog = state
             .kernel
             .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
-            Some(p) => (
-                p.api_key_env.clone(),
-                p.base_url.clone(),
-                p.key_required,
-                p.auth_status,
-            ),
+            Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
                 return ApiErrorResponse::not_found(format!("Unknown provider '{}'", name))
                     .into_json_tuple();
@@ -1167,45 +1162,6 @@ pub async fn test_provider(
                 StatusCode::OK,
                 Json(
                     serde_json::json!({"status":"error","provider":name,"error":"CLI not found in PATH"}),
-                ),
-            )
-        };
-    }
-
-    // API provider with CLI fallback but no API key — test the CLI instead.
-    if auth_status == librefang_types::model_catalog::AuthStatus::ConfiguredCli {
-        let cli_start = Instant::now();
-        // The CLI name may differ from the provider name (e.g. gemini → gemini-cli)
-        let cli_name = match name.as_str() {
-            "gemini" => "gemini-cli",
-            "anthropic" => "claude-code",
-            "openai" | "codex" => "codex-cli",
-            "qwen" => "qwen-code",
-            _ => name.as_str(),
-        };
-        let cli_ok = librefang_runtime::drivers::cli_provider_available(cli_name);
-        let cli_latency = cli_start.elapsed().as_millis();
-        state.provider_test_cache.insert(
-            name.clone(),
-            (
-                Instant::now(),
-                cli_latency,
-                chrono::Utc::now().to_rfc3339(),
-                cli_ok,
-            ),
-        );
-        return if cli_ok {
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::json!({"status":"ok","provider":name,"latency_ms":cli_latency,"note":format!("via {cli_name} CLI")}),
-                ),
-            )
-        } else {
-            (
-                StatusCode::OK,
-                Json(
-                    serde_json::json!({"status":"error","provider":name,"error":format!("{cli_name} CLI not found in PATH")}),
                 ),
             )
         };

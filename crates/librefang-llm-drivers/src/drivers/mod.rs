@@ -619,20 +619,18 @@ fn create_driver_from_entry(
         .clone()
         .unwrap_or_else(|| entry.base_url.to_string());
 
-    // Resolve API key: explicit config > primary env var > alt env var
-    let mut api_key = config
+    // Resolve API key: explicit config > primary env var > alt env var.
+    //
+    // Intentionally does NOT fall back to the Codex CLI credential file for
+    // the `openai` provider. CLI logins are surfaced as their own provider
+    // (`codex-cli`) so the user sees exactly what they configured; running
+    // `provider = "openai"` requires an explicit `OPENAI_API_KEY`.
+    let api_key = config
         .api_key
         .clone()
         .or_else(|| std::env::var(entry.api_key_env).ok())
         .or_else(|| entry.alt_api_key_env.and_then(|v| std::env::var(v).ok()))
         .unwrap_or_default();
-
-    // Special: OpenAI also checks Codex credential
-    if api_key.is_empty() && entry.api_format == ApiFormat::OpenAI && entry.name == "openai" {
-        if let Some(codex_key) = read_codex_credential() {
-            api_key = codex_key;
-        }
-    }
 
     if entry.key_required && entry.api_format != ApiFormat::VertexAI && api_key.is_empty() {
         return Err(LlmError::MissingApiKey(format!(
@@ -910,8 +908,12 @@ pub fn is_cli_provider(name: &str) -> bool {
     )
 }
 
-/// Resolve the API key for a provider by checking all known sources:
-/// primary env var → alt env var → Codex credential file (for openai).
+/// Resolve the API key for a provider by checking the declared env vars.
+///
+/// Sources (in order): primary env var → alt env var (e.g. `GOOGLE_API_KEY`
+/// for Gemini). Does NOT read CLI credential files — CLI logins are exposed
+/// as their own provider entries (`claude-code` / `codex-cli` / `gemini-cli`
+/// / `qwen-code`) rather than silently substituting for an API provider.
 ///
 /// Returns `None` if no key is found through any source.
 pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
@@ -927,59 +929,6 @@ pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
                 .and_then(|v| std::env::var(v).ok())
                 .and_then(non_empty)
         })
-        .or_else(|| {
-            if entry.name == "openai" {
-                read_codex_credential()
-            } else {
-                None
-            }
-        })
-}
-
-/// Read an OpenAI API key from the Codex CLI credential file.
-///
-/// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-/// Returns `Some(api_key)` if the file exists and contains a valid, non-expired token.
-fn read_codex_credential() -> Option<String> {
-    let codex_home = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var("USERPROFILE")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-        })?;
-
-    let auth_path = codex_home.join("auth.json");
-    let content = std::fs::read_to_string(&auth_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    if let Some(expires_at) = parsed.get("expires_at").and_then(|v| v.as_i64()) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if now >= expires_at {
-            return None;
-        }
-    }
-
-    parsed
-        .get("api_key")
-        .or_else(|| parsed.get("token"))
-        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
