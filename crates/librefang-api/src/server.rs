@@ -16,7 +16,7 @@ use std::time::Instant;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::info;
 
 /// Daemon info written to `~/.librefang/daemon.json` so the CLI can find us.
@@ -965,7 +965,15 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+        // INFO-level request spans so they're created even when the console
+        // log level is INFO. Required for the OpenTelemetry layer to pick
+        // them up and ship to the OTLP collector — at DEBUG (the default for
+        // `new_for_http`) spans never exist at INFO and the OTel exporter
+        // sees nothing.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+        )
         .layer(cors);
 
     // Split body-limit application: apply the global limit to the main app,
