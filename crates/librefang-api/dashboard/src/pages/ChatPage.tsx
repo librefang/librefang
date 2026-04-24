@@ -2449,10 +2449,17 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
-    if (!agents.some(a => a.id === selectedAgentId)) {
-      setSelectedAgentId("");
+    if (agents.some(a => a.id === selectedAgentId)) return;
+    // Not in the current list — before clearing, try expanding the query
+    // to include hand-spawned agents. The URL may point at a hand agent
+    // while `showHandAgents` (a localStorage toggle) is off, which would
+    // otherwise dump the user back to the default agent on every refresh.
+    if (!showHandAgents) {
+      setShowHandAgents(true);
+      return;
     }
-  }, [agents, selectedAgentId, agentsQuery.data]);
+    setSelectedAgentId("");
+  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent
