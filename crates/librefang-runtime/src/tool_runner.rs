@@ -2858,15 +2858,17 @@ fn tool_agent_kill(
 /// Resolve the pool `tool_load` / `tool_search` search against.
 ///
 /// - `Some(pool)` — the agent's granted `ToolDefinition` list from the
-///   agent-loop (builtin + MCP + skills). Preferred source so MCP/skill tools
-///   can be loaded back after the eager-schema trim (issue #3044).
-/// - `None` / empty — fall back to the builtin catalog. Callers that don't
-///   have the granted list on hand (legacy `execute_tool` paths, unit tests)
-///   still get sensible behavior for builtin tools.
+///   agent-loop (builtin + MCP + skills). The authoritative source: if the
+///   caller supplied one, we honor it verbatim — including an empty slice,
+///   which means "nothing is granted". Falling back to builtin on empty
+///   would leak the catalog to an agent that has none of it.
+/// - `None` — caller didn't thread the granted list through (legacy
+///   `execute_tool` paths: REST/MCP bridges, approval resume, unit tests).
+///   Fall back to the builtin catalog so these code paths keep working.
 fn meta_lookup_pool(available: Option<&[ToolDefinition]>) -> Vec<ToolDefinition> {
     match available {
-        Some(list) if !list.is_empty() => list.to_vec(),
-        _ => builtin_tool_definitions(),
+        Some(list) => list.to_vec(),
+        None => builtin_tool_definitions(),
     }
 }
 
@@ -8551,6 +8553,29 @@ description = "test"
             .expect("loaded_tool must populate for granted non-builtin");
         assert_eq!(loaded.name, "mcp_custom_thing");
         assert_eq!(loaded.description, dynamic.description);
+    }
+
+    #[test]
+    fn test_tool_meta_load_empty_pool_is_not_builtin_fallback() {
+        // `Some(&[])` must mean "granted pool is empty" — NOT "caller didn't
+        // provide one, please leak the builtin catalog". Only `None` falls
+        // back to builtins (for legacy execute_tool paths). This keeps the
+        // semantics unambiguous for future callers.
+        let empty: Vec<ToolDefinition> = Vec::new();
+        let r = tool_meta_load(&serde_json::json!({"name": "file_write"}), Some(&empty));
+        assert!(
+            r.is_error,
+            "Some(&[]) must resolve as empty pool, got content: {}",
+            r.content
+        );
+        assert!(r.loaded_tool.is_none());
+        // Sanity: None still falls back to builtin and resolves file_write.
+        let r_none = tool_meta_load(&serde_json::json!({"name": "file_write"}), None);
+        assert!(!r_none.is_error);
+        assert_eq!(
+            r_none.loaded_tool.map(|d| d.name).as_deref(),
+            Some("file_write")
+        );
     }
 
     #[test]
