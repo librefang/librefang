@@ -1,16 +1,15 @@
 /**
- * @librefang/sdk — Official JavaScript client for the LibreFang Agent OS REST API.
+ * @librefang/sdk — AUTO-GENERATED from openapi.json.
+ * Do not edit manually. Run: python3 scripts/codegen-sdks.py
  *
  * Usage:
  *   const { LibreFang } = require("@librefang/sdk");
  *   const client = new LibreFang("http://localhost:4545");
  *
- *   const agent = await client.agents.create({ template: "assistant" });
- *   const reply = await client.agents.message(agent.id, "Hello!");
- *   console.log(reply);
+ *   const agents = await client.agents.listAgents();
  *
  *   // Streaming:
- *   for await (const event of client.agents.stream(agent.id, "Tell me a joke")) {
+ *   for await (const event of client.agents.sendMessageStream(agentId, { message: "Hello" })) {
  *     process.stdout.write(event.delta || "");
  *   }
  */
@@ -27,469 +26,1181 @@ class LibreFangError extends Error {
 }
 
 class LibreFang {
-  /**
-   * @param {string} baseUrl - LibreFang server URL (e.g. "http://localhost:4545")
-   * @param {object} [opts]
-   * @param {Record<string, string>} [opts.headers] - Extra headers for every request
-   */
   constructor(baseUrl, opts) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this._headers = Object.assign({ "Content-Type": "application/json" }, (opts && opts.headers) || {});
-    this.agents = new AgentResource(this);
-    this.sessions = new SessionResource(this);
-    this.workflows = new WorkflowResource(this);
-    this.skills = new SkillResource(this);
-    this.channels = new ChannelResource(this);
-    this.tools = new ToolResource(this);
-    this.models = new ModelResource(this);
-    this.providers = new ProviderResource(this);
+    this.a2a = new A2AResource(this);
+    this.agents = new AgentsResource(this);
+    this.approvals = new ApprovalsResource(this);
+    this.auth = new AuthResource(this);
+    this.auto_dream = new AutoDreamResource(this);
+    this.budget = new BudgetResource(this);
+    this.channels = new ChannelsResource(this);
+    this.extensions = new ExtensionsResource(this);
+    this.hands = new HandsResource(this);
+    this.mcp = new McpResource(this);
     this.memory = new MemoryResource(this);
-    this.triggers = new TriggerResource(this);
-    this.schedules = new ScheduleResource(this);
+    this.models = new ModelsResource(this);
+    this.network = new NetworkResource(this);
+    this.pairing = new PairingResource(this);
+    this.proactive_memory = new ProactiveMemoryResource(this);
+    this.sessions = new SessionsResource(this);
+    this.skills = new SkillsResource(this);
+    this.system = new SystemResource(this);
+    this.tools = new ToolsResource(this);
+    this.webhooks = new WebhooksResource(this);
+    this.workflows = new WorkflowsResource(this);
   }
 
-  /** Low-level fetch wrapper. */
-  async _request(method, path, body) {
-    var url = this.baseUrl + path;
-    var init = { method: method, headers: Object.assign({}, this._headers) };
-    if (body !== undefined) {
-      init.body = JSON.stringify(body);
+  _withQuery(path, query) {
+    if (!query) return path;
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === null) continue;
+      params.append(k, String(v));
     }
-    var res = await fetch(url, init);
-    if (!res.ok) {
-      var text = await res.text().catch(function () { return ""; });
-      throw new LibreFangError("HTTP " + res.status + ": " + text, res.status, text);
-    }
-    var ct = res.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      return res.json();
-    }
-    return res.text();
+    const q = params.toString();
+    if (!q) return path;
+    return path + (path.includes("?") ? "&" : "?") + q;
   }
 
-  /** Low-level SSE streaming. Returns an async iterator of parsed events. */
-  async *_stream(method, path, body) {
-    var url = this.baseUrl + path;
-    var headers = Object.assign({}, this._headers, { Accept: "text/event-stream" });
-    var init = { method: method, headers: headers };
-    if (body !== undefined) {
-      init.body = JSON.stringify(body);
-    }
-    var res = await fetch(url, init);
+  async _request(method, path, body, query) {
+    const url = this.baseUrl + this._withQuery(path, query);
+    const opts = { method, headers: this._headers };
+    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
+    const text = await res.text();
+    if (!res.ok) throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
+    const ct = res.headers.get("content-type") || "";
+    return ct.includes("application/json") ? JSON.parse(text) : text;
+  }
+
+  async *_stream(method, path, body, query) {
+    const url = this.baseUrl + this._withQuery(path, query);
+    const headers = Object.assign({}, this._headers, { Accept: "text/event-stream" });
+    const opts = { method, headers };
+    if (body !== undefined && body !== null) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
     if (!res.ok) {
-      var text = await res.text().catch(function () { return ""; });
-      throw new LibreFangError("HTTP " + res.status + ": " + text, res.status, text);
+      const text = await res.text();
+      throw new LibreFangError(`HTTP ${res.status}: ${text}`, res.status, text);
     }
-    var reader = res.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = "";
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
     while (true) {
-      var result = await reader.read();
-      if (result.done) break;
-      buffer += decoder.decode(result.value, { stream: true });
-      var lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i].trim();
-        if (line.startsWith("data: ")) {
-          var data = line.slice(6);
-          if (data === "[DONE]") return;
-          try {
-            yield JSON.parse(data);
-          } catch (_) {
-            yield { raw: data };
-          }
-        }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        const data = trimmed.slice(6);
+        if (data === "[DONE]") return;
+        try { yield JSON.parse(data); } catch { yield { raw: data }; }
       }
     }
   }
+}
 
-  /** Health check. */
-  async health() {
-    return this._request("GET", "/api/health");
+// ── A2A Resource
+
+class A2AResource {
+  constructor(client) { this._c = client; }
+
+  async a2aListExternalAgents() {
+    return this._c._request("GET", "/api/a2a/agents");
   }
 
-  /** Detailed health. */
-  async healthDetail() {
-    return this._request("GET", "/api/health/detail");
+  async a2aGetExternalAgent(id) {
+    return this._c._request("GET", `/api/a2a/agents/${id}`);
   }
 
-  /** Server status. */
-  async status() {
-    return this._request("GET", "/api/status");
+  async a2aDiscoverExternal(data) {
+    return this._c._request("POST", "/api/a2a/discover", data, undefined);
   }
 
-  /** Server version. */
-  async version() {
-    return this._request("GET", "/api/version");
+  async a2aSendExternal(data) {
+    return this._c._request("POST", "/api/a2a/send", data, undefined);
   }
 
-  /** Prometheus metrics (text). */
-  async metrics() {
-    return this._request("GET", "/api/metrics");
-  }
-
-  /** Usage statistics. */
-  async usage() {
-    return this._request("GET", "/api/usage");
-  }
-
-  /** Config. */
-  async config() {
-    return this._request("GET", "/api/config");
+  async a2aExternalTaskStatus(id, query) {
+    return this._c._request("GET", `/api/a2a/tasks/${id}/status`, undefined, query);
   }
 }
 
-// ── Agent Resource ──────────────────────────────────────────────
+// ── Agents Resource
 
-class AgentResource {
+class AgentsResource {
   constructor(client) { this._c = client; }
 
-  /** List all agents. */
-  async list() {
-    return this._c._request("GET", "/api/agents");
+  async listAgents(query) {
+    return this._c._request("GET", "/api/agents", undefined, query);
   }
 
-  /** Get agent by ID. */
-  async get(id) {
-    return this._c._request("GET", "/api/agents/" + id);
+  async spawnAgent(data) {
+    return this._c._request("POST", "/api/agents", data, undefined);
   }
 
-  /** Create (spawn) a new agent.
-   * @param {object} opts - e.g. { template: "assistant", name: "My Agent" }
-   */
-  async create(opts) {
-    return this._c._request("POST", "/api/agents", opts);
+  async bulkCreateAgents(data) {
+    return this._c._request("POST", "/api/agents/bulk", data, undefined);
   }
 
-  /** Delete (kill) an agent. */
-  async delete(id) {
-    return this._c._request("DELETE", "/api/agents/" + id);
+  async bulkDeleteAgents() {
+    return this._c._request("DELETE", "/api/agents/bulk");
   }
 
-  /** Stop an agent. */
-  async stop(id) {
-    return this._c._request("POST", "/api/agents/" + id + "/stop");
+  async bulkStartAgents(data) {
+    return this._c._request("POST", "/api/agents/bulk/start", data, undefined);
   }
 
-  /** Clone an agent. */
-  async clone(id) {
-    return this._c._request("POST", "/api/agents/" + id + "/clone");
+  async bulkStopAgents(data) {
+    return this._c._request("POST", "/api/agents/bulk/stop", data, undefined);
   }
 
-  /** Update agent. */
-  async update(id, data) {
-    return this._c._request("PUT", "/api/agents/" + id + "/update", data);
+  async getAgent(id) {
+    return this._c._request("GET", `/api/agents/${id}`);
   }
 
-  /** Set agent mode. */
-  async setMode(id, mode) {
-    return this._c._request("PUT", "/api/agents/" + id + "/mode", { mode: mode });
+  async killAgent(id) {
+    return this._c._request("DELETE", `/api/agents/${id}`);
   }
 
-  /** Set agent model. */
-  async setModel(id, model) {
-    return this._c._request("PUT", "/api/agents/" + id + "/model", { model: model });
+  async patchAgent(id, data) {
+    return this._c._request("PATCH", `/api/agents/${id}`, data, undefined);
   }
 
-  /** Send a message and get the full response. */
-  async message(id, text, opts) {
-    var body = Object.assign({ message: text }, opts || {});
-    return this._c._request("POST", "/api/agents/" + id + "/message", body);
+  async cloneAgent(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/clone`, data, undefined);
   }
 
-  /** Send a message and stream the response (async iterator of SSE events).
-   * @example
-   *   for await (const evt of client.agents.stream(id, "Hello")) {
-   *     if (evt.type === "text_delta") process.stdout.write(evt.delta);
-   *   }
-   */
-  async *stream(id, text, opts) {
-    var body = Object.assign({ message: text }, opts || {});
-    yield* this._c._stream("POST", "/api/agents/" + id + "/message/stream", body);
+  async patchAgentConfig(id, data) {
+    return this._c._request("PATCH", `/api/agents/${id}/config`, data, undefined);
   }
 
-  /** Get agent session. */
-  async session(id) {
-    return this._c._request("GET", "/api/agents/" + id + "/session");
+  async getAgentDeliveries(id) {
+    return this._c._request("GET", `/api/agents/${id}/deliveries`);
   }
 
-  /** Reset agent session. */
-  async resetSession(id) {
-    return this._c._request("POST", "/api/agents/" + id + "/session/reset");
+  async listAgentFiles(id) {
+    return this._c._request("GET", `/api/agents/${id}/files`);
   }
 
-  /** Compact session. */
+  async getAgentFile(id, filename) {
+    return this._c._request("GET", `/api/agents/${id}/files/${filename}`);
+  }
+
+  async setAgentFile(id, filename, data) {
+    return this._c._request("PUT", `/api/agents/${id}/files/${filename}`, data, undefined);
+  }
+
+  async deleteAgentFile(id, filename) {
+    return this._c._request("DELETE", `/api/agents/${id}/files/${filename}`);
+  }
+
+  async clearAgentHistory(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/history`);
+  }
+
+  async updateAgentIdentity(id, data) {
+    return this._c._request("PATCH", `/api/agents/${id}/identity`, data, undefined);
+  }
+
+  async getAgentMcpServers(id) {
+    return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
+  }
+
+  async setAgentMcpServers(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/mcp_servers`, data, undefined);
+  }
+
+  async sendMessage(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/message`, data, undefined);
+  }
+
+  async *sendMessageStream(id, data) {
+    yield* this._c._stream("POST", `/api/agents/${id}/message/stream`, data, undefined);
+  }
+
+  async setAgentMode(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/mode`, data, undefined);
+  }
+
+  async setModel(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
+  }
+
+  async getAgentSession(id) {
+    return this._c._request("GET", `/api/agents/${id}/session`);
+  }
+
   async compactSession(id) {
-    return this._c._request("POST", "/api/agents/" + id + "/session/compact");
+    return this._c._request("POST", `/api/agents/${id}/session/compact`);
   }
 
-  /** List sessions for an agent. */
-  async listSessions(id) {
-    return this._c._request("GET", "/api/agents/" + id + "/sessions");
+  async rebootSession(id) {
+    return this._c._request("POST", `/api/agents/${id}/session/reboot`);
   }
 
-  /** Create a new session. */
-  async createSession(id, label) {
-    return this._c._request("POST", "/api/agents/" + id + "/sessions", { label: label });
+  async resetSession(id) {
+    return this._c._request("POST", `/api/agents/${id}/session/reset`);
   }
 
-  /** Switch to a session. */
-  async switchSession(id, sessionId) {
-    return this._c._request("POST", "/api/agents/" + id + "/sessions/" + sessionId + "/switch");
+  async listAgentSessions(id) {
+    return this._c._request("GET", `/api/agents/${id}/sessions`);
   }
 
-  /** Get agent skills. */
-  async getSkills(id) {
-    return this._c._request("GET", "/api/agents/" + id + "/skills");
+  async createAgentSession(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/sessions`, data, undefined);
   }
 
-  /** Set agent skills. */
-  async setSkills(id, skills) {
-    return this._c._request("PUT", "/api/agents/" + id + "/skills", skills);
+  async importSession(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/sessions/import`, data, undefined);
   }
 
-  /** Upload a file to agent. */
-  async upload(id, file, filename) {
-    var url = this._c.baseUrl + "/api/agents/" + id + "/upload";
-    var form = new FormData();
-    form.append("file", file, filename);
-    var res = await fetch(url, { method: "POST", body: form });
-    if (!res.ok) throw new LibreFangError("Upload failed: " + res.status, res.status);
-    return res.json();
+  async exportSession(id, session_id) {
+    return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/export`);
   }
 
-  /** Update agent identity. */
-  async setIdentity(id, identity) {
-    return this._c._request("PATCH", "/api/agents/" + id + "/identity", identity);
+  async switchAgentSession(id, session_id) {
+    return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/switch`);
   }
 
-  /** Patch agent config. */
-  async patchConfig(id, config) {
-    return this._c._request("PATCH", "/api/agents/" + id + "/config", config);
-  }
-}
-
-// ── Session Resource ────────────────────────────────────────────
-
-class SessionResource {
-  constructor(client) { this._c = client; }
-
-  async list() {
-    return this._c._request("GET", "/api/sessions");
+  async getAgentSkills(id) {
+    return this._c._request("GET", `/api/agents/${id}/skills`);
   }
 
-  async delete(id) {
-    return this._c._request("DELETE", "/api/sessions/" + id);
+  async setAgentSkills(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/skills`, data, undefined);
   }
 
-  async setLabel(id, label) {
-    return this._c._request("PUT", "/api/sessions/" + id + "/label", { label: label });
-  }
-}
-
-// ── Workflow Resource ───────────────────────────────────────────
-
-class WorkflowResource {
-  constructor(client) { this._c = client; }
-
-  async list() {
-    return this._c._request("GET", "/api/workflows");
+  async stopAgent(id) {
+    return this._c._request("POST", `/api/agents/${id}/stop`);
   }
 
-  async create(workflow) {
-    return this._c._request("POST", "/api/workflows", workflow);
+  async getAgentTools(id) {
+    return this._c._request("GET", `/api/agents/${id}/tools`);
   }
 
-  async run(id, input) {
-    return this._c._request("POST", "/api/workflows/" + id + "/run", input);
+  async setAgentTools(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/tools`, data, undefined);
   }
 
-  async runs(id) {
-    return this._c._request("GET", "/api/workflows/" + id + "/runs");
+  async getAgentTraces(id) {
+    return this._c._request("GET", `/api/agents/${id}/traces`);
+  }
+
+  async updateAgent(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/update`, data, undefined);
+  }
+
+  async uploadFile(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
+  }
+
+  async serveUpload(file_id) {
+    return this._c._request("GET", `/api/uploads/${file_id}`);
   }
 }
 
-// ── Skill Resource ──────────────────────────────────────────────
+// ── Approvals Resource
 
-class SkillResource {
+class ApprovalsResource {
   constructor(client) { this._c = client; }
 
-  async list() {
-    return this._c._request("GET", "/api/skills");
+  async listApprovals() {
+    return this._c._request("GET", "/api/approvals");
   }
 
-  async install(skill) {
-    return this._c._request("POST", "/api/skills/install", skill);
+  async createApproval(data) {
+    return this._c._request("POST", "/api/approvals", data, undefined);
   }
 
-  async uninstall(skill) {
-    return this._c._request("POST", "/api/skills/uninstall", skill);
+  async getApproval(id) {
+    return this._c._request("GET", `/api/approvals/${id}`);
   }
 
-  async search(query) {
-    return this._c._request("GET", "/api/marketplace/search?q=" + encodeURIComponent(query));
+  async approveRequest(id, data) {
+    return this._c._request("POST", `/api/approvals/${id}/approve`, data, undefined);
+  }
+
+  async rejectRequest(id) {
+    return this._c._request("POST", `/api/approvals/${id}/reject`);
   }
 }
 
-// ── Channel Resource ────────────────────────────────────────────
+// ── Auth Resource
 
-class ChannelResource {
+class AuthResource {
   constructor(client) { this._c = client; }
 
-  async list() {
+  async authCallback() {
+    return this._c._request("GET", "/api/auth/callback");
+  }
+
+  async authCallbackPost(data) {
+    return this._c._request("POST", "/api/auth/callback", data, undefined);
+  }
+
+  async authIntrospect(data) {
+    return this._c._request("POST", "/api/auth/introspect", data, undefined);
+  }
+
+  async authLogin() {
+    return this._c._request("GET", "/api/auth/login");
+  }
+
+  async authLoginProvider(provider) {
+    return this._c._request("GET", `/api/auth/login/${provider}`);
+  }
+
+  async authProviders() {
+    return this._c._request("GET", "/api/auth/providers");
+  }
+
+  async authUserinfo() {
+    return this._c._request("GET", "/api/auth/userinfo");
+  }
+}
+
+// ── AutoDream Resource
+
+class AutoDreamResource {
+  constructor(client) { this._c = client; }
+
+  async autoDreamAbort(id) {
+    return this._c._request("POST", `/api/auto-dream/agents/${id}/abort`);
+  }
+
+  async autoDreamSetEnabled(id, data) {
+    return this._c._request("PUT", `/api/auto-dream/agents/${id}/enabled`, data, undefined);
+  }
+
+  async autoDreamTrigger(id) {
+    return this._c._request("POST", `/api/auto-dream/agents/${id}/trigger`);
+  }
+
+  async autoDreamStatus() {
+    return this._c._request("GET", "/api/auto-dream/status");
+  }
+}
+
+// ── Budget Resource
+
+class BudgetResource {
+  constructor(client) { this._c = client; }
+
+  async budgetStatus() {
+    return this._c._request("GET", "/api/budget");
+  }
+
+  async updateBudget(data) {
+    return this._c._request("PUT", "/api/budget", data, undefined);
+  }
+
+  async agentBudgetRanking() {
+    return this._c._request("GET", "/api/budget/agents");
+  }
+
+  async agentBudgetStatus(id) {
+    return this._c._request("GET", `/api/budget/agents/${id}`);
+  }
+
+  async updateAgentBudget(id, data) {
+    return this._c._request("PUT", `/api/budget/agents/${id}`, data, undefined);
+  }
+
+  async usageStats() {
+    return this._c._request("GET", "/api/usage");
+  }
+
+  async usageByModel() {
+    return this._c._request("GET", "/api/usage/by-model");
+  }
+
+  async usageDaily() {
+    return this._c._request("GET", "/api/usage/daily");
+  }
+
+  async usageSummary() {
+    return this._c._request("GET", "/api/usage/summary");
+  }
+}
+
+// ── Channels Resource
+
+class ChannelsResource {
+  constructor(client) { this._c = client; }
+
+  async listChannels() {
     return this._c._request("GET", "/api/channels");
   }
 
-  async configure(name, config) {
-    return this._c._request("POST", "/api/channels/" + name + "/configure", config);
+  async reloadChannels() {
+    return this._c._request("POST", "/api/channels/reload");
   }
 
-  async remove(name) {
-    return this._c._request("DELETE", "/api/channels/" + name + "/configure");
+  async wechatQrStart() {
+    return this._c._request("POST", "/api/channels/wechat/qr/start");
   }
 
-  async test(name) {
-    return this._c._request("POST", "/api/channels/" + name + "/test");
+  async wechatQrStatus(query) {
+    return this._c._request("GET", "/api/channels/wechat/qr/status", undefined, query);
+  }
+
+  async whatsappQrStart() {
+    return this._c._request("POST", "/api/channels/whatsapp/qr/start");
+  }
+
+  async whatsappQrStatus(query) {
+    return this._c._request("GET", "/api/channels/whatsapp/qr/status", undefined, query);
+  }
+
+  async configureChannel(name, data) {
+    return this._c._request("POST", `/api/channels/${name}/configure`, data, undefined);
+  }
+
+  async removeChannel(name) {
+    return this._c._request("DELETE", `/api/channels/${name}/configure`);
+  }
+
+  async testChannel(name, data) {
+    return this._c._request("POST", `/api/channels/${name}/test`, data, undefined);
   }
 }
 
-// ── Tool Resource ───────────────────────────────────────────────
+// ── Extensions Resource
 
-class ToolResource {
+class ExtensionsResource {
   constructor(client) { this._c = client; }
 
-  async list() {
-    return this._c._request("GET", "/api/tools");
+  async listExtensions() {
+    return this._c._request("GET", "/api/extensions");
   }
 
-  async get(name) {
-    return this._c._request("GET", "/api/tools/" + encodeURIComponent(name));
+  async installExtension(data) {
+    return this._c._request("POST", "/api/extensions/install", data, undefined);
   }
 
-  // Invoke a tool. `opts.agent_id` (optional) is sent as the `?agent_id=`
-  // query parameter — required by the server for approval-gated tools so
-  // the deferred execution can be attributed to a real agent.
-  async invoke(name, input, opts) {
-    let path = "/api/tools/" + encodeURIComponent(name) + "/invoke";
-    const agentId = opts && opts.agent_id;
-    if (agentId) {
-      path += "?agent_id=" + encodeURIComponent(agentId);
-    }
-    return this._c._request("POST", path, input);
+  async uninstallExtension(data) {
+    return this._c._request("POST", "/api/extensions/uninstall", data, undefined);
+  }
+
+  async getExtension(name) {
+    return this._c._request("GET", `/api/extensions/${name}`);
   }
 }
 
-// ── Model Resource ──────────────────────────────────────────────
+// ── Hands Resource
 
-class ModelResource {
+class HandsResource {
   constructor(client) { this._c = client; }
 
-  async list() {
-    return this._c._request("GET", "/api/models");
+  async listHands() {
+    return this._c._request("GET", "/api/hands");
   }
 
-  async get(id) {
-    return this._c._request("GET", "/api/models/" + id);
+  async listActiveHands() {
+    return this._c._request("GET", "/api/hands/active");
   }
 
-  async aliases() {
-    return this._c._request("GET", "/api/models/aliases");
+  async installHand(data) {
+    return this._c._request("POST", "/api/hands/install", data, undefined);
+  }
+
+  async deactivateHand(id) {
+    return this._c._request("DELETE", `/api/hands/instances/${id}`);
+  }
+
+  async handInstanceBrowser(id) {
+    return this._c._request("GET", `/api/hands/instances/${id}/browser`);
+  }
+
+  async pauseHand(id) {
+    return this._c._request("POST", `/api/hands/instances/${id}/pause`);
+  }
+
+  async resumeHand(id) {
+    return this._c._request("POST", `/api/hands/instances/${id}/resume`);
+  }
+
+  async handStats(id) {
+    return this._c._request("GET", `/api/hands/instances/${id}/stats`);
+  }
+
+  async reloadHands() {
+    return this._c._request("POST", "/api/hands/reload");
+  }
+
+  async getHand(hand_id) {
+    return this._c._request("GET", `/api/hands/${hand_id}`);
+  }
+
+  async activateHand(hand_id, data) {
+    return this._c._request("POST", `/api/hands/${hand_id}/activate`, data, undefined);
+  }
+
+  async checkHandDeps(hand_id) {
+    return this._c._request("POST", `/api/hands/${hand_id}/check-deps`);
+  }
+
+  async installHandDeps(hand_id) {
+    return this._c._request("POST", `/api/hands/${hand_id}/install-deps`);
+  }
+
+  async getHandSettings(hand_id) {
+    return this._c._request("GET", `/api/hands/${hand_id}/settings`);
+  }
+
+  async updateHandSettings(hand_id, data) {
+    return this._c._request("PUT", `/api/hands/${hand_id}/settings`, data, undefined);
   }
 }
 
-// ── Provider Resource ───────────────────────────────────────────
+// ── Mcp Resource
 
-class ProviderResource {
+class McpResource {
   constructor(client) { this._c = client; }
 
-  async list() {
-    return this._c._request("GET", "/api/providers");
+  async listMcpCatalog() {
+    return this._c._request("GET", "/api/mcp/catalog");
   }
 
-  async setKey(name, key) {
-    return this._c._request("POST", "/api/providers/" + name + "/key", { key: key });
+  async getMcpCatalogEntry(id) {
+    return this._c._request("GET", `/api/mcp/catalog/${id}`);
   }
 
-  async deleteKey(name) {
-    return this._c._request("DELETE", "/api/providers/" + name + "/key");
+  async mcpHealthHandler() {
+    return this._c._request("GET", "/api/mcp/health");
   }
 
-  async test(name) {
-    return this._c._request("POST", "/api/providers/" + name + "/test");
+  async reloadMcpHandler() {
+    return this._c._request("POST", "/api/mcp/reload");
+  }
+
+  async listMcpServers() {
+    return this._c._request("GET", "/api/mcp/servers");
+  }
+
+  async addMcpServer(data) {
+    return this._c._request("POST", "/api/mcp/servers", data, undefined);
+  }
+
+  async getMcpServer(name) {
+    return this._c._request("GET", `/api/mcp/servers/${name}`);
+  }
+
+  async updateMcpServer(name, data) {
+    return this._c._request("PUT", `/api/mcp/servers/${name}`, data, undefined);
+  }
+
+  async deleteMcpServer(name) {
+    return this._c._request("DELETE", `/api/mcp/servers/${name}`);
+  }
+
+  async reconnectMcpServerHandler(name) {
+    return this._c._request("POST", `/api/mcp/servers/${name}/reconnect`);
   }
 }
 
-// ── Memory Resource ─────────────────────────────────────────────
+// ── Memory Resource
 
 class MemoryResource {
   constructor(client) { this._c = client; }
 
-  async getAll(agentId) {
-    return this._c._request("GET", "/api/memory/agents/" + agentId + "/kv");
+  async exportAgentMemory(id) {
+    return this._c._request("GET", `/api/agents/${id}/memory/export`);
   }
 
-  async get(agentId, key) {
-    return this._c._request("GET", "/api/memory/agents/" + agentId + "/kv/" + key);
+  async importAgentMemory(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/memory/import`, data, undefined);
   }
 
-  async set(agentId, key, value) {
-    return this._c._request("PUT", "/api/memory/agents/" + agentId + "/kv/" + key, { value: value });
+  async getAgentKv(id) {
+    return this._c._request("GET", `/api/memory/agents/${id}/kv`);
   }
 
-  async delete(agentId, key) {
-    return this._c._request("DELETE", "/api/memory/agents/" + agentId + "/kv/" + key);
-  }
-}
-
-// ── Trigger Resource ────────────────────────────────────────────
-
-class TriggerResource {
-  constructor(client) { this._c = client; }
-
-  async list() {
-    return this._c._request("GET", "/api/triggers");
+  async getAgentKvKey(id, key) {
+    return this._c._request("GET", `/api/memory/agents/${id}/kv/${key}`);
   }
 
-  async create(trigger) {
-    return this._c._request("POST", "/api/triggers", trigger);
+  async setAgentKvKey(id, key, data) {
+    return this._c._request("PUT", `/api/memory/agents/${id}/kv/${key}`, data, undefined);
   }
 
-  async update(id, trigger) {
-    return this._c._request("PUT", "/api/triggers/" + id, trigger);
-  }
-
-  async delete(id) {
-    return this._c._request("DELETE", "/api/triggers/" + id);
+  async deleteAgentKvKey(id, key) {
+    return this._c._request("DELETE", `/api/memory/agents/${id}/kv/${key}`);
   }
 }
 
-// ── Schedule Resource ───────────────────────────────────────────
+// ── Models Resource
 
-class ScheduleResource {
+class ModelsResource {
   constructor(client) { this._c = client; }
 
-  async list() {
+  async catalogStatus() {
+    return this._c._request("GET", "/api/catalog/status");
+  }
+
+  async catalogUpdate() {
+    return this._c._request("POST", "/api/catalog/update");
+  }
+
+  async listModels() {
+    return this._c._request("GET", "/api/models");
+  }
+
+  async listAliases() {
+    return this._c._request("GET", "/api/models/aliases");
+  }
+
+  async createAlias(data) {
+    return this._c._request("POST", "/api/models/aliases", data, undefined);
+  }
+
+  async deleteAlias(alias) {
+    return this._c._request("DELETE", `/api/models/aliases/${alias}`);
+  }
+
+  async addCustomModel(data) {
+    return this._c._request("POST", "/api/models/custom", data, undefined);
+  }
+
+  async removeCustomModel(id) {
+    return this._c._request("DELETE", `/api/models/custom/${id}`);
+  }
+
+  async getModel(id) {
+    return this._c._request("GET", `/api/models/${id}`);
+  }
+
+  async listProviders() {
+    return this._c._request("GET", "/api/providers");
+  }
+
+  async copilotOauthPoll(poll_id) {
+    return this._c._request("GET", `/api/providers/github-copilot/oauth/poll/${poll_id}`);
+  }
+
+  async copilotOauthStart() {
+    return this._c._request("POST", "/api/providers/github-copilot/oauth/start");
+  }
+
+  async getProvider(name) {
+    return this._c._request("GET", `/api/providers/${name}`);
+  }
+
+  async setDefaultProvider(name, data) {
+    return this._c._request("POST", `/api/providers/${name}/default`, data, undefined);
+  }
+
+  async setProviderKey(name, data) {
+    return this._c._request("POST", `/api/providers/${name}/key`, data, undefined);
+  }
+
+  async deleteProviderKey(name) {
+    return this._c._request("DELETE", `/api/providers/${name}/key`);
+  }
+
+  async testProvider(name) {
+    return this._c._request("POST", `/api/providers/${name}/test`);
+  }
+
+  async setProviderUrl(name, data) {
+    return this._c._request("PUT", `/api/providers/${name}/url`, data, undefined);
+  }
+}
+
+// ── Network Resource
+
+class NetworkResource {
+  constructor(client) { this._c = client; }
+
+  async commsEvents(query) {
+    return this._c._request("GET", "/api/comms/events", undefined, query);
+  }
+
+  async *commsEventsStream() {
+    yield* this._c._stream("GET", "/api/comms/events/stream");
+  }
+
+  async commsSend(data) {
+    return this._c._request("POST", "/api/comms/send", data, undefined);
+  }
+
+  async commsTask(data) {
+    return this._c._request("POST", "/api/comms/task", data, undefined);
+  }
+
+  async commsTopology() {
+    return this._c._request("GET", "/api/comms/topology");
+  }
+
+  async networkStatus() {
+    return this._c._request("GET", "/api/network/status");
+  }
+
+  async listPeers() {
+    return this._c._request("GET", "/api/peers");
+  }
+
+  async getPeer(id) {
+    return this._c._request("GET", `/api/peers/${id}`);
+  }
+}
+
+// ── Pairing Resource
+
+class PairingResource {
+  constructor(client) { this._c = client; }
+
+  async pairingComplete(data) {
+    return this._c._request("POST", "/api/pairing/complete", data, undefined);
+  }
+
+  async pairingDevices() {
+    return this._c._request("GET", "/api/pairing/devices");
+  }
+
+  async pairingRemoveDevice(id) {
+    return this._c._request("DELETE", `/api/pairing/devices/${id}`);
+  }
+
+  async pairingNotify(data) {
+    return this._c._request("POST", "/api/pairing/notify", data, undefined);
+  }
+
+  async pairingRequest() {
+    return this._c._request("POST", "/api/pairing/request");
+  }
+}
+
+// ── ProactiveMemory Resource
+
+class ProactiveMemoryResource {
+  constructor(client) { this._c = client; }
+
+  async memoryList(query) {
+    return this._c._request("GET", "/api/memory", undefined, query);
+  }
+
+  async memoryAdd(data) {
+    return this._c._request("POST", "/api/memory", data, undefined);
+  }
+
+  async memoryListAgent(id, query) {
+    return this._c._request("GET", `/api/memory/agents/${id}`, undefined, query);
+  }
+
+  async memoryResetAgent(id) {
+    return this._c._request("DELETE", `/api/memory/agents/${id}`);
+  }
+
+  async memoryConsolidate(id) {
+    return this._c._request("POST", `/api/memory/agents/${id}/consolidate`);
+  }
+
+  async memoryDuplicates(id) {
+    return this._c._request("GET", `/api/memory/agents/${id}/duplicates`);
+  }
+
+  async memoryExportAgent(id) {
+    return this._c._request("GET", `/api/memory/agents/${id}/export`);
+  }
+
+  async memoryImportAgent(id, data) {
+    return this._c._request("POST", `/api/memory/agents/${id}/import`, data, undefined);
+  }
+
+  async memoryClearLevel(id, level) {
+    return this._c._request("DELETE", `/api/memory/agents/${id}/level/${level}`);
+  }
+
+  async memorySearchAgent(id, query) {
+    return this._c._request("GET", `/api/memory/agents/${id}/search`, undefined, query);
+  }
+
+  async memoryStatsAgent(id) {
+    return this._c._request("GET", `/api/memory/agents/${id}/stats`);
+  }
+
+  async memoryCleanup() {
+    return this._c._request("POST", "/api/memory/cleanup");
+  }
+
+  async memoryUpdate(memory_id, data) {
+    return this._c._request("PUT", `/api/memory/items/${memory_id}`, data, undefined);
+  }
+
+  async memoryDelete(memory_id) {
+    return this._c._request("DELETE", `/api/memory/items/${memory_id}`);
+  }
+
+  async memoryHistory(memory_id) {
+    return this._c._request("GET", `/api/memory/items/${memory_id}/history`);
+  }
+
+  async memorySearch(query) {
+    return this._c._request("GET", "/api/memory/search", undefined, query);
+  }
+
+  async memoryStats() {
+    return this._c._request("GET", "/api/memory/stats");
+  }
+
+  async memoryGetUser(user_id) {
+    return this._c._request("GET", `/api/memory/user/${user_id}`);
+  }
+}
+
+// ── Sessions Resource
+
+class SessionsResource {
+  constructor(client) { this._c = client; }
+
+  async findSessionByLabel(id, label) {
+    return this._c._request("GET", `/api/agents/${id}/sessions/by-label/${label}`);
+  }
+
+  async listSessions() {
+    return this._c._request("GET", "/api/sessions");
+  }
+
+  async sessionCleanup() {
+    return this._c._request("POST", "/api/sessions/cleanup");
+  }
+
+  async getSession(id) {
+    return this._c._request("GET", `/api/sessions/${id}`);
+  }
+
+  async deleteSession(id) {
+    return this._c._request("DELETE", `/api/sessions/${id}`);
+  }
+
+  async setSessionLabel(id, data) {
+    return this._c._request("PUT", `/api/sessions/${id}/label`, data, undefined);
+  }
+}
+
+// ── Skills Resource
+
+class SkillsResource {
+  constructor(client) { this._c = client; }
+
+  async clawhubBrowse(query) {
+    return this._c._request("GET", "/api/clawhub/browse", undefined, query);
+  }
+
+  async clawhubInstall(data) {
+    return this._c._request("POST", "/api/clawhub/install", data, undefined);
+  }
+
+  async clawhubSearch(query) {
+    return this._c._request("GET", "/api/clawhub/search", undefined, query);
+  }
+
+  async clawhubSkillDetail(slug) {
+    return this._c._request("GET", `/api/clawhub/skill/${slug}`);
+  }
+
+  async clawhubSkillCode(slug) {
+    return this._c._request("GET", `/api/clawhub/skill/${slug}/code`);
+  }
+
+  async marketplaceSearch(query) {
+    return this._c._request("GET", "/api/marketplace/search", undefined, query);
+  }
+
+  async listSkills() {
+    return this._c._request("GET", "/api/skills");
+  }
+
+  async createSkill(data) {
+    return this._c._request("POST", "/api/skills/create", data, undefined);
+  }
+
+  async installSkill(data) {
+    return this._c._request("POST", "/api/skills/install", data, undefined);
+  }
+
+  async uninstallSkill(data) {
+    return this._c._request("POST", "/api/skills/uninstall", data, undefined);
+  }
+
+  async listTools() {
+    return this._c._request("GET", "/api/tools");
+  }
+
+  async getTool(name) {
+    return this._c._request("GET", `/api/tools/${name}`);
+  }
+}
+
+// ── System Resource
+
+class SystemResource {
+  constructor(client) { this._c = client; }
+
+  async auditRecent() {
+    return this._c._request("GET", "/api/audit/recent");
+  }
+
+  async auditVerify() {
+    return this._c._request("GET", "/api/audit/verify");
+  }
+
+  async createBackup() {
+    return this._c._request("POST", "/api/backup");
+  }
+
+  async listBackups() {
+    return this._c._request("GET", "/api/backups");
+  }
+
+  async deleteBackup(filename) {
+    return this._c._request("DELETE", `/api/backups/${filename}`);
+  }
+
+  async listBindings() {
+    return this._c._request("GET", "/api/bindings");
+  }
+
+  async addBinding(data) {
+    return this._c._request("POST", "/api/bindings", data, undefined);
+  }
+
+  async removeBinding(index) {
+    return this._c._request("DELETE", `/api/bindings/${index}`);
+  }
+
+  async listCommands() {
+    return this._c._request("GET", "/api/commands");
+  }
+
+  async getCommand(name) {
+    return this._c._request("GET", `/api/commands/${name}`);
+  }
+
+  async getConfig() {
+    return this._c._request("GET", "/api/config");
+  }
+
+  async configReload() {
+    return this._c._request("POST", "/api/config/reload");
+  }
+
+  async configSchema() {
+    return this._c._request("GET", "/api/config/schema");
+  }
+
+  async configSet(data) {
+    return this._c._request("POST", "/api/config/set", data, undefined);
+  }
+
+  async health() {
+    return this._c._request("GET", "/api/health");
+  }
+
+  async healthDetail() {
+    return this._c._request("GET", "/api/health/detail");
+  }
+
+  async quickInit() {
+    return this._c._request("POST", "/api/init");
+  }
+
+  async *logsStream() {
+    yield* this._c._stream("GET", "/api/logs/stream");
+  }
+
+  async prometheusMetrics() {
+    return this._c._request("GET", "/api/metrics");
+  }
+
+  async runMigrate(data) {
+    return this._c._request("POST", "/api/migrate", data, undefined);
+  }
+
+  async migrateDetect() {
+    return this._c._request("GET", "/api/migrate/detect");
+  }
+
+  async migrateScan(data) {
+    return this._c._request("POST", "/api/migrate/scan", data, undefined);
+  }
+
+  async listProfiles() {
+    return this._c._request("GET", "/api/profiles");
+  }
+
+  async getProfile(name) {
+    return this._c._request("GET", `/api/profiles/${name}`);
+  }
+
+  async queueStatus() {
+    return this._c._request("GET", "/api/queue/status");
+  }
+
+  async restoreBackup(data) {
+    return this._c._request("POST", "/api/restore", data, undefined);
+  }
+
+  async securityStatus() {
+    return this._c._request("GET", "/api/security");
+  }
+
+  async shutdown() {
+    return this._c._request("POST", "/api/shutdown");
+  }
+
+  async status() {
+    return this._c._request("GET", "/api/status");
+  }
+
+  async listAgentTemplates() {
+    return this._c._request("GET", "/api/templates");
+  }
+
+  async getAgentTemplate(name) {
+    return this._c._request("GET", `/api/templates/${name}`);
+  }
+
+  async version() {
+    return this._c._request("GET", "/api/version");
+  }
+
+  async apiVersions() {
+    return this._c._request("GET", "/api/versions");
+  }
+}
+
+// ── Tools Resource
+
+class ToolsResource {
+  constructor(client) { this._c = client; }
+
+  async invokeTool(name, data, query) {
+    return this._c._request("POST", `/api/tools/${name}/invoke`, data, query);
+  }
+}
+
+// ── Webhooks Resource
+
+class WebhooksResource {
+  constructor(client) { this._c = client; }
+
+  async webhookAgent(data) {
+    return this._c._request("POST", "/api/hooks/agent", data, undefined);
+  }
+
+  async webhookWake(data) {
+    return this._c._request("POST", "/api/hooks/wake", data, undefined);
+  }
+}
+
+// ── Workflows Resource
+
+class WorkflowsResource {
+  constructor(client) { this._c = client; }
+
+  async listCronJobs() {
+    return this._c._request("GET", "/api/cron/jobs");
+  }
+
+  async createCronJob(data) {
+    return this._c._request("POST", "/api/cron/jobs", data, undefined);
+  }
+
+  async updateCronJob(id, data) {
+    return this._c._request("PUT", `/api/cron/jobs/${id}`, data, undefined);
+  }
+
+  async deleteCronJob(id) {
+    return this._c._request("DELETE", `/api/cron/jobs/${id}`);
+  }
+
+  async toggleCronJob(id, data) {
+    return this._c._request("PUT", `/api/cron/jobs/${id}/enable`, data, undefined);
+  }
+
+  async cronJobStatus(id) {
+    return this._c._request("GET", `/api/cron/jobs/${id}/status`);
+  }
+
+  async listSchedules() {
     return this._c._request("GET", "/api/schedules");
   }
 
-  async create(schedule) {
-    return this._c._request("POST", "/api/schedules", schedule);
+  async createSchedule(data) {
+    return this._c._request("POST", "/api/schedules", data, undefined);
   }
 
-  async update(id, schedule) {
-    return this._c._request("PUT", "/api/schedules/" + id, schedule);
+  async getSchedule(id) {
+    return this._c._request("GET", `/api/schedules/${id}`);
   }
 
-  async delete(id) {
-    return this._c._request("DELETE", "/api/schedules/" + id);
+  async updateSchedule(id, data) {
+    return this._c._request("PUT", `/api/schedules/${id}`, data, undefined);
   }
 
-  async run(id) {
-    return this._c._request("POST", "/api/schedules/" + id + "/run");
+  async deleteSchedule(id) {
+    return this._c._request("DELETE", `/api/schedules/${id}`);
+  }
+
+  async runSchedule(id) {
+    return this._c._request("POST", `/api/schedules/${id}/run`);
+  }
+
+  async listTriggers(query) {
+    return this._c._request("GET", "/api/triggers", undefined, query);
+  }
+
+  async createTrigger(data) {
+    return this._c._request("POST", "/api/triggers", data, undefined);
+  }
+
+  async getTrigger(id) {
+    return this._c._request("GET", `/api/triggers/${id}`);
+  }
+
+  async deleteTrigger(id) {
+    return this._c._request("DELETE", `/api/triggers/${id}`);
+  }
+
+  async updateTrigger(id, data) {
+    return this._c._request("PATCH", `/api/triggers/${id}`, data, undefined);
+  }
+
+  async listWorkflows() {
+    return this._c._request("GET", "/api/workflows");
+  }
+
+  async createWorkflow(data) {
+    return this._c._request("POST", "/api/workflows", data, undefined);
+  }
+
+  async updateWorkflow(id, data) {
+    return this._c._request("PUT", `/api/workflows/${id}`, data, undefined);
+  }
+
+  async deleteWorkflow(id) {
+    return this._c._request("DELETE", `/api/workflows/${id}`);
+  }
+
+  async runWorkflow(id, data) {
+    return this._c._request("POST", `/api/workflows/${id}/run`, data, undefined);
+  }
+
+  async listWorkflowRuns(id) {
+    return this._c._request("GET", `/api/workflows/${id}/runs`);
+  }
+
+  async saveWorkflowAsTemplate(id) {
+    return this._c._request("POST", `/api/workflows/${id}/save-as-template`);
   }
 }
 
-// ── Exports ─────────────────────────────────────────────────────
-
-module.exports = { LibreFang: LibreFang, LibreFangError: LibreFangError };
+module.exports = { LibreFang, LibreFangError };

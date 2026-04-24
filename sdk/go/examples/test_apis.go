@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -9,12 +11,12 @@ import (
 func main() {
 	client := librefang.New("http://localhost:4545")
 
-	skills, _ := client.Skills.List()
-	fmt.Printf("Skills: %d\n", len(skills))
+	skills, _ := client.Skills.ListSkills()
+	fmt.Printf("Skills: %d\n", len(librefang.ToSlice(skills)))
 
-	models, _ := client.Models.List()
-	fmt.Printf("Models: %d\n", len(models))
+	models, _ := client.Models.ListModels()
+	fmt.Printf("Models: %d\n", len(librefang.ToSlice(models)))
 
-	providers, _ := client.Providers.List()
-	fmt.Printf("Providers: %d\n", len(providers))
+	providers, _ := client.Providers.ListProviders()
+	fmt.Printf("Providers: %d\n", len(librefang.ToSlice(providers)))
 }
