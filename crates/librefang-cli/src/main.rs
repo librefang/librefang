@@ -2805,9 +2805,17 @@ fn detect_best_provider() -> (String, String, String) {
                 Some(first) => first.to_uppercase().to_string() + c.as_str(),
             }
         };
+        // CLI-backed providers return an empty env_var (auth via OAuth token
+        // or keychain, not an env variable). Display a readable placeholder
+        // so the i18n message doesn't end with an empty parenthetical.
+        let auth_display = if env_var.is_empty() {
+            "CLI login"
+        } else {
+            env_var
+        };
         ui::success(&i18n::t_args(
             "detected-provider",
-            &[("display", &display_name), ("env_var", env_var)],
+            &[("display", &display_name), ("env_var", auth_display)],
         ));
         return (
             provider.to_string(),

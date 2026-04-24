@@ -850,6 +850,24 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
         }
     }
 
+    // Phase 3: CLI-backed providers. No env var is involved — a CLI login
+    // is detected via binary-on-PATH or on-disk credential files. These are
+    // tried only after all API-key providers so that a user with both an
+    // API key and a CLI login gets the direct-API path (cheaper, faster).
+    //
+    // An empty `api_key_env` in the returned tuple signals to the caller
+    // that no env var lookup is needed; the CLI driver manages its own
+    // authentication (OAuth token, keychain, or subprocess login).
+    //
+    // Order matches typical install prevalence — claude-code first, then
+    // codex-cli, then Google's Gemini CLI, then Qwen's fork.
+    const CLI_PRIORITY: &[&str] = &["claude-code", "codex-cli", "gemini-cli", "qwen-code"];
+    for &name in CLI_PRIORITY {
+        if cli_provider_available(name) {
+            return Some((name, "", ""));
+        }
+    }
+
     None
 }
 
