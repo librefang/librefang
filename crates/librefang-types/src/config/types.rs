@@ -1019,7 +1019,7 @@ impl Default for ExtensionsConfig {
 }
 
 /// Credential vault configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VaultConfig {
     /// Whether the vault is enabled (auto-detected if vault.enc exists).
@@ -1435,7 +1435,7 @@ impl Default for ThinkingConfig {
 /// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
 ///   `json_schema` mode; for providers without native support the schema is
 ///   injected into the system prompt).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
     /// Free-form text (default behaviour).
@@ -3204,7 +3204,7 @@ pub struct OAuthConfig {
 /// default to 0 which means "unlimited" — only non-zero limits are enforced.
 /// Keyed by the provider id in `BudgetConfig.providers`, which must match
 /// the `model.provider` field of the agent's `ModelConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProviderBudget {
     /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
@@ -3220,7 +3220,7 @@ pub struct ProviderBudget {
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BudgetConfig {
     /// Maximum total cost in USD per hour (0.0 = unlimited).

@@ -4568,6 +4568,7 @@ dependencies = [
  "rand 0.10.0",
  "regex-lite",
  "rmp-serde",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2",
