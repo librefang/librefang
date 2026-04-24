@@ -1195,6 +1195,25 @@ pub async fn invoke_tool(
     )
     .await;
 
+    // Operator audit trail: every direct invocation bypasses the agent loop
+    // (and therefore the agent-side audit record) so we log who called what
+    // and how it finished. Detail carries the tool name; outcome carries
+    // "ok" / the downstream error. The caller_agent_id is used when
+    // supplied, otherwise a sentinel so the entry still attributes
+    // to "REST caller" rather than appearing as an orphaned agent id.
+    let audit_caller = caller_agent_id.as_deref().unwrap_or("rest-api:anonymous");
+    let audit_outcome = if result.is_error {
+        format!("error: {}", result.content)
+    } else {
+        "ok".to_string()
+    };
+    state.kernel.audit().record(
+        audit_caller,
+        librefang_runtime::audit::AuditAction::ToolInvoke,
+        &name,
+        audit_outcome,
+    );
+
     let status = if result.is_error {
         StatusCode::BAD_REQUEST
     } else {

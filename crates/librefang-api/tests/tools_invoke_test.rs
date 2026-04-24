@@ -213,6 +213,60 @@ async fn test_invoke_allowlisted_non_approval_tool_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_invoke_writes_audit_entry() {
+    // Every direct invocation bypasses the agent loop's audit record, so the
+    // handler must emit its own. Verify: on a successful call we get a
+    // ToolInvoke entry tagged with the caller_agent_id, detail = tool name,
+    // outcome starting with "ok".
+    let h = build_harness(ToolInvokeConfig {
+        enabled: true,
+        allowlist: vec!["notify_owner".into()],
+    })
+    .await;
+    let before = h.state.kernel.audit().len();
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    let (status, _) = invoke(
+        &h.app,
+        "notify_owner",
+        Some(&agent_id),
+        serde_json::json!({"reason": "r", "summary": "s"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after = h.state.kernel.audit().len();
+    assert_eq!(
+        after,
+        before + 1,
+        "exactly one audit entry should be appended"
+    );
+    let entry = h
+        .state
+        .kernel
+        .audit()
+        .recent(1)
+        .into_iter()
+        .next()
+        .expect("at least one audit entry");
+    // AuditAction does not implement PartialEq — match instead.
+    assert!(
+        matches!(
+            entry.action,
+            librefang_runtime::audit::AuditAction::ToolInvoke
+        ),
+        "expected ToolInvoke action, got {:?}",
+        entry.action
+    );
+    assert_eq!(entry.detail, "notify_owner");
+    assert_eq!(entry.agent_id, agent_id);
+    assert!(
+        entry.outcome.starts_with("ok"),
+        "outcome should start with ok, got: {}",
+        entry.outcome
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_file_read_uses_plumbed_workspace_root() {
     // Guards the sandbox-context plumbing: if `workspace_root` is ever
     // silently reverted to None in the handler, `file_read` returns
