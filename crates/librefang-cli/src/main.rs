@@ -1618,6 +1618,7 @@ enum ServiceCommands {
 fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
 
     // One-shot CLI commands (status, stop, doctor, …) load config.toml as a
     // side effect. librefang_kernel::config emits INFO on every load and WARN
@@ -1660,22 +1661,32 @@ fn init_tracing_stderr(log_level: &str) {
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
     // One-shot CLI runs are transient — stderr is the only sink; the daemon
     // has its own file appender under `logs/daemon.log`.
+    //
+    // `.with_filter(env_filter)` applies the user-visible log filter to the
+    // fmt layer ONLY. A registry-level filter would also suppress span
+    // CREATION, which would starve the OTel exporter layer attached below
+    // (`librefang_kernel`/`librefang_runtime` downgraded to WARN means all
+    // INFO-level `#[instrument]` spans are filtered out before OTel ever
+    // sees them). Per-layer filtering keeps stderr terse while OTel
+    // receives the full span tree.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
-        .compact();
+        .compact()
+        .with_filter(env_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
     // The slot is stacked **first** (directly on Registry) so its boxed
     // `Layer<Registry>` trait object matches the innermost subscriber type.
+    // No filter is attached to this layer on purpose — see comment above.
     #[cfg(feature = "telemetry")]
     let registry =
         tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry.with(env_filter).with(fmt_layer).init();
+    registry.with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
