@@ -1524,7 +1524,10 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     get,
     path = "/api/agents/{id}/session",
     tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
+    ),
     responses(
         (status = 200, description = "Get agent conversation session history", body = serde_json::Value)
     )
@@ -1532,6 +1535,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -1555,12 +1559,38 @@ pub async fn get_agent_session(
         }
     };
 
+    // Callers (e.g. the dashboard tab with `?sessionId=` pinned) can override
+    // the canonical-active session for this request. The returned messages
+    // must belong to that exact session; otherwise tabs pinned to different
+    // sessions all render whichever session the kernel thinks is active.
+    let target_session_id = match params.get("session_id").map(|s| s.as_str()) {
+        Some(raw) => match raw.parse::<uuid::Uuid>() {
+            Ok(uuid) => librefang_types::agent::SessionId(uuid),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid session_id"})),
+                );
+            }
+        },
+        None => entry.session_id,
+    };
+
     match state
         .kernel
         .memory_substrate()
-        .get_session(entry.session_id)
+        .get_session(target_session_id)
     {
         Ok(Some(session)) => {
+            // Reject cross-agent reads when the caller passed an explicit
+            // session_id — prevents leaking one agent's history via another's
+            // id.
+            if session.agent_id != agent_id {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "session not found for this agent"})),
+                );
+            }
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
             // collects all tool_use entries keyed by id; pass 2 attaches results.

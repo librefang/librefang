@@ -1250,6 +1250,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "description": "Optional session id to load instead of the canonical active session",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {

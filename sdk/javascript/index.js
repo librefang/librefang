@@ -232,8 +232,8 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
-  async getAgentSession(id) {
-    return this._c._request("GET", `/api/agents/${id}/session`);
+  async getAgentSession(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
   }
 
   async compactSession(id) {

@@ -335,7 +335,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId)
+    loadAgentSession(loadId, sessionId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {

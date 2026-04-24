@@ -216,8 +216,8 @@ class _AgentsResource(_Resource):
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
 
-    def get_agent_session(self, id: str):
-        return self._c._request("GET", f"/api/agents/{id}/session")
+    def get_agent_session(self, id: str, session_id: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
 
     def compact_session(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/session/compact")
