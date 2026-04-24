@@ -131,6 +131,14 @@ function resolveFieldRender(node: JsonSchema, ui?: UiFieldOptions): FieldRender 
   // Option<>/OneOrMany<> so this branch is latent, but a future bare
   // struct field should render as a JSON editor, not a text input.
   if (effective.$ref && !effective.type) return { type: "object" };
+  // `serde_json::Value` fields (hook input/output schemas, tool
+  // input_schemas) emit as `{description, default}` with no type because
+  // Value can be any JSON. Render as JsonEditor so users can author the
+  // arbitrary JSON payload, not a text input that'd corrupt the shape.
+  if (!effective.type && !Array.isArray(effective.enum) && !effective.anyOf
+      && !effective.oneOf && !effective.allOf && !effective.$ref) {
+    return { type: "object" };
+  }
   const primary = pickType(effective);
   if (primary === "boolean") return { type: "boolean" };
   if (primary === "integer" || primary === "number") {
