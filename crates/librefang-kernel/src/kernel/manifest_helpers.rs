@@ -240,21 +240,34 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
 /// When `source_toml_path` points to a hand.toml rather than an agent.toml, the file
 /// contains a `HandDefinition` with multiple agent manifests keyed by role name.
 /// This function parses the file as a `HandDefinition` and returns the manifest whose
-/// `name` field (or role key) matches `agent_name`.
+/// name (in any of the four forms the kernel may have stamped) matches `agent_name`.
+///
+/// The four forms tried, in order, are:
+/// 1. `manifest.name` as written in the TOML (e.g. `"jarvis-operator"`).
+/// 2. The `[agents.<role>]` key (e.g. `"operator"`).
+/// 3. `"{hand_id}:{manifest.name}"` — the canonical form stamped by hand activation
+///    in `kernel/mod.rs` when persisting the agent record. This is the form returned
+///    by `GET /api/agents` and stored in `agents.name` in the SQLite DB, so the
+///    boot-time TOML drift detection MUST recognise it or hand-derived agents
+///    silently fall through to "Cannot parse TOML on disk as agent manifest, using
+///    DB version" and the on-disk hand.toml never propagates.
+/// 4. `"{hand_id}-{role}"` — legacy qualifier kept for backwards compatibility.
 pub(super) fn extract_manifest_from_hand_toml(
     toml_str: &str,
     agent_name: &str,
 ) -> Option<librefang_types::agent::AgentManifest> {
     let def: librefang_hands::HandDefinition = toml::from_str(toml_str).ok()?;
     for (role, hand_agent) in &def.agents {
+        // Forms 1 + 2: bare manifest name or role key.
         if hand_agent.manifest.name == agent_name || role == agent_name {
             return Some(hand_agent.manifest.clone());
         }
-    }
-    // Also try matching by the "{hand_id}-{role}" convention used for spawned agents.
-    for (role, hand_agent) in &def.agents {
-        let qualified = format!("{}-{}", def.id, role);
-        if qualified == agent_name {
+        // Form 3: canonical "{hand_id}:{manifest.name}" stamped at activation.
+        if format!("{}:{}", def.id, hand_agent.manifest.name) == agent_name {
+            return Some(hand_agent.manifest.clone());
+        }
+        // Form 4: legacy "{hand_id}-{role}" qualifier.
+        if format!("{}-{}", def.id, role) == agent_name {
             return Some(hand_agent.manifest.clone());
         }
     }
@@ -288,5 +301,125 @@ pub(super) fn peer_scoped_key(key: &str, peer_id: Option<&str>) -> String {
     match peer_id {
         Some(pid) => format!("peer:{pid}:{key}"),
         None => key.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HAND_TOML: &str = r#"
+id = "jarvis"
+version = "1.0.0"
+name = "Jarvis"
+description = "test"
+category = "other"
+
+[agents.operator]
+name = "jarvis-operator"
+description = "vault operator"
+module = "builtin:chat"
+
+[agents.operator.model]
+provider = "openrouter"
+model = "qwen/qwen3.6-plus"
+system_prompt = "You are JARVIS."
+"#;
+
+    #[test]
+    fn extract_matches_bare_manifest_name() {
+        let m = extract_manifest_from_hand_toml(HAND_TOML, "jarvis-operator");
+        assert!(m.is_some(), "must match manifest.name");
+    }
+
+    #[test]
+    fn extract_matches_role_key() {
+        let m = extract_manifest_from_hand_toml(HAND_TOML, "operator");
+        assert!(m.is_some(), "must match [agents.<role>] key");
+    }
+
+    #[test]
+    fn extract_matches_canonical_colon_form() {
+        // "{hand_id}:{manifest.name}" — what the kernel stamps at activation
+        // and what `agents.name` in the DB actually stores.
+        let m = extract_manifest_from_hand_toml(HAND_TOML, "jarvis:jarvis-operator");
+        assert!(
+            m.is_some(),
+            "must match the canonical \"{{hand_id}}:{{manifest.name}}\" form"
+        );
+    }
+
+    #[test]
+    fn extract_matches_legacy_dash_qualifier() {
+        // Use a hand whose role-key and manifest.name diverge so the
+        // "{hand_id}-{role}" form is distinguishable from form 1.
+        let toml = r#"
+id = "research"
+version = "1.0.0"
+name = "Research"
+description = "t"
+category = "other"
+
+[agents.lead]
+name = "completely-different-name"
+description = "d"
+module = "builtin:chat"
+
+[agents.lead.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "p"
+"#;
+        // "{hand_id}-{role}" → "research-lead"
+        let m = extract_manifest_from_hand_toml(toml, "research-lead");
+        assert!(m.is_some(), "must match \"{{hand_id}}-{{role}}\" qualifier");
+    }
+
+    #[test]
+    fn extract_returns_none_for_unknown_agent() {
+        assert!(extract_manifest_from_hand_toml(HAND_TOML, "no-such-agent").is_none());
+    }
+
+    #[test]
+    fn extract_preserves_nested_model_system_prompt() {
+        // Regression: AgentManifest::deserialize is lenient and will accept a
+        // hand.toml as a partial AgentManifest — top-level `name`/`description`
+        // get picked up, but `model.system_prompt` (nested under
+        // `[agents.<role>.model]`) is missed and ModelConfig::default() kicks
+        // in with the stub "You are a helpful AI agent." prompt.
+        //
+        // The boot loop must therefore call extract_manifest_from_hand_toml
+        // BEFORE falling back to the flat parse. This test verifies the
+        // extractor itself returns the nested prompt verbatim — the
+        // call-site ordering is enforced by the boot path.
+        let m = extract_manifest_from_hand_toml(HAND_TOML, "jarvis:jarvis-operator")
+            .expect("hand-extraction must match canonical name");
+        assert_eq!(
+            m.model.system_prompt, "You are JARVIS.",
+            "extracted manifest must preserve nested [agents.<role>.model].system_prompt"
+        );
+    }
+
+    #[test]
+    fn extract_returns_none_for_standalone_agent_toml() {
+        // Regression: standalone agent.toml files (no `id`, no `category`,
+        // no `[agents.X]` table) must NOT be matched by the hand-extraction
+        // path. HandDefinition deserialization should reject them so the
+        // boot loop's `or_else(|| AgentManifest::deserialize(...))` fallback
+        // kicks in for these files.
+        let standalone = r#"
+name = "my-agent"
+description = "standalone"
+module = "builtin:chat"
+
+[model]
+provider = "openrouter"
+model = "x"
+system_prompt = "p"
+"#;
+        assert!(
+            extract_manifest_from_hand_toml(standalone, "my-agent").is_none(),
+            "standalone agent.toml must not parse as a HandDefinition"
+        );
     }
 }
