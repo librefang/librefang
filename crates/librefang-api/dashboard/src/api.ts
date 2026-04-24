@@ -1758,22 +1758,100 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
 }
 
-export interface ConfigFieldSchema {
-  type?: string;
-  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
+/* ------------------------------------------------------------------ */
+/*  Config schema (draft-07)                                           */
+/* ------------------------------------------------------------------ */
+/* The backend now emits a draft-07 JSON Schema generated from the   */
+/* `KernelConfig` Rust type via `schemars`, plus two extensions:     */
+/*   - `x-sections`: ordered UI section groupings                    */
+/*   - `x-ui-options`: per-field UI hints (min/max/step/select opts) */
+/* keyed by JSON pointer (e.g. `/memory/decay_rate`).                */
+
+/** A draft-07 JSON Schema node (partial — only the fields the UI reads). */
+export interface JsonSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  properties?: Record<string, JsonSchema>;
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema;
+  required?: string[];
+  minimum?: number;
+  maximum?: number;
+  multipleOf?: number;
+  format?: string;
+  $ref?: string;
+  definitions?: Record<string, JsonSchema>;
+}
+
+/** UI-only option overrides the struct cannot carry. */
+export interface UiFieldOptions {
+  /** Curated select options — strings or `{value,label}` objects. */
+  select?: (string | { value: string; label: string })[];
+  /** `{id,name,provider}`-shaped options (the model picker). */
+  select_objects?: { id: string; name: string; provider: string }[];
+  /** Select whose values are numeric-strings (e.g. `["0","1","6"]`). */
+  number_select?: string[];
+  /** UI numeric constraints. `min`/`max` may differ from the struct's
+      `#[schemars(range)]` bounds when the UI wants tighter suggestion
+      limits than runtime validation. */
   min?: number;
   max?: number;
   step?: number;
+  placeholder?: string;
 }
 
-export interface ConfigSectionSchema {
-  fields: Record<string, string | ConfigFieldSchema>;
+export interface ConfigSectionDescriptor {
+  key: string;
+  title?: string;
+  /** `true` → fields read from the root of `KernelConfig`. `false`/omitted →
+      fields are inside `properties[struct_field]`. */
   root_level?: boolean;
+  /** Name of the `KernelConfig` field holding this section's sub-struct. */
+  struct_field?: string;
+  /** When true, changes to this section are hot-reloaded without restart. */
   hot_reloadable?: boolean;
+  /** For `root_level` sections: explicit field ordering. */
+  fields?: string[];
 }
 
-export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
-  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+export interface ConfigSchemaRoot extends JsonSchema {
+  "x-sections"?: ConfigSectionDescriptor[];
+  "x-ui-options"?: Record<string, UiFieldOptions>;
+}
+
+export async function getConfigSchema(): Promise<ConfigSchemaRoot> {
+  return get<ConfigSchemaRoot>("/api/config/schema");
+}
+
+/** Resolve a `$ref` (e.g. `#/definitions/MemoryConfig`) in the root schema. */
+export function resolveRef(
+  root: ConfigSchemaRoot,
+  ref: string,
+): JsonSchema | undefined {
+  if (!ref.startsWith("#/")) return undefined;
+  const path = ref.slice(2).split("/");
+  let node: unknown = root;
+  for (const seg of path) {
+    if (typeof node !== "object" || node === null) return undefined;
+    node = (node as Record<string, unknown>)[seg];
+  }
+  return (node as JsonSchema) ?? undefined;
+}
+
+/** Get a property's schema with `$ref`s resolved one level. */
+export function deref(
+  root: ConfigSchemaRoot,
+  node: JsonSchema | undefined,
+): JsonSchema | undefined {
+  if (!node) return undefined;
+  if (node.$ref) return resolveRef(root, node.$ref);
+  return node;
 }
 
 export async function setConfigValue(

@@ -252,50 +252,39 @@ impl ModelCatalog {
             };
 
             // If the user explicitly removed this provider's key, skip
-            // fallback/CLI detection — only honour the primary env var.
+            // alias detection — only honour the primary env var.
             let suppressed = self.suppressed_providers.contains(&provider.id);
 
-            // Secondary: provider-specific fallback keys (still API-key-based auth)
-            let has_key_fallback = if suppressed {
+            // Secondary: recognised alias env var. Only officially documented
+            // aliases count (e.g. Google AI Studio docs both `GEMINI_API_KEY`
+            // and `GOOGLE_API_KEY` as equivalent). This is NOT a CLI-to-API
+            // mapping — both are explicit API keys the user set.
+            //
+            // LibreFang intentionally does NOT promote a CLI login (Claude
+            // Code, Codex, Gemini CLI, Qwen Code) to "configured" for the
+            // corresponding API provider. CLI auth and API-key auth are
+            // surfaced as separate providers so the user sees exactly what
+            // they configured — CLI logins show up under `claude-code` /
+            // `codex-cli` / `gemini-cli` / `qwen-code`, API keys under
+            // `anthropic` / `openai` / `gemini` / `qwen`.
+            let has_key_alias = if suppressed {
                 false
             } else {
-                match provider.id.as_str() {
-                    "gemini" => std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty()),
-                    "openai" | "codex" => {
-                        std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
-                            || read_codex_credential().is_some()
-                    }
-                    _ => false,
-                }
-            };
-
-            // Tertiary: CLI tools that can serve as fallback for API providers
-            let has_cli_fallback = if suppressed {
-                false
-            } else {
-                match provider.id.as_str() {
-                    "anthropic" => crate::drivers::cli_provider_available("claude-code"),
-                    "gemini" => crate::drivers::cli_provider_available("gemini-cli"),
-                    "openai" | "codex" => crate::drivers::cli_provider_available("codex-cli"),
-                    "qwen" => crate::drivers::cli_provider_available("qwen-code"),
-                    _ => false,
-                }
+                provider.id == "gemini"
+                    && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
             };
 
             provider.auth_status = if has_key {
                 AuthStatus::Configured
-            } else if has_key_fallback {
+            } else if has_key_alias {
                 AuthStatus::AutoDetected
-            } else if has_cli_fallback {
-                AuthStatus::ConfiguredCli
             } else {
                 AuthStatus::Missing
             };
             tracing::debug!(
                 provider = %provider.id,
                 has_key,
-                has_key_fallback,
-                has_cli_fallback,
+                has_key_alias,
                 auth_status = %provider.auth_status,
                 "detect_auth result"
             );
@@ -1041,55 +1030,6 @@ fn resolve_home_dir() -> std::path::PathBuf {
         })
 }
 
-/// Read an OpenAI API key from the Codex CLI credential file.
-///
-/// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-/// Returns `Some(api_key)` if the file exists and contains a valid, non-expired token.
-/// Only checks presence — the actual key value is used transiently, never stored.
-pub fn read_codex_credential() -> Option<String> {
-    let codex_home = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var("USERPROFILE")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-        })?;
-
-    let auth_path = codex_home.join("auth.json");
-    let content = std::fs::read_to_string(&auth_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    // Check expiry if present
-    if let Some(expires_at) = parsed.get("expires_at").and_then(|v| v.as_i64()) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if now >= expires_at {
-            return None; // Expired
-        }
-    }
-
-    parsed
-        .get("api_key")
-        .or_else(|| parsed.get("token"))
-        // Codex CLI OAuth stores the token nested at tokens.id_token
-        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,6 +1241,103 @@ id = "acme"
         assert_eq!(ollama.auth_status, AuthStatus::NotRequired);
         let vllm = catalog.get_provider("vllm").unwrap();
         assert_eq!(vllm.auth_status, AuthStatus::NotRequired);
+    }
+
+    /// Module-scope mutex for tests that mutate process env vars.
+    ///
+    /// `cargo test` runs tests in parallel by default, so any two tests
+    /// touching the same env var must share this lock — otherwise they race
+    /// on process-global state. Each test declaring its own `static` was the
+    /// earlier bug: two disjoint mutexes = no mutual exclusion.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: a CLI login must NOT auto-configure the corresponding API
+    /// provider. `anthropic` / `openai` / `gemini` / `qwen` only light up
+    /// when the user sets their own API key. CLI logins surface via their
+    /// dedicated provider entries (`claude-code`, `codex-cli`, etc.).
+    ///
+    /// This test runs with no provider API-key env vars set, so every
+    /// API provider should report `Missing`. We only assert on the four
+    /// providers that previously borrowed CLI credentials — the others
+    /// are naturally Missing.
+    #[test]
+    fn detect_auth_does_not_promote_api_providers_from_cli_login() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let preserved: Vec<(&str, Option<String>)> = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "QWEN_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+        for (k, _) in &preserved {
+            // SAFETY: single-threaded section guarded by ENV_LOCK.
+            unsafe { std::env::remove_var(k) };
+        }
+
+        let mut catalog = test_catalog();
+        catalog.detect_auth();
+
+        for id in ["anthropic", "openai", "gemini", "qwen"] {
+            let p = catalog.get_provider(id).unwrap();
+            assert_eq!(
+                p.auth_status,
+                AuthStatus::Missing,
+                "{id} must be Missing when no API key is set, regardless of CLI login"
+            );
+        }
+
+        for (k, v) in preserved {
+            // SAFETY: single-threaded section guarded by ENV_LOCK.
+            unsafe {
+                if let Some(val) = v {
+                    std::env::set_var(k, val);
+                } else {
+                    std::env::remove_var(k);
+                }
+            }
+        }
+    }
+
+    /// `GOOGLE_API_KEY` remains a recognised alias for `GEMINI_API_KEY`
+    /// (officially documented by Google AI Studio as equivalent). Setting
+    /// it should promote Gemini to AutoDetected — this is a real API key
+    /// the user typed, not a CLI-credential borrow.
+    #[test]
+    fn google_api_key_alias_still_recognised_for_gemini() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev_gemini = std::env::var("GEMINI_API_KEY").ok();
+        let prev_google = std::env::var("GOOGLE_API_KEY").ok();
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::set_var("GOOGLE_API_KEY", "test-alias-key");
+        }
+
+        let mut catalog = test_catalog();
+        catalog.detect_auth();
+        let gemini = catalog.get_provider("gemini").unwrap();
+        assert_eq!(gemini.auth_status, AuthStatus::AutoDetected);
+
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            if let Some(v) = prev_gemini {
+                std::env::set_var("GEMINI_API_KEY", v);
+            } else {
+                std::env::remove_var("GEMINI_API_KEY");
+            }
+            if let Some(v) = prev_google {
+                std::env::set_var("GOOGLE_API_KEY", v);
+            } else {
+                std::env::remove_var("GOOGLE_API_KEY");
+            }
+        }
     }
 
     #[test]

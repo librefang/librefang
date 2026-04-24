@@ -1618,6 +1618,7 @@ enum ServiceCommands {
 fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
 
     // One-shot CLI commands (status, stop, doctor, …) load config.toml as a
     // side effect. librefang_kernel::config emits INFO on every load and WARN
@@ -1660,22 +1661,32 @@ fn init_tracing_stderr(log_level: &str) {
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
     // One-shot CLI runs are transient — stderr is the only sink; the daemon
     // has its own file appender under `logs/daemon.log`.
+    //
+    // `.with_filter(env_filter)` applies the user-visible log filter to the
+    // fmt layer ONLY. A registry-level filter would also suppress span
+    // CREATION, which would starve the OTel exporter layer attached below
+    // (`librefang_kernel`/`librefang_runtime` downgraded to WARN means all
+    // INFO-level `#[instrument]` spans are filtered out before OTel ever
+    // sees them). Per-layer filtering keeps stderr terse while OTel
+    // receives the full span tree.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
-        .compact();
+        .compact()
+        .with_filter(env_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
     // The slot is stacked **first** (directly on Registry) so its boxed
     // `Layer<Registry>` trait object matches the innermost subscriber type.
+    // No filter is attached to this layer on purpose — see comment above.
     #[cfg(feature = "telemetry")]
     let registry =
         tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry.with(env_filter).with(fmt_layer).init();
+    registry.with(fmt_layer).init();
 }
 
 /// Get the LibreFang home directory, respecting LIBREFANG_HOME env var.
@@ -2805,9 +2816,17 @@ fn detect_best_provider() -> (String, String, String) {
                 Some(first) => first.to_uppercase().to_string() + c.as_str(),
             }
         };
+        // CLI-backed providers return an empty env_var (auth via OAuth token
+        // or keychain, not an env variable). Display a readable placeholder
+        // so the i18n message doesn't end with an empty parenthetical.
+        let auth_display = if env_var.is_empty() {
+            "CLI login"
+        } else {
+            env_var
+        };
         ui::success(&i18n::t_args(
             "detected-provider",
-            &[("display", &display_name), ("env_var", env_var)],
+            &[("display", &display_name), ("env_var", auth_display)],
         ));
         return (
             provider.to_string(),
@@ -3139,6 +3158,36 @@ impl Drop for ForegroundTeeGuard {
 /// spawn a background thread that copies to both terminal and log file.
 #[cfg(unix)]
 fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
+    // Ensure the parent directory exists (e.g. `~/.librefang/logs/`) before we
+    // try to open the log file. Fresh installations and test environments may
+    // not have this directory yet.
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            // Report the failure on the real stderr (not yet redirected), then
+            // exit instead of limping forward into the silent-hang regime the
+            // old ordering produced.
+            eprintln!("Failed to create log directory {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+
+    // Open the log file BEFORE redirecting stdout/stderr. If the open panics
+    // (permissions, read-only fs, parent still missing, …) the panic message
+    // reaches the real stderr the user is watching. Previously we opened the
+    // file AFTER `dup2`, so a failure wrote its panic message into a pipe
+    // whose reader hadn't been spawned yet — the message was trapped in the
+    // pipe buffer and the process appeared to hang at "Starting daemon…".
+    let log_file = std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to open daemon log file {}: {e}", log_path.display());
+                std::process::exit(1);
+            }),
+    );
+
     // Create pipe for stdout+stderr (we'll write to it, background thread reads)
     let mut fds = [0i32, 0i32];
     unsafe {
@@ -3151,21 +3200,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
     let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
-    // Redirect stdout and stderr to the pipe
+    // Redirect stdout and stderr to the pipe. From here on any write to the
+    // standard streams goes through the pipe and must be drained by the
+    // read thread below — do not fail between this point and `thread::spawn`.
     unsafe {
         libc::dup2(pipe_write, libc::STDOUT_FILENO);
         libc::dup2(pipe_write, libc::STDERR_FILENO);
         libc::close(pipe_write);
     }
-
-    // Create log file (append mode)
-    let log_file = std::sync::Mutex::new(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .expect("daemon log file"),
-    );
 
     // Spawn background thread that reads from pipe and writes to both terminal and log
     std::thread::spawn(move || {

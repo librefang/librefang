@@ -961,15 +961,20 @@ pub fn qwen_code_available() -> bool {
 }
 
 /// Check if Qwen credentials exist.
+///
+/// Qwen Code is a fork of Google's Gemini CLI, so its OAuth token file is
+/// named `oauth_creds.json`. The other names are defensive fallbacks.
 fn qwen_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let qwen_dir = home.join(".qwen");
-        qwen_dir.join("credentials.json").exists()
-            || qwen_dir.join(".credentials.json").exists()
-            || qwen_dir.join("auth.json").exists()
-    } else {
-        false
-    }
+    home_dir()
+        .map(|h| qwen_credentials_in_dir(&h.join(".qwen")))
+        .unwrap_or(false)
+}
+
+fn qwen_credentials_in_dir(dir: &std::path::Path) -> bool {
+    dir.join("oauth_creds.json").exists()
+        || dir.join("credentials.json").exists()
+        || dir.join(".credentials.json").exists()
+        || dir.join("auth.json").exists()
 }
 
 /// Cross-platform home directory.
@@ -1506,5 +1511,44 @@ mod tests {
     fn test_which_nonexistent_binary() {
         // `which` for a non-existent binary should return None.
         assert!(QwenCodeDriver::which("__nonexistent_binary_12345__").is_none());
+    }
+
+    fn make_qwen_tmp_dir(label: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "librefang-test-qwen-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn oauth_creds_json_is_recognised_for_qwen() {
+        // Qwen Code forks Gemini CLI and writes the same OAuth file name.
+        let dir = make_qwen_tmp_dir("oauth-creds");
+        std::fs::write(dir.join("oauth_creds.json"), "{}").unwrap();
+        assert!(qwen_credentials_in_dir(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn qwen_credential_fallbacks_are_recognised() {
+        for name in ["credentials.json", ".credentials.json", "auth.json"] {
+            let dir = make_qwen_tmp_dir(&format!("creds-{name}"));
+            std::fs::write(dir.join(name), "{}").unwrap();
+            assert!(qwen_credentials_in_dir(&dir), "{name} should be recognised");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn qwen_empty_dir_has_no_credentials() {
+        let dir = make_qwen_tmp_dir("empty");
+        assert!(!qwen_credentials_in_dir(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

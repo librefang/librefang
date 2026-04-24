@@ -8,7 +8,9 @@ use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
 use super::DEFAULT_API_LISTEN;
 
 /// DM (direct message) policy for a channel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DmPolicy {
     /// Respond to all DMs.
@@ -21,7 +23,9 @@ pub enum DmPolicy {
 }
 
 /// Group message policy for a channel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupPolicy {
     /// Respond to all group messages.
@@ -36,7 +40,9 @@ pub enum GroupPolicy {
 }
 
 /// Output format hint for channel-specific message formatting.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// Standard Markdown (default).
@@ -51,7 +57,7 @@ pub enum OutputFormat {
 }
 
 /// Auto-routing strategy for a channel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoRouteStrategy {
     /// Disable auto-routing entirely (default). Channel messages always go to
@@ -71,7 +77,7 @@ pub enum AutoRouteStrategy {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
@@ -227,7 +233,9 @@ fn default_auto_route_divergence() -> u32 {
 }
 
 /// Controls what usage info appears in response footers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageFooterMode {
     /// Don't show usage info.
@@ -242,7 +250,9 @@ pub enum UsageFooterMode {
 }
 
 /// Kernel operating mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum KernelMode {
     /// Conservative mode — no auto-updates, pinned models, stability-first.
@@ -260,7 +270,9 @@ pub enum KernelMode {
 /// - **Stable**: only non-prerelease tags (default).
 /// - **Beta**: stable + beta tags (excludes `-rc`).
 /// - **Rc**: all tags including release candidates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     #[default]
@@ -294,7 +306,7 @@ impl std::str::FromStr for UpdateChannel {
 }
 
 /// User configuration for RBAC multi-user support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserConfig {
     /// User display name.
     pub name: String,
@@ -315,7 +327,9 @@ fn default_role() -> String {
 }
 
 /// Web search provider selection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchProvider {
     /// Brave Search API.
@@ -334,7 +348,7 @@ pub enum SearchProvider {
 }
 
 /// Web tools configuration (search + fetch).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebConfig {
     /// Which search provider to use.
@@ -377,7 +391,7 @@ impl Default for WebConfig {
 }
 
 /// Brave Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BraveSearchConfig {
     /// Env var name holding the API key.
@@ -405,7 +419,7 @@ impl Default for BraveSearchConfig {
 }
 
 /// Tavily Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TavilySearchConfig {
     /// Env var name holding the API key.
@@ -430,7 +444,7 @@ impl Default for TavilySearchConfig {
 }
 
 /// Perplexity Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PerplexitySearchConfig {
     /// Env var name holding the API key.
@@ -449,7 +463,7 @@ impl Default for PerplexitySearchConfig {
 }
 
 /// Jina Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct JinaSearchConfig {
     /// Env var name holding the API key.
@@ -480,7 +494,7 @@ impl Default for JinaSearchConfig {
 }
 
 /// Web fetch configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebFetchConfig {
     /// Maximum characters to return in content.
@@ -510,7 +524,7 @@ impl Default for WebFetchConfig {
 }
 
 /// Browser automation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BrowserConfig {
     /// Enable the built-in CDP browser tools (browser_navigate, browser_click,
@@ -573,7 +587,9 @@ impl Default for BrowserConfig {
 }
 
 /// Config hot-reload mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReloadMode {
     /// No automatic reloading.
@@ -588,7 +604,7 @@ pub enum ReloadMode {
 }
 
 /// Configuration for config file watching and hot-reload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ReloadConfig {
     /// Reload mode. Default: hybrid.
@@ -610,7 +626,7 @@ impl Default for ReloadConfig {
 ///
 /// Controls GCRA token-bucket rate limiting for HTTP API requests and
 /// per-connection limits for WebSocket connections.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RateLimitConfig {
     /// API token budget per minute per IP (GCRA algorithm). Default: 500.
@@ -692,7 +708,7 @@ impl Default for RateLimitConfig {
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
 /// systems to trigger agent actions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebhookTriggerConfig {
     /// Enable webhook trigger endpoints. Default: false.
@@ -725,7 +741,7 @@ impl Default for WebhookTriggerConfig {
 /// provider = "ollama"
 /// model = "llama3.2:latest"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FallbackProviderConfig {
     /// Provider name (e.g., "ollama", "groq").
     pub provider: String,
@@ -740,7 +756,7 @@ pub struct FallbackProviderConfig {
 }
 
 /// Text-to-speech configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
@@ -774,7 +790,7 @@ impl Default for TtsConfig {
 }
 
 /// OpenAI TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsOpenAiConfig {
     /// Voice: alloy, echo, fable, onyx, nova, shimmer. Default: "alloy".
@@ -799,7 +815,7 @@ impl Default for TtsOpenAiConfig {
 }
 
 /// ElevenLabs TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsElevenLabsConfig {
     /// Voice ID. Default: "21m00Tcm4TlvDq8ikWAM" (Rachel).
@@ -824,7 +840,7 @@ impl Default for TtsElevenLabsConfig {
 }
 
 /// Google Cloud TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsGoogleConfig {
     /// Voice name (e.g. "en-US-Standard-F", "pl-PL-Wavenet-A"). Default: "en-US-Standard-F".
@@ -852,7 +868,7 @@ impl Default for TtsGoogleConfig {
 }
 
 /// Docker container sandbox configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DockerSandboxConfig {
     /// Enable Docker sandbox. Default: false.
@@ -935,7 +951,7 @@ impl Default for DockerSandboxConfig {
 }
 
 /// Device pairing configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PairingConfig {
     /// Enable device pairing. Default: false.
@@ -966,7 +982,7 @@ impl Default for PairingConfig {
 }
 
 /// Skills configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SkillsConfig {
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
@@ -994,7 +1010,7 @@ impl Default for SkillsConfig {
 }
 
 /// Extensions & integrations configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExtensionsConfig {
     /// Enable auto-reconnect for MCP integrations.
@@ -1019,7 +1035,7 @@ impl Default for ExtensionsConfig {
 }
 
 /// Credential vault configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VaultConfig {
     /// Whether the vault is enabled (auto-detected if vault.enc exists).
@@ -1038,7 +1054,7 @@ impl Default for VaultConfig {
 }
 
 /// Agent binding — routes specific channel/account/peer patterns to agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentBinding {
     /// Target agent name or ID.
     pub agent: String,
@@ -1047,7 +1063,7 @@ pub struct AgentBinding {
 }
 
 /// Match rule for agent bindings. All specified (non-None) fields must match.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BindingMatchRule {
     /// Channel type (e.g., "discord", "telegram", "slack").
     pub channel: Option<String>,
@@ -1087,7 +1103,7 @@ impl BindingMatchRule {
 }
 
 /// Broadcast config — send same message to multiple agents.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BroadcastConfig {
     /// Broadcast strategy.
@@ -1097,7 +1113,9 @@ pub struct BroadcastConfig {
 }
 
 /// Broadcast delivery strategy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum BroadcastStrategy {
     /// Send to all agents simultaneously.
@@ -1108,7 +1126,7 @@ pub enum BroadcastStrategy {
 }
 
 /// Auto-reply engine configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoReplyConfig {
     /// Enable auto-reply engine. Default: false.
@@ -1137,7 +1155,7 @@ impl Default for AutoReplyConfig {
 /// When enabled, the kernel polls a directory for text files and dispatches
 /// their contents as messages to agents.  Files are moved to a `processed/`
 /// subdirectory after delivery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct InboxConfig {
     /// Enable inbox watcher. Default: false.
@@ -1171,7 +1189,7 @@ impl Default for InboxConfig {
 /// sample_rate = 1.0
 /// prometheus_enabled = true                   # Prometheus metrics at /api/metrics
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TelemetryConfig {
     /// Enable OpenTelemetry OTLP tracing export.
@@ -1199,7 +1217,7 @@ impl Default for TelemetryConfig {
 }
 
 /// Configuration for prompt versioning and A/B testing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PromptIntelligenceConfig {
     /// Enable prompt versioning and A/B testing. Default: false.
@@ -1221,7 +1239,7 @@ impl Default for PromptIntelligenceConfig {
 }
 
 /// Canvas (Agent-to-UI) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CanvasConfig {
     /// Enable canvas tool. Default: false.
@@ -1244,7 +1262,9 @@ impl Default for CanvasConfig {
 }
 
 /// Shell/exec security mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecSecurityMode {
     /// Block all shell execution.
@@ -1260,7 +1280,7 @@ pub enum ExecSecurityMode {
 }
 
 /// Shell/exec security policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExecPolicy {
     /// Security mode: "deny" blocks all, "allowlist" only allows listed,
@@ -1330,7 +1350,7 @@ pub enum TerminationReason {
 ///
 /// Multiple profiles can be configured per provider to enable key rotation
 /// when one key gets rate-limited or has billing issues.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AuthProfile {
     /// Profile name (e.g., "primary", "secondary").
     pub name: String,
@@ -1357,7 +1377,9 @@ impl std::fmt::Debug for AuthProfile {
 // ---------------------------------------------------------------------------
 
 /// Docker sandbox activation mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DockerSandboxMode {
     /// Docker sandbox disabled.
@@ -1370,7 +1392,9 @@ pub enum DockerSandboxMode {
 }
 
 /// Docker container lifecycle scope.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DockerScope {
     /// Container per session (destroyed when session ends).
@@ -1387,7 +1411,9 @@ pub enum DockerScope {
 // ---------------------------------------------------------------------------
 
 /// Typing indicator behavior mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingMode {
     /// Send typing indicator immediately on message receipt (default).
@@ -1406,7 +1432,7 @@ pub enum TypingMode {
 // ---------------------------------------------------------------------------
 
 /// Extended thinking configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThinkingConfig {
     /// Maximum tokens for thinking (budget).
@@ -1435,7 +1461,7 @@ impl Default for ThinkingConfig {
 /// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
 ///   `json_schema` mode; for providers without native support the schema is
 ///   injected into the system prompt).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
     /// Free-form text (default behaviour).
@@ -1468,7 +1494,7 @@ pub enum ResponseFormat {
 /// args = ["adapters/telegram_adapter.py"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
     pub name: String,
@@ -1490,7 +1516,7 @@ pub struct SidecarChannelConfig {
 // ---------------------------------------------------------------------------
 
 /// Which automatic-reset strategy is active for a session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionResetMode {
     /// No automatic reset. Sessions persist indefinitely. (default)
@@ -1505,7 +1531,7 @@ pub enum SessionResetMode {
 }
 
 /// Why a session was last reset (stored on [`AgentEntry`] for observability).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionResetReason {
     /// Last-active exceeded `idle_minutes`.
@@ -1542,7 +1568,7 @@ impl std::fmt::Display for SessionResetReason {
 /// idle_minutes = 60
 /// daily_at_hour = 4
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SessionResetPolicy {
     /// Which reset strategy (or strategies) to apply.
@@ -1579,7 +1605,7 @@ impl Default for SessionResetPolicy {
 /// cleanup_interval_hours = 24
 /// reset_prompt = "You are a helpful coding assistant. Always respond in English."
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SessionConfig {
     /// Maximum age for idle sessions before automatic cleanup (days, 0 = unlimited).
@@ -1625,7 +1651,7 @@ impl Default for SessionConfig {
 /// Controls when and how the LLM-based history compaction runs.
 /// Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept
 /// as private constants inside the runtime compactor and are not exposed here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompactionTomlConfig {
     /// Number of messages that triggers compaction (default: 30).
@@ -1683,7 +1709,7 @@ impl Default for CompactionTomlConfig {
 }
 
 /// Where a context injection should be placed in the session message list.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InjectionPosition {
     /// Prepended to the system prompt area.
@@ -1696,7 +1722,7 @@ pub enum InjectionPosition {
 }
 
 /// A single context injection entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContextInjection {
     /// A short label for logging / debugging.
     pub name: String,
@@ -1722,7 +1748,7 @@ pub struct ContextInjection {
 /// max_depth_global = 1000
 /// task_ttl_secs = 3600
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QueueConfig {
     /// Max queue depth per agent (0 = unlimited).
@@ -1756,7 +1782,7 @@ impl Default for QueueConfig {
 /// cron_lane = 2
 /// subagent_lane = 3
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QueueConcurrencyConfig {
     /// Main lane concurrent limit (user messages).
@@ -1799,7 +1825,7 @@ impl Default for QueueConcurrencyConfig {
 /// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
 /// for long-running human-in-the-loop tasks where a 10 minute reset
 /// would be wrong.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TaskBoardConfig {
     /// How long an `in_progress` task may stay claimed before the sweeper
@@ -1834,7 +1860,7 @@ impl Default for TaskBoardConfig {
 ///
 /// Environment variables `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are also
 /// respected as fallbacks when the config fields are empty.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProxyConfig {
     /// HTTP proxy URL (e.g. `http://proxy:8080`).
@@ -1900,7 +1926,7 @@ fn default_max_workflow_secs() -> u64 {
 }
 
 /// Event-driven trigger system configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TriggersConfig {
     /// Default cooldown between trigger firings in seconds (default: 5).
     #[serde(default = "default_trigger_cooldown_secs")]
@@ -1928,7 +1954,7 @@ impl Default for TriggersConfig {
 }
 
 /// Top-level kernel configuration.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KernelConfig {
     /// Configuration schema version for automatic migration.
@@ -2347,7 +2373,9 @@ pub struct KernelConfig {
 }
 
 /// Input sanitization mode for channel messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
     /// No checking — all messages pass through (default).
@@ -2367,7 +2395,7 @@ pub enum SanitizeMode {
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SanitizeConfig {
     /// Sanitization mode.
@@ -2404,7 +2432,7 @@ impl Default for SanitizeConfig {
 /// - `AZURE_OPENAI_API_VERSION` for the API version (default: "2024-02-01")
 /// - `AZURE_OPENAI_DEPLOYMENT` for the deployment name
 /// - `AZURE_OPENAI_API_KEY` for the API key
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AzureOpenAiConfig {
     /// Azure resource endpoint URL (e.g., "https://my-resource.openai.azure.com").
@@ -2434,7 +2462,7 @@ pub struct AzureOpenAiConfig {
 /// 2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` env var
 /// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (file path)
 /// 4. `gcloud auth print-access-token` CLI fallback
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VertexAiConfig {
     /// GCP project ID. Falls back to `VERTEX_AI_PROJECT_ID`,
@@ -2515,7 +2543,7 @@ pub struct VertexAiConfig {
 /// ingest = "~/.librefang/scripts/my_recall.py"
 /// after_turn = "~/.librefang/scripts/my_indexer.py"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ContextEngineTomlConfig {
     /// Built-in engine name. Supported values:
@@ -2591,7 +2619,7 @@ impl Default for ContextEngineTomlConfig {
 /// name = "My Company"
 /// github_repo = "acme-corp/librefang-plugins"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginRegistrySource {
     /// Human-readable label shown in the dashboard.
     pub name: String,
@@ -2613,7 +2641,7 @@ fn default_plugin_registries() -> Vec<PluginRegistrySource> {
 /// they read one JSON object from stdin and emit one JSON line on stdout.
 /// The `runtime` field picks which interpreter / launcher to use; it defaults
 /// to `"python"` so existing Python plugins keep working without edits.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ContextEngineHooks {
     /// Script for the `ingest` hook (called on new user message).
@@ -2857,7 +2885,7 @@ pub struct ContextEngineHooks {
 }
 
 /// Circuit-breaker settings for a hook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CircuitBreakerConfig {
     /// Consecutive failures before the circuit opens.
     #[serde(default = "default_cb_max_failures")]
@@ -2882,7 +2910,7 @@ fn default_true_bool() -> bool {
 }
 
 /// Per-hook input/output JSON Schema definition.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HookSchema {
     /// JSON Schema for the value sent to the hook script on stdin.
     #[serde(default)]
@@ -2897,7 +2925,7 @@ fn default_hook_retry_delay_ms() -> u64 {
 }
 
 /// What to do when a hook script invocation fails.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HookFailurePolicy {
     /// Log a warning and continue with the engine's built-in fallback (default).
@@ -2912,7 +2940,7 @@ pub enum HookFailurePolicy {
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
 /// Type of a plugin config field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginConfigFieldType {
     #[default]
@@ -2922,7 +2950,7 @@ pub enum PluginConfigFieldType {
 }
 
 /// A single user-configurable field declared in `[config]` of plugin.toml.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct PluginConfigField {
     /// Field value type.
     #[serde(rename = "type", default)]
@@ -2947,7 +2975,7 @@ pub struct PluginConfigField {
 /// ingest = "hooks/ingest.py"      # relative to plugin dir
 /// after_turn = "hooks/after_turn.py"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifest {
     /// Plugin name (must match directory name).
     pub name: String,
@@ -3043,7 +3071,7 @@ pub struct PluginManifest {
 }
 
 /// A single system-binary requirement declared in `plugin.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct PluginSystemRequirement {
     /// Name of the binary that must exist on `PATH`.
     pub binary: String,
@@ -3055,7 +3083,7 @@ pub struct PluginSystemRequirement {
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
 /// scopes = ["read:user", "user:email"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExternalAuthConfig {
     /// Whether external auth is enabled.
@@ -3098,7 +3126,7 @@ pub struct ExternalAuthConfig {
 /// `.well-known/openid-configuration` discovery, as well as non-OIDC OAuth2
 /// providers (GitHub) where explicit `auth_url`, `token_url`, and `userinfo_url`
 /// are specified.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OidcProvider {
     /// Unique identifier for this provider (e.g., "google", "github", "keycloak").
     pub id: String,
@@ -3184,7 +3212,7 @@ impl Default for ExternalAuthConfig {
 /// google_client_id = "your-google-client-id"
 /// github_client_id = "your-github-client-id"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct OAuthConfig {
     /// Google OAuth2 client ID for PKCE flow.
@@ -3204,7 +3232,7 @@ pub struct OAuthConfig {
 /// default to 0 which means "unlimited" — only non-zero limits are enforced.
 /// Keyed by the provider id in `BudgetConfig.providers`, which must match
 /// the `model.provider` field of the agent's `ModelConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProviderBudget {
     /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
@@ -3220,7 +3248,7 @@ pub struct ProviderBudget {
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BudgetConfig {
     /// Maximum total cost in USD per hour (0.0 = unlimited).
@@ -3294,7 +3322,7 @@ fn default_max_request_body_bytes() -> usize {
 /// # `data_dir/audit.anchor`.
 /// anchor_path = "/var/log/librefang/audit.anchor"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
@@ -3326,7 +3354,7 @@ impl Default for AuditConfig {
 ///
 /// Controls how personally identifiable information is handled before
 /// messages are sent to LLM providers.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyMode {
     /// No PII filtering — messages are sent as-is.
@@ -3351,7 +3379,7 @@ pub enum PrivacyMode {
 /// mode = "pseudonymize"  # off | redact | pseudonymize
 /// redact_patterns = ["\\b(CUSTOM_ID_\\d+)\\b"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PrivacyConfig {
     /// Privacy mode: off, redact, or pseudonymize.
@@ -3379,7 +3407,7 @@ impl Default for PrivacyConfig {
 /// [health_check]
 /// health_check_interval_secs = 60
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HealthCheckConfig {
     /// Interval in seconds between periodic health checks of LLM providers. Default: 60.
@@ -3403,7 +3431,7 @@ impl Default for HealthCheckConfig {
 /// default_timeout_secs = 60
 /// keep_recent = 10
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HeartbeatTomlConfig {
     /// How often to run the heartbeat check (seconds). Default: 30.
@@ -3444,7 +3472,7 @@ impl Default for HeartbeatTomlConfig {
 /// min_sessions = 5
 /// check_interval_secs = 86400
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoDreamConfig {
     /// Master toggle. Default: disabled — when false, no dream fires regardless
@@ -3525,7 +3553,7 @@ impl Default for AutoDreamConfig {
 /// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
 /// registry_mirror = ""
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RegistryConfig {
     /// Cache TTL for registry sync in seconds (default: 86400 = 24 hours).
@@ -3563,7 +3591,7 @@ impl Default for RegistryConfig {
 /// [plugins]
 /// plugin_registries = ["librefang/plugin-registry"]
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PluginsConfig {
     /// Additional GitHub `owner/repo` plugin registries to search.
@@ -3576,7 +3604,7 @@ fn default_prompt_caching() -> bool {
 }
 
 /// Taint skip rules for a single argument path within a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPathPolicy {
     /// Rule IDs to skip when scanning this path.  An empty list means
     /// all rules apply (no exemption).
@@ -3585,7 +3613,7 @@ pub struct McpTaintPathPolicy {
 }
 
 /// Per-tool taint policy for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintToolPolicy {
     /// Per-path exemptions.  The key is a minimal JSONPath expression
     /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
@@ -3603,7 +3631,7 @@ pub struct McpTaintToolPolicy {
 /// "$.tabId"     = { skip_rules = ["opaque_token"] }
 /// "$.sessionId" = { skip_rules = ["opaque_token"] }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPolicy {
     /// Per-tool exemptions.  The key is the tool name as it appears in
     /// the MCP server's tool list (without the `mcp_<server>_` prefix).
@@ -3615,7 +3643,7 @@ pub struct McpTaintPolicy {
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -3679,7 +3707,7 @@ fn default_http_compat_input_schema() -> serde_json::Value {
 }
 
 /// HTTP request method for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatMethod {
     Get,
@@ -3691,7 +3719,7 @@ pub enum HttpCompatMethod {
 }
 
 /// How tool arguments are mapped onto an outbound HTTP request.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatRequestMode {
     #[default]
@@ -3701,7 +3729,7 @@ pub enum HttpCompatRequestMode {
 }
 
 /// How the built-in HTTP compatibility transport formats responses.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatResponseMode {
     #[default]
@@ -3710,7 +3738,7 @@ pub enum HttpCompatResponseMode {
 }
 
 /// Header injection config for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct HttpCompatHeaderConfig {
     pub name: String,
     #[serde(default)]
@@ -3720,7 +3748,7 @@ pub struct HttpCompatHeaderConfig {
 }
 
 /// Declarative tool mapping for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct HttpCompatToolConfig {
     pub name: String,
     #[serde(default)]
@@ -3737,7 +3765,7 @@ pub struct HttpCompatToolConfig {
 }
 
 /// Transport configuration for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpTransportEntry {
     /// Subprocess with JSON-RPC over stdin/stdout.
@@ -3779,7 +3807,7 @@ pub enum McpTransportEntry {
 /// client_id = "my-client-id"
 /// scopes = ["read", "write"]
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpOAuthConfig {
     #[serde(default)]
     pub auth_url: Option<String>,
@@ -3796,7 +3824,7 @@ pub struct McpOAuthConfig {
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct A2aConfig {
     /// Whether A2A is enabled.
@@ -3824,7 +3852,7 @@ fn default_a2a_path() -> String {
 }
 
 /// An external A2A agent to discover and interact with.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalAgent {
     /// Display name.
     pub name: String,
@@ -4136,7 +4164,7 @@ fn librefang_home_dir() -> PathBuf {
 }
 
 /// Default LLM model configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DefaultModelConfig {
     /// Provider name (e.g., "anthropic", "openai").
@@ -4185,7 +4213,7 @@ impl Default for DefaultModelConfig {
 }
 
 /// Memory substrate configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Path to SQLite database file.
@@ -4231,7 +4259,7 @@ pub struct MemoryConfig {
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChunkConfig {
     /// Whether chunking is enabled. When false, text is stored as a single blob.
@@ -4280,7 +4308,7 @@ impl Default for MemoryConfig {
 ///
 /// When enabled, memories that have not been accessed within their scope's TTL
 /// are automatically deleted during periodic decay runs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryDecayConfig {
     /// Whether time-based decay is enabled.
@@ -4305,7 +4333,7 @@ impl Default for MemoryDecayConfig {
 }
 
 /// Network layer configuration.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NetworkConfig {
     /// libp2p listen addresses.
@@ -4356,7 +4384,7 @@ impl std::fmt::Debug for NetworkConfig {
 ///
 /// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
 /// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Telegram bot configuration(s).
@@ -4468,7 +4496,7 @@ fn default_file_download_max_bytes() -> u64 {
 }
 
 /// Telegram channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TelegramConfig {
     /// Env var name holding the bot token (NOT the token itself).
@@ -4534,7 +4562,7 @@ impl Default for TelegramConfig {
 }
 
 /// Discord channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
@@ -4592,7 +4620,7 @@ impl Default for DiscordConfig {
 }
 
 /// Slack channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SlackConfig {
     /// Env var name holding the app-level token (xapp-) for Socket Mode.
@@ -4645,7 +4673,7 @@ impl Default for SlackConfig {
 }
 
 /// WhatsApp Cloud API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WhatsAppConfig {
     /// Env var name holding the access token (Cloud API mode).
@@ -4704,7 +4732,7 @@ impl Default for WhatsAppConfig {
 }
 
 /// Signal channel adapter configuration (via signal-cli REST API).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SignalConfig {
     /// URL of the signal-cli REST API (e.g., "http://localhost:8080").
@@ -4742,7 +4770,7 @@ impl Default for SignalConfig {
 }
 
 /// Matrix protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MatrixConfig {
     /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
@@ -4791,7 +4819,7 @@ impl Default for MatrixConfig {
 }
 
 /// Email (IMAP/SMTP) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct EmailConfig {
     /// IMAP server host.
@@ -4844,7 +4872,7 @@ impl Default for EmailConfig {
 }
 
 /// Microsoft Teams (Bot Framework v3) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TeamsConfig {
     /// Azure Bot App ID.
@@ -4881,7 +4909,7 @@ impl Default for TeamsConfig {
 }
 
 /// Mattermost channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MattermostConfig {
     /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
@@ -4923,7 +4951,7 @@ impl Default for MattermostConfig {
 }
 
 /// IRC channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IrcConfig {
     /// IRC server hostname.
@@ -4974,7 +5002,7 @@ impl Default for IrcConfig {
 }
 
 /// Google Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GoogleChatConfig {
     /// Env var name holding the service account JSON key.
@@ -5013,7 +5041,7 @@ impl Default for GoogleChatConfig {
 }
 
 /// Twitch chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TwitchConfig {
     /// Env var name holding the OAuth token.
@@ -5047,7 +5075,7 @@ impl Default for TwitchConfig {
 }
 
 /// Rocket.Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RocketChatConfig {
     /// Rocket.Chat server URL.
@@ -5084,7 +5112,7 @@ impl Default for RocketChatConfig {
 }
 
 /// Zulip channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ZulipConfig {
     /// Zulip server URL.
@@ -5121,7 +5149,7 @@ impl Default for ZulipConfig {
 }
 
 /// XMPP/Jabber channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct XmppConfig {
     /// JID (e.g., "bot@jabber.org").
@@ -5163,7 +5191,7 @@ impl Default for XmppConfig {
 // ── Wave 3 channel configs ─────────────────────────────────────────
 
 /// LINE Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LineConfig {
     /// Env var name holding the channel secret.
@@ -5196,7 +5224,7 @@ impl Default for LineConfig {
 }
 
 /// Viber Bot API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ViberConfig {
     /// Env var name holding the auth token.
@@ -5229,7 +5257,7 @@ impl Default for ViberConfig {
 }
 
 /// Facebook Messenger Platform channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MessengerConfig {
     /// Env var name holding the page access token.
@@ -5262,7 +5290,7 @@ impl Default for MessengerConfig {
 }
 
 /// Reddit API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RedditConfig {
     /// Reddit app client ID.
@@ -5302,7 +5330,7 @@ impl Default for RedditConfig {
 }
 
 /// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MastodonConfig {
     /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
@@ -5332,7 +5360,7 @@ impl Default for MastodonConfig {
 }
 
 /// Bluesky/AT Protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BlueskyConfig {
     /// Bluesky identifier (handle or DID).
@@ -5370,7 +5398,7 @@ impl Default for BlueskyConfig {
 /// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
 /// controls whether the adapter uses a webhook HTTP server or a long-lived
 /// WebSocket connection (default) to receive events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FeishuConfig {
     /// Feishu app ID.
@@ -5423,7 +5451,9 @@ impl Default for FeishuConfig {
 }
 
 /// Connection mode for the WeCom intelligent bot adapter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WeComMode {
     /// WebSocket long-connection (no public endpoint required).
@@ -5438,7 +5468,7 @@ pub enum WeComMode {
 /// Supports two connection modes:
 /// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
 /// - `callback`: starts an HTTP server to receive message callbacks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WeComConfig {
     /// Bot ID obtained from the WeCom admin console.
@@ -5480,7 +5510,7 @@ impl Default for WeComConfig {
 }
 
 /// WeChat personal account (iLink protocol) adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WeChatConfig {
     /// Env var name holding the bot token from a previous QR login session.
@@ -5520,7 +5550,7 @@ impl Default for WeChatConfig {
 }
 
 /// Revolt (Discord-like) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
@@ -5552,7 +5582,7 @@ impl Default for RevoltConfig {
 // ── Wave 4 channel configs ─────────────────────────────────────────
 
 /// Nextcloud Talk channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NextcloudConfig {
     /// Nextcloud server URL.
@@ -5586,7 +5616,7 @@ impl Default for NextcloudConfig {
 }
 
 /// Guilded bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GuildedConfig {
     /// Env var name holding the bot token.
@@ -5617,7 +5647,7 @@ impl Default for GuildedConfig {
 }
 
 /// Keybase chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KeybaseConfig {
     /// Keybase username.
@@ -5651,7 +5681,7 @@ impl Default for KeybaseConfig {
 }
 
 /// Threema Gateway channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThreemaConfig {
     /// Threema Gateway ID.
@@ -5684,7 +5714,7 @@ impl Default for ThreemaConfig {
 }
 
 /// Nostr relay channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NostrConfig {
     /// Env var name holding the private key (nsec or hex).
@@ -5715,7 +5745,7 @@ impl Default for NostrConfig {
 }
 
 /// Webex bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebexConfig {
     /// Env var name holding the bot token.
@@ -5746,7 +5776,7 @@ impl Default for WebexConfig {
 }
 
 /// Pumble bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PumbleConfig {
     /// Env var name holding the bot token.
@@ -5776,7 +5806,7 @@ impl Default for PumbleConfig {
 }
 
 /// Flock bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FlockConfig {
     /// Env var name holding the bot token.
@@ -5806,7 +5836,7 @@ impl Default for FlockConfig {
 }
 
 /// Twist API v3 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TwistConfig {
     /// Env var name holding the API token.
@@ -5842,7 +5872,7 @@ impl Default for TwistConfig {
 // ── Wave 5 channel configs ─────────────────────────────────────────
 
 /// Mumble text chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MumbleConfig {
     /// Mumble server hostname.
@@ -5881,7 +5911,9 @@ impl Default for MumbleConfig {
 }
 
 /// How the DingTalk adapter receives inbound events.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DingTalkReceiveMode {
     /// HTTP webhook server (requires public IP / reverse proxy).
@@ -5898,7 +5930,7 @@ pub enum DingTalkReceiveMode {
 ///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
 /// - **Webhook** (legacy): HTTP server that receives callback POST requests.
 ///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DingTalkConfig {
     /// How to receive inbound messages (stream or webhook).
@@ -5947,7 +5979,7 @@ impl Default for DingTalkConfig {
 }
 
 /// QQ Bot API v2 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QqConfig {
     /// QQ Bot application ID.
@@ -5981,7 +6013,7 @@ impl Default for QqConfig {
 }
 
 /// Discourse forum channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiscourseConfig {
     /// Discourse base URL.
@@ -6018,7 +6050,7 @@ impl Default for DiscourseConfig {
 }
 
 /// Gitter Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GitterConfig {
     /// Env var name holding the auth token.
@@ -6048,7 +6080,7 @@ impl Default for GitterConfig {
 }
 
 /// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NtfyConfig {
     /// ntfy server URL.
@@ -6081,7 +6113,7 @@ impl Default for NtfyConfig {
 }
 
 /// Gotify WebSocket channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GotifyConfig {
     /// Gotify server URL.
@@ -6114,7 +6146,7 @@ impl Default for GotifyConfig {
 }
 
 /// Generic webhook channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebhookConfig {
     /// Env var name holding the HMAC signing secret.
@@ -6170,7 +6202,7 @@ impl Default for WebhookConfig {
 /// tts_url = "https://api.openai.com"
 /// tts_voice = "alloy"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VoiceConfig {
     /// WebSocket server listen port (default: 4546).
@@ -6212,7 +6244,7 @@ impl Default for VoiceConfig {
 }
 
 /// LinkedIn Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LinkedInConfig {
     /// Env var name holding the OAuth2 access token.
@@ -6245,7 +6277,7 @@ impl Default for LinkedInConfig {
 ///
 /// Controls which clients may connect to the interactive terminal (WebSocket)
 /// and how locality is determined.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Master switch — set to false to disable the terminal entirely.
@@ -6341,7 +6373,7 @@ impl Default for TerminalConfig {
 /// the endpoint into "give API-key holders the same power as the kernel".
 /// Prefer narrow globs (`"file_*"`, `"web_*"`) — reserve `"*"` for
 /// trusted single-tenant dev environments.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ToolInvokeConfig {
     /// Master switch. When `false` (default) the endpoint rejects every
     /// request with 403 regardless of the allowlist.

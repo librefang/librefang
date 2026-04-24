@@ -53,7 +53,9 @@ const MAX_CHANNEL_RULE_TOOLS: usize = 50;
 /// - `Totp` = approvals only (backward-compatible default when TOTP is enabled)
 /// - `Login` = dashboard login only
 /// - `Both` = approvals + dashboard login
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SecondFactor {
     /// No second factor required (default).
@@ -87,7 +89,7 @@ const MAX_TOTP_GRACE_PERIOD_SECS: u64 = 3600;
 // ---------------------------------------------------------------------------
 
 /// Risk level of an operation requiring approval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
@@ -128,6 +130,36 @@ pub enum ApprovalDecision {
     },
     /// Timeout fallback: skip the tool, agent continues without it.
     Skipped,
+}
+
+/// ApprovalDecision has a custom Serialize impl that produces either a plain
+/// string (`"approved"`, `"denied"`, …) or an object
+/// (`{"type": "modify_and_retry", "feedback": "..."}`). The derived
+/// `#[derive(JsonSchema)]` can't match that custom shape, so provide it
+/// manually as a `oneOf` union.
+impl schemars::JsonSchema for ApprovalDecision {
+    fn schema_name() -> String {
+        "ApprovalDecision".to_string()
+    }
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // Note: `#[derive(JsonSchema)]` would output draft-07 primitives. We
+        // hand-assemble the schema here because the upstream Serialize impl
+        // flattens simple variants to plain strings.
+        serde_json::from_value(serde_json::json!({
+            "oneOf": [
+                {"type": "string", "enum": ["approved", "denied", "timed_out", "skipped"]},
+                {
+                    "type": "object",
+                    "required": ["type", "feedback"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["modify_and_retry"]},
+                        "feedback": {"type": "string"}
+                    }
+                }
+            ]
+        }))
+        .unwrap()
+    }
 }
 
 impl Serialize for ApprovalDecision {
@@ -243,7 +275,7 @@ impl ApprovalDecision {
 // ---------------------------------------------------------------------------
 
 /// Behavior when an approval request times out.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeoutFallback {
     /// Deny the request (current default behavior).
@@ -267,7 +299,7 @@ fn default_escalation_timeout() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// An approval request for a dangerous agent operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalRequest {
     pub id: Uuid,
     pub agent_id: String,
@@ -361,7 +393,7 @@ impl ApprovalRequest {
 // ---------------------------------------------------------------------------
 
 /// Response to an approval request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalResponse {
     pub request_id: Uuid,
     pub decision: ApprovalDecision,
@@ -410,7 +442,7 @@ fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
 /// specific channel (e.g. "telegram", "discord", "slack").  If both
 /// `allowed_tools` and `denied_tools` are non-empty, `denied_tools` takes
 /// precedence (deny-wins).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct ChannelToolRule {
     /// Channel name to match (e.g. "telegram", "discord", "slack").
     pub channel: String,
@@ -490,7 +522,7 @@ impl ChannelToolRule {
 // ---------------------------------------------------------------------------
 
 /// A target for delivering notifications (approval requests, alerts, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct NotificationTarget {
     /// Channel type (e.g. "telegram", "slack", "email").
     pub channel_type: String,
@@ -502,7 +534,7 @@ pub struct NotificationTarget {
 }
 
 /// Per-agent notification routing rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentNotificationRule {
     /// Glob pattern matching agent names (e.g. "social-*", "*").
     pub agent_pattern: String,
@@ -513,7 +545,7 @@ pub struct AgentNotificationRule {
 }
 
 /// Notification engine configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct NotificationConfig {
     /// Channels to notify when an approval is requested.
     #[serde(default)]
@@ -527,7 +559,7 @@ pub struct NotificationConfig {
 }
 
 /// Rule for routing approval requests to specific notification targets.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct ApprovalRoutingRule {
     /// Tool name glob pattern (e.g. "shell_*", "file_delete").
     pub tool_pattern: String,
@@ -536,7 +568,7 @@ pub struct ApprovalRoutingRule {
 }
 
 /// Persistent audit log entry for an approval decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalAuditEntry {
     pub id: String,
     pub request_id: String,
@@ -560,7 +592,7 @@ pub struct ApprovalAuditEntry {
 // ---------------------------------------------------------------------------
 
 /// Configurable approval policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ApprovalPolicy {
     /// Tools that always require approval. Default: `["shell_exec", "file_write", "file_delete", "apply_patch"]`.

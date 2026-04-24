@@ -52,6 +52,9 @@
           cairo
           gdk-pixbuf
           pango
+          # tray-icon dlopens at runtime, not a link dep — patchelf below
+          # adds it to RPATH so the tray plugin can find it (#3052).
+          libayatana-appindicator
         ]);
 
         # Filter source to include Rust files plus non-Rust assets needed at compile time
@@ -114,6 +117,9 @@
         librefang-desktop = craneLib.buildPackage (desktopArgs // {
           cargoArtifacts = desktopCargoArtifacts;
           doCheck = false;
+          postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            patchelf --add-rpath "${pkgs.libayatana-appindicator}/lib" "$out/bin/librefang-desktop"
+          '';
           meta = with pkgs.lib; {
             description = "LibreFang — Open-source Agent Operating System (desktop UI)";
             homepage = "https://github.com/librefang/librefang";

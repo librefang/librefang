@@ -69,6 +69,28 @@ impl<T> Default for OneOrMany<T> {
     }
 }
 
+/// JSON Schema for `OneOrMany<T>`. Matches the actual Serialize behavior —
+/// a single-element collection serializes as bare `T`; zero or >= 2 elements
+/// as `Vec<T>`. The schema expresses this as `oneOf: [T, array<T>]` so any
+/// consumer validating against the schema handles both shapes.
+impl<T: schemars::JsonSchema> schemars::JsonSchema for OneOrMany<T> {
+    fn schema_name() -> String {
+        format!("OneOrMany_{}", T::schema_name())
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let single = T::json_schema(gen);
+        let many = <Vec<T>>::json_schema(gen);
+        schemars::schema::Schema::Object(schemars::schema::SchemaObject {
+            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
+                one_of: Some(vec![single, many]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
 impl<T: Serialize> Serialize for OneOrMany<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0.len() {

@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
@@ -1760,11 +1760,16 @@ impl LibreFangKernel {
                 } else {
                     model_hint.to_string()
                 };
+                let auth_source = if env_var.is_empty() {
+                    "CLI login"
+                } else {
+                    env_var
+                };
                 info!(
                     provider = %provider,
                     model = %model,
-                    env_var = %env_var,
-                    "Auto-detected default provider from environment"
+                    auth_source = %auth_source,
+                    "Auto-detected default provider"
                 );
                 config.default_model.provider = provider.to_string();
                 config.default_model.model = model;
@@ -1984,11 +1989,16 @@ impl LibreFangKernel {
                         };
                         match drivers::create_driver(&auto_config) {
                             Ok(d) => {
+                                let auth_source = if env_var.is_empty() {
+                                    "CLI login"
+                                } else {
+                                    env_var
+                                };
                                 info!(
                                     provider = %provider,
                                     model = %model,
-                                    "Auto-detected provider from {} — using as default",
-                                    env_var
+                                    auth_source = %auth_source,
+                                    "Auto-detected provider — using as default"
                                 );
                                 driver_chain.push(d);
                                 // Update the running config so agents get the right model
@@ -6300,6 +6310,15 @@ system_prompt = "You are a helpful assistant."
 
     /// Execute the default LLM-based agent loop.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        skip_all,
+        fields(
+            agent.id = %agent_id,
+            agent.name = %entry.manifest.name,
+            message.len = message.len(),
+            channel = sender_context.map(|c| c.channel.as_str()).unwrap_or("direct"),
+        ),
+    )]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,

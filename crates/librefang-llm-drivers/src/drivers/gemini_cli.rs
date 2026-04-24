@@ -237,13 +237,27 @@ pub fn gemini_cli_available() -> bool {
 }
 
 /// Check if Gemini CLI credentials exist.
+///
+/// Only looks for actual credential files. `settings.json` is intentionally
+/// excluded: it is a CLI preference file (theme, default model) that is
+/// created on first launch even when the user is not logged in, so treating
+/// it as proof of authentication marks Gemini as "configured" for anyone who
+/// merely installed the CLI.
 fn gemini_cli_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let gemini_dir = home.join(".gemini");
-        gemini_dir.join("settings.json").exists() || gemini_dir.join(".credentials.json").exists()
-    } else {
-        false
-    }
+    home_dir()
+        .map(|h| credentials_in_dir(&h.join(".gemini")))
+        .unwrap_or(false)
+}
+
+/// Check a given directory for Gemini CLI credential files.
+///
+/// Recognised filenames:
+/// - `oauth_creds.json` — Google Gemini CLI's actual OAuth token file
+/// - `credentials.json` / `.credentials.json` — defensive fallbacks
+fn credentials_in_dir(dir: &std::path::Path) -> bool {
+    dir.join("oauth_creds.json").exists()
+        || dir.join("credentials.json").exists()
+        || dir.join(".credentials.json").exists()
 }
 
 /// Cross-platform home directory.
@@ -323,5 +337,58 @@ mod tests {
         assert!(SENSITIVE_ENV_EXACT.contains(&"ANTHROPIC_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
+    }
+
+    fn make_tmp_dir(label: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "librefang-test-gemini-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn settings_json_alone_is_not_a_credential() {
+        // `settings.json` is the CLI's preference file — it is created the
+        // first time `gemini` runs, even when the user never signs in.
+        // Treating it as a credential caused LibreFang to auto-mark Gemini
+        // as "configured" for anyone who had merely installed the CLI.
+        let dir = make_tmp_dir("settings-only");
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        assert!(
+            !credentials_in_dir(&dir),
+            "settings.json must not be treated as a Gemini credential"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oauth_creds_json_is_recognised() {
+        let dir = make_tmp_dir("oauth-creds");
+        std::fs::write(dir.join("oauth_creds.json"), "{}").unwrap();
+        assert!(credentials_in_dir(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn credentials_json_variants_are_recognised() {
+        for name in ["credentials.json", ".credentials.json"] {
+            let dir = make_tmp_dir(&format!("creds-{name}"));
+            std::fs::write(dir.join(name), "{}").unwrap();
+            assert!(credentials_in_dir(&dir), "{name} should be recognised");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_dir_has_no_credentials() {
+        let dir = make_tmp_dir("empty");
+        assert!(!credentials_in_dir(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
