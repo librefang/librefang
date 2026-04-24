@@ -8,6 +8,13 @@ CONFIG="$DATA_DIR/config.toml"
 
 mkdir -p "$DATA_DIR"
 
+# Pre-create the logs directory so `librefang start --foreground` can open
+# its daily log file on a fresh container. The CLI also creates this dir
+# itself (see setup_foreground_tee), but we do it here too as defense in
+# depth — a missing logs dir previously caused the daemon to panic with
+# exit 101 silently (GH #3058).
+mkdir -p "$DATA_DIR/logs"
+
 if [ "$(stat -c '%U' "$DATA_DIR" 2>/dev/null)" != "node" ]; then
   chown -R node:node "$DATA_DIR"
 fi
