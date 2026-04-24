@@ -782,6 +782,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("stable_prefix_mode", config.stable_prefix_mode);
     set!("prompt_caching", config.prompt_caching);
     set!("max_cron_jobs", config.max_cron_jobs);
+    set!("agent_max_iterations", config.agent_max_iterations);
     set!("include", config.include);
     set!(
         "workspaces_dir",
@@ -1678,6 +1679,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "stable_prefix_mode": "boolean",
             "prompt_caching": "boolean",
             "max_cron_jobs": { "type": "number", "min": 0, "max": 100, "step": 1 },
+            "agent_max_iterations": { "type": "number", "min": 1, "max": 500, "step": 1 },
             "workspaces_dir": "string"
         }
     });
