@@ -4856,6 +4856,13 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        // TODO(#3044): the streaming entry does not yet accept an upstream
+        // interrupt, so any subagent invoked through a streaming path (rather
+        // than `tool_agent_send` → `send_message_as`) will not receive parent
+        // /stop cascade. All inter-agent dispatch today goes through the
+        // non-streaming `send_message_as`, so this is latent — but the next
+        // caller that adds streaming subagent dispatch must extend the
+        // cascade here.
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
         // Retain a clone in `session_interrupts` so `stop_agent_run` can call
         // `cancel()`.  The original is moved into `LoopOptions` below.
@@ -13575,9 +13582,12 @@ impl KernelHandle for LibreFangKernel {
         parent_agent_id: &str,
     ) -> Result<String, String> {
         let id = self.resolve_agent_identifier(agent_id)?;
-        let parent_id = parent_agent_id
-            .parse::<AgentId>()
-            .map_err(|e| format!("bad parent_agent_id: {e}"))?;
+        // Resolve parent via the same identifier path as the target so
+        // callers can pass a name / alias and cascade still works. In
+        // practice `caller_agent_id` from `ToolExecContext` is always a
+        // canonical UUID, but staying symmetric prevents surprises for
+        // future call sites.
+        let parent_id = self.resolve_agent_identifier(parent_agent_id)?;
         let result = self
             .send_message_as(id, message, parent_id)
             .await

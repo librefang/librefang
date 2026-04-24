@@ -40,13 +40,19 @@ pub trait KernelHandle: Send + Sync {
     /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
     /// the parent cascades into the callee's loop (issue #3044). Defaults
     /// to the plain `send_to_agent` behavior for implementations that
-    /// don't support cancel cascading.
+    /// don't support cancel cascading — a trace log flags the fallthrough
+    /// so operators can tell a non-standard handle is in play.
     async fn send_to_agent_as(
         &self,
         agent_id: &str,
         message: &str,
-        _parent_agent_id: &str,
+        parent_agent_id: &str,
     ) -> Result<String, String> {
+        tracing::trace!(
+            agent = %agent_id,
+            parent = %parent_agent_id,
+            "send_to_agent_as: default impl — cancel cascade not supported by this KernelHandle"
+        );
         self.send_to_agent(agent_id, message).await
     }
 

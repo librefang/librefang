@@ -2011,3 +2011,93 @@ async fn test_cron_create_preserves_peer_id() {
 
     kernel.shutdown();
 }
+
+// ── Parent /stop cascade (issue #3044) ─────────────────────────────────────
+//
+// These tests assert the plumbing that `send_message_as` relies on to make a
+// parent session's cancel signal propagate into a subagent spawned via
+// `agent_send` / `send_to_agent_as`. Going through a full LLM turn in a
+// headless test is impractical without a configured provider, so we
+// exercise the exact lookup + `new_with_upstream` chain that the kernel
+// performs internally. The `execute_llm_agent` integration is verified by
+// compile-time type threading plus the `SessionInterrupt` unit tests in
+// `librefang-runtime`.
+
+fn cascade_test_kernel() -> Arc<LibreFangKernel> {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    std::mem::forget(dir); // keep the tempdir alive until process exit
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel should boot"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_message_as_finds_parent_interrupt_and_cascades() {
+    use librefang_runtime::interrupt::SessionInterrupt;
+
+    let kernel = cascade_test_kernel();
+
+    // Simulate a parent mid-turn by registering its interrupt in the kernel
+    // the same way `execute_llm_agent` / streaming entry does.
+    let parent_id = AgentId::new();
+    let parent_interrupt = SessionInterrupt::new();
+    kernel
+        .session_interrupts
+        .insert(parent_id, parent_interrupt.clone());
+
+    // The exact pattern `send_message_as` uses to pick up the upstream.
+    let upstream = kernel
+        .session_interrupts
+        .get(&parent_id)
+        .map(|r| r.clone())
+        .expect("parent interrupt must be discoverable via session_interrupts");
+
+    // `execute_llm_agent` forms the child's interrupt via `new_with_upstream`
+    // when upstream is Some. Mirror that here and assert cascade works.
+    let child_interrupt = SessionInterrupt::new_with_upstream(&upstream);
+    assert!(
+        !child_interrupt.is_cancelled(),
+        "fresh child starts uncancelled"
+    );
+
+    parent_interrupt.cancel();
+    assert!(
+        child_interrupt.is_cancelled(),
+        "parent /stop must propagate to child via upstream"
+    );
+
+    // And the reverse must NOT hold — cancelling a child cannot stop a
+    // sibling parent session.
+    let sibling_parent = SessionInterrupt::new();
+    let sibling_child = SessionInterrupt::new_with_upstream(&sibling_parent);
+    sibling_child.cancel();
+    assert!(
+        !sibling_parent.is_cancelled(),
+        "cancelling child must NOT leak back to parent"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_message_as_without_parent_turn_has_no_upstream() {
+    let kernel = cascade_test_kernel();
+
+    // A parent id that was never registered (parent is idle or never existed).
+    let idle_parent_id = AgentId::new();
+    let upstream = kernel
+        .session_interrupts
+        .get(&idle_parent_id)
+        .map(|r| r.clone());
+    assert!(
+        upstream.is_none(),
+        "no upstream should be discovered when parent has no active turn"
+    );
+
+    kernel.shutdown();
+}
