@@ -9,7 +9,7 @@ DEFINE TABLE IF NOT EXISTS kv_store SCHEMAFULL;
 
 DEFINE FIELD IF NOT EXISTS agent_id   ON kv_store TYPE string;
 DEFINE FIELD IF NOT EXISTS key        ON kv_store TYPE string;
-DEFINE FIELD IF NOT EXISTS value      ON kv_store FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS value      ON kv_store TYPE option<object> FLEXIBLE;
 DEFINE FIELD IF NOT EXISTS version    ON kv_store TYPE int;
 DEFINE FIELD IF NOT EXISTS updated_at ON kv_store TYPE string;
 

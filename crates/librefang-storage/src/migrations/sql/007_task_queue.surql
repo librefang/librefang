@@ -8,7 +8,7 @@ DEFINE TABLE IF NOT EXISTS task_queue SCHEMAFULL;
 
 DEFINE FIELD IF NOT EXISTS agent_id      ON task_queue TYPE string;
 DEFINE FIELD IF NOT EXISTS task_type     ON task_queue TYPE string;
-DEFINE FIELD IF NOT EXISTS payload       ON task_queue FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS payload       ON task_queue TYPE option<object> FLEXIBLE;
 DEFINE FIELD IF NOT EXISTS status        ON task_queue TYPE string;
 DEFINE FIELD IF NOT EXISTS priority      ON task_queue TYPE int;
 DEFINE FIELD IF NOT EXISTS scheduled_at  ON task_queue TYPE option<string>;

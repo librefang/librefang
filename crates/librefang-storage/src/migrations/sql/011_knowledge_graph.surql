@@ -11,7 +11,7 @@ DEFINE TABLE kg_entities SCHEMAFULL;
 
 DEFINE FIELD entity_type ON kg_entities TYPE string;
 DEFINE FIELD name        ON kg_entities TYPE string;
-DEFINE FIELD properties  ON kg_entities FLEXIBLE TYPE option<object>;
+DEFINE FIELD properties  ON kg_entities TYPE option<object> FLEXIBLE;
 DEFINE FIELD created_at  ON kg_entities TYPE string;
 DEFINE FIELD updated_at  ON kg_entities TYPE string;
 DEFINE FIELD agent_id    ON kg_entities TYPE string;
@@ -26,7 +26,7 @@ DEFINE TABLE kg_relations SCHEMAFULL;
 DEFINE FIELD source_entity  ON kg_relations TYPE string;
 DEFINE FIELD relation_type  ON kg_relations TYPE string;
 DEFINE FIELD target_entity  ON kg_relations TYPE string;
-DEFINE FIELD properties     ON kg_relations FLEXIBLE TYPE option<object>;
+DEFINE FIELD properties     ON kg_relations TYPE option<object> FLEXIBLE;
 DEFINE FIELD confidence     ON kg_relations TYPE float;
 DEFINE FIELD created_at     ON kg_relations TYPE string;
 DEFINE FIELD agent_id       ON kg_relations TYPE string;

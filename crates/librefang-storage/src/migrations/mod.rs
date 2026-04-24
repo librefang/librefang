@@ -13,7 +13,7 @@
 //! against a `SCHEMAFULL` table here MUST have a matching `DEFINE FIELD`.
 //! Schemaless tables (used for the agent registry in [`librefang-memory`])
 //! are exempt. Mixed JSON-bearing fields use
-//! `FLEXIBLE TYPE option<object>`.
+//! `TYPE option<object> FLEXIBLE` (SurrealDB 3.x — FLEXIBLE follows TYPE).
 
 #[cfg(feature = "surreal-backend")]
 mod runner;
