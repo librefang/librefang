@@ -396,6 +396,50 @@ export interface WorkflowRunItem {
   completed_at?: string | null;
 }
 
+/**
+ * Multi-destination cron output fan-out target.
+ *
+ * Mirrors the Rust enum `librefang_types::scheduler::CronDeliveryTarget`,
+ * which is `#[serde(tag = "type", rename_all = "snake_case")]`. Each variant
+ * is an object with a `type` discriminator plus variant-specific fields.
+ *
+ * Empty/optional fields (`auth_header`, `subject_template`) MUST be omitted
+ * from the payload rather than sent as empty strings — the Rust side uses
+ * `Option<String>` and treating `""` as `Some("")` would leak through.
+ */
+export type CronDeliveryTarget =
+  | {
+      type: "channel";
+      /** Adapter name, e.g. "telegram", "slack", "discord". */
+      channel_type: string;
+      /** Platform-specific recipient (chat ID, user ID, channel ID). */
+      recipient: string;
+    }
+  | {
+      type: "webhook";
+      /** Destination URL. Must start with http:// or https://. */
+      url: string;
+      /** Optional Authorization header value (sent verbatim). */
+      auth_header?: string;
+    }
+  | {
+      type: "local_file";
+      /** Absolute or relative path on the daemon host. */
+      path: string;
+      /** If true, append to the file; if false, overwrite. */
+      append?: boolean;
+    }
+  | {
+      type: "email";
+      /** Recipient email address. */
+      to: string;
+      /** Optional subject template. `{job}` is replaced with the job name. */
+      subject_template?: string;
+    };
+
+/** Discriminator string for `CronDeliveryTarget` — useful for switch arms. */
+export type CronDeliveryTargetType = CronDeliveryTarget["type"];
+
 export interface ScheduleItem {
   id: string;
   name?: string;
@@ -409,6 +453,12 @@ export interface ScheduleItem {
   next_run?: string | null;
   agent_id?: string;
   workflow_id?: string;
+  /**
+   * Optional fan-out destinations. Empty/missing means single-target
+   * delivery via the legacy `delivery` field. Backend sends an array
+   * (possibly empty) on round-trip.
+   */
+  delivery_targets?: CronDeliveryTarget[];
 }
 
 export interface TriggerItem {
@@ -1632,6 +1682,8 @@ export async function createSchedule(payload: {
   workflow_id?: string;
   message?: string;
   enabled?: boolean;
+  /** Fan-out destinations. Empty array clears any existing list on update. */
+  delivery_targets?: CronDeliveryTarget[];
 }): Promise<ScheduleItem> {
   return post<ScheduleItem>("/api/schedules", payload);
 }
@@ -1645,6 +1697,12 @@ export async function updateSchedule(
     tz?: string;
     agent_id?: string;
     message?: string;
+    /**
+     * Replace fan-out delivery targets. The backend treats this as a full
+     * replace (an empty array clears the list). Omit the field to leave it
+     * unchanged.
+     */
+    delivery_targets?: CronDeliveryTarget[];
   }
 ): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/schedules/${encodeURIComponent(scheduleId)}`, payload);
