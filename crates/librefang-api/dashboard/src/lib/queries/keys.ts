@@ -199,6 +199,12 @@ export const memoryKeys = {
   stats: (agentId?: string) =>
     [...memoryKeys.statsAll(), agentId] as const,
   config: () => [...memoryKeys.all, "config"] as const,
+  // Per-agent KV memory store — distinct subtree from proactive memory
+  // so invalidating proactive entries doesn't invalidate KV reads (and
+  // vice versa). Always keyed by agentId; no list-level invalidation
+  // needed because each agent's KV is rendered independently.
+  agentKvs: () => [...memoryKeys.all, "agentKv"] as const,
+  agentKv: (agentId: string) => [...memoryKeys.agentKvs(), agentId] as const,
 };
 
 export const usageKeys = {

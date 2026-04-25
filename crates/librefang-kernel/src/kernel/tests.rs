@@ -450,6 +450,8 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
                     extra_params: std::collections::HashMap::new(),
                 },
                 ..Default::default()
@@ -692,6 +694,8 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     system_prompt: String::new(),
                     api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                    context_window: None,
+                    max_output_tokens: None,
                     extra_params: std::collections::HashMap::new(),
                 },
                 ..Default::default()

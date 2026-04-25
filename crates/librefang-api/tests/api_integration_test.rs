@@ -2327,3 +2327,183 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
         "client B body should contain published event: {body_b}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Memory endpoint regression tests for issue #3070:
+// When `[proactive_memory] enabled = false`, GET /api/memory and
+// GET /api/memory/stats must return 200 with `proactive_enabled: false`,
+// not 500. Disabled is a config state, not a server error.
+// ---------------------------------------------------------------------------
+
+/// Build a router harness with `proactive_memory.enabled` toggleable.
+async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    librefang_runtime::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let proactive = librefang_types::memory::ProactiveMemoryConfig {
+        enabled,
+        ..librefang_types::memory::ProactiveMemoryConfig::default()
+    };
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        proactive_memory: proactive,
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+/// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
+/// auth middleware treats it as a localhost caller (matching production
+/// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
+/// extension and the fail-closed branch returns 401 for non-public paths.
+fn loopback_get(uri: &str) -> Request<Body> {
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    request
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert_eq!(json["total"], serde_json::json!(0));
+    assert!(
+        json["memories"].as_array().is_some_and(|a| a.is_empty()),
+        "memories must be an empty array, got {}",
+        json["memories"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory/stats must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert!(
+        json["stats"].is_null(),
+        "stats must be null when disabled, got {}",
+        json["stats"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // When enabled the legacy fields stay intact and `proactive_enabled: true`
+    // is added so the dashboard can branch on a single field.
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    assert!(json["memories"].is_array(), "memories must be an array");
+    assert!(json["total"].is_number(), "total must be a number");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    // Existing fields remain present; we only assert their types so we don't
+    // couple to a specific empty-database snapshot.
+    assert!(json["total"].is_number() || json["total"].is_null());
+}
