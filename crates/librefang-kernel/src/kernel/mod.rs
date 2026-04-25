@@ -8852,7 +8852,7 @@ system_prompt = "You are a helpful assistant."
     pub fn activate_hand_with_id(
         &self,
         hand_id: &str,
-        config: std::collections::HashMap<String, serde_json::Value>,
+        mut config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
@@ -8885,6 +8885,16 @@ system_prompt = "You are a helpful assistant."
                     missing.join(", ")
                 );
             }
+        }
+
+        // Seed schema defaults so persisted state matches what
+        // `resolve_settings` shows. Lets schema default changes require an
+        // explicit operator action and disambiguates "accepted default" from
+        // "never reviewed" on disk.
+        for setting in &def.settings {
+            config
+                .entry(setting.key.clone())
+                .or_insert_with(|| serde_json::Value::String(setting.default.clone()));
         }
 
         // Create the instance in the registry

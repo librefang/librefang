@@ -1179,6 +1179,15 @@ export function ProvidersPage() {
     && config.urlInput === (config.provider.base_url || "")
     && config.proxyInput === (config.provider.proxy_url || "");
   const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
+  // Local providers (Ollama / vLLM / LM Studio) declare `key_required: false`
+  // — for them, the Test button must NOT require a key, otherwise users have
+  // no way to verify their custom base_url. Issue #3138.
+  const testDisabled =
+    config.saving
+    || config.testing
+    || (config.provider?.key_required !== false
+        && !config.hasStoredKey
+        && !config.keyInput.trim());
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1352,6 +1361,12 @@ export function ProvidersPage() {
               <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+              <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
+                {t("providers.base_url_hint", {
+                  defaultValue:
+                    "Bare host:port URLs (e.g. http://192.168.1.10:11434) will get /v1 appended automatically for OpenAI-compatible endpoints.",
+                })}
+              </p>
             </div>
 
             <div>
@@ -1381,7 +1396,7 @@ export function ProvidersPage() {
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>
-              <Button variant="secondary" onClick={config.testKey} disabled={config.saving || config.testing || (!config.hasStoredKey && !config.keyInput.trim())}>
+              <Button variant="secondary" onClick={config.testKey} disabled={testDisabled}>
                 {config.testing ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                 {t("providers.test")}
               </Button>

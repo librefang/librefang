@@ -584,6 +584,7 @@
     "optional": "可选",
     "remove_key": "移除 Key",
     "base_url": "Base URL",
+    "base_url_hint": "仅填 host:port (如 http://192.168.1.10:11434) 时会自动追加 /v1,适配 OpenAI 兼容端点。",
     "proxy_url": "代理 URL",
     "proxy_url_placeholder": "http://proxy:8080 或 socks5://proxy:1080",
     "api_key": "API Key",
