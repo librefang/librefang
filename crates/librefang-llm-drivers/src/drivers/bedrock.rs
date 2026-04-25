@@ -740,7 +740,10 @@ impl LlmDriver for BedrockDriver {
                 .map_err(|e| LlmError::Http(e.to_string()))?;
             let converse_response: ConverseResponse =
                 serde_json::from_str(&body_text).map_err(|e| {
-                    LlmError::Parse(format!("{}: {}", e, &body_text[..body_text.len().min(200)]))
+                    // Use char-based truncation to avoid panics on multi-byte UTF-8
+                    // boundaries (Bedrock error bodies may contain non-ASCII).
+                    let snippet: String = body_text.chars().take(200).collect();
+                    LlmError::Parse(format!("{}: {}", e, snippet))
                 })?;
 
             return convert_response(converse_response);
