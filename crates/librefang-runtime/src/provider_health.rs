@@ -150,12 +150,10 @@ fn format_request_error(err: &reqwest::Error) -> String {
     // substring is "timed out", not "timeout". Check both so we don't
     // double-append the marker when the cause chain already mentioned it.
     if err.is_timeout()
-        && !parts
-            .iter()
-            .any(|p| {
-                let s = p.to_lowercase();
-                s.contains("timeout") || s.contains("timed out")
-            })
+        && !parts.iter().any(|p| {
+            let s = p.to_lowercase();
+            s.contains("timeout") || s.contains("timed out")
+        })
     {
         parts.push("timed out".to_string());
     }
@@ -602,9 +600,7 @@ mod tests {
 
     #[test]
     fn test_is_loopback_base_url_remote_hosts() {
-        assert!(!is_loopback_base_url(
-            "https://webui.example.com/ollama/v1"
-        ));
+        assert!(!is_loopback_base_url("https://webui.example.com/ollama/v1"));
         assert!(!is_loopback_base_url("http://192.168.1.10:11434"));
         assert!(!is_loopback_base_url("https://api.openai.com/v1"));
         // LAN hosts that resolve via mDNS / private DNS are still "remote"
