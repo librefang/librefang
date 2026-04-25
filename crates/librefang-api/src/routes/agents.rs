@@ -902,10 +902,82 @@ pub async fn list_agents(
     .into_response()
 }
 
-/// Resolve uploaded file attachments into ContentBlock::Image blocks.
+/// Hard cap on inlined text-attachment length (chars). Mirrors the PDF
+/// truncation cap so a 5 MB `.log` paste doesn't blow the LLM context.
+const MAX_TEXT_ATTACHMENT_CHARS: usize = 200_000;
+const TEXT_TRUNCATION_MARKER: &str =
+    "\n\n[…file truncated at 200K chars; content continues beyond this point…]";
+
+/// Decide whether an attachment looks like a UTF-8 text/code/data file
+/// the LLM can read directly. Browsers don't set `content_type` reliably
+/// for code files (`.rs`, `.py` typically come through as empty or
+/// `application/octet-stream`), so we fall back to extension matching.
+fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
+    if content_type.starts_with("text/") {
+        return true;
+    }
+    let known_mime = matches!(
+        content_type,
+        "application/json"
+            | "application/xml"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "application/toml"
+            | "application/x-toml"
+            | "application/x-ipynb+json"
+            | "application/javascript"
+            | "application/x-javascript"
+            | "application/typescript"
+            | "application/sql"
+            | "application/graphql"
+    );
+    if known_mime {
+        return true;
+    }
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        // Plain text & docs
+        "txt" | "md" | "markdown" | "rst" | "csv" | "tsv" | "log"
+        // Config & data
+        | "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "conf" | "cfg" | "env" | "properties"
+        // Web
+        | "html" | "htm" | "css" | "scss" | "sass" | "less"
+        // JS/TS family
+        | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "vue" | "svelte"
+        // Other languages
+        | "py" | "rs" | "go" | "java" | "kt" | "kts" | "swift" | "scala" | "clj" | "ex" | "exs"
+        | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hh" | "m" | "mm"
+        | "rb" | "php" | "pl" | "lua" | "r" | "jl" | "dart" | "zig" | "nim"
+        // Shell
+        | "sh" | "bash" | "zsh" | "fish" | "ps1"
+        // Query / schema
+        | "sql" | "graphql" | "gql" | "proto"
+        // Notebooks
+        | "ipynb"
+        // Build files (no extension is rare; keep names like Dockerfile out — accept attribute can't match those)
+        | "dockerfile" | "makefile"
+    )
+}
+
+/// Resolve uploaded file attachments into content blocks.
 ///
-/// Reads each file from the upload directory, base64-encodes it, and
-/// returns image content blocks ready to insert into a session message.
+/// Reads each file from the upload directory and produces blocks the
+/// agent loop can consume:
+///   - `image/*` → `ContentBlock::Image` (base64-encoded inline)
+///   - `application/pdf` → `ContentBlock::Text` with a `[Attached PDF: <filename>]`
+///     header followed by extracted plain text (truncated at 200K chars).
+///     Scanned/image-only PDFs surface as a text note explaining no text
+///     was extractable, so the LLM at least sees the attachment exists.
+///   - text-like files (any `text/*`, `application/json|xml|yaml|toml|…`,
+///     plus common code/data extensions) → `ContentBlock::Text` with a
+///     `[Attached file: <filename>]` header. Read as UTF-8 lossy and
+///     truncated at 200K chars.
+///   - everything else → skipped with a warn log.
 pub fn resolve_attachments(
     attachments: &[AttachmentRef],
 ) -> Vec<librefang_types::message::ContentBlock> {
@@ -917,18 +989,13 @@ pub fn resolve_attachments(
     for att in attachments {
         // Look up metadata from the upload registry
         let meta = UPLOAD_REGISTRY.get(&att.file_id);
-        let content_type = if let Some(ref m) = meta {
-            m.content_type.clone()
+        let (content_type, filename) = if let Some(ref m) = meta {
+            (m.content_type.clone(), m.filename.clone())
         } else if !att.content_type.is_empty() {
-            att.content_type.clone()
+            (att.content_type.clone(), att.file_id.clone())
         } else {
             continue; // Skip unknown attachments
         };
-
-        // Only process image types
-        if !content_type.starts_with("image/") {
-            continue;
-        }
 
         // Validate file_id is a UUID to prevent path traversal
         if uuid::Uuid::parse_str(&att.file_id).is_err() {
@@ -936,37 +1003,129 @@ pub fn resolve_attachments(
         }
 
         let file_path = upload_dir.join(&att.file_id);
-        match std::fs::read(&file_path) {
-            Ok(data) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                blocks.push(librefang_types::message::ContentBlock::Image {
-                    media_type: content_type,
-                    data: b64,
-                });
+
+        if content_type.starts_with("image/") {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        content_type = %content_type,
+                        size_bytes = data.len(),
+                        "Resolved image attachment into Image block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Image {
+                        media_type: content_type,
+                        data: b64,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read image upload");
+                }
             }
-            Err(e) => {
-                tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read upload for attachment");
+        } else if content_type == "application/pdf" {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
+                    let body = match librefang_runtime::pdf_text::extract_text_from_pdf(&data) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            tracing::warn!(
+                                file_id = %att.file_id,
+                                filename = %filename,
+                                error = %e,
+                                "PDF text extraction failed; surfacing as note to LLM"
+                            );
+                            format!("[Could not extract text: {e}]")
+                        }
+                    };
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        size_bytes = data.len(),
+                        extracted_chars = body.chars().count(),
+                        "Resolved PDF attachment into Text block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Text {
+                        text: format!("{header}\n\n{body}"),
+                        provider_metadata: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read PDF upload");
+                }
             }
+        } else if is_text_like_attachment(&content_type, &filename) {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let raw = String::from_utf8_lossy(&data);
+                    let total_chars = raw.chars().count();
+                    let (body, truncated) = if total_chars > MAX_TEXT_ATTACHMENT_CHARS {
+                        let mut s: String = raw.chars().take(MAX_TEXT_ATTACHMENT_CHARS).collect();
+                        s.push_str(TEXT_TRUNCATION_MARKER);
+                        (s, true)
+                    } else {
+                        (raw.into_owned(), false)
+                    };
+                    let suffix = if truncated { ", truncated" } else { "" };
+                    let header = format!(
+                        "[Attached file: {} ({} bytes{})]",
+                        filename,
+                        data.len(),
+                        suffix
+                    );
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        content_type = %content_type,
+                        size_bytes = data.len(),
+                        kept_chars = body.chars().count(),
+                        truncated,
+                        "Resolved text attachment into Text block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Text {
+                        text: format!("{header}\n\n{body}"),
+                        provider_metadata: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read text upload");
+                }
+            }
+        } else {
+            tracing::warn!(
+                file_id = %att.file_id,
+                content_type = %content_type,
+                filename = %filename,
+                "Attachment type not yet wired into the agent loop; skipping"
+            );
         }
     }
 
     blocks
 }
 
-/// Pre-insert image attachments into an agent's session so the LLM can see them.
+/// Pre-insert attachment content blocks (image / extracted-text-from-PDF /
+/// text files) into an agent's session so the LLM can see them.
 ///
-/// This injects image content blocks into the session BEFORE the kernel
-/// adds the text user message, so the LLM receives: [..., User(images), User(text)].
+/// Injects a single user-role message containing all blocks BEFORE the
+/// kernel adds the user's text message, so the LLM receives:
+/// `[..., User(attach_blocks), User(text)]`. session_repair will merge
+/// those two consecutive user-role messages into one for the wire format.
 pub fn inject_attachments_into_session(
     kernel: &LibreFangKernel,
     agent_id: AgentId,
-    image_blocks: Vec<librefang_types::message::ContentBlock>,
+    attachment_blocks: Vec<librefang_types::message::ContentBlock>,
 ) {
     use librefang_types::message::{Message, MessageContent, Role};
 
     let entry = match kernel.agent_registry().get(agent_id) {
         Some(e) => e,
-        None => return,
+        None => {
+            tracing::warn!(agent_id = ?agent_id, "Cannot inject attachments: agent not found in registry");
+            return;
+        }
     };
 
     let mut session = match kernel.memory_substrate().get_session(entry.session_id) {
@@ -980,15 +1139,46 @@ pub fn inject_attachments_into_session(
         },
     };
 
+    let block_count = attachment_blocks.len();
+    let block_kinds: Vec<&'static str> = attachment_blocks
+        .iter()
+        .map(|b| match b {
+            librefang_types::message::ContentBlock::Image { .. } => "image",
+            librefang_types::message::ContentBlock::Text { .. } => "text",
+            librefang_types::message::ContentBlock::ImageFile { .. } => "image_file",
+            librefang_types::message::ContentBlock::ToolUse { .. } => "tool_use",
+            librefang_types::message::ContentBlock::ToolResult { .. } => "tool_result",
+            librefang_types::message::ContentBlock::Thinking { .. } => "thinking",
+            librefang_types::message::ContentBlock::Unknown => "unknown",
+        })
+        .collect();
+
     session.messages.push(Message {
         role: Role::User,
-        content: MessageContent::Blocks(image_blocks),
+        content: MessageContent::Blocks(attachment_blocks),
         pinned: false,
         timestamp: Some(chrono::Utc::now()),
     });
 
+    let total_messages_after = session.messages.len();
+
     if let Err(e) = kernel.memory_substrate().save_session(&session) {
-        tracing::warn!(error = %e, "Failed to save session with image attachments");
+        tracing::warn!(
+            agent_id = ?agent_id,
+            session_id = ?entry.session_id,
+            block_count,
+            error = %e,
+            "Failed to save session with attachment blocks"
+        );
+    } else {
+        tracing::info!(
+            agent_id = ?agent_id,
+            session_id = ?entry.session_id,
+            block_count,
+            block_kinds = ?block_kinds,
+            total_messages_after,
+            "Injected attachment blocks into session"
+        );
     }
 }
 
@@ -4222,30 +4412,72 @@ const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 /// sourced from `librefang_types::media::{ALLOWED_IMAGE_TYPES,
 /// ALLOWED_AUDIO_TYPES}` so the upload endpoint, the channel bridge, and
 /// `MediaAttachment::validate()` can never drift.
-const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] =
-    &["text/plain", "text/markdown", "text/csv", "application/pdf"];
-
-/// Exact-match MIME allowlist for `/api/agents/{id}/upload`.
 ///
-/// Historically this was the prefix list `["image/", "text/",
-/// "application/pdf", "audio/"]`, which accepted any `image/*` subtype —
-/// including `image/svg+xml` (scriptable → XSS / SSRF via `<use
-/// xlink:href>`), `image/x-icon`, `image/tiff`, `image/heic` — and every
-/// `text/*` subtype including `text/html` and `text/xml`. That
+/// Browsers send a wide variety of `Content-Type` values for the same file
+/// kind (`.json` → `application/json`; `.yaml` → `application/x-yaml` /
+/// `application/yaml`; `.ipynb` → `application/x-ipynb+json` / sometimes
+/// `application/json`), so this list is intentionally exhaustive on the
+/// safe subset.
+const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] = &[
+    "application/pdf",
+    // Plain text + tables
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "text/tab-separated-values",
+    // Structured data
+    "application/json",
+    "application/x-ipynb+json",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
+    "application/x-toml",
+    "application/sql",
+    "application/graphql",
+    // Code (often delivered with these MIMEs)
+    "application/javascript",
+    "application/x-javascript",
+    "application/typescript",
+];
+
+/// MIME allowlist for `/api/agents/{id}/upload`.
+///
+/// Historically this was a permissive prefix list (`image/`, `text/`,
+/// `application/pdf`, `audio/`) which accepted dangerous subtypes like
+/// `image/svg+xml` (scriptable → XSS / SSRF), `text/html` (stored XSS
+/// via downstream renderers), and `text/xml` (XXE / SSRF). That
 /// contradicted the SECURITY.md promise of *"Media type whitelist
 /// (png/jpeg/gif/webp)"*.
 ///
-/// The new check is exact-match against the canonical
-/// `librefang_types::media::ALLOWED_IMAGE_TYPES` +
-/// `ALLOWED_AUDIO_TYPES` constants, so the upload endpoint and
-/// `MediaAttachment::validate()` share a single source of truth and
-/// cannot drift.
+/// The check now combines:
+///   1. Exact match against the canonical media constants
+///      (`ALLOWED_IMAGE_TYPES`, `ALLOWED_AUDIO_TYPES`).
+///   2. Exact match against `EXTRA_ALLOWED_UPLOAD_TYPES` (PDF + curated
+///      text/data/code MIMEs).
+///   3. **Any other `text/*` subtype** EXCEPT `text/html` and `text/xml`.
+///      Browsers tag many code files (`.rs`, `.py`, `.go`, `.sh`, …) as
+///      `text/x-rust`, `text/x-python`, `text/x-shellscript` etc. — those
+///      are safe to inline because the agent loop reads them as plain
+///      UTF-8 and never executes/renders them. HTML/XML stay blocked
+///      because downstream consumers (markdown renderer, XML parsers)
+///      could be tricked into XSS / XXE.
 fn is_allowed_content_type(ct: &str) -> bool {
     use librefang_types::media::{mime_base, ALLOWED_AUDIO_TYPES, ALLOWED_IMAGE_TYPES};
     let base = mime_base(ct);
-    ALLOWED_IMAGE_TYPES.contains(&base.as_str())
+    if ALLOWED_IMAGE_TYPES.contains(&base.as_str())
         || ALLOWED_AUDIO_TYPES.contains(&base.as_str())
         || EXTRA_ALLOWED_UPLOAD_TYPES.contains(&base.as_str())
+    {
+        return true;
+    }
+    if let Some(subtype) = base.strip_prefix("text/") {
+        // Anything text-like is fine to ingest as a plain-text attachment,
+        // except formats that get rendered/parsed by downstream tooling
+        // and could carry an exploit payload.
+        return !matches!(subtype, "html" | "xml");
+    }
+    false
 }
 
 /// POST /api/agents/{id}/upload — Upload a file attachment.

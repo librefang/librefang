@@ -2091,6 +2091,14 @@ fn prepare_llm_messages(
         .cloned()
         .collect();
 
+    debug!(
+        agent = %manifest.name,
+        session_id = %session.id,
+        msg_count = llm_messages.len(),
+        last_two_roles = ?llm_messages.iter().rev().take(2).map(|m| m.role).collect::<Vec<_>>(),
+        "Pre-repair message snapshot (prepare_llm_messages)"
+    );
+
     let (mut messages, repair_stats) =
         crate::session_repair::validate_and_repair_with_stats(&llm_messages);
 
