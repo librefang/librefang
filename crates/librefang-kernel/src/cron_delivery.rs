@@ -24,6 +24,12 @@ use tracing::{debug, warn};
 /// delivery in `cron_deliver_response`.
 const WEBHOOK_TIMEOUT_SECS: u64 = 30;
 
+/// Per-target wall-clock timeout for fan-out delivery. Slow targets must
+/// not block the others — `join_all` waits for the longest future, so each
+/// `deliver_one` call is wrapped in `tokio::time::timeout` to bound how
+/// long any single target can stall the overall fan-out.
+const PER_TARGET_TIMEOUT_SECS: u64 = 60;
+
 /// Per-target delivery outcome returned by [`CronDeliveryEngine::deliver`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryResult {
@@ -122,6 +128,10 @@ impl CronDeliveryEngine {
     /// Returns a `Vec<DeliveryResult>` with one entry per target in the same
     /// order as the input slice. One target failing does not short-circuit
     /// the others — the job already succeeded, delivery is best-effort.
+    /// Each target is also bounded by [`PER_TARGET_TIMEOUT_SECS`] so a slow
+    /// adapter or a hung HTTP socket cannot stretch the whole fan-out
+    /// indefinitely; a timed-out target is reported as a failure with an
+    /// explicit "delivery timed out" error.
     pub async fn deliver(
         &self,
         targets: &[CronDeliveryTarget],
@@ -131,9 +141,29 @@ impl CronDeliveryEngine {
         if targets.is_empty() {
             return Vec::new();
         }
-        let futures = targets
-            .iter()
-            .map(|t| self.deliver_one(t, job_name, output));
+        let timeout = Duration::from_secs(PER_TARGET_TIMEOUT_SECS);
+        let futures = targets.iter().map(|t| {
+            let desc = describe_target(t);
+            let fut = self.deliver_one(t, job_name, output);
+            async move {
+                match tokio::time::timeout(timeout, fut).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        warn!(
+                            target = %desc,
+                            timeout_secs = PER_TARGET_TIMEOUT_SECS,
+                            "Cron fan-out: target timed out"
+                        );
+                        DeliveryResult::err(
+                            desc,
+                            format!(
+                                "delivery timed out after {PER_TARGET_TIMEOUT_SECS}s"
+                            ),
+                        )
+                    }
+                }
+            }
+        });
         join_all(futures).await
     }
 
@@ -242,6 +272,36 @@ impl CronDeliveryEngine {
                 }
             }
         }
+    }
+}
+
+/// Stable, log-friendly description of a delivery target. Mirrors the
+/// `target` field on `DeliveryResult` so timeout fallbacks and successful
+/// deliveries report the same identifier in logs / API responses.
+fn describe_target(target: &CronDeliveryTarget) -> String {
+    match target {
+        CronDeliveryTarget::Channel {
+            channel_type,
+            recipient,
+            thread_id,
+            account_id,
+        } => {
+            let mut s = format!("channel:{channel_type} -> {recipient}");
+            if let Some(t) = thread_id.as_deref() {
+                if !t.is_empty() {
+                    s.push_str(&format!(" (thread={t})"));
+                }
+            }
+            if let Some(a) = account_id.as_deref() {
+                if !a.is_empty() {
+                    s.push_str(&format!(" [account={a}]"));
+                }
+            }
+            s
+        }
+        CronDeliveryTarget::Webhook { url, .. } => format!("webhook:{url}"),
+        CronDeliveryTarget::LocalFile { path, .. } => format!("file:{path}"),
+        CronDeliveryTarget::Email { to, .. } => format!("email:{to}"),
     }
 }
 
@@ -653,6 +713,66 @@ mod tests {
         let engine = test_engine(MockSender::new());
         let results = engine.deliver(&[], "job", "x").await;
         assert!(results.is_empty());
+    }
+
+    /// A blocking sender used to verify the per-target timeout actually
+    /// short-circuits a stuck delivery.
+    struct StallSender;
+    #[async_trait]
+    impl CronChannelSender for StallSender {
+        async fn send_channel_message(
+            &self,
+            _channel_type: &str,
+            _recipient: &str,
+            _message: &str,
+            _thread_id: Option<&str>,
+            _account_id: Option<&str>,
+        ) -> Result<(), String> {
+            // Sleep well past PER_TARGET_TIMEOUT_SECS using tokio time so
+            // `tokio::time::pause` (start_paused) can advance the clock
+            // instantly without making the test wall-clock-slow.
+            tokio::time::sleep(Duration::from_secs(PER_TARGET_TIMEOUT_SECS * 10)).await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn per_target_timeout_isolates_stuck_target() {
+        // A stuck target must not block sibling targets and must surface as
+        // a timeout-flavoured failure rather than hanging the whole fan-out.
+        let tmp = tempfile::tempdir().unwrap();
+        let ok_path = tmp.path().join("ok.txt");
+        let stall = Arc::new(StallSender);
+        let engine = CronDeliveryEngine::new(stall);
+
+        let targets = vec![
+            CronDeliveryTarget::LocalFile {
+                path: ok_path.to_string_lossy().to_string(),
+                append: false,
+            },
+            CronDeliveryTarget::Channel {
+                channel_type: "stuck".to_string(),
+                recipient: "rcp".to_string(),
+                thread_id: None,
+                account_id: None,
+            },
+        ];
+        let results = engine.deliver(&targets, "job", "payload").await;
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].success, "file write should still succeed");
+        assert!(
+            !results[1].success,
+            "stuck channel must be reported as failure"
+        );
+        let err = results[1].error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err:?}"
+        );
+        // File side-effect proves the file delivery completed even though
+        // the channel target was hung.
+        assert_eq!(std::fs::read_to_string(&ok_path).unwrap(), "payload");
     }
 
     // -- Subject rendering ---------------------------------------------------
