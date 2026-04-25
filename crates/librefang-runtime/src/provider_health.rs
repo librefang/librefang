@@ -576,7 +576,7 @@ mod tests {
         // Remote budget must always exceed the loopback per-request override;
         // otherwise loopback callers would slow themselves down vs the shared
         // client's default.
-        assert!(PROBE_REMOTE_TIMEOUT_SECS > PROBE_TIMEOUT_SECS);
+        const { assert!(PROBE_REMOTE_TIMEOUT_SECS > PROBE_TIMEOUT_SECS) };
     }
 
     #[test]
