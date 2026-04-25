@@ -32,6 +32,9 @@ base64 = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 
+# OS keyring (libsecret / Keychain / Credential Manager)
+keyring = { workspace = true }
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
