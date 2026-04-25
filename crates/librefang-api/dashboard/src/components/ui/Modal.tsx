@@ -64,7 +64,12 @@ export const Modal = memo(function Modal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
-  useFocusTrap(isOpen, dialogRef, true);
+  const isDrawer = variant === "drawer-right";
+  // Modal traps Tab inside the dialog (no escape from the focus loop).
+  // Drawer leaves Tab free so keyboard users can hop back into the
+  // underlying list (which is still interactive — see container's
+  // pointer-events-none) without first hitting Esc.
+  useFocusTrap(isOpen, dialogRef, true, !isDrawer);
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -94,7 +99,6 @@ export const Modal = memo(function Modal({
     onClose();
   };
 
-  const isDrawer = variant === "drawer-right";
   // Drawer vs Modal differ in three ways:
   //   1. Position: drawer hugs the right edge full-height; modal centres.
   //   2. Dim: modal dims the page (focus on dialog); drawer leaves the

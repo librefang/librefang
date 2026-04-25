@@ -17,6 +17,10 @@ const FOCUSABLE_SELECTOR = [
 /// Use `setAriaModal` for actual dialog/modal surfaces so the hook can stay
 /// generic for other focus-contained UIs.
 ///
+/// Pass `trap = false` for non-modal surfaces (e.g. inspector drawers)
+/// where Tab should be free to leave the container — the hook still does
+/// initial focus and focus restoration, it just skips the Tab interception.
+///
 /// Usage:
 ///   const ref = useRef<HTMLDivElement>(null);
 ///   useFocusTrap(isOpen, ref, true);
@@ -29,6 +33,7 @@ export function useFocusTrap(
   isOpen: boolean,
   containerRef: React.RefObject<HTMLElement | null>,
   setAriaModal = false,
+  trap = true,
 ) {
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const appliedAriaModalRef = useRef(false);
@@ -89,9 +94,13 @@ export function useFocusTrap(
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    if (trap) {
+      window.addEventListener("keydown", handleKeyDown);
+    }
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      if (trap) {
+        window.removeEventListener("keydown", handleKeyDown);
+      }
       if (container && setAriaModal) {
         if (appliedAriaModalRef.current) {
           container.removeAttribute("aria-modal");
@@ -111,5 +120,5 @@ export function useFocusTrap(
       }
       previouslyFocused.current = null;
     };
-  }, [isOpen, containerRef, setAriaModal]);
+  }, [isOpen, containerRef, setAriaModal, trap]);
 }
