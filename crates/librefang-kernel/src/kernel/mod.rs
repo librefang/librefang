@@ -10676,6 +10676,8 @@ system_prompt = "You are a helpful assistant."
                                 message,
                                 timeout_secs,
                                 pre_check_script,
+                                pre_script,
+                                silent_marker,
                                 ..
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
@@ -10684,7 +10686,13 @@ system_prompt = "You are a helpful assistant."
                                 // {"wakeAgent": false} in the last non-empty output line.
                                 // Only fires when the script exits successfully.
                                 if let Some(script_path) = pre_check_script {
-                                    if !cron_script_wake_gate(&job_name, script_path).await {
+                                    if !cron_script_wake_gate(
+                                        &job_name,
+                                        script_path,
+                                        kernel.home_dir(),
+                                    )
+                                    .await
+                                    {
                                         tracing::info!(
                                             job = %job_name,
                                             "cron: script gate wakeAgent=false, skipping agent"
@@ -10693,6 +10701,47 @@ system_prompt = "You are a helpful assistant."
                                         continue;
                                     }
                                 }
+
+                                // Pre-script: run before the LLM turn fires and
+                                // inject stdout into the prompt as additional
+                                // context. Validation against the home/scripts
+                                // allowlist runs first; on validation or runtime
+                                // failure the agent still fires (failsafe) but
+                                // without injected context.
+                                let injected_context = if let Some(ps) = pre_script {
+                                    match librefang_types::scheduler::validate_pre_script(
+                                        ps,
+                                        kernel.home_dir(),
+                                    ) {
+                                        Ok(()) => run_cron_pre_script(&job_name, ps).await,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                job = %job_name,
+                                                error = %e,
+                                                "cron: pre_script validation failed, skipping injection"
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // Build the prompt: the scheduled message plus
+                                // pre_script stdout (when produced and non-empty).
+                                let final_message = match injected_context.as_deref() {
+                                    Some(ctx) if !ctx.trim().is_empty() => format!(
+                                        "{}\n\n--- pre_script output ---\n{}",
+                                        message, ctx
+                                    ),
+                                    _ => message.clone(),
+                                };
+
+                                // Snapshot the silent_marker once: borrowing
+                                // `&job.action` past `send_message_full` would
+                                // pin `job` across the await.
+                                let silent_marker_resolved =
+                                    silent_marker.clone().unwrap_or_else(|| "[SILENT]".into());
 
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
@@ -10787,7 +10836,7 @@ system_prompt = "You are a helpful assistant."
                                     timeout,
                                     kernel.send_message_full(
                                         agent_id,
-                                        message,
+                                        &final_message,
                                         Some(kh),
                                         None,
                                         sender_ctx,
@@ -10801,8 +10850,24 @@ system_prompt = "You are a helpful assistant."
                                     Ok(Ok(result)) => {
                                         tracing::info!(job = %job_name, "Cron job completed successfully");
                                         kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel (skip NO_REPLY/silent)
-                                        if !result.silent {
+                                        // silent_marker: when the response's
+                                        // last non-empty line equals the marker,
+                                        // suppress all delivery for this fire
+                                        // (no channel send, no fan-out). The
+                                        // job itself still counts as success —
+                                        // the agent intentionally chose to stay
+                                        // quiet this run.
+                                        let suppress_silent = is_silent_response(
+                                            &result.response,
+                                            &silent_marker_resolved,
+                                        );
+                                        if suppress_silent {
+                                            tracing::info!(
+                                                job = %job_name,
+                                                "cron: silent_marker matched, suppressing delivery"
+                                            );
+                                        } else if !result.silent {
+                                            // Deliver response to configured channel (skip NO_REPLY/silent)
                                             cron_deliver_response(
                                                 &kernel,
                                                 agent_id,
@@ -13506,12 +13571,58 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
 /// - Find the last non-empty stdout line and try to parse it as JSON.
 /// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
 /// - Everything else (non-JSON, missing key, null, 0, "") → return true.
-async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+///
+/// Path-allowlist hardening: `script_path` must canonicalize under
+/// `<home_dir>/scripts/`. Anything that escapes the allowlist (relative path
+/// joined onto an unexpected cwd, symlink pointing outside, missing file)
+/// short-circuits to `true` (failsafe — wake the agent rather than silently
+/// running a script outside the trust root).
+async fn cron_script_wake_gate(job_name: &str, script_path: &str, home_dir: &Path) -> bool {
     use tokio::process::Command;
+
+    // Allowlist check first: never spawn a process whose binary lives outside
+    // `<home_dir>/scripts/`. We follow symlinks (canonicalize) so a symlink
+    // inside the allowlist pointing outside it is also rejected.
+    let scripts_dir = home_dir.join("scripts");
+    let canonical = match std::fs::canonicalize(script_path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                error = %e,
+                "cron: pre_check_script not found, waking agent"
+            );
+            return true;
+        }
+    };
+    let scripts_canon = match std::fs::canonicalize(&scripts_dir) {
+        Ok(p) => p,
+        Err(_) => {
+            // <home>/scripts doesn't exist — by definition nothing is on the
+            // allowlist, so any configured script_path is outside it. Wake
+            // failsafe rather than silently executing.
+            tracing::warn!(
+                job = %job_name,
+                script = %script_path,
+                "cron: pre_check_script outside allowlist (scripts dir missing), waking agent"
+            );
+            return true;
+        }
+    };
+    if !canonical.starts_with(&scripts_canon) {
+        tracing::warn!(
+            job = %job_name,
+            script = %script_path,
+            allowlist = %scripts_canon.display(),
+            "cron: pre_check_script outside allowlist, waking agent"
+        );
+        return true;
+    }
 
     // Hard cap: pre-check scripts must complete within 30 s.
     // A hung script would otherwise block the cron dispatcher indefinitely.
-    let run = async { Command::new(script_path).output().await };
+    let run = async { Command::new(&canonical).output().await };
 
     let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
         Err(_elapsed) => {
@@ -13546,6 +13657,93 @@ async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_wake_gate(&stdout)
+}
+
+/// Hard cap for `pre_script` execution. Pre-scripts can do real work (HTTP
+/// scrape, file diff, computation) so we allow more headroom than the 30 s
+/// wake-gate cap — but still bound so a hung script can't pin the cron loop.
+const CRON_PRE_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run a cron job's `pre_script`, returning captured stdout as the context
+/// to inject into the next LLM turn.
+///
+/// On any failure (timeout, launch error, non-zero exit) returns `None` so
+/// the agent still fires — pre_script is *additive context*, not a wake gate.
+/// The wake gate is `pre_check_script` (separate field, separate semantics).
+async fn run_cron_pre_script(
+    job_name: &str,
+    script: &librefang_types::scheduler::PreScript,
+) -> Option<String> {
+    run_cron_pre_script_with_timeout(job_name, script, CRON_PRE_SCRIPT_TIMEOUT).await
+}
+
+/// Test-injectable variant of [`run_cron_pre_script`] that accepts an
+/// explicit timeout so unit tests can exercise the timeout branch without
+/// waiting the full 60 s production cap.
+async fn run_cron_pre_script_with_timeout(
+    job_name: &str,
+    script: &librefang_types::scheduler::PreScript,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use tokio::process::Command;
+
+    // argv[0] is the binary; remaining argv are passed verbatim (no shell).
+    // PreScript validation upstream guarantees argv is non-empty.
+    let mut cmd = Command::new(&script.argv[0]);
+    if script.argv.len() > 1 {
+        cmd.args(&script.argv[1..]);
+    }
+    if let Some(cwd) = &script.cwd {
+        cmd.current_dir(cwd);
+    }
+    for (k, v) in &script.env {
+        cmd.env(k, v);
+    }
+    // Kill the child process on drop so a timeout doesn't leak a sleep/curl
+    // beyond the dispatcher's awareness — without this the OS keeps the
+    // child alive after `output()` is dropped.
+    cmd.kill_on_drop(true);
+
+    let run = async { cmd.output().await };
+    let output = match tokio::time::timeout(timeout, run).await {
+        Err(_) => {
+            tracing::warn!(
+                job = %job_name,
+                timeout_s = timeout.as_secs(),
+                "cron: pre_script timed out"
+            );
+            return None;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(job = %job_name, error = %e, "cron: pre_script launch failed");
+            return None;
+        }
+        Ok(Ok(o)) => o,
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            job = %job_name,
+            code = ?output.status.code(),
+            "cron: pre_script exited non-zero"
+        );
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Pure helper: does `response` end with `marker` on its last non-empty
+/// trimmed line? Strict equality — a marker mentioned mid-response does not
+/// suppress delivery, only a marker that the model put on the very last
+/// non-blank line does.
+fn is_silent_response(response: &str, marker: &str) -> bool {
+    response
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim() == marker)
+        .unwrap_or(false)
 }
 
 /// Atomically write a TOML file by staging the new content in a sibling

@@ -2257,3 +2257,227 @@ fn atomic_write_no_partial_state_under_concurrency() {
         "no .tmp staging files should remain after concurrent writes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cron pre_script + silent_marker + wake-gate path-allowlist (PR-2/3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_silent_marker_match_at_end_suppresses() {
+    // Marker on the last non-empty trimmed line → suppress.
+    let resp = "Did the work, no news.\n\n[SILENT]\n";
+    assert!(is_silent_response(resp, "[SILENT]"));
+}
+
+#[test]
+fn cron_silent_marker_mid_response_does_not_match() {
+    // Marker mid-response is not the last non-empty line → fire delivery.
+    let resp = "[SILENT]\nbut actually here is the report\n";
+    assert!(!is_silent_response(resp, "[SILENT]"));
+}
+
+#[test]
+fn cron_silent_marker_default_when_none() {
+    // The dispatcher resolves `silent_marker: None` → "[SILENT]". Mirror that
+    // resolution rule here so a future refactor that changes the default
+    // string trips this guard. Wrapped in a helper rather than inlining
+    // `Option::<String>::None.unwrap_or_else(...)` so clippy's
+    // `unnecessary_literal_unwrap` doesn't flag the literal None.
+    fn resolve_marker(silent_marker: Option<String>) -> String {
+        silent_marker.unwrap_or_else(|| "[SILENT]".into())
+    }
+    let marker = resolve_marker(None);
+    assert_eq!(marker, "[SILENT]");
+    assert!(is_silent_response("ok\n[SILENT]", &marker));
+    assert!(!is_silent_response("ok\n[OTHER]", &marker));
+
+    // Explicit override is honoured verbatim.
+    let custom = resolve_marker(Some("[QUIET]".into()));
+    assert_eq!(custom, "[QUIET]");
+    assert!(is_silent_response("ok\n[QUIET]", &custom));
+    assert!(!is_silent_response("ok\n[SILENT]", &custom));
+}
+
+#[test]
+fn cron_silent_marker_trailing_blank_lines_still_match() {
+    // Trailing whitespace must not defeat the match — the helper finds the
+    // last *non-empty* trimmed line.
+    let resp = "result\n[SILENT]\n   \n\n";
+    assert!(is_silent_response(resp, "[SILENT]"));
+}
+
+#[test]
+fn cron_silent_marker_empty_response_does_not_match() {
+    assert!(!is_silent_response("", "[SILENT]"));
+    assert!(!is_silent_response("   \n\n", "[SILENT]"));
+}
+
+#[tokio::test]
+async fn cron_pre_script_timeout_returns_none() {
+    // A `sleep 100` is launched and the dispatcher's tokio timeout fires
+    // first. We use the test-injectable variant with a small (300 ms)
+    // timeout so the unit test completes quickly — the production code path
+    // calls run_cron_pre_script which uses CRON_PRE_SCRIPT_TIMEOUT (60 s).
+    // `kill_on_drop(true)` ensures the spawned `sleep` is reaped when the
+    // future is dropped, so the timeout doesn't leak a child process.
+    use librefang_types::scheduler::PreScript;
+    use std::collections::HashMap;
+
+    let script = PreScript {
+        argv: vec!["sleep".to_string(), "100".to_string()],
+        cwd: None,
+        env: HashMap::new(),
+    };
+    let result = run_cron_pre_script_with_timeout(
+        "timeout-test",
+        &script,
+        std::time::Duration::from_millis(300),
+    )
+    .await;
+    assert!(result.is_none(), "expected None on timeout, got {result:?}");
+}
+
+#[tokio::test]
+async fn cron_pre_script_non_zero_exit_returns_none() {
+    use librefang_types::scheduler::PreScript;
+    use std::collections::HashMap;
+
+    // `false` exits non-zero on every Unix; on Windows the kernel runs in WSL/
+    // bash-ish env per CLAUDE.md so this is portable enough.
+    let script = PreScript {
+        argv: vec!["false".to_string()],
+        cwd: None,
+        env: HashMap::new(),
+    };
+    let result = run_cron_pre_script("nonzero-test", &script).await;
+    assert!(
+        result.is_none(),
+        "expected None on non-zero exit, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn cron_pre_script_success_returns_stdout() {
+    use librefang_types::scheduler::PreScript;
+    use std::collections::HashMap;
+
+    // `echo hello` exits 0 with "hello\n" on stdout — the dispatcher
+    // returns it verbatim.
+    let script = PreScript {
+        argv: vec!["echo".to_string(), "hello".to_string()],
+        cwd: None,
+        env: HashMap::new(),
+    };
+    let result = run_cron_pre_script("ok-test", &script).await;
+    let stdout = result.expect("echo should succeed");
+    assert!(
+        stdout.contains("hello"),
+        "expected stdout to contain 'hello', got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+async fn cron_pre_script_launch_failure_returns_none() {
+    use librefang_types::scheduler::PreScript;
+    use std::collections::HashMap;
+
+    // A binary that does not exist anywhere on PATH triggers the launch-error
+    // branch (Command::output returns Err before the process starts).
+    let script = PreScript {
+        argv: vec!["__librefang_definitely_nonexistent_binary__".to_string()],
+        cwd: None,
+        env: HashMap::new(),
+    };
+    let result = run_cron_pre_script("launchfail-test", &script).await;
+    assert!(
+        result.is_none(),
+        "expected None on launch failure, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn wake_gate_path_outside_allowlist_falls_through_to_wake() {
+    // script_path lives outside <home>/scripts/ — wake gate must short-circuit
+    // to true (failsafe wake) without executing the binary.
+    let home = tempfile::tempdir().expect("home dir");
+    std::fs::create_dir_all(home.path().join("scripts")).expect("scripts dir");
+
+    // Drop a marker script in /tmp (outside the allowlist) that would *say*
+    // wakeAgent=false if it ran. If hardening is correct it never executes,
+    // so we expect wake=true regardless of the script's would-be output.
+    let outside_dir = tempfile::tempdir().expect("outside dir");
+    let outside_script = outside_dir.path().join("evil.sh");
+    std::fs::write(
+        &outside_script,
+        "#!/bin/sh\necho '{\"wakeAgent\": false}'\n",
+    )
+    .expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&outside_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&outside_script, perms).unwrap();
+    }
+
+    let wake = cron_script_wake_gate(
+        "outside-test",
+        outside_script.to_str().unwrap(),
+        home.path(),
+    )
+    .await;
+    assert!(
+        wake,
+        "script outside allowlist must wake (failsafe), not be executed"
+    );
+}
+
+#[tokio::test]
+async fn wake_gate_path_inside_allowlist_runs_normally() {
+    // Tempdir simulating <home>/scripts/foo.sh — the script *does* run and
+    // its `{"wakeAgent": false}` line is honoured.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("home dir");
+        let scripts_dir = home.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("scripts dir");
+
+        let script_path = scripts_dir.join("gate.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho '{\"wakeAgent\": false}'\n")
+            .expect("write");
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+
+        let wake = cron_script_wake_gate(
+            "inside-test",
+            script_path.to_str().unwrap(),
+            home.path(),
+        )
+        .await;
+        assert!(
+            !wake,
+            "script inside allowlist returning wakeAgent=false must skip"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wake_gate_missing_scripts_dir_falls_through_to_wake() {
+    // <home>/scripts does not exist — every script_path is outside the
+    // (empty) allowlist by definition, so we wake failsafe.
+    let home = tempfile::tempdir().expect("home dir");
+    // Note: we deliberately don't create <home>/scripts.
+
+    // Even a script that *would* canonicalize successfully (e.g. /bin/echo)
+    // should be rejected because the allowlist root doesn't exist.
+    let wake = cron_script_wake_gate(
+        "no-scripts-dir",
+        "/bin/echo", // exists, but allowlist root missing
+        home.path(),
+    )
+    .await;
+    assert!(wake, "missing scripts dir must wake failsafe");
+}
