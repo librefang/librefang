@@ -274,6 +274,8 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
+  CronDeliveryTarget,
+  CronDeliveryTargetType,
   CronJobItem,
   HandDefinitionItem,
   HandInstanceItem,

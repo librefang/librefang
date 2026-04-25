@@ -704,6 +704,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
   handName: string;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const toggleSchedule = useUpdateSchedule();
@@ -865,6 +866,20 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
                 <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
+                {/*
+                  Cross-link to the full SchedulerPage editor instead of
+                  reimplementing DeliveryTargetsEditor inline. Keeps this
+                  widget compact and the editor lives in exactly one place.
+                */}
+                <button
+                  type="button"
+                  onClick={() => navigate({ to: "/scheduler" })}
+                  className="text-[10px] text-brand hover:underline mt-0.5"
+                >
+                  {t("hands.configure_delivery_targets", {
+                    defaultValue: "Configure delivery targets →",
+                  })}
+                </button>
               </div>
               <button
                 onClick={() => handleToggle(job)}
