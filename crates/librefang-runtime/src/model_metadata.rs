@@ -6,16 +6,17 @@
 //! self-hosted endpoint with a non-standard window.
 //!
 //! See `.plans/model-metadata-lookup.md` for the full design and the
-//! 5-layer rationale. **Status after PR-2**: L1 / L2 / L3 / L4 (Ollama)
-//! / L5 are live; PR-2.5 will expand L4 to Anthropic `/v1/models` and
-//! generic OpenAI-compat `/v1/models/{id}`.
+//! 5-layer rationale. **Status after PR-2.5**: all five layers are live.
+//! L4 now covers Ollama `/api/show`, Anthropic `/v1/models/{id}`, and a
+//! generic OpenAI-compat `/v1/models/{id}` branch (vLLM / LM Studio /
+//! LiteLLM-style endpoints).
 //!
 //! | Layer | Source | Status |
 //! |---|---|---|
 //! | L1 | Agent manifest override (`model.context_window`) | ✅ |
 //! | L2 | Registry / `ModelCatalog` (provider-aware) | ✅ |
 //! | L3 | Persisted cache (`~/.librefang/cache/model_metadata.json`, 24h TTL) | ✅ |
-//! | L4 | Runtime probe — Ollama `/api/show` only in PR-2 | ✅ (Ollama only) |
+//! | L4 | Runtime probe — Ollama / Anthropic / OpenAI-compat `/v1/models` | ✅ |
 //! | L5 | Hardcoded fallback (< 20 entries) + provider default | ✅ |
 //!
 //! `resolve_model_metadata` is currently **passive** — no caller wires
@@ -507,12 +508,126 @@ fn looks_like_ollama(provider: &str, base_url: Option<&str>) -> bool {
     base_url.map(|u| u.contains(":11434")).unwrap_or(false)
 }
 
-/// L4 dispatcher. PR-2 only ships the Ollama branch; PR-2.5 will add
-/// Anthropic `/v1/models` and generic OpenAI-compat `/v1/models/{id}`.
+/// Parse an Anthropic `/v1/models/{id}` response.
+///
+/// The official schema returns `context_window` as a top-level integer.
+/// Zero is rejected — an Anthropic model with a 0 window is a server
+/// bug we'd rather fall back from than cache.
+fn parse_anthropic_model(json: &serde_json::Value) -> Option<u64> {
+    let n = json.get("context_window").and_then(|v| v.as_u64())?;
+    if n > 0 { Some(n) } else { None }
+}
+
+/// Probe Anthropic's `GET /v1/models/{model}` endpoint.
+///
+/// Requires an API key; uses the documented `x-api-key` +
+/// `anthropic-version` headers. The model id is URL-segment-safe (no
+/// whitespace or slashes for any Claude model), so we splice it into
+/// the path directly.
+async fn probe_anthropic(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Option<u64> {
+    let url = format!("{}/v1/models/{}", base_url.trim_end_matches('/'), model);
+    let resp = client
+        .get(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    parse_anthropic_model(&json)
+}
+
+/// Parse a generic OpenAI-compatible `/v1/models/{id}` response.
+///
+/// There is no formal spec for the per-model object beyond `id` /
+/// `object` / `created` / `owned_by`, so different servers expose the
+/// context window under different keys. We try them in priority order:
+///
+/// 1. `max_model_len` — vLLM canonical.
+/// 2. `context_length` — LM Studio, llama.cpp server, common GGUF
+///    metadata key.
+/// 3. `context_window` — some Anthropic-flavoured proxies.
+/// 4. `max_input_tokens` — LiteLLM normalised key.
+/// 5. `max_tokens` — last-ditch (some forks conflate this with the
+///    full window).
+///
+/// Zero values are rejected at every step so a misconfigured server
+/// can't poison the cache with a useless `0`.
+fn parse_openai_model(json: &serde_json::Value) -> Option<u64> {
+    const KEYS: &[&str] = &[
+        "max_model_len",
+        "context_length",
+        "context_window",
+        "max_input_tokens",
+        "max_tokens",
+    ];
+    for key in KEYS {
+        if let Some(n) = json.get(*key).and_then(|v| v.as_u64()) {
+            if n > 0 {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Probe a generic OpenAI-compatible `GET /v1/models/{model}` endpoint.
+///
+/// No auth header is set — most self-hosted servers (vLLM, LM Studio,
+/// llama.cpp) don't require one for the models endpoint, and forcing
+/// an `Authorization` header without a configured token would cause
+/// gateways like LiteLLM to 401 on what should be an open route.
+/// Callers that need bearer auth should rely on the registry (L2) or
+/// extend this branch in a follow-up.
+async fn probe_openai_compat(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+) -> Option<u64> {
+    let url = format!("{}/v1/models/{}", base_url.trim_end_matches('/'), model);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    parse_openai_model(&json)
+}
+
+/// L4 dispatcher. Order matters: Ollama is identified first by provider
+/// tag or `:11434` heuristic, Anthropic by provider name (it requires
+/// an API key, so an empty key short-circuits to `None`), and any other
+/// caller-supplied `base_url` falls into the generic OpenAI-compat path.
+/// Without a `base_url` and without a known provider tag, the probe is
+/// skipped — there's nowhere to send a request.
 async fn probe_runtime(request: &MetadataRequest<'_>) -> Option<u64> {
     if looks_like_ollama(request.provider, request.base_url) {
         let base = request.base_url.unwrap_or("http://localhost:11434");
         return probe_ollama(probe_client(), base, request.model).await;
+    }
+    if request.provider.eq_ignore_ascii_case("anthropic") {
+        let base = request.base_url.unwrap_or("https://api.anthropic.com");
+        let api_key = request.api_key?;
+        return probe_anthropic(probe_client(), base, api_key, request.model).await;
+    }
+    // Generic OpenAI-compat — only when caller provided base_url. We
+    // don't probe the public OpenAI / Groq / Anthropic endpoints by
+    // default because those are already covered by the registry (L2).
+    if let Some(base) = request.base_url {
+        return probe_openai_compat(probe_client(), base, request.model).await;
     }
     None
 }
@@ -1019,6 +1134,124 @@ mod tests {
         assert!(looks_like_ollama("custom", Some("http://10.0.0.5:11434")));
         assert!(!looks_like_ollama("custom", Some("https://api.example.com")));
         assert!(!looks_like_ollama("anthropic", None));
+    }
+
+    // ---- PR-2.5 tests: Anthropic + OpenAI-compat parsers ----
+
+    /// Parser: standard Anthropic `/v1/models/{id}` response carries
+    /// `context_window` at the top level.
+    #[test]
+    fn parse_anthropic_model_extracts_context_window() {
+        let json = serde_json::json!({
+            "id": "claude-opus-4-7",
+            "type": "model",
+            "display_name": "Claude Opus 4.7",
+            "context_window": 1_000_000u64,
+            "max_output_tokens": 64_000u64
+        });
+        assert_eq!(parse_anthropic_model(&json), Some(1_000_000));
+    }
+
+    /// Parser: missing `context_window` → `None` (probe layer treats
+    /// this as "no value", falls through to L5).
+    #[test]
+    fn parse_anthropic_model_missing_field_returns_none() {
+        let json = serde_json::json!({
+            "id": "claude-opus-4-7",
+            "type": "model"
+        });
+        assert_eq!(parse_anthropic_model(&json), None);
+    }
+
+    /// Parser: a server returning `context_window: 0` is broken; reject
+    /// it rather than caching the zero.
+    #[test]
+    fn parse_anthropic_model_rejects_zero() {
+        let json = serde_json::json!({ "context_window": 0u64 });
+        assert_eq!(parse_anthropic_model(&json), None);
+    }
+
+    /// Parser: vLLM's canonical key wins over LM Studio's
+    /// `context_length` when both are present. vLLM is authoritative
+    /// for what the server will actually accept.
+    #[test]
+    fn parse_openai_model_prefers_max_model_len() {
+        let json = serde_json::json!({
+            "id": "qwen3-coder-30b",
+            "max_model_len": 32_768u64,
+            "context_length": 16_384u64
+        });
+        assert_eq!(parse_openai_model(&json), Some(32_768));
+    }
+
+    /// Parser: LM Studio / llama.cpp servers expose `context_length`
+    /// when `max_model_len` is absent.
+    #[test]
+    fn parse_openai_model_falls_back_to_context_length() {
+        let json = serde_json::json!({
+            "id": "qwen3-coder-30b",
+            "context_length": 16_384u64
+        });
+        assert_eq!(parse_openai_model(&json), Some(16_384));
+    }
+
+    /// Parser: some Anthropic-flavoured proxies expose `context_window`
+    /// instead of `context_length`.
+    #[test]
+    fn parse_openai_model_falls_back_to_context_window() {
+        let json = serde_json::json!({
+            "id": "claude-via-proxy",
+            "context_window": 200_000u64
+        });
+        assert_eq!(parse_openai_model(&json), Some(200_000));
+    }
+
+    /// Parser: LiteLLM exposes `max_input_tokens` as its normalised
+    /// model-info key.
+    #[test]
+    fn parse_openai_model_falls_back_to_max_input_tokens() {
+        let json = serde_json::json!({
+            "id": "groq-llama",
+            "max_input_tokens": 131_072u64
+        });
+        assert_eq!(parse_openai_model(&json), Some(131_072));
+    }
+
+    /// Parser: last-ditch fallback to `max_tokens` when no other key
+    /// is set. Some forks conflate this with the full window.
+    #[test]
+    fn parse_openai_model_falls_back_to_max_tokens() {
+        let json = serde_json::json!({
+            "id": "obscure-model",
+            "max_tokens": 8_192u64
+        });
+        assert_eq!(parse_openai_model(&json), Some(8_192));
+    }
+
+    /// Parser: object with none of the recognised keys → `None`.
+    #[test]
+    fn parse_openai_model_returns_none_on_no_recognised_keys() {
+        let json = serde_json::json!({
+            "id": "obscure-model",
+            "object": "model",
+            "owned_by": "someone"
+        });
+        assert_eq!(parse_openai_model(&json), None);
+    }
+
+    /// Parser: every recognised key set to 0 must be skipped, not
+    /// returned. We'd rather fall through to the next layer than cache
+    /// a bogus zero.
+    #[test]
+    fn parse_openai_model_rejects_zero() {
+        let json = serde_json::json!({
+            "max_model_len": 0u64,
+            "context_length": 0u64,
+            "context_window": 0u64,
+            "max_input_tokens": 0u64,
+            "max_tokens": 0u64
+        });
+        assert_eq!(parse_openai_model(&json), None);
     }
 
     /// Cache key composition: `provider|base_url|model` triple keeps
