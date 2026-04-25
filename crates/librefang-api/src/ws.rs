@@ -364,9 +364,29 @@ pub async fn agent_ws(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Verify agent exists.
+    // Retry up to 5 times with 200ms backoff to handle a timing race where
+    // the client connects before the agent finishes registering (#804).
+    {
+        let mut found = state.kernel.agent_registry().get(agent_id).is_some();
+        if !found {
+            for attempt in 1..=4 {
+                debug!(
+                    agent_id = %id,
+                    attempt,
+                    "Agent not found yet, retrying in 200ms"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if state.kernel.agent_registry().get(agent_id).is_some() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            warn!(agent_id = %id, "Agent not found after 5 lookup attempts");
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
     }
 
     // Optional per-connection explicit session_id override (issue #2959).

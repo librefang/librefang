@@ -5573,8 +5573,13 @@ impl Default for WeChatConfig {
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
-    /// Revolt API URL.
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
     pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -5590,6 +5595,8 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

@@ -7822,6 +7822,55 @@ system_prompt = "You are a helpful assistant."
     /// Agents with a custom `base_url` keep their current provider unless
     /// overridden explicitly — this prevents custom setups (e.g. Tencent,
     /// Azure, or other third-party endpoints) from being misidentified.
+    /// Persist an agent's manifest to its `agent.toml` on disk so that
+    /// dashboard-driven config changes (model, provider, fallback, etc.)
+    /// survive a restart. The on-disk file lives at the entry's recorded
+    /// `source_toml_path`, falling back to the canonical
+    /// `<agent_workspaces_dir>/<safe_name>/agent.toml` when no source path
+    /// is set.
+    ///
+    /// This is best-effort: a failure to write is logged but does not
+    /// propagate as an error — the authoritative copy lives in SQLite.
+    pub fn persist_manifest_to_disk(&self, agent_id: AgentId) {
+        let Some(entry) = self.registry.get(agent_id) else {
+            return;
+        };
+        let toml_path = match entry.source_toml_path.clone() {
+            Some(p) => p,
+            None => {
+                let safe_name = safe_path_component(&entry.name, "agent");
+                self.config
+                    .load()
+                    .effective_agent_workspaces_dir()
+                    .join(safe_name)
+                    .join("agent.toml")
+            }
+        };
+        let dir = match toml_path.parent() {
+            Some(d) => d.to_path_buf(),
+            None => {
+                warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
+                return;
+            }
+        };
+        match toml::to_string_pretty(&entry.manifest) {
+            Ok(toml_str) => {
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    warn!(agent = %entry.name, "Failed to create agent dir for manifest persist: {e}");
+                    return;
+                }
+                if let Err(e) = std::fs::write(&toml_path, toml_str) {
+                    warn!(agent = %entry.name, "Failed to persist manifest to disk: {e}");
+                } else {
+                    debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                }
+            }
+            Err(e) => {
+                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {e}");
+            }
+        }
+    }
+
     pub fn set_agent_model(
         &self,
         agent_id: AgentId,
@@ -7905,6 +7954,9 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.get(agent_id) {
             let _ = self.memory.save_agent(&entry);
         }
+
+        // Write updated manifest to agent.toml so changes survive restart (#996, #1018)
+        self.persist_manifest_to_disk(agent_id);
 
         // Clear canonical session to prevent memory poisoning from old model's responses
         let _ = self.memory.delete_canonical_session(agent_id);
