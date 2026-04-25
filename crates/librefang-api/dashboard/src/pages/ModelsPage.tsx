@@ -606,8 +606,8 @@ export function ModelsPage() {
       )}
 
       {/* Add Model Modal */}
-      <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg">
-        <form onSubmit={handleAdd} className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+      <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg" variant="panel-right">
+        <form onSubmit={handleAdd} className="p-5 space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="sm:col-span-2">
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
@@ -790,7 +790,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   if (overridesQuery.isLoading) {
     return (
-      <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
+      <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
         <div className="flex items-center justify-center p-12">
           <Loader2 className="w-6 h-6 animate-spin text-brand" />
         </div>
@@ -799,8 +799,8 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   }
 
   return (
-    <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
-      <div className="p-5 space-y-5 max-h-[75vh] overflow-y-auto">
+    <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
+      <div className="p-5 space-y-5">
         {/* Model header */}
         <div className="flex items-center gap-3">
           <Cpu className="w-5 h-5 text-brand" />

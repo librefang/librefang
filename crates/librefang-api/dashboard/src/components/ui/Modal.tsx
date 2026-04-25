@@ -17,11 +17,21 @@ interface ModalProps {
   zIndex?: number;
   /** Allow content to overflow the modal container (e.g. for cmdk dropdowns). Defaults to false. */
   overflowVisible?: boolean;
-  /** Container shape. `modal` (default) is centered with max-h-[90vh].
-   *  `drawer-right` docks to the right edge at full viewport height — used
-   *  for inspector workflows where the underlying list should stay visible
-   *  for quick context-switching (Linear / Figma right panel pattern). */
-  variant?: "modal" | "drawer-right";
+  /** Container shape + dismissal behaviour.
+   *
+   *  - `modal` (default): centred, max-h-[90vh], dim backdrop, click-outside
+   *    closes. The classic blocking dialog.
+   *  - `drawer-right`: right-docked, full height, **no** dim backdrop, clicks
+   *    pass through to the underlying page so users can pick another row in
+   *    the list while the drawer is open (Linear / Figma inspector). Esc and
+   *    the explicit close button are the only dismissal paths — click-outside
+   *    would race with the list-click-to-switch interaction.
+   *  - `panel-right`: right-docked, full height, dim backdrop, click-outside
+   *    closes. Same shape as `drawer-right` but blocks the underlying page —
+   *    use for forms / configuration / sub-modals where the user MUST commit
+   *    or cancel before the rest of the page is interactive again. Visually
+   *    consistent with drawer pages, behaviourally consistent with modals. */
+  variant?: "modal" | "drawer-right" | "panel-right";
   children: ReactNode;
 }
 
@@ -65,6 +75,8 @@ export const Modal = memo(function Modal({
   const onCloseRef = useRef(onClose);
   const titleId = useId();
   const isDrawer = variant === "drawer-right";
+  const isPanel = variant === "panel-right";
+  const isRightDocked = isDrawer || isPanel;
   // Modal traps Tab inside the dialog (no escape from the focus loop).
   // Drawer leaves Tab free so keyboard users can hop back into the
   // underlying list (which is still interactive — see container's
@@ -99,20 +111,20 @@ export const Modal = memo(function Modal({
     onClose();
   };
 
-  // Drawer vs Modal differ in three ways:
-  //   1. Position: drawer hugs the right edge full-height; modal centres.
-  //   2. Dim: modal dims the page (focus on dialog); drawer leaves the
-  //      page un-dimmed because the surrounding context — typically a
-  //      list — should stay legible while the drawer inspects one item.
-  //   3. Click-through: clicks outside the drawer panel pass through to
-  //      the underlying page so users can pick another row in the list
-  //      and the drawer updates in place (Linear / Figma inspector).
-  //      The Modal still closes on backdrop click — that's its contract.
+  // Three layout shapes:
+  //   - modal: centred, dim backdrop, click-outside closes
+  //   - drawer-right: right-docked, NO backdrop, clicks pass through to the
+  //     page so a sibling list stays interactive (Linear / Figma inspector)
+  //   - panel-right: right-docked, dim backdrop, click-outside closes — same
+  //     shape as drawer-right but the modal blocking semantics so forms /
+  //     sub-modals don't conflict with click-through interactions
   const containerClass = isDrawer
     ? "fixed inset-0 flex items-stretch justify-end pointer-events-none"
+    : isPanel
+    ? "fixed inset-0 flex items-stretch justify-end bg-black/40 backdrop-blur-sm"
     : "fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4";
-  const dialogClass = isDrawer
-    ? `pointer-events-auto relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl animate-slide-in-right ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
+  const dialogClass = isRightDocked
+    ? `${isDrawer ? "pointer-events-auto " : ""}relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl animate-slide-in-right ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
     : `relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`;
 
   return (

@@ -1331,7 +1331,7 @@ export function ProvidersPage() {
       )}
 
       {/* Config Modal */}
-      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md">
+      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md" variant="panel-right">
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
@@ -1451,7 +1451,7 @@ export function ProvidersPage() {
       </Modal>
 
       {/* Create Provider Wizard */}
-      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
+      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton variant="panel-right">
         <CreateProviderWizard
           onSubmit={async (values) => {
             await createRegistryContent("provider", values);

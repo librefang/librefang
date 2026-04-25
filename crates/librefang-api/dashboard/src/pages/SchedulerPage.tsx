@@ -440,7 +440,7 @@ export function SchedulerPage() {
       </div>
 
       {/* Create Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md" variant="panel-right">
         {/* Mode tabs */}
         <div className="flex gap-1 px-5 pt-4">
           <button
@@ -610,6 +610,7 @@ export function SchedulerPage() {
         }}
         title={t("scheduler.delivery.edit_modal_title", { defaultValue: "Edit delivery targets" })}
         size="lg"
+        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {editTargetsSchedule && (
@@ -665,7 +666,7 @@ export function SchedulerPage() {
       </Modal>
 
       {/* Edit Trigger Modal */}
-      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md">
+      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md" variant="panel-right">
         <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
           {editTrigger && (
             <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">
