@@ -1167,6 +1167,53 @@ pub async fn test_provider(
         };
     }
 
+    // ── Local providers (Ollama / vLLM / LM Studio / lemonade) ──
+    // Delegate to the kernel's shared probe helper so the on-demand test
+    // updates `auth_status` in the catalog (NotRequired on success,
+    // LocalOffline on failure). Before this, the endpoint only refreshed an
+    // in-memory cache — users could start Ollama after LibreFang booted and
+    // the dashboard would stay stuck on `local_offline` forever.
+    if librefang_runtime::provider_health::is_local_provider(&name) {
+        let result = librefang_kernel::kernel::probe_and_update_local_provider(
+            &state.kernel,
+            &name,
+            &base_url,
+            false, // user-triggered test — don't escalate to warn!
+        )
+        .await;
+        let latency = result.latency_ms as u128;
+        state.provider_test_cache.insert(
+            name.clone(),
+            (
+                Instant::now(),
+                latency,
+                chrono::Utc::now().to_rfc3339(),
+                result.reachable,
+            ),
+        );
+        return if result.reachable {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "provider": name,
+                    "latency_ms": latency,
+                    "discovered_models": result.discovered_models.len(),
+                })),
+            )
+        } else {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "latency_ms": latency,
+                    "error": result.error.unwrap_or_else(|| "unreachable".to_string()),
+                })),
+            )
+        };
+    }
+
     // API providers with no base_url configured cannot be tested.
     if base_url.is_empty() {
         return ApiErrorResponse::bad_request("Provider base URL not configured").into_json_tuple();

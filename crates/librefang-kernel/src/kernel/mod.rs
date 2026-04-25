@@ -9933,6 +9933,12 @@ system_prompt = "You are a helpful assistant."
 
         // Probe local providers for reachability and model discovery.
         //
+        // Runs once immediately on boot, then every `LOCAL_PROBE_INTERVAL_SECS`
+        // so the catalog tracks local servers that start / stop after boot
+        // (common: user installs Ollama while LibreFang is running, or `brew
+        // services stop ollama`). Without periodic reprobing a one-shot
+        // failure at startup sticks in the catalog forever.
+        //
         // The set of providers the user actually relies on (default + fallback
         // chain) gets a `warn!` when offline — those are real misconfigurations
         // or stopped services. Every other local provider in the built-in
@@ -9950,88 +9956,31 @@ system_prompt = "You are a helpful assistant."
                             .map(|fb| fb.provider.to_lowercase()),
                     )
                     .collect();
+            // Probe interval comes from `[providers] local_probe_interval_secs`
+            // (default 60). Values below the 2s probe timeout are nonsensical
+            // — clamp to the default so a mis-configured TOML doesn't
+            // stampede the local daemon.
+            let probe_interval_secs = if cfg.local_probe_interval_secs >= 2 {
+                cfg.local_probe_interval_secs
+            } else {
+                60
+            };
+            let mut shutdown_rx = self.supervisor.subscribe();
             tokio::spawn(async move {
-                let local_providers: Vec<(String, String)> = {
-                    let catalog = kernel
-                        .model_catalog
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
-                    catalog
-                        .list_providers()
-                        .iter()
-                        .filter(|p| {
-                            librefang_runtime::provider_health::is_local_provider(&p.id)
-                                && !p.base_url.is_empty()
-                        })
-                        .map(|p| (p.id.clone(), p.base_url.clone()))
-                        .collect()
-                };
-
-                for (provider_id, base_url) in &local_providers {
-                    let result =
-                        librefang_runtime::provider_health::probe_provider(provider_id, base_url)
-                            .await;
-                    if result.reachable {
-                        info!(
-                            provider = %provider_id,
-                            models = result.discovered_models.len(),
-                            latency_ms = result.latency_ms,
-                            "Local provider online"
-                        );
-                        if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.set_provider_auth_status(
-                                provider_id,
-                                librefang_types::model_catalog::AuthStatus::NotRequired,
-                            );
-                            if !result.discovered_models.is_empty() {
-                                // Use enriched metadata when available (Ollama populates
-                                // discovered_model_info; other providers leave it empty).
-                                let info: Vec<_> = if result.discovered_model_info.is_empty() {
-                                    result
-                                        .discovered_models
-                                        .iter()
-                                        .map(|name| {
-                                            librefang_runtime::provider_health::DiscoveredModelInfo {
-                                                name: name.clone(),
-                                                parameter_size: None,
-                                                quantization_level: None,
-                                                family: None,
-                                                families: None,
-                                                size: None,
-                                                capabilities: vec![],
-                                            }
-                                        })
-                                        .collect()
-                                } else {
-                                    result.discovered_model_info.clone()
-                                };
-                                catalog.merge_discovered_models(provider_id, &info);
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
+                // Race the tick against the shutdown watch so daemon
+                // shutdown breaks immediately instead of blocking up to
+                // `probe_interval_secs` (60s by default) on the next tick.
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            probe_all_local_providers_once(&kernel, &relevant_providers).await;
+                        }
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
                             }
-                        }
-                    } else {
-                        let err = result.error.as_deref().unwrap_or("unknown");
-                        if relevant_providers.contains(&provider_id.to_lowercase()) {
-                            warn!(
-                                provider = %provider_id,
-                                error = err,
-                                "Configured local provider offline"
-                            );
-                        } else {
-                            debug!(
-                                provider = %provider_id,
-                                error = err,
-                                "Local provider offline (not configured as default/fallback)"
-                            );
-                        }
-                        // Mark unreachable local providers as LocalOffline (not Missing).
-                        // Using Missing would cause detect_auth() to reset the status back
-                        // to NotRequired on the next unrelated auth check, making offline
-                        // providers reappear in the model switcher.
-                        if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.set_provider_auth_status(
-                                provider_id,
-                                librefang_types::model_catalog::AuthStatus::LocalOffline,
-                            );
                         }
                     }
                 }
@@ -15699,6 +15648,132 @@ impl LibreFangKernel {
             false
         }
     }
+}
+
+// --- Local-provider probe helpers ---
+//
+// Shared between the periodic background probe (see `start_background_agents`)
+// and the on-demand refresh path in `/api/providers/{id}/test`. Authoritative
+// for the `auth_status` of local providers (Ollama / vLLM / LM Studio /
+// lemonade) — no other code writes `NotRequired` or `LocalOffline` to them.
+
+/// Probe a single local provider and update its catalog entry.
+///
+/// Returns the probe result so callers (e.g. the test endpoint) can surface
+/// latency / error detail in their response.
+///
+/// `log_offline_as_warn = true` for providers in the default-or-fallback set
+/// (a real misconfiguration), `false` for incidentally-defined local
+/// providers (not configured — expected to be offline).
+pub async fn probe_and_update_local_provider(
+    kernel: &Arc<LibreFangKernel>,
+    provider_id: &str,
+    base_url: &str,
+    log_offline_as_warn: bool,
+) -> librefang_runtime::provider_health::ProbeResult {
+    let result = librefang_runtime::provider_health::probe_provider(provider_id, base_url).await;
+    if result.reachable {
+        info!(
+            provider = %provider_id,
+            models = result.discovered_models.len(),
+            latency_ms = result.latency_ms,
+            "Local provider online"
+        );
+        if let Ok(mut catalog) = kernel.model_catalog.write() {
+            catalog.set_provider_auth_status(
+                provider_id,
+                librefang_types::model_catalog::AuthStatus::NotRequired,
+            );
+            if !result.discovered_models.is_empty() {
+                // Use enriched metadata when available (Ollama populates
+                // discovered_model_info; other providers leave it empty).
+                let info: Vec<_> = if result.discovered_model_info.is_empty() {
+                    result
+                        .discovered_models
+                        .iter()
+                        .map(
+                            |name| librefang_runtime::provider_health::DiscoveredModelInfo {
+                                name: name.clone(),
+                                parameter_size: None,
+                                quantization_level: None,
+                                family: None,
+                                families: None,
+                                size: None,
+                                capabilities: vec![],
+                            },
+                        )
+                        .collect()
+                } else {
+                    result.discovered_model_info.clone()
+                };
+                catalog.merge_discovered_models(provider_id, &info);
+            }
+        }
+    } else {
+        let err = result.error.as_deref().unwrap_or("unknown");
+        if log_offline_as_warn {
+            warn!(
+                provider = %provider_id,
+                error = err,
+                "Configured local provider offline"
+            );
+        } else {
+            debug!(
+                provider = %provider_id,
+                error = err,
+                "Local provider offline (not configured as default/fallback)"
+            );
+        }
+        // Mark unreachable local providers as LocalOffline (not Missing).
+        // Using Missing would cause detect_auth() to reset the status back
+        // to NotRequired on the next unrelated auth check, making offline
+        // providers reappear in the model switcher.
+        if let Ok(mut catalog) = kernel.model_catalog.write() {
+            catalog.set_provider_auth_status(
+                provider_id,
+                librefang_types::model_catalog::AuthStatus::LocalOffline,
+            );
+        }
+    }
+    result
+}
+
+/// Probe every local provider once and update the catalog. Called from the
+/// periodic loop in `start_background_agents`.
+///
+/// Probes run concurrently via `join_all`. The total wall time of one cycle
+/// is bounded by the slowest probe (≤ 2 s per provider — see
+/// `PROBE_TIMEOUT_SECS` in `provider_health`) instead of the sum across
+/// providers, which matters when a local server is hung rather than simply
+/// offline.
+async fn probe_all_local_providers_once(
+    kernel: &Arc<LibreFangKernel>,
+    relevant_providers: &std::collections::HashSet<String>,
+) {
+    let local_providers: Vec<(String, String)> = {
+        let catalog = kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
+            .list_providers()
+            .iter()
+            .filter(|p| {
+                librefang_runtime::provider_health::is_local_provider(&p.id)
+                    && !p.base_url.is_empty()
+            })
+            .map(|p| (p.id.clone(), p.base_url.clone()))
+            .collect()
+    };
+    let tasks = local_providers.into_iter().map(|(provider_id, base_url)| {
+        let kernel = Arc::clone(kernel);
+        let is_relevant = relevant_providers.contains(&provider_id.to_lowercase());
+        async move {
+            let _ = probe_and_update_local_provider(&kernel, &provider_id, &base_url, is_relevant)
+                .await;
+        }
+    });
+    futures::future::join_all(tasks).await;
 }
 
 // --- OFP Wire Protocol integration ---
