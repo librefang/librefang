@@ -2948,9 +2948,25 @@ impl LibreFangKernel {
                                     });
                                 match parsed {
                                     Some(mut disk_manifest) => {
-                                        // Compare key fields to detect changes
-                                        let changed = serde_json::to_value(&disk_manifest).ok()
-                                            != serde_json::to_value(&entry.manifest).ok();
+                                        // Compare manifests on a projection that strips
+                                        // every known runtime-rendered prompt tail
+                                        // (## User Configuration, ## Reference Knowledge,
+                                        // ## Your Team) before serialization. The disk
+                                        // TOML never carries any of these (they are
+                                        // re-rendered at activation/drift time), so a
+                                        // raw diff would always trigger on
+                                        // hand-with-rendered-tail agents and clobber the
+                                        // DB blob with the bare TOML on every restart.
+                                        // Comparing on the projection means drift only
+                                        // fires when the *source* TOML genuinely
+                                        // diverged from the DB form.
+                                        let changed =
+                                            serde_json::to_value(manifest_for_diff(&disk_manifest))
+                                                .ok()
+                                                != serde_json::to_value(manifest_for_diff(
+                                                    &entry.manifest,
+                                                ))
+                                                .ok();
                                         if changed {
                                             info!(
                                                 agent = %name,
@@ -3014,6 +3030,46 @@ impl LibreFangKernel {
                                                             &mut entry.manifest,
                                                             &def.settings,
                                                             cfg_for_settings,
+                                                        );
+                                                    }
+
+                                                    // Re-render `## Reference Knowledge` and
+                                                    // `## Your Team` tails — like the settings
+                                                    // tail above, the bare disk TOML never
+                                                    // carries them, so without re-rendering
+                                                    // here the agent silently loses skill
+                                                    // discoverability and peer awareness on
+                                                    // every restart. Helpers are
+                                                    // unconditionally idempotent: empty skill
+                                                    // content / single-agent hand / no peers
+                                                    // all collapse to a strip-only call that
+                                                    // also clears any stale tail left over
+                                                    // from when the hand previously had
+                                                    // those.
+                                                    //
+                                                    // Recover the agent's role from the
+                                                    // `hand_role:<role>` tag stamped at
+                                                    // activation. Skip silently when the tag
+                                                    // is missing — the agent isn't
+                                                    // hand-derived in a way we recognise, and
+                                                    // the activation path will re-stamp the
+                                                    // tags on the next `hand activate`.
+                                                    let role_opt = entry
+                                                        .manifest
+                                                        .tags
+                                                        .iter()
+                                                        .find_map(|t| t.strip_prefix("hand_role:"))
+                                                        .map(|s| s.to_string());
+                                                    if let Some(role) = role_opt {
+                                                        apply_skill_reference_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &role,
+                                                            &def,
+                                                        );
+                                                        apply_team_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &role,
+                                                            &def,
                                                         );
                                                     }
                                                 }
@@ -8918,7 +8974,6 @@ system_prompt = "You are a helpful assistant."
         }
 
         let is_multi_agent = def.is_multi_agent();
-        let role_names: Vec<String> = def.agents.keys().cloned().collect();
         let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
 
         // Kill existing agents with matching hand tag (reactivation cleanup)
@@ -9128,44 +9183,15 @@ system_prompt = "You are a helpful assistant."
                 );
             }
 
-            // Inject skill content: per-role override takes precedence over shared.
-            // SKILL-{role}.md filenames are lowercased during scan, so normalize
-            // the role name to match.
-            let role_lower = role.to_lowercase();
-            let effective_skill = def
-                .agent_skill_content
-                .get(&role_lower)
-                .or(def.skill_content.as_ref());
-            if let Some(skill_content) = effective_skill {
-                manifest.model.system_prompt = format!(
-                    "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                    manifest.model.system_prompt, skill_content
-                );
-            }
-
-            // For multi-agent hands: inject peer info into system prompt
-            if is_multi_agent {
-                let mut peer_lines = Vec::new();
-                for peer_role in &role_names {
-                    if peer_role == role {
-                        continue;
-                    }
-                    if let Some(peer_agent) = def.agents.get(peer_role) {
-                        let hint = peer_agent
-                            .invoke_hint
-                            .as_deref()
-                            .unwrap_or(&peer_agent.manifest.description);
-                        peer_lines.push(format!(
-                            "- **{peer_role}**: {hint} (use agent_send to message)"
-                        ));
-                    }
-                }
-                if !peer_lines.is_empty() {
-                    let team_block = format!("\n\n## Your Team\n\n{}", peer_lines.join("\n"));
-                    manifest.model.system_prompt =
-                        format!("{}{team_block}", manifest.model.system_prompt);
-                }
-            }
+            // Inject `## Reference Knowledge` and `## Your Team` blocks via
+            // the shared helpers. Both are also called from the boot-time
+            // TOML drift loop in `new_with_config` so the two paths render
+            // identically — the drift loop overwrites the DB blob with the
+            // bare disk TOML, which never carries either rendered tail, and
+            // would otherwise silently strip skill discoverability and peer
+            // awareness from the prompt on every restart.
+            apply_skill_reference_block_to_manifest(&mut manifest, role, &def);
+            apply_team_block_to_manifest(&mut manifest, role, &def);
 
             // Hand workspace: workspaces/<hand-id>/
             // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/
