@@ -10408,13 +10408,31 @@
           "type": "string"
         },
         {
-          "description": "Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).",
+          "description": "SearXNG self-hosted search (no API key needed).",
+          "enum": [
+            "searxng"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).",
           "enum": [
             "auto"
           ],
           "type": "string"
         }
       ]
+    },
+    "SearxngSearchConfig": {
+      "description": "SearXNG self-hosted search configuration.\n\nRequires only a `url`; SearXNG public instances reject `limit` and the LLM-facing `max_results` is taken from the per-call `tool_args` (the runtime truncates client-side after fetching).",
+      "properties": {
+        "url": {
+          "default": "",
+          "description": "Base URL of the SearXNG instance (e.g., \"https://search.example.com\"). Empty means the provider is disabled.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "SecondFactor": {
       "description": "Second-factor verification scope.\n\nControls where TOTP verification is enforced: - `Totp` = approvals only (backward-compatible default when TOTP is enabled) - `Login` = dashboard login only - `Both` = approvals + dashboard login",
@@ -12423,6 +12441,17 @@
           "default": "auto",
           "description": "Which search provider to use."
         },
+        "searxng": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SearxngSearchConfig"
+            }
+          ],
+          "default": {
+            "url": ""
+          },
+          "description": "SearXNG self-hosted search configuration."
+        },
         "tavily": {
           "allOf": [
             {
@@ -14219,6 +14248,9 @@
           "model": "sonar"
         },
         "search_provider": "auto",
+        "searxng": {
+          "url": ""
+        },
         "tavily": {
           "api_key_env": "TAVILY_API_KEY",
           "include_answer": true,
