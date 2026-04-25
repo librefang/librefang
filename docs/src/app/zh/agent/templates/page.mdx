@@ -321,6 +321,25 @@ library = { path = "shared/library", mode = "r" }   # 只读
 
 **访问模式**：`rw`（读写，默认）或 `r`（只读）。路径相对于 `workspaces_dir`，不能是绝对路径或包含 `..`。
 
+### 实时上下文（`context.md`）
+
+如果 agent workspace 里有 `context.md` 文件，**每个 agent 回合都会重新读取**，并以 `## Live Context` section 注入 system prompt。这让外部工具（cron 任务、脚本、dashboard）能把新数据 — 行情、项目状态、值班表 — 推给 agent，无需重启。
+
+**路径解析**：优先 `{workspace}/.identity/context.md`；为兼容未迁移的 workspace，回退到 `{workspace}/context.md`。
+
+**行为：**
+- 每回合读一次，prompt 组装前。
+- 读取上限 32 KB；超大文件截断并打 warn。
+- 之前能读到、现在突然失败（比如外部进程在替换文件）时，使用上次缓存的内容，避免对话中途丢失上下文。
+- 文件不存在时不添加 `## Live Context` section。
+
+**关闭实时重读**：`agent.toml` 里设 `cache_context = true` 恢复 2026 年 4 月前的行为 — `context.md` 在 session 启动时读一次并缓存到 session 结束。
+
+```toml
+# agent.toml
+cache_context = true   # 默认 false（每回合重读）
+```
+
 ---
 
 ## 理解 Temperature

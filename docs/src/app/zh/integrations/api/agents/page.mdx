@@ -357,6 +357,26 @@
 
 通过上传 ID 获取之前上传的文件。
 
+### 支持的附件类型
+
+`POST /api/agents/{id}/message`（或 streaming 变体）的 body 引用附件时，后端在调用 LLM 前会把每个 `file_id` 解析为 content block。识别三类：
+
+| 类别 | 检测 | 产出 block |
+|---|---|---|
+| **图片** | `Content-Type: image/*`（`png`、`jpeg`、`webp`、`gif`） | 内联 base64 图片 block |
+| **PDF** | `Content-Type: application/pdf` | 文本 block，前缀 `[Attached PDF: <filename>]` 跟提取的纯文本 |
+| **文本 / 代码** | 任何 `text/*` MIME，列出的 `application/*` JSON/XML/YAML/TOML/JS/TS/SQL/GraphQL 类型，**或**浏览器没填 MIME 时识别已知扩展名 | 文本 block，前缀 `[Attached file: <filename>]` 跟 UTF-8 内容 |
+
+识别的文本/代码扩展名包括 `.txt`、`.md`、`.markdown`、`.rst`、`.csv`、`.tsv`、`.log`、`.json`、`.yaml`、`.yml`、`.toml`、`.xml`、`.ini`、`.conf`、`.cfg`、`.env`、`.html`、`.css`、`.js`、`.ts`、`.tsx`、`.jsx`、`.vue`、`.svelte`、`.py`、`.rs`、`.go`、`.java`、`.kt`、`.swift`、`.scala`、`.c`、`.cpp`、`.h`、`.rb`、`.php`、`.lua`、`.r`、`.sh`、`.bash`、`.sql`、`.graphql`、`.proto`、`.ipynb`、`Dockerfile`、`Makefile` 等等。
+
+**上限：**
+
+- PDF 文本提取和文本文件读取都截断在 200,000 字符。
+- 扫描件 / 纯图片 PDF 会带一段简短说明指出无法提取文本，模型仍能看到附件存在。
+- 三类都不匹配的文件被跳过并记 warn 日志；LLM 调用照常带上其余附件继续。
+
+**本地小模型注意：** 用户消息含多段文本（比如附件头 + 用户提示）时，runtime 在 session-repair 层把同 role 相邻的文本 block 合并。这个归一化在任何 driver 调用之前发生，所以经 Ollama / vLLM / LM Studio 的 chat-tuned 小模型只看到单段 user 文本加图片，依然会注意到附件。
+
 ### GET /api/agents/&lbrace;id&rbrace;/ws
 
 用于实时双向聊天的 WebSocket 连接（参见 [WebSocket 协议](#websocket-协议)）。
@@ -368,6 +388,26 @@
 ### POST /api/agents/&lbrace;id&rbrace;/memory/import
 
 从 JSON 导入 Agent 的记忆条目。
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/trajectory
+
+导出某个 session 的脱敏 trajectory（审计轨迹）。响应打包了该 session 的消息加最小元数据（agent 名、模型、system prompt 指纹、librefang 版本），所有消息都过隐私脱敏器再序列化。用于支持、审计、合规流程，需要分享 session 但又不能泄密时用这个。
+
+**Query 参数：**
+
+- `format=json`（默认）：单 JSON 对象，content-type `application/json`。
+- `format=jsonl`：NDJSON — 第一行是元数据头，后续每行一条消息；content-type `application/x-ndjson`。方便 streaming 进 log pipeline 或 `jq` filter。
+
+**响应状态：**
+
+- `200` — trajectory 包。
+- `400` — agent 或 session id 不是合法 UUID。
+- `404` — agent 或 session 不存在。
+
+```bash
+curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?format=jsonl' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY' > session.jsonl
+```
 
 ---
 

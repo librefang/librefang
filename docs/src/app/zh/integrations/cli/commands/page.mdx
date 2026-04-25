@@ -1070,3 +1070,31 @@ librefang service status
 #   Enabled: enabled
 #   Active: active
 ```
+
+---
+
+## 聊天里的 Slash Command
+
+交互式聊天（`librefang chat`、`librefang agent chat`、TUI 聊天面板）接受 slash command。所有命令来自一个跟 channel adapter（Telegram、Slack 等）和 dashboard 共享的注册中心，所以同一个命令名在每个表面含义一致。
+
+聊天会话里输入 `/help` 渲染按 CLI 视角过滤后的命令列表：
+
+```
+/model [name] — 显示或切换 agent 模型
+/status       — 显示系统状态
+/help         — 显示本帮助
+/clear        — 清空聊天历史
+/kill         — 杀掉当前 agent 并退出
+/exit         — 结束聊天会话
+```
+
+| 命令 | 说明 |
+|---|---|
+| `/model [name]` | 显示当前模型，或切换到 `<name>`（带 provider 前缀，如 `groq/llama-3.3-70b-versatile`）。 |
+| `/status` | 打印连接和 agent 状态。 |
+| `/help` | 打印 CLI 命令列表。 |
+| `/clear` | 清空可见聊天历史，不重置 session。 |
+| `/kill` | 终止当前 agent 并退出聊天。 |
+| `/exit` | 结束聊天会话。`quit` 是别名。 |
+
+channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、`/budget` 等）见 [Provider 管理 — Channel 命令](/zh/configuration/providers/management)。未知命令名只会得到一个 "unknown command" 错误，不会被传给模型。
