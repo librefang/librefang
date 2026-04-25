@@ -138,10 +138,14 @@ const channelsRoute = createRoute({
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/chat",
-  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string } => {
-    const out: { agentId?: string; sessionId?: string } = {};
+  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string; attach?: string } => {
+    const out: { agentId?: string; sessionId?: string; attach?: string } = {};
     if (typeof search.agentId === "string") out.agentId = search.agentId;
     if (typeof search.sessionId === "string") out.sessionId = search.sessionId;
+    // Hidden flag: enables the multi-attach SSE viewer (see useSessionStream).
+    // Functionally testable once #3078 lands; before then the hook silently
+    // no-ops on the 404 the route returns.
+    if (typeof search.attach === "string") out.attach = search.attach;
     return out;
   },
   component: () => <L><ChatPage /></L>

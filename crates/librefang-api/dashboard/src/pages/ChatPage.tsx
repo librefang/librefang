@@ -13,6 +13,7 @@ import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
@@ -1570,7 +1571,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
@@ -1578,6 +1579,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
   onOpenConfig: () => void;
+  /** True while the multi-client SSE attach stream is open. */
+  attached?: boolean;
+  /** Number of SSE events received on the attach stream (for operator visibility). */
+  attachedEventCount?: number;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1707,6 +1712,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
             {t("chat.ws_connected")}
+          </Badge>
+        )}
+        {attached && (
+          <Badge variant="brand" dot>
+            <Eye className="h-2.5 w-2.5 mr-0.5" />
+            {t("chat.session_attach_watching", { defaultValue: "Watching" })}
+            {typeof attachedEventCount === "number" && attachedEventCount > 0
+              ? ` (${attachedEventCount})`
+              : ""}
           </Badge>
         )}
         <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
@@ -2300,6 +2314,17 @@ export function ChatPage() {
   }, [sessionsQuery.data]);
   const activeSessionId = urlSessionId ?? serverActiveSessionId;
 
+  // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
+  // server-side route ships in a separate PR; until that lands the hook
+  // silently no-ops on the 404 it returns. We watch a session that another
+  // client (CLI, desktop, second browser tab) may already be driving over
+  // its own /message/stream connection.
+  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!activeSessionId;
+  const sessionStream = useSessionStream(
+    attachEnabled ? selectedAgentId : null,
+    attachEnabled ? activeSessionId ?? null : null,
+  );
+
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
   // URL carries its own sessionId, and the send path forwards it per-request.
   const handleSwitchSession = useCallback(async (sessionId: string) => {
@@ -2548,6 +2573,8 @@ export function ChatPage() {
               onOpenConfig={() => navigate({ to: "/config" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
+              attached={attachEnabled && sessionStream.isAttached}
+              attachedEventCount={sessionStream.events.length}
               onWebSearchChange={async (mode) => {
                 try {
                   await patchAgentConfigMutation.mutateAsync({
