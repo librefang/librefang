@@ -702,10 +702,19 @@ impl LlmDriver for BedrockDriver {
 
             let status = resp.status().as_u16();
 
-            if status == 429 || status == 503 {
+            // Retry transient failures: rate limits (429), service unavailable (503),
+            // and the two common transient gateway errors 502 (Bad Gateway) and
+            // 504 (Gateway Timeout). 500/501/505 are NOT retried — they are usually
+            // permanent or indicate a malformed request.
+            if status == 429 || status == 502 || status == 503 || status == 504 {
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
-                    tracing::warn!(status, retry_ms, attempt, "Bedrock rate limited, retrying");
+                    tracing::warn!(
+                        status,
+                        retry_ms,
+                        attempt,
+                        "Bedrock transient failure, retrying"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
                     continue;
                 }
