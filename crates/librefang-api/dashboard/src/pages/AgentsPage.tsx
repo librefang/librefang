@@ -104,7 +104,7 @@ function SystemPromptSection({ prompt }: { prompt: string }) {
       </div>
       <div
         className={`rounded-lg bg-main border border-border-subtle p-4 text-sm text-text leading-relaxed whitespace-pre-wrap ${
-          expanded ? "" : "max-h-72 overflow-y-auto"
+          isLong && !expanded ? "max-h-72 overflow-y-auto" : ""
         }`}
       >
         {prompt}
