@@ -5,6 +5,7 @@
 //! Together, Mistral, Fireworks, Ollama, vLLM, Alibaba Coding Plan, and any
 //! OpenAI-compatible endpoint.
 pub mod anthropic;
+pub mod bedrock;
 pub mod chatgpt;
 pub mod claude_code;
 pub mod codex_cli;
@@ -129,6 +130,8 @@ pub enum ApiFormat {
     VertexAI,
     /// Azure OpenAI (OpenAI format with `api-key` header and deployment-based URL).
     AzureOpenAI,
+    /// AWS Bedrock Converse API (Bearer token auth via `AWS_BEARER_TOKEN_BEDROCK`).
+    Bedrock,
 }
 
 /// A provider entry in the static registry.
@@ -585,6 +588,17 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         alt_api_key_env: None,
         hidden: false,
     },
+    ProviderEntry {
+        name: "bedrock",
+        aliases: &["aws-bedrock"],
+        // Endpoint is built dynamically from AWS_REGION + model name by BedrockDriver.
+        base_url: "",
+        api_key_env: "AWS_BEARER_TOKEN_BEDROCK",
+        key_required: true,
+        api_format: ApiFormat::Bedrock,
+        alt_api_key_env: None,
+        hidden: false,
+    },
 ];
 
 // ── Registry Lookup ──────────────────────────────────────────────
@@ -733,6 +747,17 @@ fn create_driver_from_entry(
                 proxy_url,
             )))
         }
+        ApiFormat::Bedrock => {
+            // Region falls back to AWS_REGION → AWS_DEFAULT_REGION → us-east-1
+            // inside the driver. Endpoint is built per-call from region+model.
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .ok();
+            Ok(Arc::new(bedrock::BedrockDriver::new_with_credentials(
+                Some(api_key),
+                region,
+            )?))
+        }
     }
 }
 
@@ -791,7 +816,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, novita, claude-code, qwen-code, gemini-cli, codex-cli, \
+             azure-openai, vertex-ai, nvidia-nim, novita, bedrock, claude-code, qwen-code, gemini-cli, codex-cli, \
              qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
              qianfan, volcengine, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
@@ -1076,7 +1101,8 @@ mod tests {
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
         assert!(providers.contains(&"novita"));
-        assert_eq!(providers.len(), 40);
+        assert!(providers.contains(&"bedrock"));
+        assert_eq!(providers.len(), 41);
     }
 
     #[test]
@@ -1139,6 +1165,45 @@ mod tests {
         assert_eq!(d.base_url, "https://api.novita.ai/openai/v1");
         assert_eq!(d.api_key_env, "NOVITA_API_KEY");
         assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_bedrock() {
+        let d = provider_defaults("bedrock").unwrap();
+        assert_eq!(d.api_key_env, "AWS_BEARER_TOKEN_BEDROCK");
+        assert!(d.key_required);
+        // base_url is built dynamically per-call from AWS_REGION + model.
+        assert_eq!(d.base_url, "");
+    }
+
+    #[test]
+    fn test_provider_defaults_aws_bedrock_alias() {
+        let d = provider_defaults("aws-bedrock").unwrap();
+        assert_eq!(d.api_key_env, "AWS_BEARER_TOKEN_BEDROCK");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_bedrock_driver_with_explicit_api_key() {
+        // Explicit api_key bypasses the AWS_BEARER_TOKEN_BEDROCK env lookup so
+        // the test is hermetic regardless of the host environment.
+        let config = DriverConfig {
+            provider: "bedrock".to_string(),
+            api_key: Some("test-bedrock-bearer-token".to_string()),
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+            message_timeout_secs: 300,
+            mcp_bridge: None,
+            proxy_url: None,
+            request_timeout_secs: None,
+        };
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_ok(),
+            "Bedrock with explicit api_key should construct successfully"
+        );
     }
 
     #[test]
