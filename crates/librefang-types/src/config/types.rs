@@ -2443,6 +2443,10 @@ pub struct KernelConfig {
     /// in `tool_invoke.allowlist`.
     #[serde(default)]
     pub tool_invoke: ToolInvokeConfig,
+    /// Parallel-tool dispatcher configuration. PR-3 schema only — runtime
+    /// integration lands in PR-4. See [`ParallelToolsConfig`].
+    #[serde(default)]
+    pub parallel_tools: ParallelToolsConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4072,6 +4076,7 @@ impl Default for KernelConfig {
             max_request_body_bytes: default_max_request_body_bytes(),
             terminal: TerminalConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
+            parallel_tools: ParallelToolsConfig::default(),
         }
     }
 }
@@ -6488,6 +6493,59 @@ impl ToolInvokeConfig {
     }
 }
 
+/// Configuration for the agent loop's parallel tool dispatcher.
+///
+/// PR-3 ships the schema only; the agent loop still runs tool calls
+/// strictly sequentially. PR-4 wires the dispatcher into the runtime
+/// and PR-5 flips `enabled` on by default.
+///
+/// ```toml
+/// [parallel_tools]
+/// enabled = false
+/// max_concurrent = 4
+/// mcp_default_safety = "write_shared"   # or "read_only"
+/// mcp_readonly_allowlist = ["mcp__github__list_issues"]
+/// ```
+///
+/// Falls back to fully sequential execution when `enabled = false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ParallelToolsConfig {
+    /// Master switch. Default `false` so PR-3 ships with no behaviour
+    /// change. PR-5 will flip the default to `true` after the streaming
+    /// dispatcher integration lands.
+    pub enabled: bool,
+
+    /// Cap on concurrent tool calls within a single bucket. `0` =
+    /// uncapped (use the bucket size). The dispatcher honours this
+    /// when launching futures via `join_all`.
+    pub max_concurrent: u32,
+
+    /// Default `ParallelSafety` class assigned to MCP tools whose
+    /// servers don't carry `readOnlyHint` annotations. Conservative
+    /// default `"write_shared"` keeps unannotated MCP tools serialised
+    /// (one per bucket) instead of optimistically parallelising.
+    /// Accepted values: `"read_only"` | `"write_shared"`. PR-4 will
+    /// promote this to a typed enum once the dispatcher consumes it.
+    pub mcp_default_safety: String,
+
+    /// Explicit allowlist of MCP tool names that should be treated as
+    /// `ReadOnly` regardless of `mcp_default_safety`. Names match the
+    /// fully-namespaced form (`mcp__server__name`).
+    pub mcp_readonly_allowlist: Vec<String>,
+}
+
+impl Default for ParallelToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent: 4,
+            mcp_default_safety: "write_shared".to_string(),
+            mcp_readonly_allowlist: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6848,5 +6906,70 @@ max_tokens_per_hour = 500000
         let back = toml::to_string(&c).unwrap();
         let again: ToolInvokeConfig = toml::from_str(&back).unwrap();
         assert_eq!(c, again);
+    }
+
+    // -------- ParallelToolsConfig (PR-3 schema only) --------
+
+    #[test]
+    fn parallel_tools_default_is_disabled() {
+        let c = ParallelToolsConfig::default();
+        assert!(!c.enabled, "PR-3 must ship with the dispatcher off");
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
+
+        // KernelConfig::default() must wire the field through.
+        let cfg = KernelConfig::default();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+    }
+
+    #[test]
+    fn parallel_tools_serde_round_trip() {
+        let original = ParallelToolsConfig {
+            enabled: true,
+            max_concurrent: 8,
+            mcp_default_safety: "read_only".to_string(),
+            mcp_readonly_allowlist: vec![
+                "mcp__github__list_issues".to_string(),
+                "mcp__fs__read_file".to_string(),
+            ],
+        };
+
+        // TOML round-trip.
+        let toml_str = toml::to_string(&original).unwrap();
+        let from_toml: ParallelToolsConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(from_toml, original);
+
+        // JSON round-trip.
+        let json_str = serde_json::to_string(&original).unwrap();
+        let from_json: ParallelToolsConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(from_json, original);
+    }
+
+    #[test]
+    fn parallel_tools_missing_in_kernel_config_uses_default() {
+        // Old config.toml predating PR-3 has no [parallel_tools] section.
+        // KernelConfig deserialisation must hydrate the field with Default.
+        let toml_str = r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+        assert!(!cfg.parallel_tools.enabled);
+    }
+
+    #[test]
+    fn parallel_tools_partial_section_fills_remaining_with_default() {
+        // User supplies only `enabled = true`; remaining fields fall back
+        // to Default — verifies #[serde(default)] on the struct itself.
+        let toml_str = r#"
+            enabled = true
+        "#;
+        let c: ParallelToolsConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
     }
 }
