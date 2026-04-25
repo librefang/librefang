@@ -732,45 +732,42 @@ impl LlmDriver for BedrockDriver {
 
             let status = resp.status().as_u16();
 
-            // Retry transient failures: rate limits (429), service unavailable (503),
-            // and the two common transient gateway errors 502 (Bad Gateway) and
-            // 504 (Gateway Timeout). 500/501/505 are NOT retried — they are usually
-            // permanent or indicate a malformed request.
-            if status == 429 || status == 502 || status == 503 || status == 504 {
-                if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    tracing::warn!(
-                        status,
-                        retry_ms,
-                        attempt,
-                        "Bedrock transient failure, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-                    continue;
+            match classify_response_status(status) {
+                StatusAction::Success => {}
+                StatusAction::Retry => {
+                    if attempt < max_retries {
+                        let retry_ms = (attempt + 1) as u64 * 2000;
+                        tracing::warn!(
+                            status,
+                            retry_ms,
+                            attempt,
+                            "Bedrock transient failure, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                        continue;
+                    }
+                    return Err(if status == 429 {
+                        LlmError::RateLimited {
+                            retry_after_ms: 5000,
+                            message: None,
+                        }
+                    } else {
+                        LlmError::Overloaded {
+                            retry_after_ms: 5000,
+                        }
+                    });
                 }
-                return Err(if status == 429 {
-                    LlmError::RateLimited {
-                        retry_after_ms: 5000,
-                        message: None,
-                    }
-                } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
-                });
-            }
-
-            if status == 401 || status == 403 {
-                let body_text = resp.text().await.unwrap_or_default();
-                return Err(LlmError::AuthenticationFailed(body_text));
-            }
-
-            if !resp.status().is_success() {
-                let body_text = resp.text().await.unwrap_or_default();
-                let message = serde_json::from_str::<BedrockErrorResponse>(&body_text)
-                    .map(|e| e.message)
-                    .unwrap_or(body_text);
-                return Err(LlmError::Api { status, message });
+                StatusAction::Auth => {
+                    let body_text = resp.text().await.unwrap_or_default();
+                    return Err(LlmError::AuthenticationFailed(body_text));
+                }
+                StatusAction::Fail => {
+                    let body_text = resp.text().await.unwrap_or_default();
+                    let message = serde_json::from_str::<BedrockErrorResponse>(&body_text)
+                        .map(|e| e.message)
+                        .unwrap_or(body_text);
+                    return Err(LlmError::Api { status, message });
+                }
             }
 
             let body_text = resp
