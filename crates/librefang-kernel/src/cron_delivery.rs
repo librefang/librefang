@@ -317,6 +317,7 @@ async fn deliver_webhook(
     job_name: &str,
     output: &str,
 ) -> Result<(), String> {
+    validate_webhook_url(url)?;
     let payload = serde_json::json!({
         "job": job_name,
         "output": output,
@@ -337,6 +338,51 @@ async fn deliver_webhook(
     Ok(())
 }
 
+/// Reject webhook URLs that would let an attacker pivot through the daemon
+/// to local services or cloud metadata endpoints.
+///
+/// Cron delivery targets are reachable through the LLM tool surface, so a
+/// prompt-injected agent could otherwise set `Webhook { url:
+/// "http://169.254.169.254/latest/meta-data/iam/security-credentials/" }`
+/// and exfiltrate cloud credentials, or call back into
+/// `http://127.0.0.1:4545/api/agents` and abuse the daemon's loopback-bypass.
+fn validate_webhook_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "webhook scheme must be http or https, got '{scheme}'"
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "webhook URL has no host".to_string())?;
+    let host_lc = host.to_lowercase();
+    // Block well-known names regardless of DNS resolution.
+    if matches!(
+        host_lc.as_str(),
+        "localhost" | "metadata" | "metadata.google.internal" | "metadata.aws.amazon.com"
+    ) {
+        return Err(format!("webhook host '{host_lc}' is not allowed"));
+    }
+    // Literal IP addresses: refuse loopback and link-local (which covers
+    // the AWS / GCP / Azure 169.254.169.254 metadata service). DNS names
+    // are not resolved here — that's a known TOCTOU we accept; the
+    // operator is expected to deploy the daemon with egress filtering
+    // for paranoid environments.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let blocked = ip.is_loopback()
+            || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_link_local())
+            || matches!(ip, std::net::IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80);
+        if blocked {
+            return Err(format!(
+                "webhook host '{ip}' is loopback or link-local — refusing"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Append or overwrite `output` at `path`. Creates parent directories when
 /// missing. Returns `Err(msg)` on any I/O failure.
 ///
@@ -346,6 +392,17 @@ async fn deliver_webhook(
 /// without this check `LocalFile { path: "../../etc/passwd" }` would
 /// happily overwrite arbitrary files outside the agent workspace.
 async fn deliver_local_file(path: &Path, append: bool, output: &str) -> Result<(), String> {
+    // Refuse absolute paths outright. Cron LocalFile targets are meant to
+    // write into the agent's workspace; an attacker who can set the path
+    // via the LLM tool surface or a tampered dashboard could otherwise use
+    // an absolute path like "/etc/passwd" — which has no `..` component
+    // and thus slipped past the ParentDir-only check.
+    if path.is_absolute() {
+        return Err(format!(
+            "absolute path rejected: {} — LocalFile targets must be workspace-relative",
+            path.display()
+        ));
+    }
     if path
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
