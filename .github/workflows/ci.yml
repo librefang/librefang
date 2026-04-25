@@ -214,6 +214,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install system deps for keyring/secret-service
+        # libdbus-sys (pulled in transitively by the keyring crate via
+        # secret-service on Linux) needs dbus-1 dev headers + pkg-config.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libsecret-1-dev pkg-config
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Regenerate openapi.json

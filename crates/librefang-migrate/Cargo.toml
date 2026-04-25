@@ -16,7 +16,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]

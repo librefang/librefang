@@ -145,7 +145,7 @@ channel-mumble = []
 channel-ntfy = []
 channel-qq = []
 channel-wechat = []
-channel-wecom = ["dep:aes", "dep:cbc", "dep:roxmltree"]
+channel-wecom = ["dep:aes", "dep:cbc"]
 channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
@@ -185,7 +185,6 @@ rsa = { workspace = true, optional = true }
 aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true }
 rustls = { workspace = true, features = ["ring"] }
-roxmltree = { version = "0.21", optional = true }
 k256 = { workspace = true, optional = true }
 
 rumqttc = { workspace = true, optional = true }
@@ -195,7 +194,6 @@ rustls-connector = { workspace = true, optional = true }
 mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio-test = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 

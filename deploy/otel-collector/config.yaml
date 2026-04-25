@@ -1,7 +1,8 @@
 # OpenTelemetry Collector config for LibreFang's local dev stack.
 #
 # Receives OTLP traces + metrics from LibreFang on 4317 (gRPC) / 4318 (HTTP).
-# - Traces fan out to Tempo (for Grafana search) AND stdout (debug visibility).
+# - Traces fan out to Tempo (Grafana correlation), Jaeger (trace-debug UI)
+#   AND stdout (debug visibility).
 # - Metrics are exposed on the Prometheus scrape endpoint :8889.
 
 receivers:
@@ -11,6 +12,13 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+
+extensions:
+  # health_check exposes /, /health/status etc. on 13133. Used by docker
+  # compose's healthcheck so dependents (prometheus, grafana) only start
+  # after the collector is actually accepting OTLP traffic.
+  health_check:
+    endpoint: 0.0.0.0:13133
 
 processors:
   batch: {}
@@ -27,13 +35,21 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
+  # Mirror traces to Jaeger's all-in-one OTLP receiver. Same plaintext
+  # bridge as Tempo. Tempo stays the long-term store (Grafana correlation);
+  # Jaeger gives the trace-debugging UI (waterfall, diff, deps) at :16686.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug, otlp/tempo]
+      exporters: [debug, otlp/tempo, otlp/jaeger]
     metrics:
       receivers: [otlp]
       processors: [batch]

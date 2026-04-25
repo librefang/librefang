@@ -1253,6 +1253,17 @@ pub struct TelemetryConfig {
     pub sample_rate: f64,
     /// Enable Prometheus metrics endpoint at /api/metrics.
     pub prometheus_enabled: bool,
+    /// Auto-start the bundled observability Docker stack (Grafana, Prometheus,
+    /// Tempo, OTel collector) on daemon boot. Default: `false`.
+    ///
+    /// Off by default because spinning up four containers on every `librefang
+    /// start` is a strong implicit side-effect — operators usually prefer
+    /// `librefang start` to leave the host untouched. Existing dashboards /
+    /// custom OTel collectors keep working as long as `otlp_endpoint` points
+    /// at them; the stack is only useful for the bundled local view.
+    ///
+    /// Issue #3136.
+    pub auto_start_observability_stack: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -1263,6 +1274,7 @@ impl Default for TelemetryConfig {
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
+            auto_start_observability_stack: false,
         }
     }
 }
