@@ -268,6 +268,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/switch`);
   }
 
+  async exportSessionTrajectory(id, session_id, query) {
+    return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/trajectory`, undefined, query);
+  }
+
   async getAgentSkills(id) {
     return this._c._request("GET", `/api/agents/${id}/skills`);
   }

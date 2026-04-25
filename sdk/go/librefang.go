@@ -400,6 +400,10 @@ func (r *AgentsResource) SwitchAgentSession(id string, session_id string) (inter
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil, nil)
 }
 
+func (r *AgentsResource) ExportSessionTrajectory(id string, session_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/trajectory", id, session_id), nil, query)
+}
+
 func (r *AgentsResource) GetAgentSkills(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/skills", id), nil, nil)
 }

@@ -1576,6 +1576,61 @@
         }
       }
     },
+    "/api/agents/{id}/sessions/{session_id}/trajectory": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/trajectory — Export a redacted\ntrajectory (audit trail) for the given session.",
+        "description": "Returns a privacy-redacted bundle of the session messages plus metadata\n(agent name, model, system prompt fingerprint, librefang version). Intended\nfor support, audit, and compliance flows.\n\nQuery parameters:\n- `format=json` (default): single JSON object response.\n- `format=jsonl`: NDJSON, first line is metadata header, subsequent lines\n  are messages one-per-line. `Content-Type: application/x-ndjson`.",
+        "operationId": "export_session_trajectory",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID to export",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Response format: 'json' (default) or 'jsonl'",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redacted trajectory bundle",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent or session ID"
+          },
+          "404": {
+            "description": "Agent or session not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/skills": {
       "get": {
         "tags": [

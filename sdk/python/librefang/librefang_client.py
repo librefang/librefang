@@ -243,6 +243,9 @@ class _AgentsResource(_Resource):
     def switch_agent_session(self, id: str, session_id: str):
         return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/switch")
 
+    def export_session_trajectory(self, id: str, session_id: str, format: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/trajectory", None, query={"format": format})
+
     def get_agent_skills(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/skills")
 

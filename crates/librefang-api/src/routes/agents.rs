@@ -69,6 +69,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(export_session),
         )
         .route(
+            "/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(export_session_trajectory),
+        )
+        .route(
             "/agents/{id}/sessions/import",
             axum::routing::post(import_session),
         )
@@ -2148,6 +2152,167 @@ pub async fn export_session(
             ),
         ),
     }
+}
+
+/// GET /api/agents/{id}/sessions/{session_id}/trajectory — Export a redacted
+/// trajectory (audit trail) for the given session.
+///
+/// Returns a privacy-redacted bundle of the session messages plus metadata
+/// (agent name, model, system prompt fingerprint, librefang version). Intended
+/// for support, audit, and compliance flows.
+///
+/// Query parameters:
+/// - `format=json` (default): single JSON object response.
+/// - `format=jsonl`: NDJSON, first line is metadata header, subsequent lines
+///   are messages one-per-line. `Content-Type: application/x-ndjson`.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/sessions/{session_id}/trajectory",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID to export"),
+        ("format" = Option<String>, Query, description = "Response format: 'json' (default) or 'jsonl'"),
+    ),
+    responses(
+        (status = 200, description = "Redacted trajectory bundle", body = serde_json::Value),
+        (status = 400, description = "Invalid agent or session ID"),
+        (status = 404, description = "Agent or session not found"),
+    )
+)]
+pub async fn export_session_trajectory(
+    State(state): State<Arc<AppState>>,
+    Path((id, session_id_str)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use librefang_kernel::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
+
+    let (
+        err_invalid_id,
+        err_session_invalid,
+        err_not_found,
+        err_session_not_found,
+        err_generic_key,
+    ) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-session-invalid-id"),
+            t.t("api-error-agent-not-found"),
+            "Session not found".to_string(),
+            "api-error-generic".to_string(),
+        )
+    };
+
+    // Parse agent ID.
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err_invalid_id})),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse session ID.
+    let session_id = match session_id_str.parse::<uuid::Uuid>() {
+        Ok(uuid) => librefang_types::agent::SessionId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err_session_invalid})),
+            )
+                .into_response();
+        }
+    };
+
+    // Lookup agent → 404 if missing.
+    let agent_entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            )
+                .into_response();
+        }
+    };
+
+    // Build redaction policy. Use the agent's workspace as the path-collapse
+    // root when present.
+    let mut policy = RedactionPolicy::default();
+    if let Some(ws) = agent_entry.manifest.workspace.clone() {
+        policy = policy.with_workspace_root(ws);
+    }
+
+    let exporter = TrajectoryExporter::new(state.kernel.memory_substrate().clone(), policy);
+    let agent_ctx = AgentContext {
+        name: agent_entry.name.clone(),
+        model: agent_entry.manifest.model.model.clone(),
+        provider: agent_entry.manifest.model.provider.clone(),
+        system_prompt: agent_entry.manifest.model.system_prompt.clone(),
+    };
+
+    let bundle = match exporter.export_session(agent_id, session_id, agent_ctx) {
+        Ok(b) => b,
+        Err(librefang_types::error::LibreFangError::Memory(msg)) if msg.contains("not found") => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_session_not_found})),
+            )
+                .into_response();
+        }
+        Err(librefang_types::error::LibreFangError::Memory(msg))
+            if msg.contains("does not belong") =>
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_session_not_found})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response();
+        }
+    };
+
+    let format = params
+        .get("format")
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "json".to_string());
+
+    let (body, content_type, ext): (String, &'static str, &'static str) = if format == "jsonl" {
+        (bundle.to_jsonl(), "application/x-ndjson", "jsonl")
+    } else {
+        (bundle.to_json().to_string(), "application/json", "json")
+    };
+
+    let filename = format!("trajectory-{}.{}", session_id.0, ext);
+    let disposition = format!("attachment; filename=\"{}\"", filename);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to build response"})),
+            )
+                .into_response()
+        })
 }
 
 /// POST /api/agents/{id}/sessions/import — Import a previously exported session.

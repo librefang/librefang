@@ -137,6 +137,10 @@ async fn start_test_server_with_provider(
             axum::routing::get(routes::get_agent_session),
         )
         .route(
+            "/api/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(routes::export_session_trajectory),
+        )
+        .route(
             "/api/agents/{id}/metrics",
             axum::routing::get(routes::agent_metrics),
         )
@@ -696,6 +700,128 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_trajectory_export_empty() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // Read session to discover session_id.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let session_body: serde_json::Value = resp.json().await.unwrap();
+    let session_id = session_body["session_id"].as_str().unwrap().to_string();
+
+    // Default (json) format
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory",
+            server.base_url, agent_id, session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ct.starts_with("application/json"), "got content-type: {ct}");
+    let disp = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        disp.contains("trajectory-") && disp.contains(".json"),
+        "got disposition: {disp}"
+    );
+    let bundle: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(bundle["schema_version"], 1);
+    assert_eq!(bundle["metadata"]["agent_id"], agent_id);
+    assert_eq!(bundle["metadata"]["session_id"], session_id);
+    assert_eq!(bundle["metadata"]["model"], "test-model");
+    assert_eq!(bundle["metadata"]["provider"], "ollama");
+    assert!(bundle["metadata"]["system_prompt_sha256"].is_string());
+    assert!(bundle["metadata"]["librefang_version"].is_string());
+    assert_eq!(bundle["metadata"]["message_count"], 0);
+    assert!(bundle["messages"].as_array().unwrap().is_empty());
+
+    // jsonl format
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory?format=jsonl",
+            server.base_url, agent_id, session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.starts_with("application/x-ndjson"),
+        "got content-type: {ct}"
+    );
+    let body_text = resp.text().await.unwrap();
+    let lines: Vec<&str> = body_text.lines().collect();
+    // empty session → only metadata header line
+    assert_eq!(lines.len(), 1, "expected 1 line, got {}", lines.len());
+    assert!(lines[0].contains("\"kind\":\"metadata\""));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_trajectory_404_on_unknown_session() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent so we have a valid agent_id
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // Random valid-shape session UUID that doesn't exist.
+    let bogus = uuid::Uuid::new_v4().to_string();
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory",
+            server.base_url, agent_id, bogus
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1397,6 +1523,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(routes::export_session_trajectory),
         )
         .route(
             "/api/agents/{id}/metrics",
