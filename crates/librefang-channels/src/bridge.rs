@@ -1872,6 +1872,32 @@ async fn maybe_prefix_response(
     }
 }
 
+/// Resolve the leading prefix chunk (e.g. `"[coder] "`) for streaming output,
+/// or `None` if prefixing is disabled / agent name unknown.
+///
+/// Used by the streaming success path to inject the prefix as the first
+/// delta — `apply_agent_prefix` only handles the non-streaming "wrap full
+/// text" case.
+async fn resolve_prefix_chunk(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+) -> Option<String> {
+    let style = overrides.map(|o| o.prefix_agent_name)?;
+    if matches!(style, PrefixStyle::Off) {
+        return None;
+    }
+    let name = resolve_agent_name(handle, agent_id).await?;
+    if name.is_empty() {
+        return None;
+    }
+    match style {
+        PrefixStyle::Off => None,
+        PrefixStyle::Bracket => Some(format!("[{name}] ")),
+        PrefixStyle::BoldBracket => Some(format!("**[{name}]** ")),
+    }
+}
+
 /// Send a response, applying output formatting and optional threading.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
@@ -3062,13 +3088,32 @@ async fn dispatch_message(
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
+                // Resolve the agent-name prefix once up-front so it can be
+                // injected as the very first delta — without this, streaming
+                // adapters (e.g. Telegram) would never show the prefix on the
+                // success path. `None` when prefix is disabled, agent unknown,
+                // or the agent has no display name.
+                let prefix_chunk = resolve_prefix_chunk(handle, overrides.as_ref(), agent_id).await;
+
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
                 let mut buffered_text = String::new();
                 let buffer_handle = tokio::spawn({
+                    let prefix_chunk = prefix_chunk.clone();
                     let mut buffered = String::new();
                     async move {
+                        // Inject the prefix as the first delta so it becomes
+                        // part of the streamed message. Mirror it into the
+                        // buffer so the stream-fail fallback path's
+                        // idempotency check (`apply_agent_prefix`) sees an
+                        // already-prefixed buffer and skips re-prefixing.
+                        if let Some(ref p) = prefix_chunk {
+                            buffered.push_str(p);
+                            if adapter_tx.send(p.clone()).await.is_err() {
+                                return buffered;
+                            }
+                        }
                         while let Some(delta) = delta_rx.recv().await {
                             buffered.push_str(&delta);
                             // Best-effort forward — if adapter dropped rx, stop.
@@ -4932,6 +4977,60 @@ mod tests {
     fn test_channel_overrides_default_prefix_off() {
         let o = ChannelOverrides::default();
         assert_eq!(o.prefix_agent_name, PrefixStyle::Off);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_off_returns_none() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides::default();
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("[coder] "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bold_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::BoldBracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("**[coder]** "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_unknown_agent() {
+        let known = AgentId::new();
+        let unknown = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(known, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), unknown).await;
+        assert!(out.is_none());
     }
 
     #[tokio::test]
