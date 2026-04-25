@@ -714,13 +714,13 @@ async fn test_agent_monitoring_endpoints() {
     let agent_id = body["agent_id"].as_str().unwrap().to_string();
 
     server.state.kernel.audit().record(
-        agent_id.clone(),
+        &agent_id,
         AuditAction::AgentMessage,
         "exact match target",
         "custom_error",
     );
     server.state.kernel.audit().record(
-        agent_id.clone(),
+        &agent_id,
         AuditAction::AgentMessage,
         "should not match substring filter",
         "not_custom_error",

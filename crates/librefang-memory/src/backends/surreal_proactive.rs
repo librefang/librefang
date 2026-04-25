@@ -67,72 +67,15 @@ impl SurrealProactiveMemoryBackend {
         session: &SurrealSession,
         storage_cfg: &librefang_storage::config::StorageConfig,
     ) -> Result<Self, String> {
-        use surreal_memory::storage::surreal::{SurrealConfig, SurrealMode};
-
-        struct NoopEmbedding;
-        #[async_trait::async_trait]
-        impl surreal_memory::EmbeddingService for NoopEmbedding {
-            async fn embed(
-                &self,
-                _text: &str,
-            ) -> anyhow::Result<surreal_memory::embeddings::Embedding> {
-                Ok(vec![])
-            }
-            async fn embed_batch(
-                &self,
-                texts: Vec<String>,
-            ) -> anyhow::Result<Vec<surreal_memory::embeddings::Embedding>> {
-                Ok(texts.iter().map(|_| vec![]).collect())
-            }
-            fn dimensions(&self) -> usize {
-                0
-            }
-        }
-
-        // Use the memory-specific storage config so SurrealStorage opens its
-        // own dedicated file (embedded: librefang-memory.surreal) rather than
-        // competing for the lock on the operational file (librefang.surreal)
-        // already held by SurrealConnectionPool.
-        let mem_cfg = storage_cfg.memory_storage_config();
-        let sm_config = match &mem_cfg.backend {
-            librefang_storage::config::StorageBackendKind::Embedded { path } => SurrealConfig {
-                mode: SurrealMode::Embedded,
-                endpoint: None,
-                embedded_path: Some(path.to_string_lossy().to_string()),
-                username: None,
-                password: None,
-                namespace: mem_cfg.effective_namespace().to_string(),
-                database: mem_cfg.effective_database().to_string(),
-                retry: surreal_memory::RetryConfig::default(),
-            },
-            librefang_storage::config::StorageBackendKind::Remote(remote) => {
-                let password = std::env::var(&remote.password_env).unwrap_or_default();
-                SurrealConfig {
-                    mode: SurrealMode::Server,
-                    endpoint: Some(remote.url.clone()),
-                    embedded_path: None,
-                    username: if remote.username.is_empty() {
-                        None
-                    } else {
-                        Some(remote.username.clone())
-                    },
-                    password: if password.is_empty() {
-                        None
-                    } else {
-                        Some(password)
-                    },
-                    namespace: remote.namespace.clone(),
-                    database: remote.database.clone(),
-                    retry: surreal_memory::RetryConfig::default(),
-                }
-            }
-        };
-
-        let storage = surreal_memory::SurrealStorage::new(&sm_config, Arc::new(NoopEmbedding))
+        // Delegate to the single-source factory so this path is functionally
+        // identical to (and shares the same RocksDB lock with) the kernel's
+        // shared-storage boot path.  Standalone callers (e.g. the
+        // `#[ignore]`d integration tests) get a fresh `SurrealStorage` here
+        // because no other opener exists in their process.
+        let storage = super::shared::open_shared_memory_storage(storage_cfg)
             .await
             .map_err(|e| format!("SurrealStorage (proactive memory consolidation): {e}"))?;
-
-        Ok(Self::open(session).with_extended(Arc::new(storage)))
+        Ok(Self::open(session).with_extended(storage))
     }
 }
 

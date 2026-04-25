@@ -1,0 +1,1278 @@
+{
+  "paths": [
+    {
+      "path": "/.well-known/agent.json",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/a2a/agents",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/a2a/tasks/send",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/a2a/tasks/{id}",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/a2a/tasks/{id}/cancel",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/a2a/agents",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/a2a/agents/{id}",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/a2a/discover",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/a2a/send",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/a2a/tasks/{id}/status",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "a2a_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/agents",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/bulk",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/bulk/start",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/bulk/stop",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/agents/{id}",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/agents/{id}/clone",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_clone_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/config",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/deliveries",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/files",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/files/{filename}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/history",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/identity",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/mcp_servers",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/memory/export",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/memory/import",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/agents/{id}/message",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/message/stream",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/mode",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/model",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/agents/{id}/session",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/session/compact",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/session/reboot",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/session/reset",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/by-label/{label}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/import",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/export",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/switch",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/agents/{id}/skills",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "skill_assignment_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/stop",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/tools",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/traces",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/update",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/agents/{id}/upload",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "agent_upload_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/approvals",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/approvals/{id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/approvals/{id}/approve",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/approvals/{id}/reject",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/audit/recent",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "audit_integrity_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/audit/verify",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "audit_integrity_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/callback",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/introspect",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/login",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/login/{provider}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/providers",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/userinfo",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auto-dream/agents/{id}/abort",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auto-dream/agents/{id}/enabled",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auto-dream/agents/{id}/trigger",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auto-dream/status",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/backup",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/backups",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/backups/{filename}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/bindings",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/bindings/{index}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/budget",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "budget_runtime_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/budget/agents",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "budget_runtime_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/budget/agents/{id}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/catalog/status",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/catalog/update",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/reload",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/wechat/qr/start",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/wechat/qr/status",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/whatsapp/qr/start",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/whatsapp/qr/status",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/{name}/configure",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/channels/{name}/test",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/clawhub/browse",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/clawhub/install",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/clawhub/search",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/clawhub/skill/{slug}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/clawhub/skill/{slug}/code",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/commands",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/commands/{name}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/comms/events",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/comms/events/stream",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/comms/send",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/comms/task",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/comms/topology",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/config",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "config_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/config/reload",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "config_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/config/schema",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "config_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/config/set",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "config_contract_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/cron/jobs",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/cron/jobs/{id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/cron/jobs/{id}/enable",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/cron/jobs/{id}/status",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/extensions",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/extensions/install",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/extensions/uninstall",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/extensions/{name}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/active",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/install",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/instances/{id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/instances/{id}/browser",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/instances/{id}/pause",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/instances/{id}/resume",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/instances/{id}/stats",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/reload",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/{hand_id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/{hand_id}/activate",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/{hand_id}/check-deps",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/{hand_id}/install-deps",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hands/{hand_id}/settings",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/health",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "daemon_smoke",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/health/detail",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hooks/agent",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/hooks/wake",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/init",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/logs/stream",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/marketplace/search",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/catalog",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/catalog/{id}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/health",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/reload",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/servers",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/servers/{name}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/servers/{name}/reconnect",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/consolidate",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/duplicates",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/export",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/import",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/kv",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/kv/{key}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/level/{level}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/search",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/agents/{id}/stats",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/cleanup",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/items/{memory_id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/items/{memory_id}/history",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/memory/search",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "memory_vector_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/memory/stats",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "memory_vector_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/memory/user/{user_id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/metrics",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/migrate",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "storage_migration_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/migrate/detect",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/migrate/scan",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models/aliases",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models/aliases/{alias}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models/custom",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models/custom/{id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/models/{id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/network/status",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "daemon_smoke",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/pairing/complete",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/pairing/devices",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/pairing/devices/{id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/pairing/notify",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/pairing/request",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/peers",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "network_contract_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/peers/{id}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/profiles",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/profiles/{name}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/github-copilot/oauth/poll/{poll_id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/github-copilot/oauth/start",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/{name}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/{name}/default",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/{name}/key",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/{name}/test",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/providers/{name}/url",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/queue/status",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/restore",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/schedules",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/schedules/{id}",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/schedules/{id}/run",
+      "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/security",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/sessions",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/sessions/cleanup",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/sessions/{id}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/sessions/{id}/label",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/shutdown",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/skills",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "skill_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/skills/create",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "skill_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/skills/install",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "skill_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/skills/uninstall",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "skill_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/status",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "daemon_smoke",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/templates",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/templates/{name}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/tools",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/tools/{name}",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/triggers",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/triggers/{id}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/uploads/{file_id}",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/usage",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/usage/by-model",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/usage/daily",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/usage/summary",
+      "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "path": "/api/version",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "root_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/versions",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "root_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/workflows",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "workflow_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/workflows/{id}",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "workflow_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/workflows/{id}/run",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "workflow_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "path": "/api/workflows/{id}/runs",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "workflow_lifecycle_http",
+      "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/workflows/{id}/save-as-template",
+      "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "path": "/mcp",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "mcp_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "openai_compat_contract_http",
+      "status": "covered"
+    },
+    {
+      "path": "/v1/models",
+      "proof": "docs/integration-test-matrix.md",
+      "scenario": "openai_compat_contract_http",
+      "status": "covered"
+    }
+  ],
+  "policy": "Every OpenAPI path must be marked covered or explicitly exempted. Covered paths must reference a scenario in docs/integration-test-matrix.md. Exemptions are temporary and reviewed with the matrix.",
+  "version": 1
+}

@@ -1,0 +1,12 @@
+test_tool = "nextest"
+
+[timeout]
+build = 300
+test = 300
+
+[mutants]
+exclude_globs = [
+    "crates/librefang-api/static/**",
+    "crates/librefang-api/dashboard/**",
+    "target/**",
+]

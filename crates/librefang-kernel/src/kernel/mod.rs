@@ -1958,19 +1958,22 @@ impl LibreFangKernel {
                 let task_backend: Arc<dyn librefang_memory::TaskBackend> =
                     Arc::new(librefang_memory::SurrealTaskBackend::open(&session));
 
-                // Wire SurrealStorage with the proactive memory backend so that
-                // consolidate() → expire_stale_memories() targets the same
-                // namespace/database as all other backends.
-                // The SurrealStorage construction and NoopEmbedding are encapsulated
-                // inside librefang-memory so surreal-memory is not a direct
-                // dependency of librefang-kernel.
+                // Build the embedded SurrealStorage exactly once and share it
+                // between the proactive and semantic memory backends.
+                // SurrealStorage::new() acquires an exclusive RocksDB lock on
+                // librefang-memory.surreal — building two instances in the
+                // same process would cause the second to fail. The shared
+                // factory keeps the lock count at one by construction.
+                let shared_memory_storage =
+                    librefang_memory::open_shared_memory_storage(&storage_cfg)
+                        .await
+                        .map_err(|e| format!("shared memory storage: {e}"))?;
+
+                // Proactive memory uses the shared storage for consolidate() →
+                // expire_stale_memories(); session bridges raw SurrealQL queries.
                 let proactive_backend: Arc<dyn librefang_memory::ProactiveMemoryBackend> = Arc::new(
-                    librefang_memory::SurrealProactiveMemoryBackend::open_with_storage(
-                        &session,
-                        &storage_cfg,
-                    )
-                    .await
-                    .map_err(|e| format!("proactive memory backend: {e}"))?,
+                    librefang_memory::SurrealProactiveMemoryBackend::open(&session)
+                        .with_extended(shared_memory_storage.clone()),
                 );
                 let usage_store: Arc<dyn librefang_memory::UsageBackend> =
                     Arc::new(librefang_memory::SurrealUsageStore::open(&session));
@@ -1981,16 +1984,14 @@ impl LibreFangKernel {
                 let knowledge_backend: Arc<dyn librefang_memory::KnowledgeBackend> =
                     Arc::new(librefang_memory::SurrealKnowledgeBackend::open(&session));
 
-                // Build the SurrealSemanticBackend via the factory in librefang-memory
-                // so surreal-memory is not a direct dependency of librefang-kernel.
-                let semantic_backend: Arc<dyn librefang_memory::SemanticBackend> = Arc::new(
-                    librefang_memory::SurrealSemanticBackend::open_with_storage(
+                // Semantic backend reuses the same SurrealStorage Arc — no
+                // second connect() to the memory file.
+                let semantic_backend: Arc<dyn librefang_memory::SemanticBackend> =
+                    Arc::new(librefang_memory::SurrealSemanticBackend::new(
+                        shared_memory_storage,
                         &session,
-                        &storage_cfg,
-                    )
-                    .await
-                    .map_err(|e| format!("semantic backend: {e}"))?,
-                );
+                        None,
+                    ));
 
                 Ok::<_, String>((
                     pool,

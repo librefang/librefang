@@ -1,0 +1,146 @@
+name: Integration Coverage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/librefang-api/**"
+      - "crates/librefang-kernel/**"
+      - "crates/librefang-memory/**"
+      - "crates/librefang-skills/**"
+      - "crates/librefang-storage/**"
+      - "crates/librefang-testing/**"
+      - "docs/integration-test-matrix.md"
+      - ".github/workflows/integration-coverage.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_mutants:
+        description: "Run cargo-mutants critical-crate gate"
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  contract-matrix:
+    name: OpenAPI Contract Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check OpenAPI matrix gate
+        run: cargo test -p librefang-api --test openapi_spec_test openapi_paths_are_mapped_to_integration_coverage
+
+  critical-integration:
+    name: Critical Runtime Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Run fixture-backed runtime tests
+        run: cargo nextest run -p librefang-testing --no-fail-fast
+      - name: Run Surreal storage/vector invariants
+        run: |
+          cargo nextest run -p librefang-storage --features surreal-backend --test surreal_migration_invariants_test
+          cargo nextest run -p librefang-memory --features surreal-backend --test surreal_vector_integration_test
+
+  live-daemon-smoke:
+    name: Live Daemon Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build --release -p librefang-cli
+      - name: Run live integration smoke without LLM
+        run: cargo xtask integration-test --skip-llm --binary target/release/librefang
+
+  dashboard-playwright:
+    name: Dashboard Playwright
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/librefang-api/dashboard
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: crates/librefang-api/dashboard/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run dashboard E2E
+        run: pnpm e2e
+
+  coverage:
+    name: LLVM Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect critical crate coverage
+        run: |
+          cargo llvm-cov nextest \
+            -p librefang-api \
+            -p librefang-kernel \
+            -p librefang-memory \
+            -p librefang-skills \
+            -p librefang-storage \
+            -p librefang-testing \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 70
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: integration-coverage-lcov
+          path: lcov.info
+
+  mutation:
+    name: Mutation Score
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_mutants == true)
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants
+      - name: Run critical mutation gate
+        run: |
+          cargo mutants \
+            --test-tool=nextest \
+            --package librefang-api \
+            --package librefang-kernel \
+            --package librefang-memory \
+            --package librefang-skills \
+            --package librefang-storage

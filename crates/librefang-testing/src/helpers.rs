@@ -38,6 +38,24 @@ pub fn test_request(method: Method, path: &str, body: Option<&str>) -> Request<B
     builder.body(body).expect("failed to build test request")
 }
 
+/// Asserts the response status matches the expected status and the body is valid JSON.
+pub async fn assert_json_status(
+    response: axum::http::Response<Body>,
+    expected_status: StatusCode,
+) -> serde_json::Value {
+    let status = response.status();
+    let body = read_body(response).await;
+
+    assert_eq!(
+        status, expected_status,
+        "expected status {expected_status}, got {status}. Response body: {body}"
+    );
+
+    serde_json::from_str(&body).unwrap_or_else(|e| {
+        panic!("response body is not valid JSON: {e}. Raw content: {body}");
+    })
+}
+
 /// Asserts the response status is 200 and the body is valid JSON.
 ///
 /// Returns the parsed `serde_json::Value`.
@@ -46,18 +64,7 @@ pub fn test_request(method: Method, path: &str, body: Option<&str>) -> Request<B
 ///
 /// Panics if the status code is not 200 or the body is not valid JSON.
 pub async fn assert_json_ok(response: axum::http::Response<Body>) -> serde_json::Value {
-    let status = response.status();
-    let body = read_body(response).await;
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "expected status 200, got {status}. Response body: {body}"
-    );
-
-    serde_json::from_str(&body).unwrap_or_else(|e| {
-        panic!("response body is not valid JSON: {e}. Raw content: {body}");
-    })
+    assert_json_status(response, StatusCode::OK).await
 }
 
 /// Asserts the response status matches the expected error code and the body is valid JSON.

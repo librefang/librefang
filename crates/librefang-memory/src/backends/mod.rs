@@ -7,6 +7,8 @@
 //! `sqlite-backend`.
 
 #[cfg(feature = "surreal-backend")]
+pub mod shared;
+#[cfg(feature = "surreal-backend")]
 pub mod surreal;
 #[cfg(feature = "surreal-backend")]
 pub mod surreal_device;
@@ -27,6 +29,8 @@ pub mod surreal_task;
 #[cfg(feature = "surreal-backend")]
 pub mod surreal_usage;
 
+#[cfg(feature = "surreal-backend")]
+pub use shared::open_shared_memory_storage;
 #[cfg(feature = "surreal-backend")]
 pub use surreal::SurrealMemoryBackend;
 #[cfg(feature = "surreal-backend")]

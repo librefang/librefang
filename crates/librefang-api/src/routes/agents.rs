@@ -5439,13 +5439,13 @@ mod monitoring_tests {
         let agent_id_str = agent_id.to_string();
 
         state.kernel.audit().record(
-            agent_id_str.clone(),
+            &agent_id_str,
             AuditAction::AgentMessage,
             "exact match target",
             "custom_error",
         );
         state.kernel.audit().record(
-            agent_id_str.clone(),
+            &agent_id_str,
             AuditAction::AgentMessage,
             "should not match substring filter",
             "not_custom_error",

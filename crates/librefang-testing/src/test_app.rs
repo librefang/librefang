@@ -6,6 +6,7 @@ use crate::mock_kernel::MockKernelBuilder;
 use axum::Router;
 use librefang_api::routes::AppState;
 use librefang_kernel::LibreFangKernel;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -84,12 +85,25 @@ impl TestAppState {
             .route("/agents/{id}/tools", get(routes::get_agent_tools).put(routes::set_agent_tools))
             .route("/agents/{id}/skills", get(routes::get_agent_skills).put(routes::set_agent_skills))
             .route("/agents/{id}/logs", get(routes::agent_logs))
+            .route("/agents/{id}/clone", post(routes::clone_agent))
             // -- Profiles --
             .route("/profiles", get(routes::list_profiles))
             .route("/profiles/{name}", get(routes::get_profile))
             // -- Skills --
             .route("/skills", get(routes::list_skills))
+            .route("/skills/registry", get(routes::list_skill_registry))
+            .route("/skills/install", post(routes::install_skill))
+            .route("/skills/uninstall", post(routes::uninstall_skill))
+            .route("/skills/reload", post(routes::reload_skills))
             .route("/skills/create", post(routes::create_skill))
+            .route("/skills/{name}", get(routes::get_skill_detail))
+            // -- Workflows --
+            .route("/workflows", get(routes::list_workflows).post(routes::create_workflow))
+            .route("/workflows/{id}", get(routes::get_workflow))
+            .route("/workflows/{id}/dry-run", post(routes::dry_run_workflow))
+            .route("/workflows/{id}/run", post(routes::run_workflow))
+            .route("/workflows/{id}/runs", get(routes::list_workflow_runs))
+            .route("/workflows/runs/{run_id}", get(routes::get_workflow_run))
             // -- Config --
             .route("/config", get(routes::get_config))
             .route("/config/schema", get(routes::config_schema))
@@ -109,7 +123,10 @@ impl TestAppState {
             .route("/models", get(routes::list_models))
             .route("/providers", get(routes::list_providers))
             // -- Sessions --
-            .route("/sessions", get(routes::list_sessions));
+            .route("/sessions", get(routes::list_sessions))
+            // -- Audit --
+            .route("/audit/recent", get(routes::audit_recent))
+            .route("/audit/verify", get(routes::audit_verify));
 
         Router::new()
             .nest("/api", api)
@@ -119,6 +136,11 @@ impl TestAppState {
     /// Returns an Arc reference to the AppState.
     pub fn app_state(&self) -> Arc<AppState> {
         self.state.clone()
+    }
+
+    /// Returns the temp LibreFang home directory used by this test app.
+    pub fn home_dir(&self) -> &Path {
+        self._tmp.path()
     }
 
     /// Internal: builds AppState from a kernel.

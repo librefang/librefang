@@ -57,6 +57,8 @@ pub use backend::{
     PromptBackend, SemanticBackend, SessionBackend, TaskBackend, UsageBackend,
 };
 #[cfg(feature = "surreal-backend")]
+pub use backends::open_shared_memory_storage;
+#[cfg(feature = "surreal-backend")]
 pub use backends::SurrealDeviceStore;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealKnowledgeBackend;

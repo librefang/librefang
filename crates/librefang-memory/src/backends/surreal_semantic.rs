@@ -10,9 +10,11 @@
 //! 1. **Text / BM25 path** (`recall` without a precomputed embedding) →
 //!    delegates to `surreal_memory::MemoryStorage::search_memories`.
 //! 2. **Vector / HNSW path** (`recall` with a precomputed embedding) →
-//!    issues a parameterised `SELECT … <|$k,COSINE|> $vec` KNN query directly
+//!    issues a `SELECT … <|k,COSINE|> $vec` KNN query directly
 //!    against the connection pool.  All values are bound — no caller-supplied
-//!    strings are ever interpolated.
+//!    strings are ever interpolated.  SurrealDB requires the KNN `k` operand
+//!    to be a literal unsigned integer, so LibreFang clamps and formats that
+//!    numeric value itself while still binding user-derived filters and vectors.
 //!
 //! ## `MemoryFragment` ↔ `surreal_memory::Memory` mapping
 //!
@@ -104,72 +106,15 @@ impl SurrealSemanticBackend {
         session: &SurrealSession,
         storage_cfg: &librefang_storage::config::StorageConfig,
     ) -> Result<Self, String> {
-        use surreal_memory::storage::surreal::{SurrealConfig, SurrealMode};
-
-        struct NoopEmbedding;
-        #[async_trait::async_trait]
-        impl surreal_memory::EmbeddingService for NoopEmbedding {
-            async fn embed(
-                &self,
-                _text: &str,
-            ) -> anyhow::Result<surreal_memory::embeddings::Embedding> {
-                Ok(vec![])
-            }
-            async fn embed_batch(
-                &self,
-                texts: Vec<String>,
-            ) -> anyhow::Result<Vec<surreal_memory::embeddings::Embedding>> {
-                Ok(texts.iter().map(|_| vec![]).collect())
-            }
-            fn dimensions(&self) -> usize {
-                0
-            }
-        }
-
-        // Use the memory-specific storage config so SurrealStorage opens its
-        // own dedicated file (embedded: librefang-memory.surreal) rather than
-        // competing for the lock on the operational file (librefang.surreal)
-        // already held by SurrealConnectionPool.
-        let mem_cfg = storage_cfg.memory_storage_config();
-        let sm_config = match &mem_cfg.backend {
-            librefang_storage::config::StorageBackendKind::Embedded { path } => SurrealConfig {
-                mode: SurrealMode::Embedded,
-                endpoint: None,
-                embedded_path: Some(path.to_string_lossy().to_string()),
-                username: None,
-                password: None,
-                namespace: mem_cfg.effective_namespace().to_string(),
-                database: mem_cfg.effective_database().to_string(),
-                retry: surreal_memory::RetryConfig::default(),
-            },
-            librefang_storage::config::StorageBackendKind::Remote(remote) => {
-                let password = std::env::var(&remote.password_env).unwrap_or_default();
-                SurrealConfig {
-                    mode: SurrealMode::Server,
-                    endpoint: Some(remote.url.clone()),
-                    embedded_path: None,
-                    username: if remote.username.is_empty() {
-                        None
-                    } else {
-                        Some(remote.username.clone())
-                    },
-                    password: if password.is_empty() {
-                        None
-                    } else {
-                        Some(password)
-                    },
-                    namespace: remote.namespace.clone(),
-                    database: remote.database.clone(),
-                    retry: surreal_memory::RetryConfig::default(),
-                }
-            }
-        };
-
-        let storage = surreal_memory::SurrealStorage::new(&sm_config, Arc::new(NoopEmbedding))
+        // Delegate to the single-source factory so this path is functionally
+        // identical to (and shares the same RocksDB lock with) the kernel's
+        // shared-storage boot path.  Standalone callers (e.g. the
+        // `#[ignore]`d `knn_hnsw_relevance` integration test) get a fresh
+        // `SurrealStorage` here because no other opener exists in their process.
+        let storage = super::shared::open_shared_memory_storage(storage_cfg)
             .await
             .map_err(|e| format!("SurrealStorage (semantic backend): {e}"))?;
-
-        Ok(Self::new(Arc::new(storage), session, None))
+        Ok(Self::new(storage, session, None))
     }
 }
 
@@ -627,21 +572,23 @@ impl SurrealSemanticBackend {
     ) -> LibreFangResult<Vec<MemoryFragment>> {
         let db = self.db.clone();
         let vec = embedding.to_vec();
-        let k = limit as u64;
+        let k = limit.clamp(1, 1000) as u64;
 
-        // SurrealDB KNN syntax: `embedding <|$k,COSINE|> $vec` is only
-        // supported as a WHERE clause predicate (not in SELECT), so we compute
-        // the similarity score in a separate expression.
+        // SurrealDB KNN syntax requires a literal unsigned integer in the
+        // `<|k,COSINE|>` slot. `k` is derived from `usize` and clamped above,
+        // so formatting it into the query does not introduce caller-controlled
+        // SQL. User-derived values remain bound below.
+        let query = format!(
+            "SELECT *, vector::similarity::cosine(embedding, $vec) AS _score \
+             FROM memory \
+             WHERE embedding <|{k},COSINE|> $vec \
+               AND ($agent_id IS NONE OR agent_id = $agent_id) \
+               AND ($peer_id  IS NONE OR user_id  = $peer_id) \
+             ORDER BY _score DESC \
+             LIMIT $k"
+        );
         let rows: Vec<JsonValue> = db
-            .query(
-                "SELECT *, vector::similarity::cosine(embedding, $vec) AS _score \
-                 FROM memory \
-                 WHERE embedding <|$k,COSINE|> $vec \
-                   AND ($agent_id IS NONE OR agent_id = $agent_id) \
-                   AND ($peer_id  IS NONE OR user_id  = $peer_id) \
-                 ORDER BY _score DESC \
-                 LIMIT $k",
-            )
+            .query(query)
             .bind(("vec", vec))
             .bind(("k", k))
             .bind(("agent_id", agent_id.map(str::to_string)))
@@ -776,37 +723,46 @@ mod tests {
         assert!((recovered.confidence - frag.confidence).abs() < 1e-6);
     }
 
-    /// Verify that the KNN query template does not contain the caller-supplied
-    /// scope string as a literal in the query text — the parameterized binding
-    /// path is the only way data reaches the query.
+    /// Verify that the KNN query template does not contain caller-supplied
+    /// filter values as literals in the query text — the parameterized binding
+    /// path is the only way those values reach the query.
     ///
-    /// This is a static assertion: we confirm the hardcoded KNN SQL template
-    /// does not interpolate `$scope`, `$agent_id`, or `$peer_id` inline; those
-    /// values are always supplied via `.bind()`.
+    /// SurrealDB requires the KNN `k` operand to be a literal unsigned integer,
+    /// so only that clamped numeric value is formatted into the query.
     #[test]
     fn knn_query_template_has_no_inline_caller_values() {
-        const KNN_QUERY: &str = "SELECT *, vector::similarity::cosine(embedding, $vec) AS _score \
-            FROM memory \
-            WHERE embedding <|$limit,COSINE|> $vec \
+        let k = 5_u64;
+        let knn_query = format!(
+            "SELECT *, vector::similarity::cosine(embedding, $vec) AS _score \
+             FROM memory \
+             WHERE embedding <|{k},COSINE|> $vec \
             AND ($agent_id IS NONE OR agent_id = $agent_id) \
             AND ($peer_id IS NONE OR user_id = $peer_id) \
             AND ($scope IS NONE OR $scope IN categories) \
-            ORDER BY _score DESC \
-            LIMIT $limit";
+             ORDER BY _score DESC \
+             LIMIT $k"
+        );
 
         // All variable references use the `$name` placeholder form —
-        // none are interpolated inline.
-        assert!(KNN_QUERY.contains("$vec"), "embedding vector must be bound");
-        assert!(KNN_QUERY.contains("$agent_id"), "agent_id must be bound");
-        assert!(KNN_QUERY.contains("$peer_id"), "peer_id must be bound");
-        assert!(KNN_QUERY.contains("$scope"), "scope must be bound");
-        assert!(KNN_QUERY.contains("$limit"), "limit must be bound");
+        // none of the caller-derived filters are interpolated inline.
+        assert!(knn_query.contains("$vec"), "embedding vector must be bound");
+        assert!(knn_query.contains("$agent_id"), "agent_id must be bound");
+        assert!(knn_query.contains("$peer_id"), "peer_id must be bound");
+        assert!(knn_query.contains("$scope"), "scope must be bound");
+        assert!(
+            knn_query.contains("$k"),
+            "limit must remain bound outside the KNN operator"
+        );
+        assert!(
+            knn_query.contains("embedding <|5,COSINE|> $vec"),
+            "KNN operator must use a literal numeric k"
+        );
 
         // No raw string interpolation: the dangerous injection payload
         // cannot appear because the template is a compile-time constant.
         let injection = "'; DROP TABLE memory; --";
         assert!(
-            !KNN_QUERY.contains(injection),
+            !knn_query.contains(injection),
             "injection string must not appear in query template"
         );
     }

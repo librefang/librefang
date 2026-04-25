@@ -9,12 +9,18 @@
 //! - [`TestAppState`] — Builds an `AppState` suitable for axum testing
 //! - Helper functions — `test_request`, `assert_json_ok`, `assert_json_error`
 
+pub mod fixtures;
 pub mod helpers;
 pub mod mock_driver;
 pub mod mock_kernel;
 pub mod test_app;
 
-pub use helpers::{assert_json_error, assert_json_ok, test_request};
+pub use fixtures::{
+    agent_manifest_for_provider, assert_audit_contains, fixture_skill_md,
+    seed_invalid_registry_skill, seed_registry_skill, single_step_workflow,
+    spawn_openai_fixture_server, FIXTURE_AGENT_MANIFEST, INVALID_SKILL_MD,
+};
+pub use helpers::{assert_json_error, assert_json_ok, assert_json_status, test_request};
 pub use mock_driver::{FailingLlmDriver, MockLlmDriver};
 pub use mock_kernel::MockKernelBuilder;
 pub use test_app::TestAppState;
