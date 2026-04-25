@@ -7669,9 +7669,17 @@
                 "null"
               ]
             },
+            "allowed_channels": {
+              "default": [],
+              "description": "Restrict to specific channel IDs (empty = all channels the bot is in).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "api_url": {
               "default": "https://api.revolt.chat",
-              "description": "Revolt API URL.",
+              "description": "Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).",
               "type": "string"
             },
             "bot_token_env": {
@@ -7721,6 +7729,11 @@
                 "usage_footer": null
               },
               "description": "Per-channel behavior overrides."
+            },
+            "ws_url": {
+              "default": "wss://ws.revolt.chat",
+              "description": "Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).",
+              "type": "string"
             }
           },
           "type": "object"
@@ -10177,9 +10190,17 @@
             "null"
           ]
         },
+        "allowed_channels": {
+          "default": [],
+          "description": "Restrict to specific channel IDs (empty = all channels the bot is in).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "api_url": {
           "default": "https://api.revolt.chat",
-          "description": "Revolt API URL.",
+          "description": "Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).",
           "type": "string"
         },
         "bot_token_env": {
@@ -10229,6 +10250,11 @@
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        },
+        "ws_url": {
+          "default": "wss://ws.revolt.chat",
+          "description": "Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).",
+          "type": "string"
         }
       },
       "type": "object"
