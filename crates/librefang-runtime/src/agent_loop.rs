@@ -409,6 +409,19 @@ fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
     total_usage.cache_read_input_tokens += usage.cache_read_input_tokens;
 }
 
+/// Prompt-cache hit ratio for a turn.
+///
+/// `cache_read / (cache_read + cache_creation)`, in `[0.0, 1.0]`.
+/// Returns `0.0` when both are zero (caching not active for this turn).
+fn cache_hit_ratio(usage: &TokenUsage) -> f32 {
+    let denom = usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    if denom == 0 {
+        0.0
+    } else {
+        usage.cache_read_input_tokens as f32 / denom as f32
+    }
+}
+
 fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<ContentBlock> {
     tool_calls
         .iter()
@@ -2662,6 +2675,18 @@ async fn finalize_successful_end_turn(
         } else {
             "Agent loop completed"
         }
+    );
+
+    // Prompt-cache observability (M2): emit a single-line metric so log
+    // pipelines can compute hit-rate trends per agent without parsing the
+    // surrounding loop summary.
+    tracing::info!(
+        target: "librefang::cache",
+        agent = ctx.agent_id_str,
+        hit_ratio = cache_hit_ratio(&end_turn.total_usage),
+        creation = end_turn.total_usage.cache_creation_input_tokens,
+        read = end_turn.total_usage.cache_read_input_tokens,
+        "prompt cache metrics for turn"
     );
 
     if !ctx.opts.is_fork {
@@ -5961,6 +5986,47 @@ mod tests {
             MAX_ITERATIONS,
             librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
         );
+    }
+
+    // ── cache_hit_ratio (PR-2/2 M2) ────────────────────────────────────────
+
+    #[test]
+    fn cache_hit_ratio_zero_when_no_caching() {
+        let usage = TokenUsage::default();
+        assert_eq!(cache_hit_ratio(&usage), 0.0);
+    }
+
+    #[test]
+    fn cache_hit_ratio_full_hit() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 100,
+        };
+        assert_eq!(cache_hit_ratio(&usage), 1.0);
+    }
+
+    #[test]
+    fn cache_hit_ratio_partial() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 70,
+        };
+        assert!((cache_hit_ratio(&usage) - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cache_hit_ratio_cold_start() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(cache_hit_ratio(&usage), 0.0);
     }
 
     // ── push_accumulated_text bounded growth ──────────────────────────────

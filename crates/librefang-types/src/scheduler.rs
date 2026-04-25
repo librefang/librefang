@@ -554,7 +554,7 @@ fn extract_url_host(url: &str) -> Option<String> {
         .or_else(|| url.strip_prefix("https://"))?;
     // Host runs until the next '/', '?', '#', or end-of-string.
     let host_end = after_scheme
-        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host_part = &after_scheme[..host_end];
     // Strip optional userinfo (user:pass@host).

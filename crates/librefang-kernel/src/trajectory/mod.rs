@@ -33,7 +33,7 @@ use chrono::Utc;
 use librefang_memory::MemorySubstrate;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+use librefang_types::message::{ContentBlock, Message, MessageContent, Role, TokenUsage};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -166,6 +166,12 @@ pub struct TrajectoryMetadata {
     pub redaction_credentials: bool,
     /// Whether workspace path collapsing was applied (root was set).
     pub redaction_workspace_paths: bool,
+    /// Cache hit ratio for this trajectory's turns: `cache_read / (cache_read + cache_creation)`.
+    /// `None` when the trajectory predates this field or the model didn't
+    /// support prompt caching. `Some(0.0)` means caching was active but
+    /// nothing hit (cold start / first turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_ratio: Option<f32>,
 }
 
 /// A message turn after redaction. Keeps the original shape so consumers
@@ -217,6 +223,22 @@ pub enum RedactedBlock {
     Unknown,
 }
 
+/// Compute the prompt-cache hit ratio for an aggregate `TokenUsage`.
+///
+/// Returns `None` when neither cache_read nor cache_creation tokens were
+/// reported (e.g. provider doesn't support prompt caching). Returns
+/// `Some(ratio)` in `[0.0, 1.0]` otherwise — `Some(0.0)` for a cold-start
+/// turn where caching was active but produced no hits, `Some(1.0)` for a
+/// fully-cached turn.
+pub fn compute_cache_hit_ratio(usage: &TokenUsage) -> Option<f32> {
+    let denom = usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    if denom == 0 {
+        None
+    } else {
+        Some(usage.cache_read_input_tokens as f32 / denom as f32)
+    }
+}
+
 impl TrajectoryBundle {
     /// Serialize to a JSON value (full bundle as a single object).
     pub fn to_json(&self) -> serde_json::Value {
@@ -247,6 +269,18 @@ impl TrajectoryBundle {
             out.push('\n');
         }
         out
+    }
+
+    /// Stamp the trajectory's metadata with a cache hit ratio computed from
+    /// the supplied aggregate `TokenUsage`. Convenience wrapper around
+    /// [`compute_cache_hit_ratio`].
+    ///
+    /// Intended to be called by export sites (HTTP route, CLI exporter)
+    /// once they've gathered cumulative usage for the session — the
+    /// exporter itself does not see token counts.
+    pub fn with_cache_hit_ratio(mut self, usage: &TokenUsage) -> Self {
+        self.metadata.cache_hit_ratio = compute_cache_hit_ratio(usage);
+        self
     }
 }
 
@@ -313,6 +347,7 @@ impl TrajectoryExporter {
             librefang_version: env!("CARGO_PKG_VERSION").to_string(),
             redaction_credentials: self.policy.mask_credentials,
             redaction_workspace_paths: self.policy.workspace_root.is_some(),
+            cache_hit_ratio: None,
         };
 
         Ok(TrajectoryBundle {
@@ -349,6 +384,7 @@ impl TrajectoryExporter {
             librefang_version: env!("CARGO_PKG_VERSION").to_string(),
             redaction_credentials: self.policy.mask_credentials,
             redaction_workspace_paths: self.policy.workspace_root.is_some(),
+            cache_hit_ratio: None,
         };
         TrajectoryBundle {
             schema_version: 1,
@@ -686,6 +722,7 @@ mod tests {
                 librefang_version: "0.0.0".into(),
                 redaction_credentials: true,
                 redaction_workspace_paths: false,
+                cache_hit_ratio: None,
             },
             messages: vec![RedactedMessage {
                 role: "user".into(),
@@ -699,6 +736,114 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"kind\":\"metadata\""));
         assert!(lines[1].contains("\"kind\":\"message\""));
+    }
+
+    // ── cache_hit_ratio metadata field (PR-2/2 M2) ─────────────────────────
+
+    fn sample_metadata(cache_hit_ratio: Option<f32>) -> TrajectoryMetadata {
+        TrajectoryMetadata {
+            agent_id: "00000000-0000-0000-0000-000000000001".into(),
+            agent_name: "test".into(),
+            session_id: "00000000-0000-0000-0000-000000000002".into(),
+            session_label: None,
+            model: "test-model".into(),
+            provider: "ollama".into(),
+            system_prompt_sha256: "deadbeef".into(),
+            message_count: 0,
+            context_window_tokens: 0,
+            exported_at: "2026-01-01T00:00:00Z".into(),
+            librefang_version: "0.0.0".into(),
+            redaction_credentials: true,
+            redaction_workspace_paths: false,
+            cache_hit_ratio,
+        }
+    }
+
+    #[test]
+    fn trajectory_metadata_cache_hit_ratio_serde_round_trip() {
+        let meta = sample_metadata(Some(0.85));
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert!(
+            json.contains("\"cache_hit_ratio\":0.85"),
+            "field missing in JSON: {json}"
+        );
+        let back: TrajectoryMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.cache_hit_ratio, Some(0.85));
+    }
+
+    #[test]
+    fn trajectory_metadata_cache_hit_ratio_legacy_compat() {
+        // Legacy trajectory JSON predating the field — must deserialize
+        // cleanly with `cache_hit_ratio == None` and the field must be
+        // omitted on re-serialization.
+        let legacy = r#"{
+            "agent_id":"00000000-0000-0000-0000-000000000001",
+            "agent_name":"test",
+            "session_id":"00000000-0000-0000-0000-000000000002",
+            "model":"test-model",
+            "provider":"ollama",
+            "system_prompt_sha256":"deadbeef",
+            "message_count":0,
+            "context_window_tokens":0,
+            "exported_at":"2026-01-01T00:00:00Z",
+            "librefang_version":"0.0.0",
+            "redaction_credentials":true,
+            "redaction_workspace_paths":false
+        }"#;
+        let meta: TrajectoryMetadata = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert_eq!(meta.cache_hit_ratio, None);
+
+        let reserialized = serde_json::to_string(&meta).expect("reserialize");
+        assert!(
+            !reserialized.contains("cache_hit_ratio"),
+            "None should be skipped: {reserialized}"
+        );
+    }
+
+    #[test]
+    fn compute_cache_hit_ratio_none_when_no_caching() {
+        let usage = TokenUsage::default();
+        assert_eq!(compute_cache_hit_ratio(&usage), None);
+    }
+
+    #[test]
+    fn compute_cache_hit_ratio_full_hit() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 100,
+        };
+        assert_eq!(compute_cache_hit_ratio(&usage), Some(1.0));
+    }
+
+    #[test]
+    fn compute_cache_hit_ratio_cold_start_returns_some_zero() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(compute_cache_hit_ratio(&usage), Some(0.0));
+    }
+
+    #[test]
+    fn bundle_with_cache_hit_ratio_stamps_metadata() {
+        let bundle = TrajectoryBundle {
+            schema_version: 1,
+            metadata: sample_metadata(None),
+            messages: Vec::new(),
+        };
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 70,
+        };
+        let stamped = bundle.with_cache_hit_ratio(&usage);
+        let ratio = stamped.metadata.cache_hit_ratio.expect("ratio set");
+        assert!((ratio - 0.7).abs() < 1e-6, "got {ratio}");
     }
 
     #[test]
