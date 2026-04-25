@@ -2421,8 +2421,23 @@ fn finalize_end_turn_text(
     total_usage: &TokenUsage,
     messages_count: usize,
     empty_response_log_message: &str,
+    accumulated_text: &str,
 ) -> String {
     if text.trim().is_empty() {
+        // Fallback to text accumulated from intermediate tool_use iterations.
+        // Agents commonly emit a chat reply alongside tool_use blocks (e.g. a
+        // user-facing message followed by memory_store calls); without this
+        // fallback the final EndTurn iteration's empty text would mask that
+        // earlier output and the empty-response guard would replace it with
+        // a generic completion notice.
+        if !accumulated_text.trim().is_empty() {
+            debug!(
+                agent = %manifest_name,
+                accumulated_len = accumulated_text.len(),
+                "Using accumulated text from intermediate tool_use iterations"
+            );
+            return accumulated_text.to_string();
+        }
         warn!(
             agent = %manifest_name,
             iteration,
@@ -2829,6 +2844,12 @@ pub async fn run_agent_loop(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Accumulate text content from intermediate tool_use iterations. A turn
+    // that yields a tool_use response may also carry user-facing text (e.g.
+    // "Looking that up for you..." before a memory_store call). Without this
+    // buffer that text is lost when the final EndTurn iteration returns an
+    // empty body and the empty-response guard takes over. See #fix-3074.
+    let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
 
@@ -3299,6 +3320,7 @@ pub async fn run_agent_loop(
                     &total_usage,
                     messages.len(),
                     "Empty response from LLM — guard activated",
+                    &accumulated_text,
                 );
                 final_response = text.clone();
 
@@ -3339,6 +3361,20 @@ pub async fn run_agent_loop(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Capture any text content from this tool_use turn — the LLM
+                // may emit text alongside tool calls (e.g. a chat reply
+                // before a memory_store invocation). Without this the text
+                // is lost if the next iteration returns EndTurn with empty
+                // text.
+                let intermediate_text = response.text();
+                if !intermediate_text.trim().is_empty() {
+                    if !accumulated_text.is_empty() {
+                        accumulated_text.push_str("\n\n");
+                    }
+                    accumulated_text.push_str(intermediate_text.trim());
+                }
+
                 // Stage the turn locally — session.messages is NOT
                 // mutated until `staged.commit(...)` runs below (or the
                 // mid-turn signal handler commits on our behalf). If
@@ -4150,6 +4186,9 @@ pub async fn run_agent_loop_streaming(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Accumulated text from intermediate tool_use iterations — see the
+    // matching declaration in run_agent_loop for full rationale.
+    let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
 
@@ -4661,6 +4700,7 @@ pub async fn run_agent_loop_streaming(
                     &total_usage,
                     messages.len(),
                     "Empty response from LLM (streaming) — guard activated",
+                    &accumulated_text,
                 );
                 final_response = text.clone();
 
@@ -4703,6 +4743,19 @@ pub async fn run_agent_loop_streaming(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Capture text from this tool_use turn (streaming path) — the
+                // streaming sink already forwards the deltas to the channel,
+                // but the in-memory accumulator is what feeds the empty-text
+                // fallback in finalize_end_turn_text. Mirrors the sync path.
+                let intermediate_text = response.text();
+                if !intermediate_text.trim().is_empty() {
+                    if !accumulated_text.is_empty() {
+                        accumulated_text.push_str("\n\n");
+                    }
+                    accumulated_text.push_str(intermediate_text.trim());
+                }
+
                 // See non-streaming branch above for the full rationale
                 // — this is the streaming twin of the #2381 staged-commit
                 // fix.
@@ -5756,6 +5809,68 @@ mod tests {
         assert_eq!(
             resolve_max_iterations(None, None),
             librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    // --- finalize_end_turn_text fallback tests ------------------------------
+    //
+    // The helper is the single funnel for empty-response handling on both
+    // sync and streaming paths. These tests pin the three-way contract:
+    //   1. Final text non-empty → use it (accumulated buffer ignored).
+    //   2. Final text empty + accumulated non-empty → use accumulated buffer.
+    //   3. Final text empty + accumulated empty → emit canned guard message.
+
+    #[test]
+    fn finalize_end_turn_text_uses_final_text_when_present() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(
+            "final answer".to_string(),
+            true,
+            "agent",
+            3,
+            &usage,
+            5,
+            "log msg",
+            "leftover from earlier turn",
+        );
+        // Final text wins — accumulated buffer must NOT leak into output.
+        assert_eq!(out, "final answer");
+    }
+
+    #[test]
+    fn finalize_end_turn_text_falls_back_to_accumulated_when_final_empty() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(
+            "   ".to_string(), // whitespace-only counts as empty
+            true,
+            "agent",
+            3,
+            &usage,
+            5,
+            "log msg",
+            "I looked that up for you.",
+        );
+        assert_eq!(out, "I looked that up for you.");
+    }
+
+    #[test]
+    fn finalize_end_turn_text_emits_guard_when_both_empty_with_tools() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(String::new(), true, "agent", 3, &usage, 5, "log msg", "");
+        assert!(
+            out.contains("Task completed"),
+            "expected tools-executed guard message, got: {out}"
+        );
+    }
+
+    #[test]
+    fn finalize_end_turn_text_emits_guard_when_both_empty_no_tools() {
+        let usage = TokenUsage::default();
+        let out =
+            finalize_end_turn_text(String::new(), false, "agent", 0, &usage, 1, "log msg", "");
+        assert!(
+            out.contains("empty response"),
+            "expected no-tools guard message, got: {out}"
         );
     }
 
