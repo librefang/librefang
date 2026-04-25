@@ -206,6 +206,51 @@ supports_streaming = true
     }
 
     #[test]
+    fn test_provider_catalog_parse_mixed_text_and_image() {
+        // Regression: an image-modality entry (no context_window /
+        // max_output_tokens) must not cause the whole file to fail parsing.
+        // Pre-#3074 this would error at the first image entry, daemon would
+        // fall back to "Ok(file) = ..." catching nothing, and the entire
+        // provider (e.g. all of openai.toml) would be silently dropped.
+        let toml_str = r#"
+[[models]]
+id = "gpt-4.1"
+display_name = "GPT-4.1"
+provider = "openai"
+tier = "frontier"
+context_window = 1047576
+max_output_tokens = 32768
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "gpt-image-2"
+display_name = "GPT Image 2"
+provider = "openai"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 5.0
+output_cost_per_m = 10.0
+image_input_cost_per_m = 8.0
+image_output_cost_per_m = 30.0
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+"#;
+        let file: ProviderCatalogFile =
+            toml::from_str(toml_str).expect("mixed text+image catalog must parse");
+        assert_eq!(file.models.len(), 2);
+        assert_eq!(file.models[0].id, "gpt-4.1");
+        assert_eq!(file.models[1].id, "gpt-image-2");
+        assert_eq!(file.models[1].context_window, 0);
+        assert!(file.models[1].is_image_generation());
+        assert_eq!(file.models[1].image_output_cost_per_m, Some(30.0));
+    }
+
+    #[test]
     fn test_last_sync_time_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(last_sync_time_for(tmp.path()).is_none());

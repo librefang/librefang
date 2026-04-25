@@ -613,6 +613,7 @@ mod tests {
                 supports_streaming: true,
                 supports_thinking: false,
                 aliases: vec![],
+                ..Default::default()
             }],
         });
         let cost = MeteringEngine::estimate_cost_with_catalog(
