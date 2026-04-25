@@ -73,10 +73,56 @@ const MAX_CONCURRENT_LLM_CALLS: usize = 5;
 static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
 
-/// Maximum message history size before auto-trimming to prevent context overflow.
-/// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
-/// 7-10 real conversation turns instead of the previous 3-5.
-const MAX_HISTORY_MESSAGES: usize = 40;
+/// Default ceiling for message history before auto-trimming. With tool
+/// calls each user turn can consume 4–6 messages, so 40 gives roughly
+/// 7–10 real conversation turns instead of the previous 3–5. Override
+/// per-agent via `AgentManifest.max_history_messages` or globally via
+/// `KernelConfig.max_history_messages`; resolved at loop entry by
+/// `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES` are
+/// clamped up at runtime.
+pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 40;
+
+/// Floor for the message-history cap. Values below this are clamped up
+/// with a warning log: `safe_trim_messages` re-validates the trimmed
+/// window via `validate_and_repair` and synthesizes a minimal user
+/// message when fewer than 2 messages survive, so caps under one full
+/// tool round-trip (user → tool_use → tool_result → assistant text)
+/// defeat the safe-trim heuristic entirely.
+const MIN_HISTORY_MESSAGES: usize = 4;
+
+/// Resolve the effective message-history trim cap for an agent loop entry.
+///
+/// Resolution order:
+/// 1. `manifest.max_history_messages` (per-agent override)
+/// 2. `opts.max_history_messages` (operator / kernel config override)
+/// 3. `DEFAULT_MAX_HISTORY_MESSAGES` (compiled-in fallback)
+///
+/// The resolved value is then clamped up to `MIN_HISTORY_MESSAGES` if it
+/// would otherwise defeat the safe-trim heuristic.
+fn resolve_max_history(manifest: &AgentManifest, opts: &LoopOptions) -> usize {
+    let raw = manifest
+        .max_history_messages
+        .or(opts.max_history_messages)
+        .unwrap_or(DEFAULT_MAX_HISTORY_MESSAGES);
+    clamp_max_history(raw, &manifest.name)
+}
+
+/// Clamp a requested cap up to `MIN_HISTORY_MESSAGES`, logging a warning
+/// when the requested value is too low. Returning silently for values at
+/// or above the floor keeps logs quiet for the common path.
+fn clamp_max_history(requested: usize, agent: &str) -> usize {
+    if requested < MIN_HISTORY_MESSAGES {
+        warn!(
+            agent = %agent,
+            requested,
+            applied = MIN_HISTORY_MESSAGES,
+            "max_history_messages below floor; clamping"
+        );
+        MIN_HISTORY_MESSAGES
+    } else {
+        requested
+    }
+}
 
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
@@ -205,7 +251,7 @@ fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("argument is required")
 }
 
-/// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
+/// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
 /// Both the LLM working copy (`messages`) and the canonical session store
@@ -224,8 +270,8 @@ fn safe_trim_messages(
 ) {
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
-    if session_messages.len() > MAX_HISTORY_MESSAGES {
-        let desired = session_messages.len() - MAX_HISTORY_MESSAGES;
+    if session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES {
+        let desired = session_messages.len() - DEFAULT_MAX_HISTORY_MESSAGES;
         let trim_point = crate::session_repair::find_safe_trim_point(session_messages, desired)
             .filter(|&p| p > 0)
             .unwrap_or(desired);
@@ -240,11 +286,11 @@ fn safe_trim_messages(
         session_messages.drain(..trim_point);
     }
 
-    if messages.len() <= MAX_HISTORY_MESSAGES {
+    if messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES {
         return;
     }
 
-    let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
+    let desired_trim = messages.len() - DEFAULT_MAX_HISTORY_MESSAGES;
 
     // Find a trim point that does not split ToolUse/ToolResult pairs.
     // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
@@ -1363,6 +1409,17 @@ pub struct LoopOptions {
     /// operators can lower the default without recompiling or editing every
     /// manifest. None → use the library fallback.
     pub max_iterations: Option<u32>,
+    /// Operator-level override for the message-history trim cap.
+    /// Resolution order when the loop starts:
+    /// 1. `manifest.max_history_messages` (per-agent)
+    /// 2. `opts.max_history_messages` (operator / kernel config)
+    /// 3. `DEFAULT_MAX_HISTORY_MESSAGES` (library fallback)
+    ///
+    /// Kernel populates this from `KernelConfig.max_history_messages` so
+    /// operators can lower the default without recompiling or editing every
+    /// manifest. `None` → use the library fallback. Values below
+    /// `MIN_HISTORY_MESSAGES` are clamped up at resolution time.
+    pub max_history_messages: Option<usize>,
 }
 
 /// Result of an agent loop execution.
@@ -2659,7 +2716,7 @@ pub async fn run_agent_loop(
     // pushed) expose an empty slice to callers. Updated after
     // safe_trim_messages to point at the post-trim position of the just-
     // pushed user message (len-1) so slicing stays in-bounds even when the
-    // trim drains deeper than (len - MAX_HISTORY_MESSAGES). Fixes #2067.
+    // trim drains deeper than (len - DEFAULT_MAX_HISTORY_MESSAGES). Fixes #2067.
     let mut new_messages_start = session.messages.len();
 
     // Early return if driver is not configured
@@ -6280,7 +6337,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
     }
 
     #[test]
@@ -6679,7 +6736,7 @@ mod tests {
     /// Regression for issue #2067: auto_memorize sliced `session.messages`
     /// with an index captured **before** `safe_trim_messages` ran, so when
     /// `find_safe_trim_point` scanned forward and trimmed deeper than
-    /// `len - MAX_HISTORY_MESSAGES`, the slice went out of range and the
+    /// `len - DEFAULT_MAX_HISTORY_MESSAGES`, the slice went out of range and the
     /// agent_loop task panicked ("range start index 42 out of range for
     /// slice of length 36").
     ///
@@ -6739,10 +6796,10 @@ mod tests {
         let old_messages_before = session_messages.len();
 
         // Push the current turn's user message. At this point
-        // len = 26 + 14 + 1 = 41, which is > MAX_HISTORY_MESSAGES=40 and
+        // len = 26 + 14 + 1 = 41, which is > DEFAULT_MAX_HISTORY_MESSAGES=40 and
         // will trigger safe_trim_messages.
         session_messages.push(Message::user("current turn"));
-        assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
+        assert!(session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES);
 
         let mut llm_messages = session_messages.clone();
         safe_trim_messages(
@@ -6896,7 +6953,7 @@ mod tests {
             Some("memory context".to_string()),
         );
 
-        assert!(messages.len() <= MAX_HISTORY_MESSAGES);
+        assert!(messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES);
         assert!(messages.iter().all(|msg| {
             let text = msg.content.text_content();
             text != "canonical context"
@@ -7991,7 +8048,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
     }
 
     #[tokio::test]
