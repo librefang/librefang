@@ -533,6 +533,13 @@ impl WebSearchEngine {
             return Err("SearXNG URL is not configured".to_string());
         }
 
+        // SearXNG treats `pageno=0` as "no results" silently — guard up-front
+        // so callers (LLM tool args, internal misuse) get a clear error
+        // instead of an opaque empty response.
+        if page == 0 {
+            return Err("SearXNG pageno must be >= 1 (pages are 1-indexed)".to_string());
+        }
+
         let category = category.unwrap_or("general");
 
         // Validate category against the instance — fail fast with the available
@@ -1095,5 +1102,24 @@ mod tests {
             .await
             .expect_err("empty SearXNG URL must fail");
         assert!(err.contains("SearXNG URL is not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_search_searxng_pageno_zero_rejected() {
+        // Configure a non-empty URL so we get past the "URL not configured"
+        // gate and actually exercise the pageno guard. The URL is never
+        // contacted because the guard fires first.
+        let mut config = librefang_types::config::WebConfig::default();
+        config.searxng.url = "https://search.invalid".to_string();
+        let cache = std::sync::Arc::new(crate::web_cache::WebCache::new(std::time::Duration::ZERO));
+        let engine = WebSearchEngine::new(config, cache, Vec::new());
+        let err = engine
+            .search_searxng("test", 5, None, 0)
+            .await
+            .expect_err("pageno=0 must be rejected");
+        assert!(
+            err.contains("pageno must be >= 1"),
+            "expected pageno guard error, got: {err}"
+        );
     }
 }
