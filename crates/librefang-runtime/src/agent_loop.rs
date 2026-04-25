@@ -47,6 +47,63 @@ use tracing::{debug, info, instrument, warn};
 /// runtime fallback and the manifest default.
 const MAX_ITERATIONS: u32 = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
 
+/// Hard cap on the in-memory `accumulated_text` buffer used as a fallback for
+/// the empty-response guard.
+///
+/// Each agent loop turn may push intermediate text emitted alongside
+/// `tool_use` blocks into this buffer. Across many iterations (autonomous
+/// agents, retry loops, long-running tasks) the buffer can grow unbounded,
+/// pinning megabytes of heap per active session. 64 KiB is far above any
+/// reasonable user-facing message (~10× a Slack message limit) while still
+/// being orders of magnitude below problematic memory pressure.
+///
+/// Once the cap is reached the buffer is sealed: subsequent appends short-
+/// circuit and a single `warn!` is emitted on the transition so the log
+/// isn't spammed. The existing buffered prefix is preserved so the empty-
+/// response fallback still has something useful to surface.
+const ACCUMULATED_TEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Append `intermediate_text` to `accumulated_text`, bounded by
+/// `ACCUMULATED_TEXT_MAX_BYTES`. See the constant's doc-comment for rationale.
+fn push_accumulated_text(accumulated_text: &mut String, intermediate_text: &str) {
+    // Buffer already sealed on a prior call.
+    if accumulated_text.len() >= ACCUMULATED_TEXT_MAX_BYTES {
+        return;
+    }
+    let separator = if accumulated_text.is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let projected = accumulated_text.len() + separator.len() + intermediate_text.len();
+    if projected > ACCUMULATED_TEXT_MAX_BYTES {
+        warn!(
+            current_bytes = accumulated_text.len(),
+            incoming_bytes = intermediate_text.len(),
+            cap_bytes = ACCUMULATED_TEXT_MAX_BYTES,
+            "accumulated_text fallback buffer cap reached; further intermediate \
+             text for this loop will be dropped (existing buffer is preserved \
+             for the empty-response fallback)"
+        );
+        // Seal the buffer with ASCII padding so future calls trip the early
+        // return above. ASCII is always UTF-8 boundary-safe.
+        let sentinel = " [accumulated_text capped]";
+        if accumulated_text.len() + sentinel.len() <= ACCUMULATED_TEXT_MAX_BYTES {
+            accumulated_text.push_str(sentinel);
+        }
+        let pad = ACCUMULATED_TEXT_MAX_BYTES.saturating_sub(accumulated_text.len());
+        if pad > 0 {
+            accumulated_text.reserve(pad);
+            for _ in 0..pad {
+                accumulated_text.push(' ');
+            }
+        }
+        return;
+    }
+    accumulated_text.push_str(separator);
+    accumulated_text.push_str(intermediate_text);
+}
+
 /// Maximum retries for rate-limited or overloaded API calls.
 const MAX_RETRIES: u32 = 3;
 
@@ -3386,12 +3443,12 @@ pub async fn run_agent_loop(
                 // before a memory_store invocation). Without this the text
                 // is lost if the next iteration returns EndTurn with empty
                 // text.
+                //
+                // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
+                // push_accumulated_text.
                 let intermediate_text = response.text();
                 if !intermediate_text.trim().is_empty() {
-                    if !accumulated_text.is_empty() {
-                        accumulated_text.push_str("\n\n");
-                    }
-                    accumulated_text.push_str(intermediate_text.trim());
+                    push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
                 }
 
                 // Stage the turn locally — session.messages is NOT
@@ -4799,12 +4856,12 @@ pub async fn run_agent_loop_streaming(
                 // re-emit `final_response` MUST either drop the
                 // accumulated_text fallback in finalize_end_turn_text or
                 // gate it on a `streaming_already_emitted: bool` flag.
+                //
+                // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
+                // push_accumulated_text.
                 let intermediate_text = response.text();
                 if !intermediate_text.trim().is_empty() {
-                    if !accumulated_text.is_empty() {
-                        accumulated_text.push_str("\n\n");
-                    }
-                    accumulated_text.push_str(intermediate_text.trim());
+                    push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
                 }
 
                 // See non-streaming branch above for the full rationale
@@ -5837,6 +5894,65 @@ mod tests {
             MAX_ITERATIONS,
             librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
         );
+    }
+
+    // ── push_accumulated_text bounded growth ──────────────────────────────
+
+    #[test]
+    fn test_push_accumulated_text_appends_with_separator() {
+        let mut buf = String::new();
+        push_accumulated_text(&mut buf, "first");
+        assert_eq!(buf, "first");
+
+        push_accumulated_text(&mut buf, "second");
+        assert_eq!(buf, "first\n\nsecond");
+    }
+
+    #[test]
+    fn test_push_accumulated_text_caps_at_max_bytes() {
+        let mut buf = String::new();
+        // First push: well within cap
+        let small = "a".repeat(1024);
+        push_accumulated_text(&mut buf, &small);
+        assert_eq!(buf.len(), 1024);
+
+        // Second push: would exceed the cap → buffer is sealed at exactly the cap
+        let huge = "b".repeat(ACCUMULATED_TEXT_MAX_BYTES);
+        push_accumulated_text(&mut buf, &huge);
+        assert_eq!(
+            buf.len(),
+            ACCUMULATED_TEXT_MAX_BYTES,
+            "buffer must be sealed exactly at the cap (no overflow)"
+        );
+        // The original 'a' prefix must be preserved — that's the whole point
+        // of the "preserve buffered prefix" guarantee.
+        assert!(buf.starts_with(&small));
+
+        // Third push: short-circuits, no growth, no panic
+        push_accumulated_text(&mut buf, "ignored");
+        assert_eq!(buf.len(), ACCUMULATED_TEXT_MAX_BYTES);
+        assert!(!buf.contains("ignored"));
+    }
+
+    #[test]
+    fn test_push_accumulated_text_under_cap_unchanged() {
+        // Sanity: many small pushes under the cap accumulate normally.
+        let mut buf = String::new();
+        for i in 0..100 {
+            push_accumulated_text(&mut buf, &format!("turn {i}"));
+        }
+        assert!(buf.len() < ACCUMULATED_TEXT_MAX_BYTES);
+        assert!(buf.starts_with("turn 0"));
+        assert!(buf.contains("turn 99"));
+    }
+
+    #[test]
+    fn test_push_accumulated_text_empty_initial_no_separator() {
+        // First-push must not start with the "\n\n" separator.
+        let mut buf = String::new();
+        push_accumulated_text(&mut buf, "hello");
+        assert_eq!(buf, "hello");
+        assert!(!buf.starts_with("\n\n"));
     }
 
     /// Resolve the iteration cap the same way `run_agent_loop` does: per-agent
