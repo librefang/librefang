@@ -317,6 +317,10 @@ function formatKvValue(value: unknown): string {
 }
 
 const KV_VALUE_TRUNCATE = 200;
+// Cap the hover-preview too — large KV values (multi-KB JSON blobs) would
+// otherwise live in the DOM as a giant `title` attribute on every row,
+// inflating page memory for what's only meant to be a quick peek.
+const KV_TITLE_TRUNCATE = 2000;
 
 function AgentKvRows({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
@@ -360,10 +364,14 @@ function AgentKvRows({ agentId }: { agentId: string }) {
           formatted.length > KV_VALUE_TRUNCATE
             ? formatted.slice(0, KV_VALUE_TRUNCATE) + "…"
             : formatted;
+        const titlePreview =
+          formatted.length > KV_TITLE_TRUNCATE
+            ? formatted.slice(0, KV_TITLE_TRUNCATE) + "…"
+            : formatted;
         return (
           <tr key={pair.key} className="border-t border-border-subtle/40">
             <td className="px-3 py-2 text-xs font-mono break-all">{pair.key}</td>
-            <td className="px-3 py-2 text-xs font-mono text-text-dim break-all" title={formatted}>
+            <td className="px-3 py-2 text-xs font-mono text-text-dim break-all" title={titlePreview}>
               {truncated}
             </td>
             <td className="px-3 py-2 text-xs text-text-dim">{pair.source ?? "-"}</td>
