@@ -187,6 +187,25 @@
 
 发送消息并以 Server-Sent Events 流的方式接收响应（参见 [SSE 流式传输](#sse-流式传输)）。
 
+### GET /api/agents/&lbrace;id&rbrace;/attach
+
+作为额外只读订阅者附加到**当前 session** 的 SSE 流——多客户端联合观察时有用，CLI、Tauri 桌面、浏览器多 tab 想跟同一回合 live。
+
+`POST /message/stream` 本身保持 single-consumer（只发起方拿到）；本端点由按 session 的 `SessionStreamHub` 把每个 `StreamEvent` 同时复制给原调用方和任意数量的额外订阅者。订阅者不推进回合，只观察。
+
+**行为：**
+
+- 连接保持到当前回合结束。回合结束时服务端干净关闭。
+- 你 attach 时没有正在跑的回合，连接等下一个。
+- 单个 agent 可有多个并发 attacher，不会拖慢生产者（broadcast channel；按事件的扇出常数代价）。
+- 事件格式跟 `/message/stream` 完全一样，已有解析器无需改动。
+
+```bash
+# 第二个客户端联合观察当前回合
+curl -N 'http://127.0.0.1:4545/api/agents/$AGENT/attach' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY'
+```
+
 ### GET /api/agents/&lbrace;id&rbrace;/session
 
 获取 Agent 当前的对话历史。
@@ -388,6 +407,18 @@
 ### POST /api/agents/&lbrace;id&rbrace;/memory/import
 
 从 JSON 导入 Agent 的记忆条目。
+
+### Owner Notice
+
+agent 可以发**结构化的私密旁路消息**给运营者，跟用户可见的回复并行。`notify_owner` 内置 tool 在回合中收集一条或多条 notice；runtime 聚合到 `ReplyEnvelope.owner_notice: Option<String>` 字段。
+
+通知出现在三处：
+
+- **`POST /message`** 响应 body：顶层 `owner_notice` 字符串，跟 `response` 同级。
+- **`POST /message/stream` / `GET /attach`** SSE：在最终 `Done` 之前的 `StreamEvent::OwnerNotice { text }` 事件。
+- **WhatsApp gateway**：设了 `OWNER_JIDS` 环境变量（逗号分隔的 JID）后，每条 notice 扇出到这组 owner。其他 channel adapter 可以同样接入。
+
+适合 "这个用户问了我没法在公开消息里答的事——升级给运维" 流程，或者任何不该让用户在 chat 里看到的审计轨迹。
 
 ### GET /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/trajectory
 

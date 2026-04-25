@@ -187,6 +187,25 @@ Send a message to an agent and receive the complete response.
 
 Send a message and receive the response as a Server-Sent Events stream (see [SSE Streaming](#sse-streaming)).
 
+### GET /api/agents/&lbrace;id&rbrace;/attach
+
+Attach as an additional read-only subscriber to the **current session's** SSE stream — useful for multi-client co-watching when multiple surfaces (CLI, Tauri desktop, browser tabs) need to follow the same turn live.
+
+`POST /message/stream` itself remains single-consumer (the originating caller); this endpoint is fed by a per-session `SessionStreamHub` that tees every produced `StreamEvent` to the original caller plus any number of attached subscribers. Subscribers do not advance the turn; they only observe.
+
+**Behaviour:**
+
+- The connection stays open for the lifetime of the current turn. When the turn ends, the server closes the stream cleanly.
+- If no turn is in flight when you attach, the connection waits for the next one.
+- A single agent can have many concurrent attachers without slowing the producer (broadcast channel; fan-out is constant-cost per event).
+- The event format is identical to `/message/stream`, so existing parsers work unchanged.
+
+```bash
+# Co-watch the current turn from a second client
+curl -N 'http://127.0.0.1:4545/api/agents/$AGENT/attach' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY'
+```
+
 ### GET /api/agents/&lbrace;id&rbrace;/session
 
 Returns the agent's current conversation history.
@@ -388,6 +407,18 @@ Export all memory entries for an agent as JSON.
 ### POST /api/agents/&lbrace;id&rbrace;/memory/import
 
 Import memory entries for an agent from JSON.
+
+### Owner Notices
+
+Agents can send the operator a **structured private side-channel message** in addition to the user-facing reply. The `notify_owner` built-in tool collects one or more notices during the turn; the runtime aggregates them onto a `ReplyEnvelope.owner_notice: Option<String>` field.
+
+The notice surfaces in three places:
+
+- **`POST /message`** response body: a top-level `owner_notice` string alongside `response`.
+- **`POST /message/stream` / `GET /attach`** SSE: a `StreamEvent::OwnerNotice { text }` event right before the final `Done`.
+- **WhatsApp gateway**: when the `OWNER_JIDS` env var is set (comma-separated JIDs), each notice is fanned out to that owner set. Other channel adapters can opt in similarly.
+
+Use it for "this user asked something I can't answer in public — escalate to ops" flows or any audit trail the user shouldn't see in the chat.
 
 ### GET /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/trajectory
 
