@@ -889,12 +889,43 @@ pub async fn build_router(
              to restore the legacy public reads allowlist."
         );
     }
+    // Read LIBREFANG_ALLOW_NO_AUTH once at boot — operators flip this to
+    // run intentionally open on a non-loopback bind. Without it, an empty
+    // api_key on a LAN/public bind fails closed for non-loopback origins.
+    let allow_no_auth = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+
+    // Loud startup warning when the server is bound to a non-loopback
+    // address with no authentication configured. The middleware enforces
+    // fail-closed for non-loopback traffic; this warning makes the
+    // operator-facing posture explicit at boot.
+    let bind_is_loopback = listen_addr.ip().is_loopback();
+    if !any_auth && !bind_is_loopback {
+        if allow_no_auth {
+            tracing::warn!(
+                "LIBREFANG_ALLOW_NO_AUTH=1 is set. Running WITHOUT authentication on {}. \
+                 Anyone reachable at this address can read/write agents, channels, and keys.",
+                listen_addr
+            );
+        } else {
+            tracing::warn!(
+                "No api_key configured and server is bound to {} (non-loopback). \
+                 Non-loopback requests will be rejected with 401. \
+                 Set api_key in config.toml, bind to 127.0.0.1, \
+                 or set LIBREFANG_ALLOW_NO_AUTH=1 to explicitly run open.",
+                listen_addr
+            );
+        }
+    }
+
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
         dashboard_auth_enabled,
         user_api_keys: Arc::new(user_api_keys_vec),
         require_auth_for_reads,
+        allow_no_auth,
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {
@@ -1084,6 +1115,11 @@ pub async fn run_daemon(
     // `task_board.sweep_interval_secs` (default 30s).
     kernel.clone().spawn_task_board_sweep_task();
 
+    // Session stream hub idle GC — drops broadcast entries with no live
+    // receivers so the per-session sender map does not grow unbounded under
+    // churn (multi-client SSE attach, PR #3078).
+    kernel.clone().spawn_session_stream_hub_gc_task();
+
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {
@@ -1182,33 +1218,47 @@ pub async fn run_daemon(
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
 
-    // Auto-start observability stack (OTLP collector + Prometheus + Grafana) if Docker is available
-    let observability_started = if kernel.config_ref().telemetry.enabled {
-        match start_observability_stack(kernel.home_dir()) {
+    // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
+    // ONLY when the operator has opted in via `telemetry.auto_start_observability_stack`.
+    // Default is off because spinning four containers on every `librefang
+    // start` is a strong implicit side effect; users who only want OTel export
+    // to an existing collector should keep this off and just configure
+    // `otlp_endpoint`. Issue #3136.
+    let mut observability_guard: Option<ObservabilityHandle> = if kernel
+        .config_ref()
+        .telemetry
+        .enabled
+        && kernel.config_ref().telemetry.auto_start_observability_stack
+    {
+        let project = derive_compose_project_name(kernel.home_dir());
+        match start_observability_stack(kernel.home_dir(), &project) {
             Ok(ObservabilityStartup::Started) => {
                 info!(
-                    "Observability stack started (OTLP :4317/:4318, Tempo :3200, Prometheus :9090, Grafana :3000)"
+                    "Observability stack started ({project}: OTLP :4317/:4318, Tempo :3200, Prometheus :9090, Grafana :3000)"
                 );
-                true
+                Some(ObservabilityHandle::new(
+                    kernel.home_dir().to_path_buf(),
+                    project,
+                ))
             }
             Ok(ObservabilityStartup::DockerUnavailable) => {
                 info!("Docker not available, skipping observability stack");
-                false
+                None
             }
             Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
                 tracing::warn!(
                     "Observability stack failed to start (likely a port conflict on 3000/3200/4317/9090 or an existing stack): {}",
                     stderr.trim()
                 );
-                false
+                None
             }
             Err(e) => {
                 tracing::warn!("Failed to start observability stack: {e}");
-                false
+                None
             }
         }
     } else {
-        false
+        None
     };
 
     // Background: sync model catalog from community repo on startup, then every 24 hours
@@ -1347,13 +1397,16 @@ pub async fn run_daemon(
         b.stop().await;
     }
 
-    // Stop observability stack
-    if observability_started {
-        if let Err(e) = stop_observability_stack(state.kernel.home_dir()) {
-            tracing::warn!("Failed to stop observability stack: {e}");
-        } else {
-            info!("Observability stack stopped");
+    // Stop observability stack — graceful path. `.take()` consumes the guard
+    // so its Drop becomes a no-op; if we never reach this line (panic, OOM,
+    // SIGTERM) the Drop impl will still attempt a best-effort `compose down`.
+    if let Some(handle) = observability_guard.take() {
+        match stop_observability_stack(handle.home_dir(), handle.project_name()) {
+            Ok(()) => info!("Observability stack stopped ({})", handle.project_name()),
+            Err(e) => tracing::warn!("Failed to stop observability stack: {e}"),
         }
+        // Mark the guard's stop as already attempted so its Drop is silent.
+        std::mem::forget(handle);
     }
 
     // Clean up tmux session so child shell processes don't linger after shutdown.
@@ -1467,9 +1520,71 @@ fn stage_observability_assets(home_dir: &Path) -> std::io::Result<std::path::Pat
     Ok(root.join("docker-compose.observability.yml"))
 }
 
-/// Check if Docker is available and start the observability stack.
+/// Derive a Docker Compose project name unique to this `home_dir`. Without
+/// an explicit `-p`, compose falls back to the working-dir basename
+/// (`observability`) which collides between two daemons booted with
+/// different home dirs and lets either tear down the other's stack. Hash
+/// the absolute home_dir path and prefix with `librefang-` so the project
+/// name stays scannable in `docker ps` output. Issue #3136.
+fn derive_compose_project_name(home_dir: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    // Canonicalize when possible so equivalent paths (`/tmp/x` vs
+    // `/private/tmp/x` on macOS) map to the same project.
+    let canonical = std::fs::canonicalize(home_dir).unwrap_or_else(|_| home_dir.to_path_buf());
+    canonical.hash(&mut hasher);
+    format!("librefang-{:08x}", hasher.finish() as u32)
+}
+
+/// RAII guard that calls `stop_observability_stack` on Drop. The graceful
+/// shutdown path consumes the guard via `mem::forget` after explicitly
+/// stopping (so success can be logged at the right moment); any path that
+/// skips the explicit stop — panic, early return, axum's error branch —
+/// still gets a best-effort cleanup. SIGKILL is unreachable from here, so
+/// operators on hostile-shutdown paths still need `docker compose -p
+/// librefang-<hash> down` manually; that's acknowledged in issue #3136.
+struct ObservabilityHandle {
+    home_dir: std::path::PathBuf,
+    project_name: String,
+}
+
+impl ObservabilityHandle {
+    fn new(home_dir: std::path::PathBuf, project_name: String) -> Self {
+        Self {
+            home_dir,
+            project_name,
+        }
+    }
+
+    fn home_dir(&self) -> &Path {
+        &self.home_dir
+    }
+
+    fn project_name(&self) -> &str {
+        &self.project_name
+    }
+}
+
+impl Drop for ObservabilityHandle {
+    fn drop(&mut self) {
+        // Best-effort: log the failure but never panic from Drop.
+        if let Err(e) = stop_observability_stack(&self.home_dir, &self.project_name) {
+            tracing::warn!(
+                project = %self.project_name,
+                "non-graceful exit: failed to tear down observability stack: {e}"
+            );
+        }
+    }
+}
+
+/// Check if Docker is available and start the observability stack under
+/// `project_name` so two daemons with different home dirs don't fight over
+/// the same compose project.
 fn start_observability_stack(
     home_dir: &Path,
+    project_name: &str,
 ) -> Result<ObservabilityStartup, Box<dyn std::error::Error>> {
     // Check if docker CLI exists and daemon is reachable
     let docker_check = std::process::Command::new("docker")
@@ -1487,7 +1602,7 @@ fn start_observability_stack(
         .map_err(|e| format!("failed to stage observability assets: {e}"))?;
 
     let output = std::process::Command::new("docker")
-        .args(["compose", "-f"])
+        .args(["compose", "-p", project_name, "-f"])
         .arg(&compose_file)
         .args(["up", "-d"])
         .output()
@@ -1502,8 +1617,13 @@ fn start_observability_stack(
     }
 }
 
-/// Stop the observability stack using the staged compose file.
-fn stop_observability_stack(home_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Stop the observability stack identified by `project_name`. Idempotent:
+/// returns `Ok(())` when the compose file is missing (already torn down or
+/// never started) or when `compose down` succeeds with no containers.
+fn stop_observability_stack(
+    home_dir: &Path,
+    project_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let compose_file = home_dir
         .join("observability")
         .join("docker-compose.observability.yml");
@@ -1512,7 +1632,7 @@ fn stop_observability_stack(home_dir: &Path) -> Result<(), Box<dyn std::error::E
     }
 
     std::process::Command::new("docker")
-        .args(["compose", "-f"])
+        .args(["compose", "-p", project_name, "-f"])
         .arg(&compose_file)
         .args(["down"])
         .stdout(std::process::Stdio::null())
@@ -1521,6 +1641,33 @@ fn stop_observability_stack(home_dir: &Path) -> Result<(), Box<dyn std::error::E
         .map_err(|e| format!("docker compose down failed: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+
+    #[test]
+    fn derive_project_name_is_stable_for_same_home() {
+        let p = std::path::PathBuf::from("/tmp/librefang-test-home-a");
+        let a = derive_compose_project_name(&p);
+        let b = derive_compose_project_name(&p);
+        assert_eq!(a, b, "same home_dir must produce the same project name");
+        assert!(
+            a.starts_with("librefang-"),
+            "project name must be operator-recognisable in `docker ps`: {a}"
+        );
+    }
+
+    #[test]
+    fn derive_project_name_differs_for_different_homes() {
+        let a = derive_compose_project_name(std::path::Path::new("/tmp/librefang-home-A"));
+        let b = derive_compose_project_name(std::path::Path::new("/tmp/librefang-home-B"));
+        assert_ne!(
+            a, b,
+            "two daemons with distinct home_dirs must NOT share a compose project"
+        );
+    }
 }
 
 /// SECURITY: Restrict file permissions to owner-only (0600) on Unix.

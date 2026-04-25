@@ -396,6 +396,64 @@ export interface WorkflowRunItem {
   completed_at?: string | null;
 }
 
+/**
+ * Multi-destination cron output fan-out target.
+ *
+ * Mirrors the Rust enum `librefang_types::scheduler::CronDeliveryTarget`,
+ * which is `#[serde(tag = "type", rename_all = "snake_case")]`. Each variant
+ * is an object with a `type` discriminator plus variant-specific fields.
+ *
+ * Empty/optional fields (`auth_header`, `subject_template`) MUST be omitted
+ * from the payload rather than sent as empty strings — the Rust side uses
+ * `Option<String>` and treating `""` as `Some("")` would leak through.
+ */
+export type CronDeliveryTarget =
+  | {
+      type: "channel";
+      /** Adapter name, e.g. "telegram", "slack", "discord". */
+      channel_type: string;
+      /** Platform-specific recipient (chat ID, user ID, channel ID). */
+      recipient: string;
+      /**
+       * Optional thread/topic id (Slack `thread_ts`, Telegram forum-topic
+       * id). Omit unless the adapter supports threading. Empty strings are
+       * stripped at submit time so the wire shape matches the Rust
+       * `Option<String>` exactly.
+       */
+      thread_id?: string;
+      /**
+       * Optional adapter-key suffix used to disambiguate multiple
+       * configured accounts of the same channel (e.g. two Slack workspaces
+       * keyed `slack:workspace-a` vs `slack:workspace-b`). Omit when only
+       * one account of `channel_type` is configured.
+       */
+      account_id?: string;
+    }
+  | {
+      type: "webhook";
+      /** Destination URL. Must start with http:// or https://. */
+      url: string;
+      /** Optional Authorization header value (sent verbatim). */
+      auth_header?: string;
+    }
+  | {
+      type: "local_file";
+      /** Absolute or relative path on the daemon host. */
+      path: string;
+      /** If true, append to the file; if false, overwrite. */
+      append?: boolean;
+    }
+  | {
+      type: "email";
+      /** Recipient email address. */
+      to: string;
+      /** Optional subject template. `{job}` is replaced with the job name. */
+      subject_template?: string;
+    };
+
+/** Discriminator string for `CronDeliveryTarget` — useful for switch arms. */
+export type CronDeliveryTargetType = CronDeliveryTarget["type"];
+
 export interface ScheduleItem {
   id: string;
   name?: string;
@@ -409,6 +467,12 @@ export interface ScheduleItem {
   next_run?: string | null;
   agent_id?: string;
   workflow_id?: string;
+  /**
+   * Optional fan-out destinations. Empty/missing means single-target
+   * delivery via the legacy `delivery` field. Backend sends an array
+   * (possibly empty) on round-trip.
+   */
+  delivery_targets?: CronDeliveryTarget[];
 }
 
 export interface TriggerItem {
@@ -545,6 +609,9 @@ export interface MemoryListResponse {
   total?: number;
   offset?: number;
   limit?: number;
+  // Server signals whether proactive memory is enabled in config so the
+  // dashboard can render an explanatory note + fall back to per-agent KV.
+  proactive_enabled?: boolean;
 }
 
 export interface MemoryStatsResponse {
@@ -557,6 +624,23 @@ export interface MemoryStatsResponse {
   auto_memorize_enabled?: boolean;
   auto_retrieve_enabled?: boolean;
   llm_extraction?: boolean;
+  // Mirrors MemoryListResponse — see field doc above.
+  proactive_enabled?: boolean;
+}
+
+// Per-agent KV pair returned by `GET /api/memory/agents/:id/kv`.
+//
+// `created_at` and `source` are best-effort: the underlying substrate may not
+// populate them today, so the dashboard treats them as optional.
+export interface AgentKvPair {
+  key: string;
+  value: unknown;
+  source?: string;
+  created_at?: string;
+}
+
+export interface AgentKvResponse {
+  kv_pairs?: AgentKvPair[];
 }
 
 export interface UsageSummaryResponse {
@@ -997,8 +1081,12 @@ export async function resetAgentSession(agentId: string): Promise<ApiActionRespo
   return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
 }
 
-export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
-  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session`);
+export async function loadAgentSession(
+  agentId: string,
+  sessionId?: string | null,
+): Promise<AgentSessionResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
 export async function sendAgentMessage(
@@ -1628,6 +1716,8 @@ export async function createSchedule(payload: {
   workflow_id?: string;
   message?: string;
   enabled?: boolean;
+  /** Fan-out destinations. Empty array clears any existing list on update. */
+  delivery_targets?: CronDeliveryTarget[];
 }): Promise<ScheduleItem> {
   return post<ScheduleItem>("/api/schedules", payload);
 }
@@ -1641,6 +1731,12 @@ export async function updateSchedule(
     tz?: string;
     agent_id?: string;
     message?: string;
+    /**
+     * Replace fan-out delivery targets. The backend treats this as a full
+     * replace (an empty array clears the list). Omit the field to leave it
+     * unchanged.
+     */
+    delivery_targets?: CronDeliveryTarget[];
   }
 ): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/schedules/${encodeURIComponent(scheduleId)}`, payload);
@@ -2175,6 +2271,13 @@ export async function getMemoryStats(agentId?: string): Promise<MemoryStatsRespo
     return get<MemoryStatsResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/stats`);
   }
   return get<MemoryStatsResponse>("/api/memory/stats");
+}
+
+// List the per-agent KV memory store (always available — independent of
+// `[proactive_memory] enabled`). Used as the fallback view when proactive
+// memory is disabled, and as a complementary view when it is enabled.
+export async function getAgentKvMemory(agentId: string): Promise<AgentKvResponse> {
+  return get<AgentKvResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/kv`);
 }
 
 export async function addMemoryFromText(

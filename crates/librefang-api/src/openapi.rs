@@ -55,6 +55,7 @@ use crate::types;
         routes::update_agent,
         routes::send_message,
         routes::send_message_stream,
+        routes::attach_session_stream,
         routes::get_agent_session,
         routes::list_agent_sessions,
         routes::create_agent_session,

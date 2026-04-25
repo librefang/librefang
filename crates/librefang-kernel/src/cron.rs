@@ -74,6 +74,9 @@ pub struct CronScheduler {
     jobs: DashMap<CronJobId, JobMeta>,
     /// Path to the persistence file (`<home>/cron_jobs.json`).
     persist_path: PathBuf,
+    /// Daemon home directory (e.g. `~/.librefang`). Used to enforce the
+    /// `<home>/scripts/` allowlist on `pre_script.argv[0]` at validation time.
+    home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
 }
@@ -88,6 +91,7 @@ impl CronScheduler {
         Self {
             jobs: DashMap::new(),
             persist_path: home_dir.join("data").join("cron_jobs.json"),
+            home_dir: home_dir.to_path_buf(),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
         }
     }
@@ -164,8 +168,11 @@ impl CronScheduler {
             .filter(|r| r.value().job.agent_id == job.agent_id)
             .count();
 
-        // CronJob.validate returns Result<(), String>
-        job.validate(agent_count)
+        // CronJob.validate_with_home returns Result<(), String>.
+        // Passing `Some(home_dir)` enables the `<home>/scripts/` allowlist
+        // check on `pre_script.argv[0]` and the dangerous-env-key denylist
+        // on `pre_script.env` (defends against `LD_PRELOAD`, `PATH`, etc.).
+        job.validate_with_home(agent_count, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
 
         // Compute initial next_run
@@ -268,7 +275,37 @@ impl CronScheduler {
                     meta.job.delivery = delivery;
                 }
 
+                // Replace fan-out delivery_targets if provided. Must be an
+                // array of CronDeliveryTarget objects; an empty array clears
+                // all targets.
+                if !updates["delivery_targets"].is_null() {
+                    let targets: Vec<librefang_types::scheduler::CronDeliveryTarget> =
+                        serde_json::from_value(updates["delivery_targets"].clone()).map_err(
+                            |e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")),
+                        )?;
+                    meta.job.delivery_targets = targets;
+                }
+
                 Ok(meta.job.clone())
+            }
+            None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
+        }
+    }
+
+    /// Replace the multi-destination delivery targets on an existing job.
+    ///
+    /// The schedule, action, and primary `delivery` field are left untouched;
+    /// only the `delivery_targets` fan-out list is swapped in. Call
+    /// [`Self::persist`] afterwards to write the change to disk.
+    pub fn set_delivery_targets(
+        &self,
+        id: CronJobId,
+        targets: Vec<librefang_types::scheduler::CronDeliveryTarget>,
+    ) -> LibreFangResult<()> {
+        match self.jobs.get_mut(&id) {
+            Some(mut meta) => {
+                meta.job.delivery_targets = targets;
+                Ok(())
             }
             None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
         }
@@ -673,6 +710,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
             created_at: Utc::now(),
@@ -1535,5 +1573,124 @@ mod tests {
             assert!(sched.list_jobs(agent).is_empty());
             assert_eq!(sched.list_jobs(other).len(), 1);
         }
+    }
+
+    // -- delivery_targets management ---------------------------------------
+
+    #[test]
+    fn set_delivery_targets_replaces_existing_list() {
+        use librefang_types::scheduler::CronDeliveryTarget;
+
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // Initially empty.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+
+        // Set two targets.
+        let targets = vec![
+            CronDeliveryTarget::Channel {
+                channel_type: "slack".into(),
+                recipient: "C123".into(),
+                thread_id: None,
+                account_id: None,
+            },
+            CronDeliveryTarget::LocalFile {
+                path: "/tmp/x.log".into(),
+                append: true,
+            },
+        ];
+        sched.set_delivery_targets(id, targets.clone()).unwrap();
+        assert_eq!(sched.get_job(id).unwrap().delivery_targets, targets);
+
+        // Replace with a single target — full replacement, not append.
+        let single = vec![CronDeliveryTarget::Webhook {
+            url: "https://example.com/hook".into(),
+            auth_header: None,
+        }];
+        sched.set_delivery_targets(id, single.clone()).unwrap();
+        assert_eq!(sched.get_job(id).unwrap().delivery_targets, single);
+
+        // Clear with an empty Vec.
+        sched.set_delivery_targets(id, Vec::new()).unwrap();
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    #[test]
+    fn set_delivery_targets_unknown_id_returns_error() {
+        let (sched, _tmp) = make_scheduler(100);
+        let unknown = CronJobId::new();
+        let res = sched.set_delivery_targets(unknown, Vec::new());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn update_job_patches_delivery_targets() {
+        use librefang_types::scheduler::CronDeliveryTarget;
+
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        let updates = serde_json::json!({
+            "delivery_targets": [
+                {"type": "webhook", "url": "https://example.com/hook"},
+                {"type": "local_file", "path": "/tmp/y.log"},
+            ]
+        });
+        let updated = sched.update_job(id, &updates).unwrap();
+        assert_eq!(updated.delivery_targets.len(), 2);
+        assert!(matches!(
+            &updated.delivery_targets[0],
+            CronDeliveryTarget::Webhook { url, .. } if url == "https://example.com/hook"
+        ));
+        assert!(matches!(
+            &updated.delivery_targets[1],
+            CronDeliveryTarget::LocalFile { append, .. } if !*append
+        ));
+    }
+
+    #[test]
+    fn update_job_invalid_delivery_targets_rejected() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        let updates = serde_json::json!({
+            "delivery_targets": [{"type": "bogus_target_type"}]
+        });
+        let res = sched.update_job(id, &updates);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn delivery_targets_persist_across_reload() {
+        use librefang_types::scheduler::CronDeliveryTarget;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let job_id = {
+            let sched = CronScheduler::new(tmp.path(), 100);
+            let id = sched.add_job(make_job(agent), false).unwrap();
+            sched
+                .set_delivery_targets(
+                    id,
+                    vec![CronDeliveryTarget::Email {
+                        to: "alice@example.com".into(),
+                        subject_template: Some("Cron: {job}".into()),
+                    }],
+                )
+                .unwrap();
+            sched.persist().unwrap();
+            id
+        };
+        let sched = CronScheduler::new(tmp.path(), 100);
+        sched.load().unwrap();
+        let job = sched.get_job(job_id).unwrap();
+        assert_eq!(job.delivery_targets.len(), 1);
+        assert!(matches!(
+            &job.delivery_targets[0],
+            CronDeliveryTarget::Email { to, .. } if to == "alice@example.com"
+        ));
     }
 }

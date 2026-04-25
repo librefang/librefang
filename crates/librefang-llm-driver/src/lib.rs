@@ -226,11 +226,21 @@ pub struct CompletionRequest {
     pub thinking: Option<librefang_types::config::ThinkingConfig>,
     /// Enable prompt caching for providers that support it.
     ///
-    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` to system
-    ///   message blocks and the last user turn.
+    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` markers
+    ///   on the system block, the last tool, and the trailing 2-3 messages
+    ///   (system_and_3 rolling window — uses all 4 cache breakpoints).
     /// - **OpenAI**: automatic prefix caching (no request changes needed, but
     ///   cached token counts are parsed from the response).
     pub prompt_caching: bool,
+    /// Cache TTL hint when [`Self::prompt_caching`] is enabled.
+    ///
+    /// - `None` (default) → 5-minute ephemeral cache (1.25x write multiplier).
+    /// - `Some("1h")` → 1-hour cache; only honored by the Anthropic driver,
+    ///   which auto-injects the `anthropic-beta: extended-cache-ttl-2025-04-11`
+    ///   header. Other values are treated as 5m.
+    ///
+    /// Ignored by drivers that don't implement `cache_control` markers.
+    pub cache_ttl: Option<&'static str>,
     /// Desired response format (structured output).
     ///
     /// When set, instructs the LLM to return output in the specified format.
@@ -716,6 +726,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

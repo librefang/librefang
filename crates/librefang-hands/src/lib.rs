@@ -311,6 +311,8 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 system_prompt: legacy.system_prompt,
                 api_key_env: legacy.api_key_env,
                 base_url: legacy.base_url,
+                context_window: None,
+                max_output_tokens: None,
                 extra_params: std::collections::HashMap::new(),
             },
             autonomous: legacy.max_iterations.map(|max_iter| AutonomousConfig {

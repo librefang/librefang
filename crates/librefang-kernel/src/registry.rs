@@ -64,6 +64,20 @@ impl AgentRegistry {
         }
     }
 
+    /// Flip the sticky `has_processed_message` flag and bump `last_active`.
+    ///
+    /// Called from the real message-dispatch path
+    /// (`execute_llm_agent`) — never from administrative bookkeeping. This
+    /// is what the heartbeat monitor checks to distinguish "agent that has
+    /// genuinely been alive" from "agent that was spawned and never used".
+    /// Idempotent: once `true`, repeated calls only refresh `last_active`.
+    pub fn mark_processed_message(&self, id: AgentId) {
+        if let Some(mut entry) = self.agents.get_mut(&id) {
+            entry.has_processed_message = true;
+            entry.last_active = chrono::Utc::now();
+        }
+    }
+
     /// Update agent state.
     pub fn set_state(&self, id: AgentId, state: AgentState) -> LibreFangResult<()> {
         let mut entry = self

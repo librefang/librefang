@@ -308,11 +308,30 @@ pub async fn agent_ws(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
-    // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
+    // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+
+    // Mirror middleware: when no auth is configured, only allow loopback
+    // unless the operator opted in via LIBREFANG_ALLOW_NO_AUTH=1.
+    // SECURITY: Closes openfang #1034 B2 — empty api_key used to permit
+    // unauthenticated WS upgrades from any origin.
+    if !auth_required {
+        let is_loopback = addr.ip().is_loopback();
+        let allow_no_auth = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        if !is_loopback && !allow_no_auth {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: no api_key configured and origin is not loopback"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
     if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
@@ -371,9 +390,29 @@ pub async fn agent_ws(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Verify agent exists.
+    // Retry up to 5 times with 200ms backoff to handle a timing race where
+    // the client connects before the agent finishes registering (#804).
+    {
+        let mut found = state.kernel.agent_registry().get(agent_id).is_some();
+        if !found {
+            for attempt in 1..=4 {
+                debug!(
+                    agent_id = %id,
+                    attempt,
+                    "Agent not found yet, retrying in 200ms"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if state.kernel.agent_registry().get(agent_id).is_some() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            warn!(agent_id = %id, "Agent not found after 5 lookup attempts");
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
     }
 
     // Optional per-connection explicit session_id override (issue #2959).
@@ -1173,9 +1212,31 @@ async fn handle_command(
     verbose: &Arc<AtomicU8>,
 ) -> serde_json::Value {
     match cmd {
-        "new" | "reset" => match state.kernel.reset_session(agent_id) {
+        "new" => match state.kernel.create_agent_session(agent_id, None) {
+            Ok(info) => match info.get("session_id").and_then(|v| v.as_str()) {
+                Some(sid) if !sid.is_empty() => serde_json::json!({
+                    "type": "command_result",
+                    "command": "new",
+                    "message": "New session created.",
+                    "session_id": sid,
+                }),
+                // The kernel returned success but no session_id — treat as a
+                // hard failure rather than emitting an empty string the
+                // dashboard would silently swallow (frontend reads `sid`
+                // truthy and skips the navigate, leaving the URL stale on the
+                // old session). Surface explicitly so the user sees the bug.
+                _ => serde_json::json!({
+                    "type": "error",
+                    "content": "New session failed: kernel returned no session_id",
+                }),
+            },
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
+            }
+        },
+        "reset" => match state.kernel.reset_session(agent_id) {
             Ok(()) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
+                serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },

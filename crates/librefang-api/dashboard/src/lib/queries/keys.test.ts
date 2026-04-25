@@ -200,6 +200,17 @@ describe("query key factories", () => {
       expect(memoryKeys.stats().slice(0, prefix.length)).toEqual(prefix);
       expect(memoryKeys.stats("a1").slice(0, prefix.length)).toEqual(prefix);
     });
+
+    it("agentKv keys are nested under memoryKeys.all and agentKvs", () => {
+      expect(memoryKeys.agentKvs()).toEqual(["memory", "agentKv"]);
+      expect(memoryKeys.agentKv("a1")).toEqual(["memory", "agentKv", "a1"]);
+      const prefix = memoryKeys.agentKvs();
+      expect(memoryKeys.agentKv("a1").slice(0, prefix.length)).toEqual(prefix);
+      // Ensure agentKv subtree is disjoint from list/stats subtrees so
+      // invalidating proactive memory doesn't blow KV away.
+      expect(memoryKeys.agentKvs()).not.toEqual(memoryKeys.lists());
+      expect(memoryKeys.agentKvs()).not.toEqual(memoryKeys.statsAll());
+    });
   });
 
   describe("structural stability", () => {

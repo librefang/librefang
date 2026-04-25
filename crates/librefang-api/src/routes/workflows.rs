@@ -1278,6 +1278,10 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         librefang_types::scheduler::CronAction::Workflow { workflow_id, .. } => workflow_id.clone(),
         _ => String::new(),
     };
+    // Serialize delivery_targets so callers can round-trip the field through
+    // the schedule view without a second GET on the raw cron-job endpoint.
+    let delivery_targets = serde_json::to_value(&job.delivery_targets)
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     serde_json::json!({
         "id": job.id.to_string(),
         "name": job.name,
@@ -1290,6 +1294,7 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
         "created_at": job.created_at.to_rfc3339(),
         "last_run": job.last_run.map(|t| t.to_rfc3339()),
         "next_run": job.next_run.map(|t| t.to_rfc3339()),
+        "delivery_targets": delivery_targets,
     })
 }
 
@@ -1459,8 +1464,24 @@ pub async fn create_schedule(
             model_override: None,
             timeout_secs: None,
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         }
     };
+
+    // Optional fan-out delivery targets. Validated up front so a bad shape
+    // returns a 400 rather than silently dropping targets later.
+    let delivery_targets: Vec<librefang_types::scheduler::CronDeliveryTarget> =
+        match req.get("delivery_targets") {
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(t) => t,
+                Err(e) => {
+                    return ApiErrorResponse::bad_request(format!("Invalid delivery_targets: {e}"))
+                        .into_json_tuple();
+                }
+            },
+        };
 
     let job = librefang_types::scheduler::CronJob {
         id: librefang_types::scheduler::CronJobId::new(),
@@ -1470,6 +1491,7 @@ pub async fn create_schedule(
         schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
+        delivery_targets,
         peer_id: None,
         session_mode: req["session_mode"]
             .as_str()
@@ -1568,6 +1590,27 @@ pub async fn update_schedule(
     }
     if let Some(agent_id) = req.get("agent_id") {
         updates.insert("agent_id".to_string(), agent_id.clone());
+    }
+    // Multi-destination fan-out targets: full replacement when supplied.
+    // Validation is done on the kernel side via serde, but reject obviously
+    // malformed payloads (non-array) up front to give a clearer 400.
+    //
+    // Semantics intentionally differ between `null` and `[]`:
+    //   * field omitted        — leave existing targets untouched.
+    //   * `delivery_targets:null` — same as omitted (preserves the
+    //     existing list). The kernel `update_job` checks `is_null()` and
+    //     skips the patch.
+    //   * `delivery_targets:[]` — explicit clear; kernel deserializes the
+    //     empty array and replaces the list with `Vec::new()`.
+    // Callers that want to clear all targets must send `[]`, not `null`.
+    if let Some(targets) = req.get("delivery_targets") {
+        if !targets.is_null() && !targets.is_array() {
+            return ApiErrorResponse::bad_request(
+                "delivery_targets must be an array of CronDeliveryTarget objects",
+            )
+            .into_json_tuple();
+        }
+        updates.insert("delivery_targets".to_string(), targets.clone());
     }
 
     match state

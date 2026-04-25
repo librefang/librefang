@@ -264,6 +264,44 @@ impl SessionId {
             name.as_bytes(),
         ))
     }
+
+    /// Derive a session ID from a structured (channel, account, conversation) key.
+    ///
+    /// Backward compatible with `for_channel`: when `account` is empty, the
+    /// resulting id is identical to `for_channel(agent, channel)` if
+    /// `conversation` is also empty, or to `for_channel(agent, format!("{channel}:{conversation}"))`
+    /// when only `conversation` is set. This preserves existing session ids for
+    /// channels that never carried an account dimension.
+    ///
+    /// When `account` is non-empty, a `v2:` byte prefix is mixed in so the
+    /// hash space is disjoint from the legacy format — avoids collisions even
+    /// if a real channel/account ever lines up textually with a legacy scope.
+    pub fn from_route_key(
+        agent_id: AgentId,
+        channel: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Self {
+        if account.is_empty() {
+            let scope = if conversation.is_empty() {
+                channel.to_string()
+            } else {
+                format!("{channel}:{conversation}")
+            };
+            return Self::for_channel(agent_id, &scope);
+        }
+        let name = format!(
+            "v2:{}:{}:{}:{}",
+            agent_id.0,
+            channel.to_lowercase(),
+            account.to_lowercase(),
+            conversation.to_lowercase()
+        );
+        Self(uuid::Uuid::new_v5(
+            &CHANNEL_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
 }
 
 impl std::str::FromStr for SessionId {
@@ -563,6 +601,25 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     /// Optional base URL override for the provider.
     pub base_url: Option<String>,
+    /// Optional override for this model's context window (in tokens).
+    ///
+    /// When set, takes precedence over registry / runtime-probed values.
+    /// Use it to force a value when the model's actual context differs
+    /// from what the catalog reports (e.g. a self-hosted Ollama model
+    /// configured with `num_ctx` smaller than the model's nominal
+    /// length, or a vLLM endpoint with a custom `--max-model-len`).
+    ///
+    /// `None` (the default) means "let the runtime resolve it from the
+    /// registry, persisted cache, or live `/v1/models` probe".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Optional override for this model's maximum output tokens.
+    ///
+    /// Same precedence and semantics as [`Self::context_window`]. Useful
+    /// when a self-hosted endpoint advertises a smaller usable cap than
+    /// the catalog default (e.g. a quantised checkpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Provider-specific extension parameters that are flattened directly
     /// into the API request body.
     ///
@@ -585,6 +642,8 @@ impl Default for ModelConfig {
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: std::collections::HashMap::new(),
         }
     }
@@ -785,6 +844,19 @@ pub struct AgentManifest {
     /// for this specific agent. Follows the same pattern as `exec_policy`.
     #[serde(default)]
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
+    /// Per-agent override for the message-history trim cap. When set,
+    /// takes precedence over `KernelConfig.max_history_messages` and the
+    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Values below 4
+    /// are silently clamped at runtime with a warning log.
+    #[serde(default)]
+    pub max_history_messages: Option<usize>,
+    /// If true, the agent's `context.md` is read once at session start and
+    /// reused. Default is `false`: the runtime re-reads `context.md` before
+    /// every turn so external writers (cron jobs, integrations) reach the LLM
+    /// on the next message.
+    #[serde(default)]
+    pub cache_context: bool,
 }
 
 /// Access mode for a named workspace.
@@ -860,6 +932,8 @@ impl Default for AgentManifest {
             show_progress: true,
             auto_evolve: true,
             channel_overrides: None,
+            max_history_messages: None,
+            cache_context: false,
         }
     }
 }
@@ -1017,6 +1091,23 @@ pub struct AgentEntry {
     /// `None` until the first auto-reset occurs.
     #[serde(default)]
     pub reset_reason: Option<crate::config::SessionResetReason>,
+
+    /// Sticky flag: `true` once the agent has processed at least one real
+    /// inbound message, channel event, or autonomous tick.
+    ///
+    /// Used by the heartbeat monitor (`crate::heartbeat::check_agents`) to
+    /// distinguish agents that have genuinely been alive (and may now be
+    /// hanging) from agents that were spawned but never received any work
+    /// — the latter must not be flagged unresponsive, which would push them
+    /// into a crash-recover loop (openfang #844).
+    ///
+    /// Replaces the older time-window heuristic
+    /// (`last_active - created_at <= IDLE_GRACE_SECS`) which was fragile
+    /// because administrative `set_state` / metadata writes also bump
+    /// `last_active`. Bookkeeping bumps must NOT flip this flag — only
+    /// real message-dispatch paths.
+    #[serde(default)]
+    pub has_processed_message: bool,
 }
 
 impl Default for AgentEntry {
@@ -1042,6 +1133,7 @@ impl Default for AgentEntry {
             force_session_wipe: false,
             resume_pending: false,
             reset_reason: None,
+            has_processed_message: false,
         }
     }
 }
@@ -1925,6 +2017,8 @@ model = "llama-3.3-70b-versatile"
             system_prompt: "test".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: extra,
         };
 
@@ -2046,5 +2140,55 @@ model = "llama-3.3-70b-versatile"
         let persistent = SessionId::for_channel(agent, "cron");
         let isolated = SessionId::for_cron_run(agent, "cron");
         assert_ne!(persistent, isolated);
+    }
+
+    #[test]
+    fn from_route_key_empty_account_matches_for_channel() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        // Plain channel, no conversation: must equal for_channel(agent, channel).
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", ""),
+            SessionId::for_channel(agent, "telegram"),
+        );
+        // Channel + conversation, empty account: must equal for_channel(agent, "channel:conv")
+        // — preserves legacy `format!("{channel}:{chat_id}")` scope.
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", "12345"),
+            SessionId::for_channel(agent, "telegram:12345"),
+        );
+    }
+
+    #[test]
+    fn from_route_key_separates_accounts() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let alice = SessionId::from_route_key(agent, "telegram", "alice", "12345");
+        let bob = SessionId::from_route_key(agent, "telegram", "bob", "12345");
+        assert_ne!(
+            alice, bob,
+            "Different accounts on same channel+conversation must yield different sessions"
+        );
+        // And neither should collide with the legacy account-less id.
+        let legacy = SessionId::from_route_key(agent, "telegram", "", "12345");
+        assert_ne!(alice, legacy);
+        assert_ne!(bob, legacy);
+    }
+
+    #[test]
+    fn from_route_key_normalizes_case() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let mixed = SessionId::from_route_key(agent, "Telegram", "Alice", "ABC");
+        let lower = SessionId::from_route_key(agent, "telegram", "alice", "abc");
+        assert_eq!(
+            mixed, lower,
+            "channel/account/conversation must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn from_route_key_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let a = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        let b = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        assert_eq!(a, b);
     }
 }

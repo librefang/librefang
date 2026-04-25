@@ -450,6 +450,8 @@ fn test_spawn_agent_applies_local_default_model_override() {
                     system_prompt: String::new(),
                     api_key_env: None,
                     base_url: None,
+                    context_window: None,
+                    max_output_tokens: None,
                     extra_params: std::collections::HashMap::new(),
                 },
                 ..Default::default()
@@ -692,6 +694,8 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                     system_prompt: String::new(),
                     api_key_env: Some("CLOUDVERSE_API_KEY".to_string()),
                     base_url: Some("https://cloudverse.freshworkscorp.com/api/v1".to_string()),
+                    context_window: None,
+                    max_output_tokens: None,
                     extra_params: std::collections::HashMap::new(),
                 },
                 ..Default::default()
@@ -897,6 +901,141 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     assert_eq!(
         second_manifest.mcp_servers, first_manifest.mcp_servers,
         "reactivation should preserve MCP server assignments"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression test for issue #3135 — hand-level `skills = [...]` allowlist
+/// MUST propagate into each derived per-role agent's `AgentManifest.skills`,
+/// otherwise `sorted_enabled_skills` treats the empty list as "unrestricted"
+/// and inlines every installed skill into every role's prompt.
+///
+/// The merge logic lives in `activate_hand_with_id` (kernel/mod.rs ~9057):
+/// - hand_skills empty + agent_skills empty   → agent_skills stays empty (unrestricted)
+/// - hand_skills non-empty + agent_skills empty → agent_skills := hand_skills
+/// - hand_skills non-empty + agent_skills non-empty → intersection
+#[test]
+fn test_hand_skills_propagate_to_derived_agent_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-skills-propagation");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Hand with a top-level allowlist of two skills and one worker role
+    // that does NOT set its own `skills` field — must inherit ["alpha", "beta"].
+    let hand_toml = r#"
+id = "skills-prop-test"
+version = "0.1.0"
+name = "Skills Propagation Test Hand"
+description = "Regression fixture for issue #3135"
+category = "communication"
+
+skills = ["alpha", "beta"]
+
+[agents.worker]
+name = "skills-prop-worker"
+description = "Inherits hand-level skills allowlist"
+
+[agents.worker.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+    kernel
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand("skills-prop-test", HashMap::new())
+        .expect("hand should activate without unmet requirements");
+
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let entry = kernel
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry");
+
+    assert_eq!(
+        entry.manifest.skills,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "hand-level skills allowlist must propagate into AgentManifest.skills \
+         on the derived per-role agent (issue #3135)"
+    );
+
+    kernel.shutdown();
+}
+
+/// Companion to the propagation test: when the per-role agent ALSO declares
+/// its own `skills` field, the merge must intersect with the hand-level
+/// allowlist (per the documented semantics in `activate_hand_with_id`).
+#[test]
+fn test_hand_skills_intersect_per_role_overrides() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-skills-intersect");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Hand allows alpha+beta+gamma; agent independently lists alpha+delta.
+    // Expected effective list: ["alpha"] (intersection).
+    let hand_toml = r#"
+id = "skills-intersect-test"
+version = "0.1.0"
+name = "Skills Intersect Test Hand"
+description = "Regression fixture for issue #3135 (intersection branch)"
+category = "communication"
+
+skills = ["alpha", "beta", "gamma"]
+
+[agents.worker]
+name = "skills-intersect-worker"
+description = "Has its own skills list — should be intersected"
+skills = ["alpha", "delta"]
+
+[agents.worker.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+    kernel
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand("skills-intersect-test", HashMap::new())
+        .expect("hand should activate without unmet requirements");
+
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let entry = kernel
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry");
+
+    assert_eq!(
+        entry.manifest.skills,
+        vec!["alpha".to_string()],
+        "per-role agent skills list must be intersected with the hand-level \
+         allowlist — only skills present in BOTH lists survive"
     );
 
     kernel.shutdown();
@@ -2158,6 +2297,720 @@ async fn send_to_agent_as_rejects_unparseable_parent_id() {
     // Either the resolver's "Agent not found" wording or the fallback
     // parse error is acceptable — the important thing is we don't panic.
     assert!(!err.is_empty());
+
+    kernel.shutdown();
+}
+
+// ── atomic_write_toml ────────────────────────────────────────────────
+// `persist_manifest_to_disk` previously used a plain `fs::write` which
+// could leave a corrupt half-written file when the daemon crashed
+// mid-write, or let two concurrent persisters race and truncate each
+// other. `atomic_write_toml` stages the bytes in a sibling temp file
+// and atomically renames it into place.
+
+#[test]
+fn atomic_write_replaces_existing_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.toml");
+    std::fs::write(&path, "old = 1\n").unwrap();
+
+    super::atomic_write_toml(&path, "new = 2\n").expect("write must succeed");
+
+    let got = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(got, "new = 2\n", "atomic write must replace prior content");
+}
+
+#[test]
+fn atomic_write_leaves_no_tmp_file_on_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.toml");
+    super::atomic_write_toml(&path, "model = \"x\"\n").unwrap();
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no .tmp staging file should remain after success"
+    );
+}
+
+#[test]
+fn atomic_write_no_partial_state_under_concurrency() {
+    // Spawn two threads racing to write the same path with very
+    // different payloads. The file must always end up parseable as
+    // exactly one of the two payloads — never a truncated mix.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("manifest.toml");
+    // Seed the file so a partial truncate would be observable.
+    std::fs::write(&path, "seed = 0\n").unwrap();
+
+    let payload_a = format!("name = \"{}\"\n", "a".repeat(4096));
+    let payload_b = format!("name = \"{}\"\n", "b".repeat(4096));
+
+    let path_a = path.clone();
+    let payload_a_clone = payload_a.clone();
+    let t1 = std::thread::spawn(move || {
+        for _ in 0..50 {
+            super::atomic_write_toml(&path_a, &payload_a_clone).unwrap();
+        }
+    });
+    let path_b = path.clone();
+    let payload_b_clone = payload_b.clone();
+    let t2 = std::thread::spawn(move || {
+        for _ in 0..50 {
+            super::atomic_write_toml(&path_b, &payload_b_clone).unwrap();
+        }
+    });
+
+    // While the writers are racing, repeatedly read the file. Every
+    // read must see a complete, parseable payload — never partial.
+    for _ in 0..200 {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            assert!(
+                contents == "seed = 0\n" || contents == payload_a || contents == payload_b,
+                "reader observed corrupt/partial state: {} bytes",
+                contents.len()
+            );
+        }
+    }
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let final_contents = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        final_contents == payload_a || final_contents == payload_b,
+        "final file must equal one of the two payloads exactly"
+    );
+    // No stray .tmp files left behind.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no .tmp staging files should remain after concurrent writes"
+    );
+}
+
+/// Regression: hand `[[settings]]` must survive a daemon restart.
+///
+/// Before the fix, `boot_with_config`'s TOML drift detection block would
+/// overwrite the DB manifest with the bare disk TOML — which never carries
+/// the runtime-materialized `## User Configuration` tail. That stripped the
+/// configured settings from the system prompt on every restart until somebody
+/// re-ran `hand activate` by hand. This test pre-populates a hand, an active
+/// hand_state.json, and a DB agent entry whose manifest already carries the
+/// rendered tail (mimicking a previously activated hand), then forces drift
+/// by bumping a non-prompt field on the disk TOML and re-booting. The saved
+/// manifest must still contain the settings tail after boot.
+#[test]
+fn boot_drift_preserves_hand_settings_tail() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // 1) Install a hand definition under registry/hands/<id>/HAND.toml with one [[settings]].
+    let hand_id = "settingshand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    // Suppress registry_sync's network fetch (which would otherwise wipe our
+    // synthetic hand) by pre-touching the freshness marker.
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let hand_toml = r#"
+id = "settingshand"
+version = "1.0.0"
+name = "Settings Hand"
+description = "drift-test hand"
+category = "other"
+
+[[settings]]
+key = "stt"
+label = "STT"
+setting_type = "select"
+default = "groq"
+[[settings.options]]
+value = "groq"
+label = "Groq"
+provider_env = "GROQ_API_KEY"
+
+[agents.operator]
+name = "operator"
+description = "test operator"
+module = "builtin:chat"
+
+[agents.operator.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+
+    // 2) Persist hand_state.json so the drift loop can recover the user's chosen config.
+    let state_json = serde_json::json!({
+        "version": 4,
+        "instances": [{
+            "hand_id": hand_id,
+            "instance_id": uuid::Uuid::new_v4().to_string(),
+            "config": { "stt": "groq" },
+            "old_agent_ids": {},
+            "coordinator_role": "operator",
+            "status": "Active",
+            "activated_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }]
+    });
+    std::fs::write(
+        home_dir.join("data").join("hand_state.json"),
+        serde_json::to_string_pretty(&state_json).unwrap(),
+    )
+    .unwrap();
+
+    // 3) Mirror the hand TOML at workspaces/<hand_id>-hand/agent.toml so the
+    //    boot loop's drift detection finds a TOML to compare against. We
+    //    deliberately put a DIFFERENT system_prompt body on disk than what we
+    //    seed into the DB so `disk_manifest != entry.manifest` — forcing the
+    //    drift branch.
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("operator");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
+    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+
+    // 4) First boot to initialise SQLite + persist a seed agent entry that
+    //    pretends to be a previously-activated hand agent (carries the
+    //    rendered settings tail and a `hand:<id>` tag). Boot once with no
+    //    pre-existing agents, manually save the seed entry through
+    //    `kernel.memory.save_agent`, drop, re-boot.
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "operator", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:operator");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "operator".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        // The seed prompt mirrors what activation would have stamped: BASE
+        // PROMPT (matching the registry HAND.toml) plus the rendered tail.
+        manifest.model.system_prompt =
+            "BASE PROMPT\n\n---\n\n## User Configuration\n\n- STT: Groq (groq)".to_string();
+        // The drift loop reads hand membership off `manifest.tags` because
+        // AgentEntry.tags is not persisted by save_agent.
+        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    // 5) Second boot: drift should fire (disk_manifest's BASE PROMPT v2 differs
+    //    from the seeded BASE PROMPT-with-tail), and the fix re-renders the
+    //    `## User Configuration` tail before save_agent.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:operator");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    assert!(
+        prompt.contains("BASE PROMPT v2"),
+        "drift must have applied disk TOML body; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("## User Configuration"),
+        "settings tail must be re-rendered after drift; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("STT"),
+        "rendered settings line must be present; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression: hand `## Reference Knowledge` and `## Your Team` tails must
+/// survive a daemon restart (issue #3143).
+///
+/// Same drift mechanism as `boot_drift_preserves_hand_settings_tail`, but
+/// covers the two other rendered tails the activation path appends to a
+/// hand-derived agent's `system_prompt`. Pre-fix, only the settings tail
+/// was re-rendered after drift — the skill section and team roster were
+/// silently stripped on every restart.
+///
+/// Sets up a multi-agent hand whose SKILL.md is loaded into
+/// `def.skill_content`, seeds a DB agent whose manifest carries both
+/// rendered tails, then forces drift via a body-text edit on the disk
+/// TOML. After reboot, both tails must be back.
+#[test]
+fn boot_drift_preserves_skill_and_team_tails() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let hand_id = "teamhand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    let hand_toml = r#"
+id = "teamhand"
+version = "1.0.0"
+name = "Team Hand"
+description = "drift-test multi-agent hand"
+category = "other"
+
+[agents.lead]
+name = "lead"
+description = "lead agent"
+module = "builtin:chat"
+invoke_hint = "delegates work"
+
+[agents.lead.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE PROMPT"
+
+[agents.worker]
+name = "worker"
+description = "executes tasks"
+module = "builtin:chat"
+
+[agents.worker.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "WORKER PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+    // SKILL.md is read by HandRegistry::reload_from_disk and stuffed into
+    // def.skill_content — that's the input to apply_skill_reference_block_to_manifest.
+    std::fs::write(
+        hand_dir.join("SKILL.md"),
+        "## Skill\n\nuseful background context",
+    )
+    .unwrap();
+
+    // Mirror the hand TOML at the workspaces location so the drift loop
+    // finds a TOML to compare against. Force a body-text drift via
+    // BASE PROMPT -> BASE PROMPT v2 — this difference survives the
+    // sanitized projection (manifest_for_diff strips only the rendered
+    // tails, not the base prompt body) so the drift branch fires.
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("lead");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
+    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+
+    // First boot — initialise SQLite, then seed a DB entry that mimics a
+    // previously-activated lead agent (carries Reference Knowledge + Your
+    // Team tails).
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "lead", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:lead");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "lead agent".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        manifest.model.system_prompt = "BASE PROMPT\n\n---\n\n## Reference Knowledge\n\nuseful background context\n\n## Your Team\n\n- **worker**: executes tasks (use agent_send to message)".to_string();
+        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:lead".to_string()];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}"), "hand_role:lead".to_string()],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    // Second boot: drift fires (BASE PROMPT vs BASE PROMPT v2 in the
+    // sanitized projection); the fix re-renders both tails before
+    // save_agent persists the new blob.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:lead");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    assert!(
+        prompt.contains("BASE PROMPT v2"),
+        "drift must have applied disk TOML body; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("## Reference Knowledge"),
+        "Reference Knowledge tail must be re-rendered after drift; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("useful background context"),
+        "skill content from SKILL.md must be present; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("## Your Team"),
+        "Your Team tail must be re-rendered after drift; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("- **worker**:"),
+        "peer line must be present; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Regression: when only the rendered tails differ (no real TOML drift),
+/// the boot loop must NOT treat that as a meaningful diff and must NOT
+/// rewrite the DB blob unnecessarily. The sanitized `manifest_for_diff`
+/// projection covers this — without it, every restart of a hand-with-tails
+/// agent would burn a save_agent write even when the source TOML was
+/// unchanged.
+#[test]
+fn boot_drift_skipped_when_only_rendered_tails_differ() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let hand_id = "stillhand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    let hand_toml = r#"
+id = "stillhand"
+version = "1.0.0"
+name = "Still Hand"
+description = "no-drift test"
+category = "other"
+
+[agents.main]
+name = "operator"
+description = "the only agent"
+module = "builtin:chat"
+
+[agents.main.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "STABLE PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+    std::fs::write(hand_dir.join("SKILL.md"), "stable skill notes").unwrap();
+
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("main");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    // Disk TOML matches registry exactly — no real source-of-truth drift.
+    std::fs::write(&workspaces_hand_toml, hand_toml).unwrap();
+
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "main", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:operator");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "the only agent".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        // Seeded prompt carries the rendered Reference Knowledge tail.
+        // Without manifest_for_diff this would always look "different"
+        // from the bare disk TOML and trigger a clobber every boot.
+        manifest.model.system_prompt =
+            "STABLE PROMPT\n\n---\n\n## Reference Knowledge\n\nstable skill notes".to_string();
+        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:main".to_string()];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}"), "hand_role:main".to_string()],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:operator");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    // Tail must still be intact — drift did not fire, so the seeded
+    // tail-carrying prompt is what we get back.
+    assert!(
+        prompt.starts_with("STABLE PROMPT"),
+        "base body must be unchanged; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("## Reference Knowledge"),
+        "tail must survive a no-op restart; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Negative-path coverage for the `hand_role:` tag lookup at
+/// `kernel/mod.rs:~3057`. When a hand-derived agent carries the `hand:<id>`
+/// tag but is missing the `hand_role:<role>` companion (e.g. activated by an
+/// older codepath that didn't stamp it, or a hand-stitched record imported
+/// from elsewhere), the drift branch must:
+///
+///   1. Not panic — the role lookup is a guard, not an assertion.
+///   2. Apply the disk TOML body change so config edits still propagate.
+///   3. Skip the skill / team re-render — without the role we can't pick the
+///      right per-role override, so we'd rather drop the rendered tails than
+///      stamp the wrong content.
+///
+/// The next `hand activate` re-stamps both tags and restores the tails; this
+/// test only proves the boot path degrades gracefully in the meantime.
+#[test]
+fn boot_drift_skips_tail_render_when_hand_role_tag_missing() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let hand_id = "rolelesshand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    let hand_toml = r#"
+id = "rolelesshand"
+version = "1.0.0"
+name = "Roleless Hand"
+description = "missing-role drift test"
+category = "other"
+
+[agents.main]
+name = "operator"
+description = "the only agent"
+module = "builtin:chat"
+
+[agents.main.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+    std::fs::write(hand_dir.join("SKILL.md"), "skill notes").unwrap();
+
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("main");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    // Force a body-text drift so the drift branch fires.
+    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
+    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "main", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:operator");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "the only agent".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        manifest.model.system_prompt =
+            "BASE PROMPT\n\n---\n\n## Reference Knowledge\n\nskill notes".to_string();
+        // Crucial: only the `hand:` tag is stamped — `hand_role:` is missing.
+        manifest.tags = vec![format!("hand:{hand_id}")];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}")],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    // Second boot must not panic even though hand_role tag is absent.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:operator");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    // Drift applied the disk TOML body change.
+    assert!(
+        prompt.contains("BASE PROMPT v2"),
+        "drift must have applied disk TOML body even without hand_role; got: {prompt}"
+    );
+    // Reference Knowledge tail is gone — disk_manifest replaced the prompt
+    // and the role-keyed re-render was skipped.
+    assert!(
+        !prompt.contains("## Reference Knowledge"),
+        "skill tail must NOT be re-rendered when hand_role tag is missing; got: {prompt}"
+    );
 
     kernel.shutdown();
 }

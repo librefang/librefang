@@ -586,7 +586,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const models = modelsQuery.data?.models ?? [];
 
   return (
-    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg">
+    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg" variant="drawer-right">
       <div className="p-6 space-y-4">
         {/* Header info */}
         <div className="flex items-center gap-3">
@@ -611,6 +611,28 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
               {provider.latency_ms ? `${provider.latency_ms}ms` : "-"}
             </p>
           </div>
+        </div>
+
+        {/* Model list — placed right under the count so users see what
+            actually counts toward the number rather than scrolling past
+            properties to find it. No inner scroll: the drawer's own
+            overflow-y-auto handles overflow. */}
+        <div className="space-y-3">
+          <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.provider_models")}</h3>
+          {modelsQuery.isLoading ? (
+            <p className="text-xs text-text-dim">{t("common.loading")}</p>
+          ) : models.length === 0 ? (
+            <p className="text-xs text-text-dim">{t("providers.no_models_for_provider")}</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {models.map(m => (
+                <div key={m.id} className="flex items-center gap-2 p-2 rounded-lg bg-main/20 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.available ? "bg-success" : "bg-text-dim/30"}`} />
+                  <span className="truncate font-mono">{m.display_name || m.id}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Properties */}
@@ -654,25 +676,6 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
               </div>
             )}
           </div>
-        </div>
-
-        {/* Model list */}
-        <div className="space-y-3">
-          <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.provider_models")}</h3>
-          {modelsQuery.isLoading ? (
-            <p className="text-xs text-text-dim">{t("common.loading")}</p>
-          ) : models.length === 0 ? (
-            <p className="text-xs text-text-dim">{t("providers.no_models_for_provider")}</p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto">
-              {models.map(m => (
-                <div key={m.id} className="flex items-center gap-2 p-2 rounded-lg bg-main/20 text-xs">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.available ? "bg-success" : "bg-text-dim/30"}`} />
-                  <span className="truncate font-mono">{m.display_name || m.id}</span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         {provider.error_message && (
@@ -1179,6 +1182,15 @@ export function ProvidersPage() {
     && config.urlInput === (config.provider.base_url || "")
     && config.proxyInput === (config.provider.proxy_url || "");
   const saveDisabled = !config.provider || config.saving || config.testing || isUnchanged;
+  // Local providers (Ollama / vLLM / LM Studio) declare `key_required: false`
+  // — for them, the Test button must NOT require a key, otherwise users have
+  // no way to verify their custom base_url. Issue #3138.
+  const testDisabled =
+    config.saving
+    || config.testing
+    || (config.provider?.key_required !== false
+        && !config.hasStoredKey
+        && !config.keyInput.trim());
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1322,7 +1334,7 @@ export function ProvidersPage() {
       )}
 
       {/* Config Modal */}
-      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md">
+      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md" variant="panel-right">
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
@@ -1352,6 +1364,12 @@ export function ProvidersPage() {
               <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
                 className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+              <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
+                {t("providers.base_url_hint", {
+                  defaultValue:
+                    "Bare host:port URLs (e.g. http://192.168.1.10:11434) will get /v1 appended automatically for OpenAI-compatible endpoints.",
+                })}
+              </p>
             </div>
 
             <div>
@@ -1381,7 +1399,7 @@ export function ProvidersPage() {
                 {config.saving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
                 {t("common.save")}
               </Button>
-              <Button variant="secondary" onClick={config.testKey} disabled={config.saving || config.testing || (!config.hasStoredKey && !config.keyInput.trim())}>
+              <Button variant="secondary" onClick={config.testKey} disabled={testDisabled}>
                 {config.testing ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
                 {t("providers.test")}
               </Button>
@@ -1436,7 +1454,7 @@ export function ProvidersPage() {
       </Modal>
 
       {/* Create Provider Wizard */}
-      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
+      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton variant="panel-right">
         <CreateProviderWizard
           onSubmit={async (values) => {
             await createRegistryContent("provider", values);

@@ -1817,6 +1817,22 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
 /// (e.g. the agent echoed its own name, or an inner agent already prefixed a
 /// delegated reply), the wrap is skipped to keep things idempotent.
 ///
+/// # Idempotency caveats
+///
+/// The "starts-with" check uses the literal `[name]` / `**[name]**` string. If
+/// `agent_name` itself contains `[`, `]`, or `*` characters, the detection is
+/// best-effort:
+///
+/// - The function never panics or corrupts UTF-8 — output stays well-formed.
+/// - For pathological names like `"a]b"`, repeated invocations may produce
+///   nested prefixes like `"[a]b] [a]b] text"` because the outer `[a]b]`
+///   isn't recognized as already-prefixed by a naive `starts_with`.
+///
+/// Worst-case degradation is therefore "extra prefix" rather than data loss
+/// or crash. Agents authoring outbound replies should pick names without
+/// bracket / asterisk characters; the dashboard's agent rename UI does not
+/// enforce this today.
+///
 /// Per-platform native identity features (Slack `username` override, Discord
 /// embed `author`, Telegram `From:` in rich messages) are intentionally not
 /// handled here.
@@ -2440,6 +2456,7 @@ async fn dispatch_message(
                 router,
                 &message.sender,
                 &message.channel,
+                overrides.as_ref(),
             )
             .await;
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -2774,38 +2791,7 @@ async fn dispatch_message(
             vec![]
         };
 
-        if matches!(
-            cmd,
-            "start"
-                | "help"
-                | "agents"
-                | "agent"
-                | "status"
-                | "models"
-                | "providers"
-                | "new"
-                | "reboot"
-                | "compact"
-                | "model"
-                | "stop"
-                | "usage"
-                | "think"
-                | "skills"
-                | "hands"
-                | "btw"
-                | "workflows"
-                | "workflow"
-                | "triggers"
-                | "trigger"
-                | "schedules"
-                | "schedule"
-                | "approvals"
-                | "approve"
-                | "reject"
-                | "budget"
-                | "peers"
-                | "a2a"
-        ) {
+        if crate::commands::is_channel_command(cmd) {
             if is_command_allowed(cmd, overrides.as_ref()) {
                 // Special-case /agents: send an inline keyboard with one button per agent.
                 if cmd == "agents" {
@@ -2888,6 +2874,7 @@ async fn dispatch_message(
                     router,
                     &message.sender,
                     &message.channel,
+                    overrides.as_ref(),
                 )
                 .await;
                 send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -4095,6 +4082,11 @@ async fn dispatch_with_blocks(
 }
 
 /// Handle a bot command (returns the response text).
+///
+/// `overrides` reflects the merged agent + channel policy for the calling
+/// context. It currently affects `/help` rendering (so disabled/blocked
+/// commands don't appear in the help text); other branches treat it as
+/// advisory.
 async fn handle_command(
     name: &str,
     args: &[String],
@@ -4102,6 +4094,7 @@ async fn handle_command(
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
     channel_type: &crate::types::ChannelType,
+    overrides: Option<&ChannelOverrides>,
 ) -> String {
     match name {
         "start" => {
@@ -4119,50 +4112,7 @@ async fn handle_command(
             msg.push_str("\nCommands:\n/agents - list agents\n/agent <name> - select an agent\n/help - show this help");
             msg
         }
-        "help" => "LibreFang Bot Commands:\n\
-             \n\
-             Session:\n\
-             /agents - list running agents\n\
-             /agent <name> - select which agent to talk to\n\
-             /new - reset session (clear messages)\n\
-             /reboot - hard reset session (full context clear, no summary)\n\
-             /compact - trigger LLM session compaction\n\
-             /model [name] - show or switch agent model\n\
-             /stop - cancel current agent run\n\
-             /usage - show session token usage and cost\n\
-             /think [on|off] - toggle extended thinking\n\
-             \n\
-             Info:\n\
-             /models - list available AI models\n\
-             /providers - show configured providers\n\
-             /skills - list installed skills\n\
-             /hands - list available and active hands\n\
-             /status - show system status\n\
-             \n\
-             Automation:\n\
-             /workflows - list workflows\n\
-             /workflow run <name> [input] - run a workflow\n\
-             /triggers - list event triggers\n\
-             /trigger add <agent> <pattern> <prompt> - create trigger\n\
-             /trigger del <id> - remove trigger\n\
-             /schedules - list cron jobs\n\
-             /schedule add <agent> <cron-5-fields> <message> - create job\n\
-             /schedule del <id> - remove job\n\
-             /schedule run <id> - run job now\n\
-             /approvals - list pending approvals\n\
-             /approve <id> - approve a request\n\
-             /reject <id> - reject a request\n\
-             \n\
-             Monitoring:\n\
-             /budget - show spending limits and current costs\n\
-             /peers - show OFP peer network status\n\
-             /a2a - list discovered external A2A agents\n\
-             \n\
-             /btw <question> - ask a side question (ephemeral, not saved to session)\n\
-             \n\
-             /start - show welcome message\n\
-             /help - show this help"
-            .to_string(),
+        "help" => crate::commands::channel_help_text(overrides),
         "status" => handle.uptime_info().await,
         "agents" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -4617,12 +4567,28 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("agents", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "agents",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("coder"));
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/agents"));
     }
 
@@ -4647,6 +4613,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -4904,6 +4871,50 @@ mod tests {
         assert_eq!(out, text);
     }
 
+    /// Names containing `]` / `[` / `*` are pathological because our naive
+    /// `starts_with("[name]")` idempotency check can misfire.
+    ///
+    /// Required behaviors verified here (per the doc-comment caveat):
+    ///   1. Function MUST NOT panic on bracket / asterisk in the name.
+    ///   2. Output MUST stay well-formed UTF-8.
+    ///   3. Worst-case degradation is "extra/duplicated prefix", never data
+    ///      loss or corruption of the body text.
+    #[test]
+    fn test_apply_agent_prefix_bracket_in_name_does_not_panic() {
+        // `]` inside the name. First call produces `[a]b] hello`.
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "a]b", "hello");
+        assert_eq!(out, "[a]b] hello");
+        assert!(out.is_char_boundary(out.len()));
+
+        // Second call: starts_with("[a]b]") matches because the literal is
+        // `[a]b]` and the text begins with that — this is the "lucky" case
+        // where the caveat doesn't bite. Idempotent here.
+        let out2 = apply_agent_prefix(PrefixStyle::Bracket, "a]b", &out);
+        assert_eq!(out2, "[a]b] hello");
+
+        // `[` inside the name — the documented worst case. Repeated calls
+        // legitimately stack a fresh prefix because `starts_with("[a[b]")`
+        // does NOT match `[a[b] [a[b] hello`. Body ("hello") is preserved.
+        let stacked = apply_agent_prefix(
+            PrefixStyle::Bracket,
+            "a[b",
+            &apply_agent_prefix(PrefixStyle::Bracket, "a[b", "hello"),
+        );
+        assert!(
+            stacked.ends_with("hello"),
+            "body must be preserved: {stacked}"
+        );
+        assert!(stacked.is_char_boundary(stacked.len()));
+
+        // `*` inside the name — bold style relies on `**[name]**`; an
+        // asterisk in the name produces `**[a*b]**` which still passes the
+        // `starts_with` check on a second invocation.
+        let bold = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", "hi");
+        assert_eq!(bold, "**[a*b]** hi");
+        let bold2 = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", &bold);
+        assert_eq!(bold2, bold);
+    }
+
     #[tokio::test]
     async fn test_maybe_prefix_response_off_is_byte_identical() {
         let agent_id = AgentId::new();
@@ -5133,7 +5144,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("btw", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "btw",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("Usage:"));
     }
 
@@ -5158,6 +5178,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -5175,8 +5196,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/btw"));
     }
 

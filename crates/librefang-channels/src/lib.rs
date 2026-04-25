@@ -8,6 +8,7 @@
 
 // Core infrastructure — always compiled
 pub mod bridge;
+pub mod commands;
 pub mod formatter;
 pub(crate) mod http_client;
 pub mod message_journal;

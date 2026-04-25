@@ -130,6 +130,25 @@ pub enum CronAction {
         /// a missing `wakeAgent` key are treated as "wake normally".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_check_script: Option<String>,
+        /// Pre-processing script: the agent loop runs this argv before the
+        /// scheduled prompt fires, captures stdout, and injects it into the
+        /// LLM context. Use it to split deterministic data fetching (HTTP
+        /// scrape, diff, computation) from the LLM reasoning step — saves
+        /// tokens and reduces hallucination risk.
+        ///
+        /// Distinct from the existing `pre_check_script` field: that one
+        /// gates whether the agent runs at all (via `{"wakeAgent": false}`),
+        /// this one feeds *additional context* to a normally-firing run.
+        /// Both can coexist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_script: Option<PreScript>,
+        /// Marker that, when present at the end of the agent's response,
+        /// suppresses the delivery (no Telegram message, no email, no
+        /// dashboard ping). Default is `"[SILENT]"`. Match is "last
+        /// non-empty trimmed line == marker" — strict, won't trigger if
+        /// the marker only appears mid-response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        silent_marker: Option<String>,
     },
     /// Trigger a workflow execution by ID or name.
     Workflow {
@@ -142,6 +161,187 @@ pub enum CronAction {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+}
+
+// ---------------------------------------------------------------------------
+// PreScript
+// ---------------------------------------------------------------------------
+
+/// Pre-processing script invocation spec.
+///
+/// `argv` is split form (no shell parsing). `argv[0]` MUST resolve
+/// to a file under `<home_dir>/scripts/` after canonicalization —
+/// the validator rejects absolute paths outside that allowlist or
+/// relative paths that escape it via `..`.
+///
+/// `cwd` defaults to the agent's workspace; relative paths in `cwd`
+/// are interpreted against the workspace root (resolved when the
+/// scheduler dispatcher launches the script in M2).
+///
+/// `env` entries are added on top of the daemon's environment.
+/// Use it to pass per-job secrets / endpoints; sensitive values
+/// should still go through `LIBREFANG_VAULT_KEY` instead of plain
+/// strings here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreScript {
+    /// Argv-split command. `argv[0]` is the executable, the rest are passed
+    /// verbatim as arguments (no shell expansion).
+    pub argv: Vec<String>,
+    /// Working directory for the spawned process. Resolved by the dispatcher
+    /// at execution time — the validator does not constrain `cwd` because
+    /// agent workspaces are not visible at config-validation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Extra environment variables layered on top of the daemon env. Empty
+    /// by default; use sparingly — prefer the vault for secrets.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+/// Errors returned by [`validate_pre_script`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PreScriptValidationError {
+    /// `argv` was empty — there is no command to run.
+    #[error("pre_script.argv must not be empty")]
+    EmptyArgv,
+    /// Resolved `argv[0]` canonicalized to a path outside the
+    /// `<home_dir>/scripts/` allowlist.
+    #[error(
+        "pre_script binary `{path}` is outside the scripts allowlist (must be under {home_dir})"
+    )]
+    OutsideAllowlist {
+        /// Resolved path that failed the allowlist check.
+        path: String,
+        /// The expected allowlist root (`<home_dir>/scripts`).
+        home_dir: String,
+    },
+    /// Resolved `argv[0]` does not exist on disk (canonicalize failed).
+    #[error("pre_script binary `{path}` does not exist")]
+    NotFound {
+        /// The path that could not be canonicalized.
+        path: String,
+    },
+    /// `env` contains a key from the dangerous-keys denylist (e.g.
+    /// `LD_PRELOAD`, `PATH`) that would defeat the path allowlist.
+    #[error("pre_script.env contains dangerous key `{key}` that would defeat the path allowlist")]
+    DangerousEnvKey {
+        /// The offending env key (preserved in original case for the user).
+        key: String,
+    },
+}
+
+/// Environment variable keys that, if attacker-controlled, defeat the
+/// path allowlist on `argv[0]`. Setting any of these in `PreScript.env`
+/// is rejected by `validate_pre_script`.
+///
+/// References:
+/// - `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` — glibc dynamic linker
+///   inject arbitrary code into the spawned process.
+/// - `DYLD_INSERT_LIBRARIES` / `DYLD_LIBRARY_PATH` / `DYLD_FALLBACK_LIBRARY_PATH`
+///   — Darwin equivalent.
+/// - `PATH` — `argv[0]` is allowlisted but PATH-rewriting hijacks any
+///   `subprocess.Popen("subcmd")` style call inside the script.
+/// - `IFS` — POSIX shell field-splitter rewrite.
+const DANGEROUS_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "PATH",
+    "IFS",
+];
+
+/// Returns true if `key` matches one of [`DANGEROUS_ENV_KEYS`] under an
+/// ASCII case-insensitive comparison.
+///
+/// Linux/macOS env keys are case-sensitive, but the danger keys are
+/// canonical uppercase; matching case-insensitively is defence-in-depth
+/// (a subprocess might lowercase / mixed-case the key) and matches
+/// Windows env semantics where keys are case-insensitive.
+fn is_dangerous_env_key(key: &str) -> bool {
+    DANGEROUS_ENV_KEYS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(key))
+}
+
+/// Reject any [`PreScript`] whose `env` contains a key on the
+/// dangerous-keys denylist. Path-independent: callable from contexts
+/// where the daemon home directory is not available.
+pub fn validate_pre_script_env(script: &PreScript) -> Result<(), PreScriptValidationError> {
+    for key in script.env.keys() {
+        if is_dangerous_env_key(key) {
+            return Err(PreScriptValidationError::DangerousEnvKey { key: key.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a [`PreScript`] against the home-directory allowlist.
+///
+/// `home_dir` is the daemon home (typically `~/.librefang`). The script's
+/// `argv[0]` must canonicalize to a path under `<home_dir>/scripts/`.
+/// Relative paths are joined onto `<home_dir>/scripts/` first, then
+/// canonicalized.
+///
+/// Rejects: empty argv, missing argv[0], paths that escape the scripts
+/// dir via `..`, symlinks pointing outside the allowlist (canonicalize
+/// follows symlinks). Component-level prefix comparison is used — a sibling
+/// directory like `<home_dir>/scripts-other` will not satisfy the allowlist
+/// even though its string representation shares the prefix.
+pub fn validate_pre_script(
+    script: &PreScript,
+    home_dir: &std::path::Path,
+) -> Result<(), PreScriptValidationError> {
+    // Reject dangerous env keys before touching the filesystem — fast fail and
+    // keeps the security check independent of the home directory existing.
+    validate_pre_script_env(script)?;
+
+    let argv0 = script
+        .argv
+        .first()
+        .ok_or(PreScriptValidationError::EmptyArgv)?;
+    if argv0.is_empty() {
+        return Err(PreScriptValidationError::EmptyArgv);
+    }
+
+    let scripts_root = home_dir.join("scripts");
+    let candidate = {
+        let p = std::path::Path::new(argv0);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            scripts_root.join(p)
+        }
+    };
+
+    // Canonicalize both sides so symlink targets and `..` traversal collapse
+    // to their real on-disk paths before the prefix comparison runs.
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|_| PreScriptValidationError::NotFound {
+            path: candidate.display().to_string(),
+        })?;
+    // The scripts root may not exist yet on a fresh install; treat that as
+    // "nothing is on the allowlist", which makes any path fail allowlist.
+    let allow_root =
+        scripts_root
+            .canonicalize()
+            .map_err(|_| PreScriptValidationError::OutsideAllowlist {
+                path: resolved.display().to_string(),
+                home_dir: scripts_root.display().to_string(),
+            })?;
+
+    // Component-level prefix check rejects e.g. `/home/X-other` vs `/home/X`.
+    if !resolved.starts_with(&allow_root) {
+        return Err(PreScriptValidationError::OutsideAllowlist {
+            path: resolved.display().to_string(),
+            home_dir: allow_root.display().to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +371,64 @@ pub enum CronDelivery {
 }
 
 // ---------------------------------------------------------------------------
+// CronDeliveryTarget (multi-destination fan-out)
+// ---------------------------------------------------------------------------
+
+/// A single destination for multi-destination cron output fan-out.
+///
+/// A cron job may declare zero or more `CronDeliveryTarget`s on its
+/// `delivery_targets` field. When the job fires and produces output, the
+/// delivery engine sends the same output to every target concurrently.
+/// Failures in one target do not abort delivery to the others.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CronDeliveryTarget {
+    /// Deliver via an existing channel adapter (Telegram/Slack/Discord/etc.).
+    Channel {
+        /// Which adapter to use (e.g. `"telegram"`, `"slack"`).
+        channel_type: String,
+        /// Platform-specific recipient (chat ID, user ID, etc.).
+        recipient: String,
+        /// Optional thread/topic id (e.g. Slack `thread_ts`, Telegram
+        /// forum-topic id). Reserved up front so adding it later does not
+        /// break persisted JSON. `None` preserves the historical behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        /// Optional adapter-key suffix used to disambiguate multiple
+        /// configured accounts of the same channel (e.g. two Slack
+        /// workspaces). Resolved into the `<channel>:<account_id>` adapter
+        /// lookup key by `LibreFangKernel::send_channel_message`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+    },
+    /// Deliver via HTTP POST to a webhook URL with a JSON payload.
+    Webhook {
+        /// Destination URL (`http://` or `https://`).
+        url: String,
+        /// Optional `Authorization` header value sent verbatim.
+        #[serde(default)]
+        auth_header: Option<String>,
+    },
+    /// Append or overwrite a local file on disk.
+    LocalFile {
+        /// Absolute or relative path to the output file.
+        path: String,
+        /// If `true`, append to the file; if `false`, overwrite.
+        #[serde(default)]
+        append: bool,
+    },
+    /// Deliver via the existing email channel adapter.
+    Email {
+        /// Recipient email address.
+        to: String,
+        /// Optional subject template (e.g. `"Cron: {job}"`). Literal `{job}`
+        /// placeholders are replaced with the job name at send time.
+        #[serde(default)]
+        subject_template: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // CronJob
 // ---------------------------------------------------------------------------
 
@@ -189,8 +447,13 @@ pub struct CronJob {
     pub schedule: CronSchedule,
     /// What to do when fired.
     pub action: CronAction,
-    /// Where to deliver the result.
+    /// Where to deliver the result (single legacy destination).
     pub delivery: CronDelivery,
+    /// Additional fan-out destinations. May be empty; each target is
+    /// delivered concurrently after the job produces its output. Failures in
+    /// one target do not abort delivery to the others.
+    #[serde(default)]
+    pub delivery_targets: Vec<CronDeliveryTarget>,
     /// Optional peer/user ID to use as the `SenderContext.user_id` when the
     /// job fires. When set, memory lookups keyed by peer (e.g.
     /// `peer:{user_id}:KEY`) will resolve correctly. Defaults to `None`
@@ -220,7 +483,25 @@ impl CronJob {
     /// `existing_count` is the number of jobs the owning agent already has
     /// (excluding this job if it already exists). Returns `Ok(())` or an
     /// error message describing the first validation failure.
+    ///
+    /// Forwards to [`CronJob::validate_with_home`] with `home_dir = None`,
+    /// meaning the dangerous-env-key denylist is enforced but the
+    /// `<home_dir>/scripts/` path allowlist is skipped (callers without
+    /// a daemon home directory in hand still get the security floor).
     pub fn validate(&self, existing_count: usize) -> Result<(), String> {
+        self.validate_with_home(existing_count, None)
+    }
+
+    /// Same as [`CronJob::validate`] but additionally enforces the
+    /// `<home_dir>/scripts/` path allowlist on any `pre_script.argv[0]`.
+    /// Pass the daemon home (typically `~/.librefang`) as `home_dir` from
+    /// production code paths; pass `None` only from tests or contexts
+    /// where the path check is intentionally deferred.
+    pub fn validate_with_home(
+        &self,
+        existing_count: usize,
+        home_dir: Option<&std::path::Path>,
+    ) -> Result<(), String> {
         // -- job count cap --
         if existing_count >= MAX_JOBS_PER_AGENT {
             return Err(format!(
@@ -253,10 +534,13 @@ impl CronJob {
         self.validate_schedule()?;
 
         // -- action --
-        self.validate_action()?;
+        self.validate_action(home_dir)?;
 
         // -- delivery --
         self.validate_delivery()?;
+
+        // -- delivery_targets (multi-destination fan-out) --
+        self.validate_delivery_targets()?;
 
         Ok(())
     }
@@ -294,7 +578,7 @@ impl CronJob {
         Ok(())
     }
 
-    fn validate_action(&self) -> Result<(), String> {
+    fn validate_action(&self, home_dir: Option<&std::path::Path>) -> Result<(), String> {
         match &self.action {
             CronAction::SystemEvent { text } => {
                 if text.is_empty() {
@@ -310,6 +594,7 @@ impl CronJob {
             CronAction::AgentTurn {
                 message,
                 timeout_secs,
+                pre_script,
                 ..
             } => {
                 if message.is_empty() {
@@ -331,6 +616,15 @@ impl CronJob {
                         return Err(format!(
                             "timeout_secs too large ({t}, max {MAX_TIMEOUT_SECS})"
                         ));
+                    }
+                }
+                // pre_script: env denylist always runs; path allowlist only
+                // runs when the caller supplied a daemon home directory.
+                if let Some(ps) = pre_script {
+                    if let Some(home) = home_dir {
+                        validate_pre_script(ps, home).map_err(|e| e.to_string())?;
+                    } else {
+                        validate_pre_script_env(ps).map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -386,6 +680,143 @@ impl CronJob {
         }
         Ok(())
     }
+
+    /// Validate the multi-destination `delivery_targets` list. Cron jobs are
+    /// reachable through the LLM tool surface and the dashboard, so the
+    /// path/host restrictions live here at the input boundary — by the
+    /// time a target reaches `cron_delivery::deliver_*` we trust it.
+    fn validate_delivery_targets(&self) -> Result<(), String> {
+        for (i, target) in self.delivery_targets.iter().enumerate() {
+            match target {
+                CronDeliveryTarget::Channel {
+                    channel_type,
+                    recipient,
+                    ..
+                } => {
+                    if channel_type.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: channel_type must not be empty"
+                        ));
+                    }
+                    if recipient.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: recipient must not be empty"
+                        ));
+                    }
+                }
+                CronDeliveryTarget::Webhook { url, .. } => {
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        return Err(format!(
+                            "delivery_targets[{i}]: webhook URL must start with http:// or https://"
+                        ));
+                    }
+                    if url.len() > MAX_WEBHOOK_URL_LEN {
+                        return Err(format!(
+                            "delivery_targets[{i}]: webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
+                            url.len()
+                        ));
+                    }
+                    // SSRF: refuse hosts that point at the daemon itself or
+                    // at cloud metadata services. Best-effort URL parse —
+                    // malformed URLs were already rejected by the scheme
+                    // prefix check above.
+                    if let Some(host) = extract_url_host(url) {
+                        if is_blocked_webhook_host(&host) {
+                            return Err(format!(
+                                "delivery_targets[{i}]: webhook host '{host}' is not allowed (loopback / link-local / metadata service)"
+                            ));
+                        }
+                    }
+                }
+                CronDeliveryTarget::LocalFile { path, .. } => {
+                    if path.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: file path must not be empty"
+                        ));
+                    }
+                    let p = std::path::Path::new(path);
+                    if p.is_absolute() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must be workspace-relative, not absolute ({path})"
+                        ));
+                    }
+                    // Windows drive-letter form (`C:\...` or `C:/...`) is
+                    // not flagged absolute on Unix — guard explicitly.
+                    let bytes = path.as_bytes();
+                    if bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && (bytes[2] == b'\\' || bytes[2] == b'/')
+                    {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must be workspace-relative ({path})"
+                        ));
+                    }
+                    if p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must not contain '..' ({path})"
+                        ));
+                    }
+                }
+                CronDeliveryTarget::Email { to, .. } => {
+                    if to.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: email recipient must not be empty"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Extract the lowercased host from a URL string. Returns `None` if the URL
+/// cannot be parsed. Used by webhook SSRF validation.
+fn extract_url_host(url: &str) -> Option<String> {
+    // Strip scheme.
+    let after_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    // Host runs until the next '/', '?', '#', or end-of-string.
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let host_part = &after_scheme[..host_end];
+    // Strip optional userinfo (user:pass@host).
+    let host_part = host_part.rsplit('@').next().unwrap_or(host_part);
+    // Strip optional port. IPv6 addresses are wrapped in `[...]` so a colon
+    // outside brackets is the port separator.
+    let host = if let Some(stripped) = host_part.strip_prefix('[') {
+        // IPv6 — keep the bracketed form for downstream matching.
+        let close = stripped.find(']')?;
+        &host_part[..=close + 1 - 1] // up to and including ']'
+    } else if let Some(colon) = host_part.find(':') {
+        &host_part[..colon]
+    } else {
+        host_part
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Hosts the daemon refuses to webhook to. Mirrors the dashboard editor
+/// so users see a consistent rejection regardless of where the target
+/// was created.
+fn is_blocked_webhook_host(host: &str) -> bool {
+    matches!(
+        host,
+        "localhost" | "metadata" | "metadata.google.internal" | "metadata.aws.amazon.com"
+    ) || host.starts_with("127.")
+        || host.starts_with("169.254.")
+        || host == "[::1]"
+        || host.starts_with("[fe80:")
+        || host.starts_with("fe80:")
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +876,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
             created_at: Utc::now(),
@@ -681,6 +1113,8 @@ mod tests {
             model_override: None,
             timeout_secs: None,
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("empty"), "{err}");
@@ -694,6 +1128,8 @@ mod tests {
             model_override: None,
             timeout_secs: None,
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too long"), "{err}");
@@ -707,6 +1143,8 @@ mod tests {
             model_override: None,
             timeout_secs: Some(9),
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too small"), "{err}");
@@ -720,6 +1158,8 @@ mod tests {
             model_override: None,
             timeout_secs: Some(601),
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too large"), "{err}");
@@ -733,6 +1173,8 @@ mod tests {
             model_override: Some("claude-haiku-4-5-20251001".into()),
             timeout_secs: Some(10),
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         assert!(job.validate(0).is_ok());
 
@@ -741,6 +1183,8 @@ mod tests {
             model_override: None,
             timeout_secs: Some(600),
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -753,6 +1197,8 @@ mod tests {
             model_override: None,
             timeout_secs: None,
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -882,6 +1328,8 @@ mod tests {
             model_override: None,
             timeout_secs: Some(30),
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"kind\":\"agent_turn\""));
@@ -1061,5 +1509,512 @@ mod tests {
         } else {
             panic!("expected Workflow variant");
         }
+    }
+
+    // -- CronDeliveryTarget serde --
+
+    #[test]
+    fn delivery_target_channel_roundtrip() {
+        let t = CronDeliveryTarget::Channel {
+            channel_type: "telegram".into(),
+            recipient: "12345".into(),
+            thread_id: None,
+            account_id: None,
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"channel\""), "tag missing: {s}");
+        assert!(s.contains("telegram"));
+        // `skip_serializing_if = "Option::is_none"` keeps the wire shape
+        // identical to the pre-thread_id payload so old persisted JSON
+        // round-trips unchanged.
+        assert!(!s.contains("thread_id"), "thread_id leaked when None: {s}");
+        assert!(
+            !s.contains("account_id"),
+            "account_id leaked when None: {s}"
+        );
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_channel_with_thread_and_account_roundtrip() {
+        let t = CronDeliveryTarget::Channel {
+            channel_type: "slack".into(),
+            recipient: "C123".into(),
+            thread_id: Some("1700000000.000100".into()),
+            account_id: Some("workspace-b".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"thread_id\":\"1700000000.000100\""));
+        assert!(s.contains("\"account_id\":\"workspace-b\""));
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_channel_legacy_payload_deserializes() {
+        // Pre-existing persisted payloads without thread_id/account_id must
+        // still deserialize cleanly thanks to #[serde(default)].
+        let json = r#"{"type":"channel","channel_type":"telegram","recipient":"12345"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::Channel {
+                channel_type: "telegram".into(),
+                recipient: "12345".into(),
+                thread_id: None,
+                account_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_target_webhook_roundtrip() {
+        let t = CronDeliveryTarget::Webhook {
+            url: "https://example.com/hook".into(),
+            auth_header: Some("Bearer x".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"webhook\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_webhook_default_no_auth() {
+        // auth_header should default to None when omitted.
+        let json = r#"{"type":"webhook","url":"https://x.test/h"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::Webhook {
+                url: "https://x.test/h".into(),
+                auth_header: None,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_target_localfile_roundtrip() {
+        let t = CronDeliveryTarget::LocalFile {
+            path: "/var/log/cron-out.log".into(),
+            append: true,
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"local_file\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_localfile_default_append() {
+        // append should default to false when omitted.
+        let json = r#"{"type":"local_file","path":"/tmp/out.log"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::LocalFile {
+                path: "/tmp/out.log".into(),
+                append: false,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_target_email_roundtrip() {
+        let t = CronDeliveryTarget::Email {
+            to: "alice@example.com".into(),
+            subject_template: Some("Report: {job}".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"email\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn cron_job_delivery_targets_default_empty() {
+        // Old persisted JSON without `delivery_targets` must still deserialize
+        // (the field has `#[serde(default)]`).
+        let json = serde_json::to_string(&valid_job()).unwrap();
+        // Strip the field to simulate an older payload.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("delivery_targets");
+        let stripped = serde_json::to_string(&v).unwrap();
+        let back: CronJob = serde_json::from_str(&stripped).unwrap();
+        assert!(back.delivery_targets.is_empty());
+    }
+
+    #[test]
+    fn cron_job_with_delivery_targets_roundtrip() {
+        let mut job = valid_job();
+        job.delivery_targets = vec![
+            CronDeliveryTarget::Channel {
+                channel_type: "slack".into(),
+                recipient: "C123".into(),
+                thread_id: None,
+                account_id: None,
+            },
+            CronDeliveryTarget::LocalFile {
+                path: "/tmp/out.log".into(),
+                append: true,
+            },
+        ];
+        let json = serde_json::to_string(&job).unwrap();
+        let back: CronJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.delivery_targets.len(), 2);
+        assert_eq!(back.delivery_targets, job.delivery_targets);
+    }
+
+    // -- PreScript validation --
+
+    /// Build a temp daemon home with `scripts/foo.sh` so the allowlist
+    /// check has a real on-disk anchor to canonicalize against.
+    fn fixture_home_with_script(name: &str) -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("tempdir");
+        let scripts = home.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let script_path = scripts.join(name);
+        std::fs::write(&script_path, "#!/bin/sh\necho hello\n").unwrap();
+        // Make it executable on Unix; on Windows the perm bits are no-ops
+        // but the validator only checks path location, not the +x bit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        home
+    }
+
+    #[test]
+    fn pre_script_validation_accepts_path_under_scripts_dir() {
+        let home = fixture_home_with_script("foo.sh");
+        let script = PreScript {
+            argv: vec!["foo.sh".into(), "--flag".into()],
+            cwd: None,
+            env: Default::default(),
+        };
+        validate_pre_script(&script, home.path()).expect("relative path under scripts/ accepted");
+
+        // Absolute path under the same root must also pass.
+        let abs = home.path().join("scripts").join("foo.sh");
+        let script_abs = PreScript {
+            argv: vec![abs.to_string_lossy().into_owned()],
+            cwd: None,
+            env: Default::default(),
+        };
+        validate_pre_script(&script_abs, home.path()).expect("absolute path under scripts/ ok");
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_outside_allowlist() {
+        let home = fixture_home_with_script("foo.sh");
+        // Pick a path that exists on every supported platform so we hit
+        // the allowlist branch rather than NotFound.
+        #[cfg(unix)]
+        let outside = "/bin/sh";
+        #[cfg(not(unix))]
+        let outside =
+            std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        let script = PreScript {
+            argv: vec![outside.to_string()],
+            cwd: None,
+            env: Default::default(),
+        };
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::OutsideAllowlist { .. }) => {}
+            other => panic!("expected OutsideAllowlist, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_dot_dot_escape() {
+        let home = fixture_home_with_script("foo.sh");
+        // `scripts/../foo.sh` would resolve to `<home>/foo.sh`, which is
+        // outside `<home>/scripts/`. Place a real file there to make sure
+        // the rejection comes from the allowlist check, not NotFound.
+        std::fs::write(home.path().join("escape.sh"), "#!/bin/sh\n").unwrap();
+        let script = PreScript {
+            argv: vec!["../escape.sh".into()],
+            cwd: None,
+            env: Default::default(),
+        };
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::OutsideAllowlist { .. }) => {}
+            other => panic!("expected OutsideAllowlist for `..` escape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_empty_argv() {
+        let home = fixture_home_with_script("foo.sh");
+        let script = PreScript {
+            argv: vec![],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert_eq!(
+            validate_pre_script(&script, home.path()),
+            Err(PreScriptValidationError::EmptyArgv)
+        );
+
+        // Also reject an explicit empty string at argv[0].
+        let script2 = PreScript {
+            argv: vec![String::new()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert_eq!(
+            validate_pre_script(&script2, home.path()),
+            Err(PreScriptValidationError::EmptyArgv)
+        );
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_nonexistent_path() {
+        let home = fixture_home_with_script("foo.sh");
+        let script = PreScript {
+            argv: vec!["does-not-exist.sh".into()],
+            cwd: None,
+            env: Default::default(),
+        };
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::NotFound { .. }) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    // -- CronAction::AgentTurn serde compat --
+
+    #[test]
+    fn cron_action_agent_turn_serde_round_trip_with_pre_script() {
+        // Full round-trip via TOML to cover the user-facing config format,
+        // plus JSON for the persisted DashMap path.
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let action = CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: Some(60),
+            pre_check_script: None,
+            pre_script: Some(PreScript {
+                argv: vec!["scripts/poll.sh".into(), "--once".into()],
+                cwd: Some("/tmp/work".into()),
+                env,
+            }),
+            silent_marker: Some("[QUIET]".into()),
+        };
+        let toml_str = toml::to_string(&action).unwrap();
+        let back_toml: CronAction = toml::from_str(&toml_str).unwrap();
+        let json_str = serde_json::to_string(&action).unwrap();
+        let back_json: CronAction = serde_json::from_str(&json_str).unwrap();
+        for back in [back_toml, back_json] {
+            match back {
+                CronAction::AgentTurn {
+                    pre_script: Some(ps),
+                    silent_marker: Some(sm),
+                    ..
+                } => {
+                    assert_eq!(ps.argv, vec!["scripts/poll.sh", "--once"]);
+                    assert_eq!(ps.cwd.as_deref(), Some("/tmp/work"));
+                    assert_eq!(ps.env.get("FOO").map(String::as_str), Some("bar"));
+                    assert_eq!(sm, "[QUIET]");
+                }
+                other => panic!("round-trip lost pre_script/silent_marker: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cron_action_agent_turn_serde_compat_no_pre_script() {
+        // Pre-existing config payloads (no pre_script / silent_marker keys)
+        // must still deserialize cleanly thanks to #[serde(default)].
+        let json = r#"{
+            "kind": "agent_turn",
+            "message": "hello",
+            "model_override": null,
+            "timeout_secs": null
+        }"#;
+        let back: CronAction = serde_json::from_str(json).unwrap();
+        match back {
+            CronAction::AgentTurn {
+                pre_script,
+                silent_marker,
+                ..
+            } => {
+                assert!(pre_script.is_none());
+                assert!(silent_marker.is_none());
+            }
+            other => panic!("expected AgentTurn, got {other:?}"),
+        }
+    }
+
+    // -- PreScript dangerous-env denylist (review fix for PR #3145) --
+
+    fn pre_script_with_env(home: &std::path::Path, key: &str, value: &str) -> PreScript {
+        let scripts = home.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let script_path = scripts.join("safe.sh");
+        if !script_path.exists() {
+            std::fs::write(&script_path, "#!/bin/sh\n").unwrap();
+        }
+        let mut env = std::collections::HashMap::new();
+        env.insert(key.into(), value.into());
+        PreScript {
+            argv: vec!["safe.sh".into()],
+            cwd: None,
+            env,
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_ld_preload() {
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "LD_PRELOAD", "/tmp/evil.so");
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::DangerousEnvKey { key }) => {
+                assert_eq!(key, "LD_PRELOAD");
+            }
+            other => panic!("expected DangerousEnvKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_path_override() {
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "PATH", "/tmp/evil:/bin");
+        assert!(matches!(
+            validate_pre_script(&script, home.path()),
+            Err(PreScriptValidationError::DangerousEnvKey { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_dyld_insert() {
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib");
+        assert!(matches!(
+            validate_pre_script(&script, home.path()),
+            Err(PreScriptValidationError::DangerousEnvKey { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_dangerous_env_case_insensitive() {
+        // ASCII case-insensitive matching: `Ld_Preload` is rejected even
+        // though the canonical form is uppercase. Mirrors the Windows env
+        // semantics and defends against subprocesses that lowercase keys.
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "Ld_Preload", "/tmp/evil.so");
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::DangerousEnvKey { key }) => {
+                assert_eq!(key, "Ld_Preload", "original casing preserved in error");
+            }
+            other => panic!("expected DangerousEnvKey for mixed case, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_accepts_safe_env_keys() {
+        // Arbitrary non-denylist keys must round-trip cleanly. Specifically
+        // includes names that *contain* substrings of denylist entries
+        // (`HOME_OVERRIDE` ⊃ no denylist match) to confirm we match whole
+        // keys, not substrings.
+        let home = fixture_home_with_script("safe.sh");
+        let mut env = std::collections::HashMap::new();
+        env.insert("MY_API_KEY".into(), "secret".into());
+        env.insert("HOME_OVERRIDE".into(), "/tmp/work".into());
+        env.insert("CUSTOM_LD_FLAG".into(), "x".into());
+        let script = PreScript {
+            argv: vec!["safe.sh".into()],
+            cwd: None,
+            env,
+        };
+        validate_pre_script(&script, home.path())
+            .expect("safe env keys must pass dangerous-key denylist");
+    }
+
+    #[test]
+    fn cron_job_validate_rejects_pre_script_with_dangerous_env() {
+        // End-to-end: a cron job carrying a poisoned pre_script.env is
+        // rejected at the `CronJob::validate` boundary so ill-formed
+        // payloads never reach the scheduler. Path allowlist is skipped
+        // here (home_dir = None) but the env denylist still fires.
+        let mut env = std::collections::HashMap::new();
+        env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
+        let mut job = valid_job();
+        job.action = CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: Some(PreScript {
+                argv: vec!["scripts/safe.sh".into()],
+                cwd: None,
+                env,
+            }),
+            silent_marker: None,
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(
+            err.contains("LD_PRELOAD") && err.contains("dangerous"),
+            "expected dangerous-key error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cron_job_validate_with_home_rejects_pre_script_outside_allowlist() {
+        // Companion test: when home_dir IS provided, both env denylist and
+        // path allowlist run. A path-escape with a benign env still fails
+        // on the path check, proving the path branch is wired up.
+        let home = fixture_home_with_script("safe.sh");
+        let mut job = valid_job();
+        #[cfg(unix)]
+        let outside = "/bin/sh".to_string();
+        #[cfg(not(unix))]
+        let outside =
+            std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        job.action = CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: Some(PreScript {
+                argv: vec![outside],
+                cwd: None,
+                env: Default::default(),
+            }),
+            silent_marker: None,
+        };
+        let err = job.validate_with_home(0, Some(home.path())).unwrap_err();
+        assert!(
+            err.contains("allowlist"),
+            "expected allowlist error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn silent_marker_default_via_serde_skip() {
+        // `silent_marker: None` must NOT appear in serialized output so the
+        // wire shape stays identical to legacy payloads.
+        let action = CronAction::AgentTurn {
+            message: "hi".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(
+            !json.contains("silent_marker"),
+            "silent_marker leaked when None: {json}"
+        );
+        assert!(
+            !json.contains("pre_script"),
+            "pre_script leaked when None: {json}"
+        );
     }
 }

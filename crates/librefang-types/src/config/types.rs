@@ -1253,6 +1253,17 @@ pub struct TelemetryConfig {
     pub sample_rate: f64,
     /// Enable Prometheus metrics endpoint at /api/metrics.
     pub prometheus_enabled: bool,
+    /// Auto-start the bundled observability Docker stack (Grafana, Prometheus,
+    /// Tempo, OTel collector) on daemon boot. Default: `false`.
+    ///
+    /// Off by default because spinning up four containers on every `librefang
+    /// start` is a strong implicit side-effect — operators usually prefer
+    /// `librefang start` to leave the host untouched. Existing dashboards /
+    /// custom OTel collectors keep working as long as `otlp_endpoint` points
+    /// at them; the stack is only useful for the bundled local view.
+    ///
+    /// Issue #3136.
+    pub auto_start_observability_stack: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -1263,6 +1274,7 @@ impl Default for TelemetryConfig {
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
+            auto_start_observability_stack: false,
         }
     }
 }
@@ -2046,6 +2058,15 @@ pub struct KernelConfig {
     /// autonomous agents. `None` means "use the compiled-in default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_max_iterations: Option<u32>,
+    /// Operator override for the agent message-history trim cap. When set,
+    /// any agent without its own `max_history_messages` uses this value
+    /// instead of the compiled-in default
+    /// (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound
+    /// per-turn token cost; raise it for long-context models. `None` means
+    /// "use the compiled-in default". Values below 4 are silently clamped
+    /// at runtime with a warning log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_history_messages: Option<usize>,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -2434,6 +2455,10 @@ pub struct KernelConfig {
     /// in `tool_invoke.allowlist`.
     #[serde(default)]
     pub tool_invoke: ToolInvokeConfig,
+    /// Parallel-tool dispatcher configuration. PR-3 schema only — runtime
+    /// integration lands in PR-4. See [`ParallelToolsConfig`].
+    #[serde(default)]
+    pub parallel_tools: ParallelToolsConfig,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3970,6 +3995,7 @@ impl Default for KernelConfig {
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
             agent_max_iterations: None,
+            max_history_messages: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
@@ -4062,6 +4088,7 @@ impl Default for KernelConfig {
             max_request_body_bytes: default_max_request_body_bytes(),
             terminal: TerminalConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
+            parallel_tools: ParallelToolsConfig::default(),
         }
     }
 }
@@ -5624,8 +5651,13 @@ impl Default for WeChatConfig {
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
-    /// Revolt API URL.
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
     pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -5641,6 +5673,8 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -6471,6 +6505,59 @@ impl ToolInvokeConfig {
     }
 }
 
+/// Configuration for the agent loop's parallel tool dispatcher.
+///
+/// PR-3 ships the schema only; the agent loop still runs tool calls
+/// strictly sequentially. PR-4 wires the dispatcher into the runtime
+/// and PR-5 flips `enabled` on by default.
+///
+/// ```toml
+/// [parallel_tools]
+/// enabled = false
+/// max_concurrent = 4
+/// mcp_default_safety = "write_shared"   # or "read_only"
+/// mcp_readonly_allowlist = ["mcp__github__list_issues"]
+/// ```
+///
+/// Falls back to fully sequential execution when `enabled = false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ParallelToolsConfig {
+    /// Master switch. Default `false` so PR-3 ships with no behaviour
+    /// change. PR-5 will flip the default to `true` after the streaming
+    /// dispatcher integration lands.
+    pub enabled: bool,
+
+    /// Cap on concurrent tool calls within a single bucket. `0` =
+    /// uncapped (use the bucket size). The dispatcher honours this
+    /// when launching futures via `join_all`.
+    pub max_concurrent: u32,
+
+    /// Default `ParallelSafety` class assigned to MCP tools whose
+    /// servers don't carry `readOnlyHint` annotations. Conservative
+    /// default `"write_shared"` keeps unannotated MCP tools serialised
+    /// (one per bucket) instead of optimistically parallelising.
+    /// Accepted values: `"read_only"` | `"write_shared"`. PR-4 will
+    /// promote this to a typed enum once the dispatcher consumes it.
+    pub mcp_default_safety: String,
+
+    /// Explicit allowlist of MCP tool names that should be treated as
+    /// `ReadOnly` regardless of `mcp_default_safety`. Names match the
+    /// fully-namespaced form (`mcp__server__name`).
+    pub mcp_readonly_allowlist: Vec<String>,
+}
+
+impl Default for ParallelToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent: 4,
+            mcp_default_safety: "write_shared".to_string(),
+            mcp_readonly_allowlist: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6831,5 +6918,70 @@ max_tokens_per_hour = 500000
         let back = toml::to_string(&c).unwrap();
         let again: ToolInvokeConfig = toml::from_str(&back).unwrap();
         assert_eq!(c, again);
+    }
+
+    // -------- ParallelToolsConfig (PR-3 schema only) --------
+
+    #[test]
+    fn parallel_tools_default_is_disabled() {
+        let c = ParallelToolsConfig::default();
+        assert!(!c.enabled, "PR-3 must ship with the dispatcher off");
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
+
+        // KernelConfig::default() must wire the field through.
+        let cfg = KernelConfig::default();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+    }
+
+    #[test]
+    fn parallel_tools_serde_round_trip() {
+        let original = ParallelToolsConfig {
+            enabled: true,
+            max_concurrent: 8,
+            mcp_default_safety: "read_only".to_string(),
+            mcp_readonly_allowlist: vec![
+                "mcp__github__list_issues".to_string(),
+                "mcp__fs__read_file".to_string(),
+            ],
+        };
+
+        // TOML round-trip.
+        let toml_str = toml::to_string(&original).unwrap();
+        let from_toml: ParallelToolsConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(from_toml, original);
+
+        // JSON round-trip.
+        let json_str = serde_json::to_string(&original).unwrap();
+        let from_json: ParallelToolsConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(from_json, original);
+    }
+
+    #[test]
+    fn parallel_tools_missing_in_kernel_config_uses_default() {
+        // Old config.toml predating PR-3 has no [parallel_tools] section.
+        // KernelConfig deserialisation must hydrate the field with Default.
+        let toml_str = r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+        assert!(!cfg.parallel_tools.enabled);
+    }
+
+    #[test]
+    fn parallel_tools_partial_section_fills_remaining_with_default() {
+        // User supplies only `enabled = true`; remaining fields fall back
+        // to Default — verifies #[serde(default)] on the struct itself.
+        let toml_str = r#"
+            enabled = true
+        "#;
+        let c: ParallelToolsConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
     }
 }

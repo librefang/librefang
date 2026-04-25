@@ -4,7 +4,9 @@ import {
   searchMemories,
   getMemoryStats,
   getMemoryConfig,
+  getAgentKvMemory,
   type MemoryItem,
+  type AgentKvPair,
 } from "../http/client";
 import { healthDetailQueryOptions } from "./runtime";
 import { memoryKeys } from "./keys";
@@ -13,6 +15,7 @@ import { withOverrides, type QueryOverrides } from "./options";
 const REFRESH_MS = 30_000;
 const STALE_MS = 30_000;
 const CONFIG_STALE_MS = 300_000;
+const KV_STALE_MS = 30_000;
 
 export const memoryQueries = {
 
@@ -33,8 +36,18 @@ export const memoryQueries = {
 
 
 
+// Propagates `proactive_enabled` from the list endpoint so the page can
+// decide whether to render proactive sections without making a second
+// request. The search endpoint does not expose this flag today; in search
+// mode we leave it `undefined` and let the page rely on the list-mode
+// response (search is hidden when proactive is disabled, so this never
+// becomes ambiguous in practice).
 export const memorySearchOrListQueryOptions = (search: string) =>
-  queryOptions<{ memories: MemoryItem[]; total: number }>({
+  queryOptions<{
+    memories: MemoryItem[];
+    total: number;
+    proactive_enabled?: boolean;
+  }>({
     queryKey: memoryKeys.searchOrList(search),
     queryFn: async () => {
       if (search.trim()) {
@@ -42,7 +55,11 @@ export const memorySearchOrListQueryOptions = (search: string) =>
         return { memories: items, total: items.length };
       }
       const res = await listMemories({ offset: 0, limit: 10000 });
-      return { memories: res.memories ?? [], total: res.total ?? 0 };
+      return {
+        memories: res.memories ?? [],
+        total: res.total ?? 0,
+        proactive_enabled: res.proactive_enabled,
+      };
     },
     staleTime: STALE_MS,
     refetchInterval: REFRESH_MS,
@@ -50,6 +67,25 @@ export const memorySearchOrListQueryOptions = (search: string) =>
 
 export function useMemorySearchOrList(search: string) {
   return useQuery(memorySearchOrListQueryOptions(search));
+}
+
+// Per-agent KV memory store. Independent of proactive memory — works even
+// when `[proactive_memory] enabled = false`. Returns `kv_pairs` directly
+// (server already returns `{kv_pairs: [...]}`); we normalize undefined to
+// an empty array so consumers can iterate without null checks.
+export const agentKvMemoryQueryOptions = (agentId: string) =>
+  queryOptions<AgentKvPair[]>({
+    queryKey: memoryKeys.agentKv(agentId),
+    queryFn: async () => {
+      const res = await getAgentKvMemory(agentId);
+      return res.kv_pairs ?? [];
+    },
+    enabled: !!agentId,
+    staleTime: KV_STALE_MS,
+  });
+
+export function useAgentKvMemory(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentKvMemoryQueryOptions(agentId), options));
 }
 
 export function useMemoryStats(agentId?: string) {

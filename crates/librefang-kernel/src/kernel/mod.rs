@@ -307,6 +307,8 @@ pub struct LibreFangKernel {
     pub(crate) event_bus: EventBus,
     /// Session lifecycle event bus (push-based pub/sub for session-scoped events).
     pub(crate) session_lifecycle_bus: Arc<crate::session_lifecycle::SessionLifecycleBus>,
+    /// Per-session stream-event hub for multi-client SSE attach.
+    pub(crate) session_stream_hub: Arc<crate::session_stream_hub::SessionStreamHub>,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
@@ -477,6 +479,8 @@ pub struct LibreFangKernel {
     approval_sweep_started: AtomicBool,
     /// Idempotency guard for the task-board stuck-task sweeper (issue #2923).
     task_board_sweep_started: AtomicBool,
+    /// Idempotency guard for the session-stream-hub idle GC task.
+    session_stream_hub_gc_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -1115,6 +1119,54 @@ impl LibreFangKernel {
         });
     }
 
+    /// Spawn the session-stream-hub idle GC loop.
+    ///
+    /// `SessionStreamHub` lazily creates a broadcast sender per session on
+    /// first publish or first attach. Without periodic pruning, the senders
+    /// map grows unbounded under churn (many short-lived sessions, many
+    /// reconnects). This task calls `gc_idle()` every 60s to drop entries
+    /// with zero live receivers.
+    ///
+    /// Idempotent: re-calling while already running is a no-op.
+    pub fn spawn_session_stream_hub_gc_task(self: Arc<Self>) {
+        let handle = tokio::runtime::Handle::current();
+        if self
+            .session_stream_hub_gc_started
+            .swap(true, Ordering::AcqRel)
+        {
+            debug!("Session stream hub GC task already running");
+            return;
+        }
+
+        let kernel = Arc::clone(&self);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the immediate first tick — nothing to GC at boot.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pruned = kernel.session_stream_hub.gc_idle();
+                        if pruned > 0 {
+                            tracing::debug!(pruned, "Session stream hub GC pruned idle sessions");
+                        }
+                    }
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            kernel
+                .session_stream_hub_gc_started
+                .store(false, Ordering::Release);
+            tracing::debug!("Session stream hub GC task stopped");
+        });
+    }
+
     /// Skill registry (RwLock — hot-reload on install/uninstall).
     #[inline]
     pub fn skill_registry_ref(
@@ -1635,6 +1687,15 @@ impl LibreFangKernel {
 }
 
 impl LibreFangKernel {
+    /// Per-session stream-event hub (multi-client SSE attach).
+    ///
+    /// API handlers use this to subscribe attaching clients to a session's
+    /// in-flight `StreamEvent` flow. Returns the shared `Arc` so subscribers
+    /// outlive any individual turn.
+    pub fn session_stream_hub(&self) -> Arc<crate::session_stream_hub::SessionStreamHub> {
+        Arc::clone(&self.session_stream_hub)
+    }
+
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
         let config = load_config(config_path);
@@ -1799,9 +1860,13 @@ impl LibreFangKernel {
                 config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
                 if !config.provider_urls.contains_key("ollama") {
+                    // Use 127.0.0.1: on macOS `localhost` resolves to ::1 first
+                    // and Ollama only binds IPv4, so the IPv6 attempt fails
+                    // without reliable fallback. See PROVIDER_REGISTRY in
+                    // librefang-llm-drivers for the same reasoning.
                     config.provider_urls.insert(
                         "ollama".to_string(),
-                        "http://localhost:11434/v1".to_string(),
+                        "http://127.0.0.1:11434/v1".to_string(),
                     );
                 }
             } else {
@@ -2643,6 +2708,7 @@ impl LibreFangKernel {
             session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
                 256,
             )),
+            session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
@@ -2725,6 +2791,7 @@ impl LibreFangKernel {
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             task_board_sweep_started: AtomicBool::new(false),
+            session_stream_hub_gc_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir
@@ -2787,6 +2854,29 @@ impl LibreFangKernel {
         // Initialize prompt store
         let _ = kernel.prompt_store.set(prompt_store);
 
+        // Pre-load persisted hand instance configs so the per-agent drift
+        // detection below can re-render the `## User Configuration` settings
+        // tail after overwriting the DB manifest with the bare disk TOML.
+        // Without this, every restart strips configured settings from the
+        // system prompt of any hand-spawned agent until somebody manually
+        // re-runs `hand activate` (issue: settings drift on restart).
+        //
+        // Hand instances themselves aren't restored into `hand_registry` yet
+        // — that happens later in `start_background_agents` via
+        // `activate_hand_with_id`. Reading `hand_state.json` directly is the
+        // cheapest way to recover the user-chosen config at this point in
+        // boot.
+        let persisted_hand_configs: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, serde_json::Value>,
+        > = {
+            let state_path = cfg.home_dir.join("data").join("hand_state.json");
+            librefang_hands::registry::HandRegistry::load_state(&state_path)
+                .into_iter()
+                .map(|e| (e.hand_id, e.config))
+                .collect()
+        };
+
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
             Ok(agents) => {
@@ -2836,19 +2926,47 @@ impl LibreFangKernel {
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
                             Ok(toml_str) => {
-                                // Try parsing as AgentManifest first; fall back to
-                                // extracting from a hand.toml (HandDefinition format).
-                                let parsed =
-                                    toml::from_str::<librefang_types::agent::AgentManifest>(
-                                        &toml_str,
-                                    )
-                                    .ok()
-                                    .or_else(|| extract_manifest_from_hand_toml(&toml_str, &name));
+                                // Try the hand-extraction path FIRST, then fall back
+                                // to parsing as a flat AgentManifest.
+                                //
+                                // Order matters: AgentManifest deserialization is lenient
+                                // and will silently accept a hand.toml as a "partial"
+                                // AgentManifest, picking up top-level `name`/`description`
+                                // and defaulting `model.system_prompt` to the
+                                // ModelConfig::default() stub ("You are a helpful AI agent.")
+                                // because the real prompt is nested under `[agents.<role>.model]`
+                                // and never reached. The hand-extraction path correctly walks
+                                // the nested structure; HandDefinition deserialization requires
+                                // top-level `id` + `category` so it cleanly returns None for
+                                // standalone agent.toml files.
+                                let parsed = extract_manifest_from_hand_toml(&toml_str, &name)
+                                    .or_else(|| {
+                                        toml::from_str::<librefang_types::agent::AgentManifest>(
+                                            &toml_str,
+                                        )
+                                        .ok()
+                                    });
                                 match parsed {
                                     Some(mut disk_manifest) => {
-                                        // Compare key fields to detect changes
-                                        let changed = serde_json::to_value(&disk_manifest).ok()
-                                            != serde_json::to_value(&entry.manifest).ok();
+                                        // Compare manifests on a projection that strips
+                                        // every known runtime-rendered prompt tail
+                                        // (## User Configuration, ## Reference Knowledge,
+                                        // ## Your Team) before serialization. The disk
+                                        // TOML never carries any of these (they are
+                                        // re-rendered at activation/drift time), so a
+                                        // raw diff would always trigger on
+                                        // hand-with-rendered-tail agents and clobber the
+                                        // DB blob with the bare TOML on every restart.
+                                        // Comparing on the projection means drift only
+                                        // fires when the *source* TOML genuinely
+                                        // diverged from the DB form.
+                                        let changed =
+                                            serde_json::to_value(manifest_for_diff(&disk_manifest))
+                                                .ok()
+                                                != serde_json::to_value(manifest_for_diff(
+                                                    &entry.manifest,
+                                                ))
+                                                .ok();
                                         if changed {
                                             info!(
                                                 agent = %name,
@@ -2863,13 +2981,150 @@ impl LibreFangKernel {
                                             if disk_manifest.tags.is_empty() {
                                                 disk_manifest.tags = entry.manifest.tags.clone();
                                             }
+                                            // Always preserve the canonical name. For hand-derived
+                                            // agents the DB name is "{hand_id}:{manifest.name}"
+                                            // (stamped at hand activation — grep for
+                                            // `format!("{hand_id}:{}", manifest.name)`) while the
+                                            // TOML only carries the bare "{manifest.name}". Letting
+                                            // the disk version overwrite the canonical name here
+                                            // would break `find_by_name` lookups, channel routing,
+                                            // and peer discovery — all of which key on the colon
+                                            // form. Mirrors the runtime hot-reload path lower in
+                                            // this file.
+                                            disk_manifest.name = entry.manifest.name.clone();
                                             entry.manifest = disk_manifest;
+
+                                            // Re-render the `## User Configuration` tail that the
+                                            // bare disk TOML never carries. Without this, a hand
+                                            // with `[[settings]]` silently loses its configured
+                                            // values from the system prompt on every restart, and
+                                            // the agent improvises (or fails) until somebody
+                                            // re-activates the hand by hand. Mirrors the activation
+                                            // path in `activate_hand_with_id`.
+                                            // The AgentEntry.tags field is not persisted to SQLite
+                                            // (see librefang-memory/src/structured.rs::load_agent
+                                            // which always returns tags = vec![]); the actual
+                                            // hand membership tag lives on manifest.tags. Read
+                                            // there to identify the owning hand. We use the DB
+                                            // (entry.manifest before the swap to disk_manifest)
+                                            // because the disk TOML manifest typically doesn't
+                                            // carry the runtime-stamped `hand:<id>` tag either.
+                                            if let Some(hand_id) = entry
+                                                .manifest
+                                                .tags
+                                                .iter()
+                                                .find_map(|t| t.strip_prefix("hand:"))
+                                                .map(|s| s.to_string())
+                                            {
+                                                if let Some(def) =
+                                                    kernel.hand_registry.get_definition(&hand_id)
+                                                {
+                                                    if !def.settings.is_empty() {
+                                                        let empty =
+                                                            std::collections::HashMap::new();
+                                                        let cfg_for_settings =
+                                                            persisted_hand_configs
+                                                                .get(&hand_id)
+                                                                .unwrap_or(&empty);
+                                                        let _ = apply_settings_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &def.settings,
+                                                            cfg_for_settings,
+                                                        );
+                                                    }
+
+                                                    // Re-render `## Reference Knowledge` and
+                                                    // `## Your Team` tails — like the settings
+                                                    // tail above, the bare disk TOML never
+                                                    // carries them, so without re-rendering
+                                                    // here the agent silently loses skill
+                                                    // discoverability and peer awareness on
+                                                    // every restart. Helpers are
+                                                    // unconditionally idempotent: empty skill
+                                                    // content / single-agent hand / no peers
+                                                    // all collapse to a strip-only call that
+                                                    // also clears any stale tail left over
+                                                    // from when the hand previously had
+                                                    // those.
+                                                    //
+                                                    // Recover the agent's role from the
+                                                    // `hand_role:<role>` tag stamped at
+                                                    // activation. Skip silently when the tag
+                                                    // is missing — the agent isn't
+                                                    // hand-derived in a way we recognise, and
+                                                    // the activation path will re-stamp the
+                                                    // tags on the next `hand activate`.
+                                                    let role_opt = entry
+                                                        .manifest
+                                                        .tags
+                                                        .iter()
+                                                        .find_map(|t| t.strip_prefix("hand_role:"))
+                                                        .map(|s| s.to_string());
+                                                    if let Some(role) = role_opt {
+                                                        apply_skill_reference_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &role,
+                                                            &def,
+                                                        );
+                                                        apply_team_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &role,
+                                                            &def,
+                                                        );
+                                                    } else {
+                                                        // Hand membership is known (we're inside
+                                                        // the `hand:<id>` branch) but the role tag
+                                                        // wasn't stamped — this agent will boot
+                                                        // without skill discoverability or peer
+                                                        // awareness until somebody re-runs
+                                                        // `hand activate`. Log so the silent
+                                                        // degradation is at least greppable.
+                                                        debug!(
+                                                            agent = %name,
+                                                            hand = %hand_id,
+                                                            "hand_role:<role> tag missing on \
+                                                             hand-derived agent; skipping skill/team \
+                                                             tail re-render until next hand activate"
+                                                        );
+                                                    }
+                                                }
+                                            }
+
                                             // Persist the update back to DB
                                             if let Err(e) = kernel.memory.save_agent(&entry) {
                                                 warn!(
                                                     agent = %name,
                                                     "Failed to persist TOML update: {e}"
                                                 );
+                                            }
+
+                                            // Re-materialize named workspaces and rewrite TOOLS.md
+                                            // so a HAND.toml gaining `[agents.<role>.workspaces]`
+                                            // (or any other manifest change that affects what's
+                                            // injected into TOOLS.md) takes effect on `restart`
+                                            // without forcing a hand deactivate/reactivate cycle —
+                                            // which would destroy triggers, cron jobs, and runtime
+                                            // sessions. Both helpers are idempotent: the dir is
+                                            // create_dir_all'd, TOOLS.md is force-rewritten with
+                                            // truncate, and user-editable identity files use
+                                            // create_new so manual edits are preserved.
+                                            //
+                                            // Skip when workspace is None — a manifest without a
+                                            // resolved workspace path has never been spawned, so
+                                            // the normal spawn flow at register_agent() will run
+                                            // these helpers when activation eventually happens.
+                                            if let Some(ref ws_dir) = entry.manifest.workspace {
+                                                let resolved_workspaces = ensure_named_workspaces(
+                                                    &cfg.effective_workspaces_dir(),
+                                                    &entry.manifest.workspaces,
+                                                );
+                                                if entry.manifest.generate_identity_files {
+                                                    generate_identity_files(
+                                                        ws_dir,
+                                                        &entry.manifest,
+                                                        &resolved_workspaces,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -4044,6 +4299,12 @@ system_prompt = "You are a helpful assistant."
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
                 is_group: false,
                 was_mentioned: false,
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -4118,6 +4379,7 @@ system_prompt = "You are a helpful assistant."
                 allowed_tools: None,
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: self.config.load().agent_max_iterations,
+                max_history_messages: self.config.load().max_history_messages,
             },
         )
         .await
@@ -4831,6 +5093,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools,
             interrupt: Some(interrupt),
             max_iterations: self.config.load().agent_max_iterations,
+            max_history_messages: self.config.load().max_history_messages,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -4898,6 +5161,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
+            max_history_messages: self.config.load().max_history_messages,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -4961,7 +5225,12 @@ system_prompt = "You are a helpful assistant."
 
         // Non-LLM modules: execute non-streaming and emit results as stream events
         if is_wasm || is_python {
-            let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+            // Fan out to the session hub so attached clients see the
+            // synthesized text delta + complete event for non-LLM agents too.
+            let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
+                &self.session_stream_hub,
+                entry.session_id,
+            );
             let kernel_clone = Arc::clone(self);
             let message_owned = message.to_string();
             let entry_clone = entry.clone();
@@ -5128,7 +5397,10 @@ system_prompt = "You are a helpful assistant."
                 .filter(|w| *w > 0)
         });
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
+            &self.session_stream_hub,
+            effective_session_id,
+        );
         let mut manifest = entry.manifest.clone();
 
         // Inject model_supports_tools for auto web search augmentation
@@ -5266,6 +5538,12 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -5960,6 +6238,7 @@ system_prompt = "You are a helpful assistant."
             system: Some(classify_prompt),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -6372,6 +6651,14 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
+        // Sticky-flip: this is the single chokepoint for "agent processed a
+        // real message" — any inbound message, channel event, autonomous
+        // tick, cron fire, or fork that produces an LLM call routes here.
+        // The heartbeat monitor uses this flag (not a time window) to
+        // decide whether an idle agent should be flagged unresponsive.
+        // Idempotent: subsequent calls only refresh `last_active`.
+        self.registry.mark_processed_message(agent_id);
+
         // Derive session ID. Resolution order (highest priority first):
         //
         // 1. Explicit override from the HTTP caller (multi-tab / multi-session UIs).
@@ -6674,6 +6961,12 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -6733,6 +7026,7 @@ system_prompt = "You are a helpful assistant."
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
+                cache_ttl: None,
                 response_format: None,
                 timeout_secs: None,
                 extra_body: None,
@@ -6936,6 +7230,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
+            max_history_messages: cfg.max_history_messages,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as
@@ -7873,6 +8168,55 @@ system_prompt = "You are a helpful assistant."
     /// Agents with a custom `base_url` keep their current provider unless
     /// overridden explicitly — this prevents custom setups (e.g. Tencent,
     /// Azure, or other third-party endpoints) from being misidentified.
+    /// Persist an agent's manifest to its `agent.toml` on disk so that
+    /// dashboard-driven config changes (model, provider, fallback, etc.)
+    /// survive a restart. The on-disk file lives at the entry's recorded
+    /// `source_toml_path`, falling back to the canonical
+    /// `<agent_workspaces_dir>/<safe_name>/agent.toml` when no source path
+    /// is set.
+    ///
+    /// This is best-effort: a failure to write is logged but does not
+    /// propagate as an error — the authoritative copy lives in SQLite.
+    pub fn persist_manifest_to_disk(&self, agent_id: AgentId) {
+        let Some(entry) = self.registry.get(agent_id) else {
+            return;
+        };
+        let toml_path = match entry.source_toml_path.clone() {
+            Some(p) => p,
+            None => {
+                let safe_name = safe_path_component(&entry.name, "agent");
+                self.config
+                    .load()
+                    .effective_agent_workspaces_dir()
+                    .join(safe_name)
+                    .join("agent.toml")
+            }
+        };
+        let dir = match toml_path.parent() {
+            Some(d) => d.to_path_buf(),
+            None => {
+                warn!(agent = %entry.name, "Failed to derive parent dir for manifest persist");
+                return;
+            }
+        };
+        match toml::to_string_pretty(&entry.manifest) {
+            Ok(toml_str) => {
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    warn!(agent = %entry.name, "Failed to create agent dir for manifest persist: {e}");
+                    return;
+                }
+                if let Err(e) = atomic_write_toml(&toml_path, &toml_str) {
+                    warn!(agent = %entry.name, "Failed to persist manifest to disk: {e}");
+                } else {
+                    debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                }
+            }
+            Err(e) => {
+                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {e}");
+            }
+        }
+    }
+
     pub fn set_agent_model(
         &self,
         agent_id: AgentId,
@@ -7957,6 +8301,9 @@ system_prompt = "You are a helpful assistant."
             let _ = self.memory.save_agent(&entry);
         }
 
+        // Write updated manifest to agent.toml so changes survive restart (#996, #1018)
+        self.persist_manifest_to_disk(agent_id);
+
         // Clear canonical session to prevent memory poisoning from old model's responses
         let _ = self.memory.delete_canonical_session(agent_id);
         debug!(agent_id = %agent_id, "Cleared canonical session after model switch");
@@ -8008,11 +8355,13 @@ system_prompt = "You are a helpful assistant."
             )))
         })?;
 
-        // Parse as AgentManifest; if that fails, try extracting from a hand.toml.
+        // Try the hand-extraction path FIRST, then fall back to flat AgentManifest.
+        // See the boot loop for the rationale — AgentManifest::deserialize is lenient
+        // enough to accept a hand.toml and silently produce a stub manifest with
+        // the default "You are a helpful AI agent." system prompt.
         let mut disk_manifest: librefang_types::agent::AgentManifest =
-            toml::from_str::<librefang_types::agent::AgentManifest>(&toml_str)
-                .ok()
-                .or_else(|| extract_manifest_from_hand_toml(&toml_str, &entry.name))
+            extract_manifest_from_hand_toml(&toml_str, &entry.name)
+                .or_else(|| toml::from_str::<librefang_types::agent::AgentManifest>(&toml_str).ok())
                 .ok_or_else(|| {
                     KernelError::LibreFang(LibreFangError::Internal(format!(
                         "Invalid TOML in {}: not an agent manifest or hand definition",
@@ -8574,7 +8923,7 @@ system_prompt = "You are a helpful assistant."
     pub fn activate_hand_with_id(
         &self,
         hand_id: &str,
-        config: std::collections::HashMap<String, serde_json::Value>,
+        mut config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
@@ -8609,6 +8958,16 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Seed schema defaults so persisted state matches what
+        // `resolve_settings` shows. Lets schema default changes require an
+        // explicit operator action and disambiguates "accepted default" from
+        // "never reviewed" on disk.
+        for setting in &def.settings {
+            config
+                .entry(setting.key.clone())
+                .or_insert_with(|| serde_json::Value::String(setting.default.clone()));
+        }
+
         // Create the instance in the registry
         let instance = self
             .hand_registry
@@ -8620,9 +8979,13 @@ system_prompt = "You are a helpful assistant."
                 other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
             })?;
 
-        // Pre-compute shared overrides from hand definition
-        let resolved = librefang_hands::resolve_settings(&def.settings, &instance.config);
-        let mut allowed_env = resolved.env_vars;
+        // Pre-compute shared overrides from hand definition. The system-prompt
+        // tail is materialized later (after per-role manifest cloning) via
+        // `apply_settings_block_to_manifest` — keep this block aligned with the
+        // env-var allowlist only.
+        let resolved_settings_env: Vec<String> =
+            librefang_hands::resolve_settings(&def.settings, &instance.config).env_vars;
+        let mut allowed_env = resolved_settings_env;
         for req in &def.requires {
             match req.requirement_type {
                 librefang_hands::RequirementType::ApiKey
@@ -8636,7 +8999,6 @@ system_prompt = "You are a helpful assistant."
         }
 
         let is_multi_agent = def.is_multi_agent();
-        let role_names: Vec<String> = def.agents.keys().cloned().collect();
         let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
 
         // Kill existing agents with matching hand tag (reactivation cleanup)
@@ -8672,10 +9034,18 @@ system_prompt = "You are a helpful assistant."
                 }
                 let taken_crons = self.cron_scheduler.list_jobs(old_id);
                 if !taken_crons.is_empty() {
-                    saved_crons
-                        .entry(old_role.clone())
-                        .or_default()
-                        .extend(taken_crons);
+                    // Dedupe by job id within this snapshot: if two registry
+                    // entries somehow tag the same role (concurrent activation
+                    // racing the `kill_agent` cleanup, or a bug that left two
+                    // tagged agents alive), the same `CronJob` could be
+                    // collected twice and re-added twice — yielding duplicate
+                    // jobs that fire side-by-side. Deterministically keep
+                    // exactly one per `CronJobId`.
+                    let bucket: &mut Vec<librefang_types::scheduler::CronJob> =
+                        saved_crons.entry(old_role.clone()).or_default();
+                    let seen: std::collections::HashSet<librefang_types::scheduler::CronJobId> =
+                        bucket.iter().map(|j| j.id).collect();
+                    bucket.extend(taken_crons.into_iter().filter(|j| !seen.contains(&j.id)));
                 }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
@@ -8821,13 +9191,14 @@ system_prompt = "You are a helpful assistant."
                 manifest.profile = Some(ToolProfile::Custom);
             }
 
-            // Inject settings into system prompt
-            if !resolved.prompt_block.is_empty() {
-                manifest.model.system_prompt = format!(
-                    "{}\n\n---\n\n{}",
-                    manifest.model.system_prompt, resolved.prompt_block
-                );
-            }
+            // Inject settings into system prompt. Shared with the boot-time
+            // TOML drift loop in `new_with_config` so both paths render the
+            // tail identically — the drift loop overwrites the DB blob with
+            // the bare disk TOML, which never carries the runtime-materialized
+            // tail, and would otherwise silently strip configured values from
+            // the prompt on every restart.
+            let _ =
+                apply_settings_block_to_manifest(&mut manifest, &def.settings, &instance.config);
 
             // Inject allowed env vars
             if !allowed_env.is_empty() {
@@ -8837,44 +9208,15 @@ system_prompt = "You are a helpful assistant."
                 );
             }
 
-            // Inject skill content: per-role override takes precedence over shared.
-            // SKILL-{role}.md filenames are lowercased during scan, so normalize
-            // the role name to match.
-            let role_lower = role.to_lowercase();
-            let effective_skill = def
-                .agent_skill_content
-                .get(&role_lower)
-                .or(def.skill_content.as_ref());
-            if let Some(skill_content) = effective_skill {
-                manifest.model.system_prompt = format!(
-                    "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                    manifest.model.system_prompt, skill_content
-                );
-            }
-
-            // For multi-agent hands: inject peer info into system prompt
-            if is_multi_agent {
-                let mut peer_lines = Vec::new();
-                for peer_role in &role_names {
-                    if peer_role == role {
-                        continue;
-                    }
-                    if let Some(peer_agent) = def.agents.get(peer_role) {
-                        let hint = peer_agent
-                            .invoke_hint
-                            .as_deref()
-                            .unwrap_or(&peer_agent.manifest.description);
-                        peer_lines.push(format!(
-                            "- **{peer_role}**: {hint} (use agent_send to message)"
-                        ));
-                    }
-                }
-                if !peer_lines.is_empty() {
-                    let team_block = format!("\n\n## Your Team\n\n{}", peer_lines.join("\n"));
-                    manifest.model.system_prompt =
-                        format!("{}{team_block}", manifest.model.system_prompt);
-                }
-            }
+            // Inject `## Reference Knowledge` and `## Your Team` blocks via
+            // the shared helpers. Both are also called from the boot-time
+            // TOML drift loop in `new_with_config` so the two paths render
+            // identically — the drift loop overwrites the DB blob with the
+            // bare disk TOML, which never carries either rendered tail, and
+            // would otherwise silently strip skill discoverability and peer
+            // awareness from the prompt on every restart.
+            apply_skill_reference_block_to_manifest(&mut manifest, role, &def);
+            apply_team_block_to_manifest(&mut manifest, role, &def);
 
             // Hand workspace: workspaces/<hand-id>/
             // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/
@@ -8968,7 +9310,9 @@ system_prompt = "You are a helpful assistant."
 
         // Restore cron jobs that were snapshotted before kill_agent. They're
         // re-added under the new agent_id for the same role. Runtime state
-        // (next_run, last_run) is reset so jobs get a fresh start.
+        // (last_run) is reset and `next_run` is recomputed from the schedule
+        // so jobs resume on a clean future tick instead of immediately on
+        // the next scheduler poll.
         if !saved_crons.is_empty() {
             let mut total_restored = 0usize;
             for (role, jobs) in saved_crons {
@@ -8976,7 +9320,13 @@ system_prompt = "You are a helpful assistant."
                     let mut restored = 0usize;
                     for mut job in jobs {
                         job.agent_id = new_id;
-                        job.next_run = None;
+                        // Compute the next future fire time from the
+                        // schedule explicitly. `add_job` will overwrite this
+                        // with `compute_next_run` too, but writing it here
+                        // makes the intent ("don't refire immediately just
+                        // because we restored") obvious to readers and
+                        // resilient to future changes in `add_job`.
+                        job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
                         if self.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
@@ -9476,6 +9826,7 @@ system_prompt = "You are a helpful assistant."
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -10467,6 +10818,7 @@ system_prompt = "You are a helpful assistant."
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
@@ -10579,6 +10931,16 @@ system_prompt = "You are a helpful assistant."
                                                 &delivery,
                                             )
                                             .await;
+                                            // Fan out to multi-destination
+                                            // delivery_targets (best-effort,
+                                            // failure-isolated).
+                                            cron_fan_out_targets(
+                                                &kernel,
+                                                &job_name,
+                                                &result.response,
+                                                &delivery_targets,
+                                            )
+                                            .await;
                                         }
                                     }
                                     Ok(Err(e)) => {
@@ -10603,6 +10965,7 @@ system_prompt = "You are a helpful assistant."
                                 tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
                                 let input_text = input.clone().unwrap_or_default();
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let timeout_s = timeout_secs.unwrap_or(300);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
 
@@ -10632,6 +10995,13 @@ system_prompt = "You are a helpful assistant."
                                                 kernel.cron_scheduler.record_success(job_id);
                                                 cron_deliver_response(
                                                     &kernel, agent_id, &output, &delivery,
+                                                )
+                                                .await;
+                                                cron_fan_out_targets(
+                                                    &kernel,
+                                                    &job_name,
+                                                    &output,
+                                                    &delivery_targets,
                                                 )
                                                 .await;
                                             }
@@ -12332,6 +12702,7 @@ system_prompt = "You are a helpful assistant."
             system: Some(review_prompt.to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -13298,6 +13669,67 @@ async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
     parse_wake_gate(&stdout)
 }
 
+/// Atomically write a TOML file by staging the new content in a sibling
+/// `.tmp` file and renaming it over the destination.
+///
+/// SECURITY / CORRECTNESS: a plain `fs::write` is non-atomic. Two
+/// concurrent persisters (e.g. `patch_agent` + `set_agent_model`) can
+/// truncate each other's output mid-flight, and a process crash at the
+/// wrong moment leaves a half-written file that fails to parse on next
+/// boot. `rename` is atomic on POSIX filesystems and effectively atomic
+/// on Windows for files on the same volume; if the rename fails we
+/// clean up the staging file.
+///
+/// We also `sync_all` the temp file before rename so the bytes hit the
+/// disk before the directory entry is swapped — without that, a power
+/// loss could leave the renamed file pointing at empty/stale data even
+/// though the rename succeeded.
+fn atomic_write_toml(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Per-call counter so two threads in the same process never share
+    // a tmp filename — otherwise concurrent writers can clobber each
+    // other's staging file before rename, defeating the atomicity.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+
+    // Same-directory tmp path keeps rename on the same filesystem so
+    // it's a true atomic in-place swap rather than a cross-volume copy.
+    let mut tmp = path.to_path_buf();
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
+        .to_os_string();
+    let mut tmp_name = file_name;
+    tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    tmp.set_file_name(tmp_name);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        // fsync so the bytes hit disk before we publish via rename;
+        // without this a power loss between rename and flush would
+        // leave the renamed file pointing at empty/garbage data.
+        f.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // POSIX `rename` is atomic. Windows `MoveFileEx` with
+    // REPLACE_EXISTING (which Rust's std uses) is effectively atomic
+    // for files on the same volume, though there is a brief window
+    // where readers may see ERROR_SHARING_VIOLATION on contention.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Parse the wake gate from script stdout.
 ///
 /// Finds the last non-empty line, tries JSON-decode, checks `wakeAgent`.
@@ -13317,6 +13749,94 @@ fn parse_wake_gate(script_output: &str) -> bool {
 
     // Only `{"wakeAgent": false}` (strict bool false) skips the agent.
     value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
+}
+
+/// Adapter from the kernel's `send_channel_message` to the
+/// `CronChannelSender` trait used by the multi-target fan-out engine.
+struct KernelCronBridge {
+    kernel: Arc<LibreFangKernel>,
+}
+
+#[async_trait::async_trait]
+impl crate::cron_delivery::CronChannelSender for KernelCronBridge {
+    async fn send_channel_message(
+        &self,
+        channel_type: &str,
+        recipient: &str,
+        message: &str,
+        thread_id: Option<&str>,
+        account_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.kernel
+            .send_channel_message(channel_type, recipient, message, thread_id, account_id)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Sentinel body sent when the agent / workflow produced no output but the
+/// caller still wants every fan-out target invoked (heartbeat semantics).
+/// Plain text so all adapters render it identically.
+const CRON_EMPTY_OUTPUT_HEARTBEAT: &str = "(cron heartbeat: empty output)";
+
+/// Fan out `output` to every target in `delivery_targets` concurrently.
+///
+/// Best-effort: never returns an error, because the cron job itself has
+/// already succeeded by the time we get here. Per-target failures are
+/// counted and logged. The legacy single-destination `delivery` field is
+/// handled separately by [`cron_deliver_response`].
+///
+/// **Empty output is not silently dropped.** When `output.is_empty()` we
+/// substitute a short heartbeat marker so every configured target still
+/// fires — the previous early-return swallowed the delivery entirely and
+/// broke liveness-style cron jobs (e.g. "ping #ops every hour even when I
+/// have nothing to say"). Cron jobs that genuinely want to skip empty-
+/// output runs should not configure fan-out targets at all.
+async fn cron_fan_out_targets(
+    kernel: &Arc<LibreFangKernel>,
+    job_name: &str,
+    output: &str,
+    targets: &[librefang_types::scheduler::CronDeliveryTarget],
+) {
+    if targets.is_empty() {
+        return;
+    }
+    let payload: &str = if output.is_empty() {
+        CRON_EMPTY_OUTPUT_HEARTBEAT
+    } else {
+        output
+    };
+    let sender: Arc<dyn crate::cron_delivery::CronChannelSender> = Arc::new(KernelCronBridge {
+        kernel: kernel.clone(),
+    });
+    let engine = crate::cron_delivery::CronDeliveryEngine::new(sender);
+    let results = engine.deliver(targets, job_name, payload).await;
+    let total = results.len();
+    let failures = results.iter().filter(|r| !r.success).count();
+    let successes = total - failures;
+    if failures == 0 {
+        tracing::info!(
+            job = %job_name,
+            targets = total,
+            "Cron fan-out: all {successes} target(s) delivered"
+        );
+    } else {
+        tracing::warn!(
+            job = %job_name,
+            total = total,
+            ok = successes,
+            failed = failures,
+            "Cron fan-out: partial delivery"
+        );
+        for r in results.iter().filter(|r| !r.success) {
+            tracing::warn!(
+                job = %job_name,
+                target = %r.target,
+                error = %r.error.as_deref().unwrap_or(""),
+                "Cron fan-out: target failed"
+            );
+        }
+    }
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.
@@ -14087,7 +14607,7 @@ impl KernelHandle for LibreFangKernel {
         job_json: serde_json::Value,
     ) -> Result<String, String> {
         use librefang_types::scheduler::{
-            CronAction, CronDelivery, CronJob, CronJobId, CronSchedule,
+            CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
         };
 
         let name = job_json["name"]
@@ -14127,6 +14647,16 @@ impl KernelHandle for LibreFangKernel {
                 None
             };
 
+        // Multi-destination fan-out targets. Optional; missing/null = empty.
+        // Validate each entry up front so a bad shape produces a clear error
+        // before the job is added (rather than failing silently at fire time).
+        let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
+            serde_json::from_value(job_json["delivery_targets"].clone())
+                .map_err(|e| format!("Invalid delivery_targets: {e}"))?
+        } else {
+            Vec::new()
+        };
+
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
@@ -14134,6 +14664,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
+            delivery_targets,
             peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
             session_mode,
             enabled: true,
@@ -15339,6 +15870,14 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
+        self.named_workspace_prefixes(agent_id)
+            .into_iter()
+            .filter(|(_, mode)| *mode == WorkspaceMode::ReadOnly)
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    fn named_workspace_prefixes(&self, agent_id: &str) -> Vec<(std::path::PathBuf, WorkspaceMode)> {
         let Ok(aid) = agent_id.parse::<AgentId>() else {
             return vec![];
         };
@@ -15352,13 +15891,16 @@ impl KernelHandle for LibreFangKernel {
         entry
             .manifest
             .workspaces
-            .iter()
-            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
-            .filter_map(|(_, decl)| {
+            .values()
+            .filter_map(|decl| {
                 if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
                     return None;
                 }
-                workspaces_root.join(&decl.path).canonicalize().ok()
+                workspaces_root
+                    .join(&decl.path)
+                    .canonicalize()
+                    .ok()
+                    .map(|p| (p, decl.mode.clone()))
             })
             .collect()
     }
@@ -15803,7 +16345,28 @@ pub async fn probe_and_update_local_provider(
     base_url: &str,
     log_offline_as_warn: bool,
 ) -> librefang_runtime::provider_health::ProbeResult {
-    let result = librefang_runtime::provider_health::probe_provider(provider_id, base_url).await;
+    // Forward the provider's api_key (when configured) so reverse-proxy
+    // frontends like Open WebUI accept the listing request. Without this,
+    // the probe always 401s and the catalog flips to LocalOffline even
+    // when the underlying ollama is healthy.
+    let api_key = {
+        let catalog = kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let env_var = catalog
+            .get_provider(provider_id)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_")));
+        std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
+    };
+    let result = librefang_runtime::provider_health::probe_provider(
+        provider_id,
+        base_url,
+        api_key.as_deref(),
+    )
+    .await;
     if result.reachable {
         info!(
             provider = %provider_id,

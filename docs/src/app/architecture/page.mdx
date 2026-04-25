@@ -97,12 +97,20 @@ librefang/
 │   └── cli-npm/               #   @librefang/cli (npm wrapper)
 ├── deploy/                    # Deployment configs
 │   ├── Dockerfile             #   Docker image
+│   ├── docker-entrypoint.sh   #   Container entrypoint
 │   ├── docker-compose.yml     #   Docker Compose
+│   ├── docker-compose.observability.yml  # Observability stack
+│   ├── OBSERVABILITY.md       #   Observability stack guide
 │   ├── fly/                   #   Fly.io (fly.toml + deploy.sh)
 │   ├── railway/               #   Railway (railway.json)
 │   ├── render.yaml            #   Render
 │   ├── gcp/                   #   GCP Terraform
 │   ├── librefang.service      #   systemd unit
+│   ├── worker/                #   Worker deployment configs
+│   ├── otel-collector/        #   OpenTelemetry Collector config
+│   ├── tempo/                 #   Grafana Tempo (trace store)
+│   ├── loki/                  #   Grafana Loki (log store)
+│   ├── alloy/                 #   Grafana Alloy (log collector)
 │   ├── grafana/               #   Grafana dashboards
 │   └── prometheus/            #   Prometheus config
 ├── docs/                      # Documentation site (Next.js)

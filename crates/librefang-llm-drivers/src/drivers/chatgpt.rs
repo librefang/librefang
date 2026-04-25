@@ -1046,6 +1046,7 @@ mod tests {
             system: Some("You are helpful.".to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1083,6 +1084,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1111,6 +1113,7 @@ mod tests {
             system: Some("System prompt.".to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: None,
             extra_body: None,
@@ -1138,6 +1141,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: Some(ResponseFormat::JsonSchema {
                 name: "answer".to_string(),
                 schema: serde_json::json!({

@@ -270,27 +270,32 @@ impl StandaloneChat {
     // ── Slash commands (subset — no tab navigation) ──────────────────────────
 
     fn handle_slash_command(&mut self, cmd: &str) {
+        use librefang_channels::commands::{self, Scope};
+
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-        match parts[0] {
-            "/exit" | "/quit" => {
+        let head = parts[0];
+        let bare = head.strip_prefix('/').unwrap_or(head);
+
+        // Resolve through the central registry so unknown commands are
+        // rejected uniformly and aliases like `/quit -> /exit` are honored.
+        let canonical = match commands::lookup(bare) {
+            Some(def) if def.scope.contains(Scope::CLI) => def.name,
+            _ => {
+                self.chat
+                    .push_message(Role::System, format!("Unknown command: {head}. Type /help"));
+                return;
+            }
+        };
+
+        match canonical {
+            "exit" => {
                 self.should_quit = true;
             }
-            "/help" => {
-                self.chat.push_message(
-                    Role::System,
-                    [
-                        "/help         \u{2014} show this help",
-                        "/model        \u{2014} open model picker (Ctrl+M)",
-                        "/model <name> \u{2014} switch to model directly",
-                        "/status       \u{2014} connection & agent info",
-                        "/clear        \u{2014} clear chat history",
-                        "/kill         \u{2014} kill the current agent & quit",
-                        "/exit         \u{2014} end chat session",
-                    ]
-                    .join("\n"),
-                );
+            "help" => {
+                self.chat
+                    .push_message(Role::System, commands::cli_help_text());
             }
-            "/status" => {
+            "status" => {
                 let mut s = Vec::new();
                 match &self.backend {
                     Backend::Daemon { base_url } => {
@@ -306,7 +311,7 @@ impl StandaloneChat {
                 }
                 self.chat.push_message(Role::System, s.join("\n"));
             }
-            "/model" => {
+            "model" => {
                 let args = parts.get(1).map(|s| s.trim()).unwrap_or("");
                 if args.is_empty() {
                     // No argument: open the model picker
@@ -316,7 +321,7 @@ impl StandaloneChat {
                     self.switch_model(args);
                 }
             }
-            "/clear" => {
+            "clear" => {
                 let name = self.chat.agent_name.clone();
                 let model = self.chat.model_label.clone();
                 let mode = self.chat.mode_label.clone();
@@ -327,7 +332,7 @@ impl StandaloneChat {
                 self.chat
                     .push_message(Role::System, "Chat history cleared.".to_string());
             }
-            "/kill" => {
+            "kill" => {
                 let name = self.agent_name.clone();
                 match &self.backend {
                     Backend::Daemon { base_url } => {
@@ -374,12 +379,9 @@ impl StandaloneChat {
                     }
                 }
             }
-            _ => {
-                self.chat.push_message(
-                    Role::System,
-                    format!("Unknown command: {}. Type /help", parts[0]),
-                );
-            }
+            // The pre-flight `commands::lookup` guarantees `canonical` is one
+            // of the names matched above.
+            other => unreachable!("unhandled CLI command `{other}`"),
         }
     }
 

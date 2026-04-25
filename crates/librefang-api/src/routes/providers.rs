@@ -444,21 +444,42 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     };
 
     // Collect local providers that need probing
-    let local_providers: Vec<(usize, String, String)> = provider_list
+    let local_providers: Vec<(usize, String, String, Option<String>)> = provider_list
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
-        .map(|(i, p)| (i, p.id.clone(), p.base_url.clone()))
+        .map(|(i, p)| {
+            // Resolve the provider's api_key env var (catalog field, falling
+            // back to the {PROVIDER}_API_KEY convention) and read its value
+            // for the probe. Local providers fronted by an authenticating
+            // reverse proxy (Open WebUI, LiteLLM, etc.) need this Bearer
+            // token forwarded; bare-localhost setups have nothing in the
+            // env so the probe runs unauthenticated as before.
+            let env_var = if p.api_key_env.trim().is_empty() {
+                format!("{}_API_KEY", p.id.to_uppercase().replace('-', "_"))
+            } else {
+                p.api_key_env.clone()
+            };
+            let api_key = std::env::var(&env_var)
+                .ok()
+                .filter(|v| !v.trim().is_empty());
+            (i, p.id.clone(), p.base_url.clone(), api_key)
+        })
         .collect();
 
     // Fire all probes concurrently (cached results return instantly)
     let cache = &state.provider_probe_cache;
     let probe_futures: Vec<_> = local_providers
         .iter()
-        .map(|(_, id, url)| {
-            librefang_runtime::provider_health::probe_provider_cached(id, url, cache)
+        .map(|(_, id, url, api_key)| {
+            librefang_runtime::provider_health::probe_provider_cached(
+                id,
+                url,
+                api_key.as_deref(),
+                cache,
+            )
         })
         .collect();
     let probe_results = futures::future::join_all(probe_futures).await;
@@ -466,7 +487,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     // Index probe results by provider list position for O(1) lookup
     let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
-    for ((idx, _, _), result) in local_providers.iter().zip(probe_results) {
+    for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
     }
 
@@ -559,27 +580,44 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         catalog.list_providers().to_vec()
     };
 
-    let local_providers: Vec<(usize, String, String)> = provider_list
+    let local_providers: Vec<(usize, String, String, Option<String>)> = provider_list
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
-        .map(|(i, p)| (i, p.id.clone(), p.base_url.clone()))
+        .map(|(i, p)| {
+            // See sibling site above — same env-var resolution so Open WebUI
+            // / LiteLLM-fronted local providers get a Bearer token attached.
+            let env_var = if p.api_key_env.trim().is_empty() {
+                format!("{}_API_KEY", p.id.to_uppercase().replace('-', "_"))
+            } else {
+                p.api_key_env.clone()
+            };
+            let api_key = std::env::var(&env_var)
+                .ok()
+                .filter(|v| !v.trim().is_empty());
+            (i, p.id.clone(), p.base_url.clone(), api_key)
+        })
         .collect();
 
     let cache = &state.provider_probe_cache;
     let probe_futures: Vec<_> = local_providers
         .iter()
-        .map(|(_, id, url)| {
-            librefang_runtime::provider_health::probe_provider_cached(id, url, cache)
+        .map(|(_, id, url, api_key)| {
+            librefang_runtime::provider_health::probe_provider_cached(
+                id,
+                url,
+                api_key.as_deref(),
+                cache,
+            )
         })
         .collect();
     let probe_results = futures::future::join_all(probe_futures).await;
 
     let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
-    for ((idx, _, _), result) in local_providers.iter().zip(probe_results) {
+    for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
     }
 
@@ -681,9 +719,20 @@ pub async fn get_provider(
         && !provider.base_url.is_empty()
     {
         let cache = &state.provider_probe_cache;
+        // Forward the api_key when present so reverse-proxy-fronted local
+        // providers (Open WebUI, LiteLLM) get a valid Bearer token.
+        let env_var = if provider.api_key_env.trim().is_empty() {
+            format!("{}_API_KEY", provider.id.to_uppercase().replace('-', "_"))
+        } else {
+            provider.api_key_env.clone()
+        };
+        let api_key = std::env::var(&env_var)
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         let probe = librefang_runtime::provider_health::probe_provider_cached(
             &provider.id,
             &provider.base_url,
+            api_key.as_deref(),
             cache,
         )
         .await;
@@ -1386,7 +1435,7 @@ pub async fn set_provider_url(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
-    let base_url = match body["base_url"].as_str() {
+    let base_url_raw = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'base_url' field")
@@ -1395,10 +1444,19 @@ pub async fn set_provider_url(
     };
 
     // Validate URL scheme
-    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+    if !base_url_raw.starts_with("http://") && !base_url_raw.starts_with("https://") {
         return ApiErrorResponse::bad_request("base_url must start with http:// or https://")
             .into_json_tuple();
     }
+
+    // Normalize for the common Ollama / vLLM / LM Studio mistake: users
+    // paste `http://host:port` (no path) and the OpenAI driver then hits
+    // `/chat/completions` instead of `/v1/chat/completions`, getting a 404.
+    // If the user gave us a host-only URL (path is empty or just "/"),
+    // append `/v1` so OpenAI-compatible endpoints work out of the box.
+    // Custom paths (`/api/openai`, `/openai/v1`, etc.) are left alone.
+    // Issue #3138.
+    let base_url = normalize_base_url(&base_url_raw);
 
     // Optional proxy_url in same request
     let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
@@ -1440,8 +1498,31 @@ pub async fn set_provider_url(
         }
     }
 
-    // Probe reachability at the new URL
-    let probe = librefang_runtime::provider_health::probe_provider(&name, &base_url).await;
+    // Probe reachability at the new URL. Forward the configured api_key so
+    // reverse-proxy-fronted endpoints (Open WebUI, LiteLLM, etc.) accept
+    // the listing request — without this, they return 401 even when the
+    // backing model server is healthy.
+    let probe_env_var = {
+        let catalog = state
+            .kernel
+            .model_catalog_ref()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        catalog
+            .get_provider(&name)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
+    };
+    let probe_api_key = std::env::var(&probe_env_var)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let probe = librefang_runtime::provider_health::probe_provider(
+        &name,
+        &base_url,
+        probe_api_key.as_deref(),
+    )
+    .await;
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
@@ -1631,6 +1712,82 @@ fn persist_default_model(
     root.insert("default_model".to_string(), toml::Value::Table(dm_table));
     std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
     Ok(())
+}
+
+/// Normalize a user-supplied provider base URL.
+///
+/// `http://host:port` (no path) and `http://host:port/` are rewritten to
+/// `http://host:port/v1` because every OpenAI-compatible local server we
+/// support (Ollama, vLLM, LM Studio, LlamaSwap, llama-server, etc.) serves
+/// its chat-completions endpoint at `/v1/chat/completions`. Without the
+/// normalisation the OpenAI driver produces `/chat/completions` and the
+/// server returns HTTP 404 — see issue #3138.
+///
+/// Custom paths (`/api/openai`, `/openai/v1`, `/router/some/path`) are left
+/// untouched: if a user explicitly typed a path we trust it.
+fn normalize_base_url(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/').to_string();
+    // After scheme there must be host[:port][/path…]. Find the first '/'
+    // after the scheme separator to know whether a path was supplied.
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    let has_path = after_scheme.find('/').is_some();
+    if has_path {
+        // User supplied an explicit path — respect it.
+        trimmed
+    } else {
+        // Bare host[:port] — assume OpenAI-compatible default.
+        format!("{trimmed}/v1")
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_appends_v1_for_bare_host() {
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://localhost:8000"),
+        "http://localhost:8000/v1"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_preserves_explicit_path() {
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/v1"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/v1/"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("https://api.openai.com/v1"),
+        "https://api.openai.com/v1"
+    );
+    assert_eq!(
+        normalize_base_url("https://example.com/api/openai"),
+        "https://example.com/api/openai"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_trims_whitespace() {
+    assert_eq!(
+        normalize_base_url("  http://localhost:11434  "),
+        "http://localhost:11434/v1"
+    );
 }
 
 /// Upsert a provider URL in the `[provider_urls]` section of config.toml.
@@ -1967,7 +2124,10 @@ pub async fn detect_ollama() -> impl IntoResponse {
         }
     };
 
-    match client.get("http://localhost:11434/api/tags").send().await {
+    // Use 127.0.0.1 instead of localhost: on dual-stack hosts (macOS)
+    // localhost resolves to ::1 first and Ollama binds IPv4 only, causing
+    // probes to fail without reliable IPv4 fallback.
+    match client.get("http://127.0.0.1:11434/api/tags").send().await {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
                 tracing::warn!("Ollama responded but JSON parse failed: {e}");

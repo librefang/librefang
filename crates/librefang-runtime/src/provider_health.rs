@@ -8,6 +8,7 @@
 //! on TCP connect timeouts to unreachable local services.
 
 use dashmap::DashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Enriched metadata for a discovered model (Ollama-specific fields are optional).
@@ -114,11 +115,112 @@ pub fn is_local_provider(provider: &str) -> bool {
     )
 }
 
-/// Overall request timeout for local provider health probes (connect + response).
+/// Per-request total timeout for loopback probe targets.
+///
+/// The shared probe client (see [`PROBE_CLIENT`]) is configured with the
+/// relaxed remote budget so it can serve HTTPS reverse-proxy fronts; loopback
+/// callers tighten the total via `RequestBuilder::timeout(...)` so a dead
+/// local daemon still surfaces fast. `connect_timeout` cannot be overridden
+/// per-request — both profiles share the client's 3 s connect budget — but
+/// this 2 s request budget fires first on any pathological local stall.
 const PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// TCP connect timeout — fail fast when the local port is not listening.
-const PROBE_CONNECT_TIMEOUT_SECS: u64 = 1;
+/// Total request timeout for non-loopback probe targets (HTTPS reverse proxies,
+/// remote ollama, etc.). 8 s comfortably absorbs cold-start TLS handshakes
+/// (~1–3 s on first connect) plus end-to-end WAN latency.
+const PROBE_REMOTE_TIMEOUT_SECS: u64 = 8;
+
+/// TCP connect timeout for the shared probe client. Applied uniformly because
+/// reqwest does not expose per-request connect timeouts.
+const PROBE_REMOTE_CONNECT_TIMEOUT_SECS: u64 = 3;
+
+/// Format a `reqwest::Error` with its cause chain so probe failures stay
+/// diagnosable. The default `Display` impl drops the inner cause, leaving the
+/// generic `error sending request for url (...)` line for everything from a
+/// timeout to a TLS handshake failure to DNS — flatten the chain so the WARN
+/// line tells operators which it actually was.
+fn format_request_error(err: &reqwest::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source: Option<&dyn std::error::Error> = std::error::Error::source(err);
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    // reqwest renders timeouts as "operation timed out" / "timed out" — the
+    // substring is "timed out", not "timeout". Check both so we don't
+    // double-append the marker when the cause chain already mentioned it.
+    if err.is_timeout()
+        && !parts.iter().any(|p| {
+            let s = p.to_lowercase();
+            s.contains("timeout") || s.contains("timed out")
+        })
+    {
+        parts.push("timed out".to_string());
+    }
+    parts.join(": ")
+}
+
+/// Process-wide cache for the probe HTTP client. Constructed once on first
+/// use so the connection pool and TLS sessions persist across probe cycles —
+/// otherwise every 60-second probe to an HTTPS reverse-proxy front (Open WebUI
+/// etc.) pays a fresh ~1–2 s cold-start TLS handshake.
+///
+/// Configured with the relaxed remote timeouts; loopback callers tighten the
+/// total request budget via per-request `RequestBuilder::timeout(...)`. The
+/// connect timeout cannot be overridden per-request, so loopback uses the
+/// same 3-second connect budget as remote — acceptable because a localhost
+/// daemon that can't accept TCP within 3 s is already broken.
+///
+/// Limitation: not invalidated on `[proxy]` config reload. Users who change
+/// `http_proxy` / `https_proxy` at runtime need to restart the daemon for
+/// probe traffic to pick up the new forward proxy. Acceptable because the
+/// motivating case (reverse-proxy ollama URLs like Open WebUI) does not
+/// involve forward proxies, and `[proxy]` reloads are rare in practice.
+static PROBE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Return the shared probe HTTP client, building it on first call.
+fn probe_client() -> &'static reqwest::Client {
+    PROBE_CLIENT.get_or_init(|| {
+        crate::http_client::proxied_client_builder()
+            .connect_timeout(Duration::from_secs(PROBE_REMOTE_CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(PROBE_REMOTE_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|e| {
+                // Build can fail in exotic TLS configurations. Fall back to a
+                // default reqwest::Client so probes still run rather than
+                // failing every cycle with the same construction error.
+                tracing::warn!(
+                    error = %e,
+                    "probe HTTP client build failed; falling back to default reqwest::Client"
+                );
+                reqwest::Client::new()
+            })
+    })
+}
+
+/// Returns `true` when `base_url` points at a loopback host. Loopback hosts
+/// get the tight [`PROBE_TIMEOUT_SECS`] per-request total; everything else
+/// uses the shared client's [`PROBE_REMOTE_TIMEOUT_SECS`] default.
+///
+/// Both profiles share the [`PROBE_REMOTE_CONNECT_TIMEOUT_SECS`] connect
+/// budget because reqwest does not expose per-request connect timeouts; this
+/// is tolerable since a localhost daemon that cannot accept TCP within 3 s is
+/// already broken.
+///
+/// Unparseable URLs are treated as loopback to preserve fast-fail behaviour
+/// for plain `localhost:11434` style strings.
+fn is_loopback_base_url(base_url: &str) -> bool {
+    match url::Url::parse(base_url) {
+        Ok(u) => match u.host_str() {
+            Some(h) => matches!(
+                h.to_ascii_lowercase().as_str(),
+                "localhost" | "127.0.0.1" | "::1" | "[::1]"
+            ),
+            None => true,
+        },
+        Err(_) => true,
+    }
+}
 
 /// Default TTL for cached probe results (seconds).
 const PROBE_CACHE_TTL_SECS: u64 = 60;
@@ -177,22 +279,17 @@ impl Default for ProbeCache {
 ///
 /// `base_url` should be the provider's base URL from the catalog (e.g.,
 /// `http://localhost:11434/v1` for Ollama, `http://localhost:8000/v1` for vLLM).
-pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
+///
+/// `api_key` is forwarded as `Authorization: Bearer <key>` when `Some` and
+/// non-empty. Required when the local provider is fronted by an
+/// authenticating reverse proxy (e.g. Open WebUI exposes ollama under
+/// `/ollama/v1` behind a JWT) — a bare `None` keeps the original
+/// "no auth" behaviour for direct-to-localhost setups.
+pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str>) -> ProbeResult {
     let start = Instant::now();
 
-    let client = match crate::http_client::proxied_client_builder()
-        .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return ProbeResult {
-                error: Some(format!("Failed to build HTTP client: {e}")),
-                ..Default::default()
-            };
-        }
-    };
+    let client = probe_client();
+    let is_loopback = is_loopback_base_url(base_url);
 
     let lower = provider.to_lowercase();
 
@@ -210,12 +307,34 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
         (format!("{trimmed}/models"), false)
     };
 
-    let resp = match client.get(&url).send().await {
+    // Attach Bearer token when an api_key was supplied. Ollama itself
+    // ignores Authorization headers (and bare ollama servers should not
+    // be passed a key here), but reverse-proxy frontends like Open WebUI
+    // require them — without this, the probe always 401s and the
+    // catalog flips to LocalOffline even though the underlying ollama
+    // is healthy.
+    let mut req = client.get(&url);
+    if is_loopback {
+        // Tighten the request budget for loopback targets so a dead local
+        // daemon still surfaces fast. The shared client carries the relaxed
+        // remote timeout; per-request `.timeout()` overrides it for this call.
+        // (`connect_timeout` is fixed at client build, but the 2 s request
+        // timeout fires first on any pathological local stall.)
+        req = req.timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
+    }
+    if let Some(key) = api_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            req = req.header("Authorization", format!("Bearer {trimmed}"));
+        }
+    }
+
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return ProbeResult {
                 latency_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("{e}")),
+                error: Some(format_request_error(&e)),
                 ..Default::default()
             };
         }
@@ -342,12 +461,13 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 pub async fn probe_provider_cached(
     provider: &str,
     base_url: &str,
+    api_key: Option<&str>,
     cache: &ProbeCache,
 ) -> ProbeResult {
     if let Some(cached) = cache.get(provider) {
         return cached;
     }
-    let result = probe_provider(provider, base_url).await;
+    let result = probe_provider(provider, base_url, api_key).await;
     cache.insert(provider, result.clone());
     result
 }
@@ -443,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_unreachable_returns_error() {
         // Probe a port that's almost certainly not running a server
-        let result = probe_provider("ollama", "http://127.0.0.1:19999").await;
+        let result = probe_provider("ollama", "http://127.0.0.1:19999", None).await;
         assert!(!result.reachable);
         assert!(result.error.is_some());
     }
@@ -451,7 +571,49 @@ mod tests {
     #[test]
     fn test_probe_timeout_value() {
         assert_eq!(PROBE_TIMEOUT_SECS, 2);
-        assert_eq!(PROBE_CONNECT_TIMEOUT_SECS, 1);
+        assert_eq!(PROBE_REMOTE_TIMEOUT_SECS, 8);
+        assert_eq!(PROBE_REMOTE_CONNECT_TIMEOUT_SECS, 3);
+        // Remote budget must always exceed the loopback per-request override;
+        // otherwise loopback callers would slow themselves down vs the shared
+        // client's default.
+        const { assert!(PROBE_REMOTE_TIMEOUT_SECS > PROBE_TIMEOUT_SECS) };
+    }
+
+    #[test]
+    fn test_probe_client_is_shared() {
+        // The shared client is initialised lazily and persisted via OnceLock —
+        // every probe call must see the same instance so the connection pool
+        // and TLS sessions actually amortise across the 60-second probe loop.
+        let a = probe_client();
+        let b = probe_client();
+        assert!(std::ptr::eq(a, b));
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_loopback_hosts() {
+        assert!(is_loopback_base_url("http://127.0.0.1:11434/v1"));
+        assert!(is_loopback_base_url("http://localhost:11434/v1"));
+        assert!(is_loopback_base_url("http://LOCALHOST:11434"));
+        assert!(is_loopback_base_url("http://[::1]:11434/v1"));
+        assert!(is_loopback_base_url("http://127.0.0.1:8000/"));
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_remote_hosts() {
+        assert!(!is_loopback_base_url("https://webui.example.com/ollama/v1"));
+        assert!(!is_loopback_base_url("http://192.168.1.10:11434"));
+        assert!(!is_loopback_base_url("https://api.openai.com/v1"));
+        // LAN hosts that resolve via mDNS / private DNS are still "remote"
+        // for the probe — they cross a network boundary.
+        assert!(!is_loopback_base_url("http://nas.local:11434"));
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_unparseable_falls_back_to_loopback() {
+        // Unparseable URLs preserve the legacy fast-fail budget rather than
+        // mysteriously slowing every probe in a malformed-config scenario.
+        assert!(is_loopback_base_url("not a url"));
+        assert!(is_loopback_base_url(""));
     }
 
     #[test]

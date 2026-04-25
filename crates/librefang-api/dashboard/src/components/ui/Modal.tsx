@@ -17,6 +17,21 @@ interface ModalProps {
   zIndex?: number;
   /** Allow content to overflow the modal container (e.g. for cmdk dropdowns). Defaults to false. */
   overflowVisible?: boolean;
+  /** Container shape + dismissal behaviour.
+   *
+   *  - `modal` (default): centred, max-h-[90vh], dim backdrop, click-outside
+   *    closes. The classic blocking dialog.
+   *  - `drawer-right`: right-docked, full height, **no** dim backdrop, clicks
+   *    pass through to the underlying page so users can pick another row in
+   *    the list while the drawer is open (Linear / Figma inspector). Esc and
+   *    the explicit close button are the only dismissal paths — click-outside
+   *    would race with the list-click-to-switch interaction.
+   *  - `panel-right`: right-docked, full height, dim backdrop, click-outside
+   *    closes. Same shape as `drawer-right` but blocks the underlying page —
+   *    use for forms / configuration / sub-modals where the user MUST commit
+   *    or cancel before the rest of the page is interactive again. Visually
+   *    consistent with drawer pages, behaviourally consistent with modals. */
+  variant?: "modal" | "drawer-right" | "panel-right";
   children: ReactNode;
 }
 
@@ -52,13 +67,21 @@ export const Modal = memo(function Modal({
   disableBackdropClose,
   zIndex = 50,
   overflowVisible = false,
+  variant = "modal",
   children,
 }: ModalProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
-  useFocusTrap(isOpen, dialogRef, true);
+  const isDrawer = variant === "drawer-right";
+  const isPanel = variant === "panel-right";
+  const isRightDocked = isDrawer || isPanel;
+  // Modal traps Tab inside the dialog (no escape from the focus loop).
+  // Drawer leaves Tab free so keyboard users can hop back into the
+  // underlying list (which is still interactive — see container's
+  // pointer-events-none) without first hitting Esc.
+  useFocusTrap(isOpen, dialogRef, true, !isDrawer);
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -88,18 +111,37 @@ export const Modal = memo(function Modal({
     onClose();
   };
 
+  // Three layout shapes:
+  //   - modal: centred, dim backdrop, click-outside closes
+  //   - drawer-right: right-docked, NO backdrop, clicks pass through to the
+  //     page so a sibling list stays interactive (Linear / Figma inspector)
+  //   - panel-right: right-docked, dim backdrop, click-outside closes — same
+  //     shape as drawer-right but the modal blocking semantics so forms /
+  //     sub-modals don't conflict with click-through interactions
+  const containerClass = isDrawer
+    ? "fixed inset-0 flex items-stretch justify-end pointer-events-none"
+    : isPanel
+    ? "fixed inset-0 flex items-stretch justify-end bg-black/40 backdrop-blur-sm"
+    : "fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4";
+  const dialogClass = isRightDocked
+    ? `${isDrawer ? "pointer-events-auto " : ""}relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl animate-slide-in-right ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
+    : `relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`;
+
   return (
     <div
-      className="fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
+      className={containerClass}
       style={{ zIndex }}
-      onClick={disableBackdropClose ? undefined : handleBackdropClick}
+      // Backdrop dismissal is a modal contract; the drawer relies on Esc
+      // and its explicit close button instead, since "click outside to
+      // close" would race with the list-click-to-switch interaction.
+      onClick={isDrawer || disableBackdropClose ? undefined : handleBackdropClick}
     >
       <div
         ref={dialogRef}
         role="dialog"
-        aria-modal="true"
+        aria-modal={isDrawer ? "false" : "true"}
         aria-labelledby={titleId}
-        className={`relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`}
+        className={dialogClass}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || !hideCloseButton) && (
@@ -118,7 +160,13 @@ export const Modal = memo(function Modal({
             )}
           </div>
         )}
-        <div className="flex-1 overflow-y-auto scrollbar-thin">{children}</div>
+        {/* `overscroll-contain` stops wheel events from chaining into the
+            page once the dialog hits its top/bottom — the bug surfaces
+            in the drawer variant (page is interactive behind the panel)
+            but the centred modal benefits too: a long modal pinned over
+            a long page used to scroll the page after the modal bottomed
+            out, which feels like the modal "leaks" the gesture. */}
+        <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin">{children}</div>
       </div>
     </div>
   );

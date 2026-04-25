@@ -599,4 +599,20 @@ pub trait KernelHandle: Send + Sync {
     fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
         vec![]
     }
+
+    /// Return the canonicalized absolute paths of ALL named workspaces declared
+    /// for the given agent, paired with their access modes. Used by file-read,
+    /// file-list, file-write, and apply-patch tools to widen the sandbox
+    /// accept-list to include declared shared workspaces (PR #2958 wired
+    /// `[workspaces]` into write-side denial only; this surfaces the full
+    /// allowlist to the read-side path resolver).
+    ///
+    /// Default: no named workspaces — read-side resolution falls back to the
+    /// primary workspace root only.
+    fn named_workspace_prefixes(
+        &self,
+        _agent_id: &str,
+    ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
+        Vec::new()
+    }
 }

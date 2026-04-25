@@ -104,6 +104,20 @@ jobs:
           DIRECT=$(printf '%s\n' "$CHANGED" \
             | sed -n 's|^crates/\([^/]*\)/.*|\1|p' \
             | sort -u | tr '\n' ' ')
+
+          # Schema-mirror rule. `librefang-types` is the source of the
+          # schemars-derived `KernelConfig` schema, but the golden-file guard
+          # (`kernel_config_schema_matches_golden_fixture`) lives in
+          # `librefang-api`. A types-only PR would otherwise ship without
+          # touching the api crate's tests — the drift then surfaces only on
+          # the main full-run, polluting every subsequent PR's selective
+          # lane. See incident: #3144 → #3162 → #3167.
+          if printf '%s\n' $DIRECT | grep -qx 'librefang-types' \
+              && ! printf '%s\n' $DIRECT | grep -qx 'librefang-api'; then
+            DIRECT="$DIRECT librefang-api"
+            echo "Schema-mirror: librefang-types changed, pulling librefang-api into affected set"
+          fi
+
           echo "crates=$DIRECT" >> "$GITHUB_OUTPUT"
           echo "Affected crates: ${DIRECT:-<none>}"
 
@@ -200,6 +214,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install system deps for keyring/secret-service
+        # libdbus-sys (pulled in transitively by the keyring crate via
+        # secret-service on Linux) needs dbus-1 dev headers + pkg-config.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libsecret-1-dev pkg-config
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Regenerate openapi.json

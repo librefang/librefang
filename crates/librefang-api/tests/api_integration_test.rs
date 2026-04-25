@@ -141,6 +141,10 @@ async fn start_test_server_with_provider(
             axum::routing::get(routes::export_session_trajectory),
         )
         .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
+        )
+        .route(
             "/api/agents/{id}/metrics",
             axum::routing::get(routes::agent_metrics),
         )
@@ -511,7 +515,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     )
     .unwrap();
 
-    let request = Request::builder()
+    let mut request = Request::builder()
         .method("POST")
         .uri("/api/migrate")
         .header("content-type", "application/json")
@@ -525,6 +529,16 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
             .unwrap(),
         ))
         .unwrap();
+    // Simulate a loopback connection so the unauth-fail-closed branch
+    // (when api_key is empty) treats this oneshot as a localhost caller
+    // rather than a non-loopback origin. Production gets ConnectInfo from
+    // axum's connection layer; oneshot bypasses that, so we inject it.
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
 
     let response = harness.app.clone().oneshot(request).await.unwrap();
 
@@ -700,6 +714,121 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+}
+
+/// Regression test for the cross-agent session-read guard added in PR #3071.
+///
+/// `GET /api/agents/{A}/session?session_id={B's session}` MUST NOT return
+/// agent B's history under agent A's id — otherwise one agent id can read
+/// another agent's conversation by guessing a session UUID.
+///
+/// Also verifies the malformed-uuid case returns 400 (typed query param
+/// validation) and that passing the agent's own session_id round-trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_session_rejects_cross_agent_session_id() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent A.
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_a: serde_json::Value = resp.json().await.unwrap();
+    let agent_a = body_a["agent_id"].as_str().unwrap().to_string();
+
+    // Spawn agent B (distinct name so the manifest validates).
+    const TEST_MANIFEST_B: &str = r#"
+name = "test-agent-b"
+version = "0.1.0"
+description = "Integration test agent B"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST_B}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_b: serde_json::Value = resp.json().await.unwrap();
+    let agent_b = body_b["agent_id"].as_str().unwrap().to_string();
+
+    // Discover B's session id (canonical-active).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_b
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let b_session: serde_json::Value = resp.json().await.unwrap();
+    let b_session_id = b_session["session_id"].as_str().unwrap().to_string();
+
+    // Cross-agent read: A's id with B's session_id → 404 (the guard).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, b_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-agent session read must be rejected"
+    );
+
+    // Malformed UUID → 400 (typed serde validation).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id=not-a-uuid",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Same-agent round-trip: A's id with A's own session_id → 200.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    let a_session: serde_json::Value = resp.json().await.unwrap();
+    let a_session_id = a_session["session_id"].as_str().unwrap().to_string();
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, a_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"].as_str().unwrap(), a_session_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1507,6 +1636,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         dashboard_auth_enabled: false,
         user_api_keys: Arc::new(Vec::new()),
         require_auth_for_reads: false,
+        // Tests synthesize requests without ConnectInfo, so opt in to the
+        // open-server path to keep them green.
+        allow_no_auth: true,
     };
 
     let app = Router::new()
@@ -1527,6 +1659,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         .route(
             "/api/agents/{id}/sessions/{session_id}/trajectory",
             axum::routing::get(routes::export_session_trajectory),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
         )
         .route(
             "/api/agents/{id}/metrics",
@@ -2063,4 +2199,311 @@ async fn test_mcp_http_enforces_agent_tool_allowlist() {
         content.contains("Permission denied") || content.contains("capability"),
         "denial must mention permission/capability; got: {content}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-client session attach (GET /api/agents/{id}/sessions/{sid}/stream)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_404_for_unknown_agent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let bogus_agent = uuid::Uuid::new_v4();
+    let bogus_session = uuid::Uuid::new_v4();
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/stream",
+            server.base_url, bogus_agent, bogus_session
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_fans_out_to_multiple_clients() {
+    use futures::StreamExt as _;
+    use librefang_runtime::llm_driver::StreamEvent;
+    use std::time::Duration;
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent (ollama, no LLM call needed).
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id_str = body["agent_id"].as_str().unwrap().to_string();
+    let agent_id: librefang_types::agent::AgentId = agent_id_str.parse().unwrap();
+
+    // Pull the agent's canonical session id from the registry — the attach
+    // route validates the session belongs to the agent.
+    let session_id = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .unwrap()
+        .session_id;
+
+    let url = format!(
+        "{}/api/agents/{}/sessions/{}/stream",
+        server.base_url, agent_id_str, session_id
+    );
+
+    // Helper that opens an SSE attach connection and reads until it sees a
+    // complete SSE frame (one `\n\n` boundary) or the timeout elapses. Returns
+    // the bytes accumulated so the test can assert on the published payload.
+    async fn read_first_frame(client: reqwest::Client, url: String) -> String {
+        let resp = client.get(url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(chunk)) = stream.next().await {
+                buf.extend_from_slice(&chunk);
+                if buf.windows(2).any(|w| w == b"\n\n") {
+                    return;
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    let attacher_a = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+    let attacher_b = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+
+    // Wait until both attachers have completed `subscribe()` inside the
+    // handler before publishing — broadcast is fire-and-forget for events
+    // that arrive with zero subscribers, so a sleep-based wait would be
+    // racy on slow CI. Poll receiver_count until it reaches 2.
+    let hub = server.state.kernel.session_stream_hub();
+    let sender = hub.sender(session_id);
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if sender.receiver_count() >= 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "both attachers should subscribe within 5s; receiver_count={}",
+        sender.receiver_count()
+    );
+
+    let receiver_count = sender
+        .send(StreamEvent::TextDelta {
+            text: "hello-multiattach".to_string(),
+        })
+        .expect("at least one receiver should be attached");
+    assert!(
+        receiver_count >= 2,
+        "expected both attachers to be subscribed before publish; got {receiver_count}"
+    );
+
+    let body_a = attacher_a.await.unwrap();
+    let body_b = attacher_b.await.unwrap();
+
+    assert!(
+        body_a.contains("hello-multiattach"),
+        "client A body should contain published event: {body_a}"
+    );
+    assert!(
+        body_b.contains("hello-multiattach"),
+        "client B body should contain published event: {body_b}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory endpoint regression tests for issue #3070:
+// When `[proactive_memory] enabled = false`, GET /api/memory and
+// GET /api/memory/stats must return 200 with `proactive_enabled: false`,
+// not 500. Disabled is a config state, not a server error.
+// ---------------------------------------------------------------------------
+
+/// Build a router harness with `proactive_memory.enabled` toggleable.
+async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    librefang_runtime::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let proactive = librefang_types::memory::ProactiveMemoryConfig {
+        enabled,
+        ..librefang_types::memory::ProactiveMemoryConfig::default()
+    };
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        proactive_memory: proactive,
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+/// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
+/// auth middleware treats it as a localhost caller (matching production
+/// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
+/// extension and the fail-closed branch returns 401 for non-public paths.
+fn loopback_get(uri: &str) -> Request<Body> {
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    request
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert_eq!(json["total"], serde_json::json!(0));
+    assert!(
+        json["memories"].as_array().is_some_and(|a| a.is_empty()),
+        "memories must be an empty array, got {}",
+        json["memories"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory/stats must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert!(
+        json["stats"].is_null(),
+        "stats must be null when disabled, got {}",
+        json["stats"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // When enabled the legacy fields stay intact and `proactive_enabled: true`
+    // is added so the dashboard can branch on a single field.
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    assert!(json["memories"].is_array(), "memories must be an array");
+    assert!(json["total"].is_number(), "total must be a number");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    // Existing fields remain present; we only assert their types so we don't
+    // couple to a specific empty-database snapshot.
+    assert!(json["total"].is_number() || json["total"].is_null());
 }

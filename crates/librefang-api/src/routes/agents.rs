@@ -53,6 +53,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(send_message_stream),
         )
         .route(
+            "/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(attach_session_stream),
+        )
+        .route(
             "/agents/{id}/session",
             axum::routing::get(get_agent_session),
         )
@@ -1519,12 +1523,25 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     })
 }
 
+/// Query params for `GET /api/agents/{id}/session`.
+///
+/// Using a typed struct (rather than `HashMap<String,String>`) gives us
+/// automatic UUID validation: a malformed `session_id` is rejected by serde
+/// before the handler runs, returning a clean 400.
+#[derive(serde::Deserialize)]
+pub struct GetAgentSessionQuery {
+    pub session_id: Option<uuid::Uuid>,
+}
+
 /// GET /api/agents/:id/session — Get agent session (conversation history).
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/session",
     tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
+    ),
     responses(
         (status = 200, description = "Get agent conversation session history", body = serde_json::Value)
     )
@@ -1532,9 +1549,19 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session_id"})),
+            );
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -1555,12 +1582,30 @@ pub async fn get_agent_session(
         }
     };
 
+    // Callers (e.g. the dashboard tab with `?sessionId=` pinned) can override
+    // the canonical-active session for this request. The returned messages
+    // must belong to that exact session; otherwise tabs pinned to different
+    // sessions all render whichever session the kernel thinks is active.
+    let target_session_id = match params.session_id {
+        Some(uuid) => librefang_types::agent::SessionId(uuid),
+        None => entry.session_id,
+    };
+
     match state
         .kernel
         .memory_substrate()
-        .get_session(entry.session_id)
+        .get_session(target_session_id)
     {
         Ok(Some(session)) => {
+            // Reject cross-agent reads when the caller passed an explicit
+            // session_id — prevents leaking one agent's history via another's
+            // id.
+            if session.agent_id != agent_id {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "session not found for this agent"})),
+                );
+            }
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
             // collects all tool_use entries keyed by id; pass 2 attaches results.
@@ -1720,16 +1765,34 @@ pub async fn get_agent_session(
                 })),
             )
         }
-        Ok(None) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "session_id": entry.session_id.0.to_string(),
-                "agent_id": agent_id.to_string(),
-                "message_count": 0,
-                "context_window_tokens": 0,
-                "messages": [],
-            })),
-        ),
+        Ok(None) => {
+            // The session row is not materialized in the memory substrate
+            // (e.g. agent just spawned, no messages yet). If the caller pinned
+            // an explicit session_id that does NOT match this agent's
+            // canonical-active id, refuse — otherwise the response would
+            // silently fall back to the agent's own canonical-empty session
+            // under the requested id, hiding the cross-agent guard. The
+            // canonical id is owned by this agent by construction (registry
+            // entry), so matching it is safe to treat as the no-query path.
+            if let Some(requested) = params.session_id {
+                if requested != entry.session_id.0 {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": "session not found for this agent"})),
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": entry.session_id.0.to_string(),
+                    "agent_id": agent_id.to_string(),
+                    "message_count": 0,
+                    "context_window_tokens": 0,
+                    "messages": [],
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
             (
@@ -2167,6 +2230,177 @@ pub async fn send_message_stream(
     });
 
     Sse::new(sse_stream).into_response()
+}
+
+/// GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's
+/// in-flight stream events (SSE).
+///
+/// Any client can subscribe to the events emitted by an active turn on this
+/// session: the originating client (CLI, Tauri desktop, web) plus any number
+/// of additional clients. Late attachers begin receiving events from the
+/// moment they subscribe — partial-turn snapshots are not replayed.
+///
+/// Returns 404 if the session does not exist or belongs to a different agent.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/sessions/{session_id}/stream",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID to attach to"),
+    ),
+    responses(
+        (status = 200, description = "Server-sent events stream of session events"),
+        (status = 400, description = "Invalid agent or session ID"),
+        (status = 404, description = "Agent or session not found")
+    )
+)]
+pub async fn attach_session_stream(
+    State(state): State<Arc<AppState>>,
+    Path((id, session_id_str)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, Sse};
+    use futures::stream;
+    use librefang_runtime::llm_driver::StreamEvent;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+                .into_response();
+        }
+    };
+
+    let session_id = match session_id_str.parse::<uuid::Uuid>() {
+        Ok(uuid) => librefang_types::agent::SessionId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
+            )
+                .into_response();
+        }
+    };
+
+    let agent_entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate the session belongs to this agent. Two acceptable shapes:
+    //   1. The session has been persisted (one or more turns ran) and its
+    //      `agent_id` matches the path agent.
+    //   2. The session has not been persisted yet (fresh agent, no turn yet)
+    //      but the id matches the agent's canonical `session_id` from the
+    //      registry. Sessions are written lazily on first turn, so requiring
+    //      a memory row would forbid attach-before-first-turn.
+    // Anything else is rejected — a caller cannot attach to an arbitrary
+    // session UUID without first proving the agent–session binding.
+    let session_lookup = state.kernel.memory_substrate().get_session(session_id);
+    let session_valid = match &session_lookup {
+        Ok(Some(s)) => s.agent_id == agent_id,
+        Ok(None) => agent_entry.session_id == session_id,
+        Err(_) => false,
+    };
+    if !session_valid {
+        if let Err(e) = session_lookup {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            )
+                .into_response();
+        }
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "session not found for this agent"
+            })),
+        )
+            .into_response();
+    }
+
+    let receiver = state.kernel.session_stream_hub().subscribe(session_id);
+
+    // Bridge broadcast::Receiver into an SSE stream. Skip Lagged events with
+    // a debug log (intentionally lossy semantics — see SessionStreamHub
+    // docs) and end the stream when the channel closes.
+    let sse_stream = stream::unfold(
+        (receiver, StreamDedup::new()),
+        |(mut rx, mut dedup)| async move {
+            loop {
+                let event = match rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::debug!(skipped = n, "session attach stream lagged, skipping");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => return None,
+                };
+                let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
+                    StreamEvent::TextDelta { text } => {
+                        if dedup.is_duplicate(&text) {
+                            continue;
+                        }
+                        dedup.record_sent(&text);
+                        Event::default()
+                            .event("chunk")
+                            .json_data(serde_json::json!({"content": text, "done": false}))
+                            .unwrap_or_else(|_| Event::default().data("error"))
+                    }
+                    StreamEvent::ToolUseStart { name, .. } => Event::default()
+                        .event("tool_use")
+                        .json_data(serde_json::json!({"tool": name}))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
+                        .event("tool_result")
+                        .json_data(serde_json::json!({"tool": name, "input": input}))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::ContentComplete { usage, .. } => Event::default()
+                        .event("done")
+                        .json_data(serde_json::json!({
+                            "done": true,
+                            "usage": {
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::PhaseChange { phase, detail } => Event::default()
+                        .event("phase")
+                        .json_data(serde_json::json!({
+                            "phase": phase,
+                            "detail": detail,
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::OwnerNotice { text } => Event::default()
+                        .event("owner_notice")
+                        .json_data(serde_json::json!({ "text": text }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    _ => Event::default().comment("skip"),
+                });
+                return Some((sse_event, (rx, dedup)));
+            }
+        },
+    );
+
+    Sse::new(sse_stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
 }
 
 #[utoipa::path(
@@ -3452,6 +3686,11 @@ pub async fn patch_agent(
         if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
             tracing::warn!("Failed to persist agent state: {e}");
         }
+
+        // Write updated manifest to agent.toml on disk so disk doesn't override
+        // dashboard changes on next boot (#996, #1018).
+        state.kernel.persist_manifest_to_disk(agent_id);
+
         (
             StatusCode::OK,
             Json(
@@ -3904,6 +4143,10 @@ pub async fn patch_agent_config(
             tracing::warn!("Failed to persist agent config update: {e}");
         }
     }
+
+    // Write updated manifest to agent.toml on disk so disk doesn't override
+    // dashboard changes on next boot (#996, #1018).
+    state.kernel.persist_manifest_to_disk(agent_id);
 
     (
         StatusCode::OK,

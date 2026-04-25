@@ -41,6 +41,10 @@ pub struct AuthState {
     /// through bearer authentication. Static assets, OAuth entry points, and
     /// `/api/health*` remain public so the daemon stays probeable.
     pub require_auth_for_reads: bool,
+    /// Set from `LIBREFANG_ALLOW_NO_AUTH=1` to permit running without an
+    /// api_key on a non-loopback bind. Off by default so empty keys
+    /// fail closed for LAN/public origins (see issue #1034 port).
+    pub allow_no_auth: bool,
 }
 
 #[derive(Clone)]
@@ -393,10 +397,14 @@ pub async fn auth(
     //
     // Dashboard assets (JS/CSS/font chunks) are always public — they contain
     // no sensitive data and the SPA shell needs them to render even the
-    // inline login page returned for unauthenticated browsers.
+    // inline login page returned for unauthenticated browsers. The same
+    // applies to `/locales/*.json` — translation bundles are static i18n
+    // resources fetched by the SPA shell before any auth flow runs.
     let is_dashboard_asset = path.starts_with("/dashboard/assets/");
-    let dashboard_shell_public =
-        (!auth_state.dashboard_auth_enabled && is_dashboard_path) || is_dashboard_asset;
+    let is_locale_bundle = path.starts_with("/locales/");
+    let dashboard_shell_public = (!auth_state.dashboard_auth_enabled && is_dashboard_path)
+        || is_dashboard_asset
+        || is_locale_bundle;
 
     let always_public_get_only = is_get
         && (matches!(
@@ -453,15 +461,41 @@ pub async fn auth(
         return next.run(request).await;
     }
 
-    // If no API key configured (empty, whitespace-only, or missing), skip auth
-    // entirely. Users who don't set api_key accept that all endpoints are open.
-    // To secure the dashboard, set a non-empty api_key in config.toml.
+    // If no API key configured (empty/whitespace) and no other auth method is
+    // active, fail closed for any request that did NOT come from loopback —
+    // unless the operator explicitly opted in via LIBREFANG_ALLOW_NO_AUTH=1.
+    //
+    // SECURITY: This closes the openfang #1034 hole where an empty api_key
+    // bypassed auth for every origin (LAN/public), exposing agent config,
+    // channel tokens, and LLM keys to anyone reachable on the bind address.
+    // Loopback already short-circuits above for the single-user dev UX, so
+    // reaching this branch means the caller is on the LAN/WAN.
     let api_key = api_key.trim();
     if api_key.is_empty()
         && auth_state.user_api_keys.is_empty()
         && !auth_state.dashboard_auth_enabled
     {
-        return next.run(request).await;
+        // Re-check ConnectInfo defensively — if it is missing for any reason
+        // we MUST treat the origin as non-loopback (fail closed, never open).
+        let is_loopback = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().is_loopback())
+            .unwrap_or(false);
+        if is_loopback || auth_state.allow_no_auth {
+            return next.run(request).await;
+        }
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("www-authenticate", "Bearer")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "error": "API key required for non-loopback requests. Set api_key in config.toml, bind to 127.0.0.1, or set LIBREFANG_ALLOW_NO_AUTH=1 to opt out."
+                })
+                .to_string(),
+            ))
+            .unwrap_or_default();
     }
 
     // Check Authorization: Bearer <token> header, then fallback to X-API-Key
@@ -855,6 +889,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
@@ -887,6 +922,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route(
@@ -922,6 +958,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route(
@@ -957,6 +994,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route(
@@ -992,6 +1030,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/budget", get(|| async { "ok" }))
@@ -1026,6 +1065,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route(
@@ -1067,6 +1107,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(vec![]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/", get(|| async { "dashboard html" }))
@@ -1102,6 +1143,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
             }]),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route(
@@ -1137,6 +1179,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -1170,6 +1213,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -1200,6 +1244,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
@@ -1229,6 +1274,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -1265,6 +1311,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: false,
+            allow_no_auth: false,
         };
         let app_off = Router::new()
             .route("/api/health", get(|| async { "ok" }))
@@ -1310,6 +1357,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app_on = Router::new()
             .route("/api/health/detail", get(|| async { "detail" }))
@@ -1339,6 +1387,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/status", get(|| async { "status" }))
@@ -1377,6 +1426,7 @@ mod tests {
                 api_key_hash: crate::password_hash::hash_password("alice-key").unwrap(),
             }]),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -1425,6 +1475,7 @@ mod tests {
             dashboard_auth_enabled: false,
             user_api_keys: Arc::new(Vec::new()),
             require_auth_for_reads: true,
+            allow_no_auth: false,
         };
         let app = Router::new()
             .route("/api/agents", get(|| async { "agents listing" }))
@@ -1446,5 +1497,134 @@ mod tests {
             "flag must not block unauthenticated reads when no auth is configured — \
              the startup warning handles operator feedback"
         );
+    }
+
+    // ---- openfang #1034 port: empty-api_key fail-closed coverage --------
+    //
+    // Helper builders + 6 scenarios specified by the security port:
+    //   (a) loopback + no key      → 200
+    //   (b) LAN IP + no key        → 401
+    //   (c) public IP + no key     → 401
+    //   (d) allow_no_auth=1        → 200 from any origin
+    //   (e) configured key         → still does normal Bearer validation
+    //   (f) missing ConnectInfo    → 401 (fail-closed, never open)
+
+    fn no_auth_state() -> AuthState {
+        AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+        }
+    }
+
+    fn with_key_state(key: &str) -> AuthState {
+        AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(Vec::new()),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+        }
+    }
+
+    fn protected_router(state: AuthState) -> Router {
+        Router::new()
+            .route("/api/agents/1", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, auth))
+    }
+
+    fn req_with_addr(ip: &str) -> Request<Body> {
+        let addr: std::net::SocketAddr = format!("{ip}:40000").parse().unwrap();
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/agents/1")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        req
+    }
+
+    /// (a) Empty api_key + loopback origin → 200. Single-user dev UX kept.
+    #[tokio::test]
+    async fn empty_key_allows_loopback() {
+        let app = protected_router(no_auth_state());
+        let resp = app.oneshot(req_with_addr("127.0.0.1")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// (b) Empty api_key + LAN origin → 401. Closes the #1034 hole where a
+    /// 192.168.x caller could hit every non-public endpoint.
+    #[tokio::test]
+    async fn empty_key_blocks_lan_origin() {
+        let app = protected_router(no_auth_state());
+        let resp = app.oneshot(req_with_addr("192.168.1.50")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// (c) Empty api_key + public IP origin → 401.
+    #[tokio::test]
+    async fn empty_key_blocks_public_origin() {
+        let app = protected_router(no_auth_state());
+        let resp = app.oneshot(req_with_addr("203.0.113.5")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// (d) `allow_no_auth = true` (i.e. LIBREFANG_ALLOW_NO_AUTH=1 at boot)
+    /// opens the door from any origin. Operators must opt in explicitly.
+    #[tokio::test]
+    async fn empty_key_with_allow_no_auth_opens_lan() {
+        let mut s = no_auth_state();
+        s.allow_no_auth = true;
+        let app = protected_router(s);
+        let resp = app.oneshot(req_with_addr("10.0.0.9")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// (e) With an api_key configured, missing token → 401, valid bearer → 200.
+    /// Confirms the new branch only fires on the no-auth code path.
+    #[tokio::test]
+    async fn configured_key_still_validates_bearer() {
+        let app = protected_router(with_key_state("secret"));
+        let resp = app
+            .clone()
+            .oneshot(req_with_addr("203.0.113.5"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let addr: std::net::SocketAddr = "203.0.113.5:40000".parse().unwrap();
+        let mut authed = Request::builder()
+            .method("GET")
+            .uri("/api/agents/1")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        authed
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        let ok = app.oneshot(authed).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    /// (f) ConnectInfo extension is missing → fail closed. The middleware
+    /// must never treat unknown origin as loopback. Defense in depth in case
+    /// upstream wiring changes (e.g. a future router skips
+    /// `into_make_service_with_connect_info`).
+    #[tokio::test]
+    async fn empty_key_blocks_when_connect_info_missing() {
+        let app = protected_router(no_auth_state());
+        // No ConnectInfo extension inserted.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/agents/1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

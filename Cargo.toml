@@ -98,6 +98,9 @@ async-trait = "0.1"
 # Base64
 base64 = "0.22"
 
+# Bitflags
+bitflags = "2"
+
 # Bytes
 bytes = "1"
 
@@ -121,6 +124,11 @@ tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip",
 
 # Home directory resolution
 dirs = "6"
+
+# OS keyring access — libsecret on Linux, Keychain on macOS, Credential Manager
+# on Windows. Falls back to the file-based AES-256-GCM keyring in vault.rs if
+# the OS keyring is genuinely unavailable.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # YAML parsing
 serde_yaml = "0.9"

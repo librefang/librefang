@@ -48,6 +48,9 @@ prediction_report_*.md
 BUILD_LOG.md
 message_journal.jsonl
 
+# Local working notes / design plans (ultrareview, brainstorm scratch)
+.plans/
+
 # Node.js (packages/)
 node_modules/
 

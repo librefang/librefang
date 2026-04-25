@@ -58,6 +58,31 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     (supports_vision, true, supports_thinking)
 }
 
+#[cfg(test)]
+impl ModelCatalog {
+    /// Test-only constructor: build a catalog directly from owned entries
+    /// without going through TOML loading. Used by sibling modules' unit
+    /// tests (`model_metadata`, etc.) so they can inject deterministic
+    /// fixtures without touching the filesystem.
+    pub fn from_entries(models: Vec<ModelCatalogEntry>, providers: Vec<ProviderInfo>) -> Self {
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for m in &models {
+            for alias in &m.aliases {
+                aliases
+                    .entry(alias.to_lowercase())
+                    .or_insert_with(|| m.id.clone());
+            }
+        }
+        Self {
+            models,
+            aliases,
+            providers,
+            suppressed_providers: HashSet::new(),
+            overrides: HashMap::new(),
+        }
+    }
+}
+
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
@@ -340,6 +365,63 @@ impl ModelCatalog {
     /// List all models in the catalog.
     pub fn list_models(&self) -> &[ModelCatalogEntry] {
         &self.models
+    }
+
+    /// Find a model by canonical ID restricted to a specific provider.
+    ///
+    /// Same model ID can exist under multiple providers with different
+    /// `context_window` values (e.g. `claude-opus-4-7` is 1M on
+    /// `anthropic` but 128K on `copilot`). [`Self::find_model`] is
+    /// provider-blind and may return the first match — this method
+    /// resolves the ambiguity when the caller knows which provider the
+    /// agent is targeting.
+    ///
+    /// Resolution order:
+    /// 1. Exact `(provider, id)` match (case-insensitive on both).
+    /// 2. Exact `(provider, alias)` match resolved via the alias map.
+    /// 3. `None`. Callers fall back to [`Self::find_model`] for
+    ///    cross-provider lookup.
+    ///
+    /// `provider` matches case-insensitively. An empty `provider`
+    /// disables the provider filter and behaves like
+    /// [`Self::find_model`].
+    pub fn find_model_for_provider(
+        &self,
+        provider: &str,
+        id_or_alias: &str,
+    ) -> Option<&ModelCatalogEntry> {
+        if provider.is_empty() {
+            return self.find_model(id_or_alias);
+        }
+        let want_provider = provider.to_lowercase();
+        let want_id = id_or_alias.to_lowercase();
+
+        // Pass 1: exact (provider, id) match. Custom-tier wins, otherwise
+        // first occurrence (mirrors the precedence in `find_model`).
+        let mut found: Option<&ModelCatalogEntry> = None;
+        for m in &self.models {
+            if m.provider.to_lowercase() == want_provider && m.id.to_lowercase() == want_id {
+                if m.tier == ModelTier::Custom {
+                    return Some(m);
+                }
+                if found.is_none() {
+                    found = Some(m);
+                }
+            }
+        }
+        if let Some(entry) = found {
+            return Some(entry);
+        }
+
+        // Pass 2: alias resolution restricted to the provider.
+        if let Some(canonical) = self.aliases.get(&want_id) {
+            return self
+                .models
+                .iter()
+                .find(|m| m.provider.to_lowercase() == want_provider && m.id == *canonical);
+        }
+
+        None
     }
 
     /// Find a model by its canonical ID, display name, or alias.
@@ -1196,6 +1278,71 @@ id = "acme"
         assert!(catalog.find_model("nonexistent-model").is_none());
     }
 
+    /// `find_model_for_provider` must filter by provider so the same model
+    /// id under different providers (which can differ in `context_window`)
+    /// resolves to the right entry. The test catalog has
+    /// `claude-sonnet-4-20250514` only under `anthropic`, so a copilot
+    /// lookup of the same id must miss.
+    #[test]
+    fn test_find_model_for_provider_filters_by_provider() {
+        let catalog = test_catalog();
+        assert!(
+            catalog
+                .find_model_for_provider("anthropic", "claude-sonnet-4-20250514")
+                .is_some(),
+            "anthropic catalog hit expected"
+        );
+        assert!(
+            catalog
+                .find_model_for_provider("copilot", "claude-sonnet-4-20250514")
+                .is_none(),
+            "no copilot entry for the anthropic id should exist",
+        );
+    }
+
+    /// Empty `provider` arg disables filtering and behaves like
+    /// `find_model`. Useful when the agent's manifest has no provider
+    /// configured (e.g. fresh install before any provider key is set).
+    #[test]
+    fn test_find_model_for_provider_empty_provider_falls_back() {
+        let catalog = test_catalog();
+        let via_filtered = catalog
+            .find_model_for_provider("", "claude-sonnet-4-20250514")
+            .expect("empty provider should match anyway");
+        let via_unfiltered = catalog
+            .find_model("claude-sonnet-4-20250514")
+            .expect("unfiltered match");
+        assert_eq!(via_filtered.id, via_unfiltered.id);
+    }
+
+    /// Provider matching is case-insensitive — registries sometimes
+    /// store providers as `Anthropic` while manifests use `anthropic`.
+    #[test]
+    fn test_find_model_for_provider_case_insensitive_provider() {
+        let catalog = test_catalog();
+        assert!(catalog
+            .find_model_for_provider("ANTHROPIC", "claude-sonnet-4-20250514")
+            .is_some(),);
+    }
+
+    /// Alias resolution is also provider-scoped: `"sonnet"` must resolve
+    /// to the anthropic entry under `provider="anthropic"`, but a query
+    /// against an unrelated provider with the same alias must miss.
+    #[test]
+    fn test_find_model_for_provider_alias_is_scoped() {
+        let catalog = test_catalog();
+        let r = catalog
+            .find_model_for_provider("anthropic", "sonnet")
+            .expect("alias under anthropic");
+        assert_eq!(r.id, "claude-sonnet-4-6");
+        assert!(
+            catalog
+                .find_model_for_provider("openai", "sonnet")
+                .is_none(),
+            "alias must not leak across providers",
+        );
+    }
+
     #[test]
     fn test_resolve_alias() {
         let catalog = test_catalog();
@@ -1799,7 +1946,7 @@ id = "acme"
     fn test_set_provider_url() {
         let mut catalog = test_catalog();
         let old_url = catalog.get_provider("ollama").unwrap().base_url.clone();
-        assert_eq!(old_url, "http://localhost:11434/v1");
+        assert_eq!(old_url, "http://127.0.0.1:11434/v1");
 
         let updated = catalog.set_provider_url("ollama", "http://192.168.1.100:11434/v1");
         assert!(updated);
@@ -1844,7 +1991,7 @@ id = "acme"
         // lmstudio should be unchanged
         assert_eq!(
             catalog.get_provider("lmstudio").unwrap().base_url,
-            "http://localhost:1234/v1"
+            "http://127.0.0.1:1234/v1"
         );
     }
 

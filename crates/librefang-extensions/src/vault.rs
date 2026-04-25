@@ -21,8 +21,10 @@ use zeroize::Zeroizing;
 /// Service name for OS keyring storage.
 #[cfg(not(test))]
 const KEYRING_SERVICE: &str = "librefang-vault";
-/// Username for OS keyring (used by platform keyring backends).
-#[allow(dead_code)]
+/// Username for OS keyring entry. Each librefang install stores a single
+/// master key per host, so the username is a fixed sentinel — the keyring
+/// crate's `Entry` constructor needs both a service and a username regardless.
+#[cfg(not(test))]
 const KEYRING_USER: &str = "master-key";
 /// Env var fallback for vault key.
 const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
@@ -431,10 +433,35 @@ struct KeyringFile {
     ciphertext: String,
 }
 
-/// Store the master key in the OS keyring (file-based fallback with AES-256-GCM).
+/// Store the master key in the OS keyring (libsecret on Linux, Keychain on
+/// macOS, Credential Manager on Windows). Falls back to a file-based
+/// AES-256-GCM wrapped store only when the OS keyring is genuinely
+/// unavailable (e.g. headless Linux without a Secret Service daemon).
 fn store_keyring_key(key_b64: &str) -> Result<(), String> {
     #[cfg(not(test))]
     {
+        // Try the OS keyring first. The previous behaviour silently dropped
+        // through to the file fallback even on hosts that had a working
+        // keyring — see issue #3178.
+        match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            Ok(entry) => match entry.set_password(key_b64) {
+                Ok(()) => {
+                    debug!("Stored master key in OS keyring");
+                    return Ok(());
+                }
+                Err(e) => {
+                    debug!(
+                        "OS keyring set_password failed ({e}) — falling back to file-based store"
+                    );
+                }
+            },
+            Err(e) => {
+                debug!(
+                    "OS keyring entry initialisation failed ({e}) — falling back to file-based store"
+                );
+            }
+        }
+
         // File-based fallback — wraps the master key with AES-256-GCM using an
         // Argon2id-derived wrapping key from the machine fingerprint.
         let keyring_path = dirs::data_local_dir()
@@ -489,10 +516,28 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
     }
 }
 
-/// Load the master key from the OS keyring (file-based fallback).
+/// Load the master key, preferring the OS keyring and falling back to the
+/// file-based AES-256-GCM wrapped store. Symmetric with `store_keyring_key`.
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
+        // OS keyring first (issue #3178).
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            match entry.get_password() {
+                Ok(s) => {
+                    debug!("Loaded master key from OS keyring");
+                    return Ok(Zeroizing::new(s));
+                }
+                Err(keyring::Error::NoEntry) => {
+                    // Empty keyring is normal for a host that previously stored
+                    // the key in the file fallback — drop through silently.
+                }
+                Err(e) => {
+                    debug!("OS keyring get_password failed ({e}) — trying file-based fallback");
+                }
+            }
+        }
+
         let keyring_path = dirs::data_local_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("librefang")

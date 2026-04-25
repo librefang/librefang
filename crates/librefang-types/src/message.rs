@@ -169,7 +169,27 @@ impl MessageContent {
         MessageContent::Text(content.into())
     }
 
-    /// Get the total character length of text in this content.
+    /// Total UTF-8 byte length of textual payload across all blocks.
+    ///
+    /// **Upper-bound token estimate, not an exact count.**
+    ///
+    /// Callers that use this to estimate LLM token usage should treat the
+    /// returned value as a rough cap, not a real tokenization. The current
+    /// implementation returns `String::len()` which is the **byte** length
+    /// (per Rust semantics, not the user-facing "char count"). For
+    /// most modern LLM tokenizers (BPE/tiktoken-style), 1 token ≈ 4 bytes
+    /// of English-prose UTF-8 and somewhat less for CJK / source code, so
+    /// `text_length / 4` is a conservative ceiling.
+    ///
+    /// `ToolUse` blocks include the tool name plus the JSON-serialised
+    /// arguments — also counted in bytes — to keep tool-heavy turns from
+    /// looking artificially small. Images / image-files are skipped: they
+    /// have their own provider-specific token cost models.
+    ///
+    /// If exact token counts ever become necessary, swap callers to a real
+    /// tokenizer (tiktoken-rs, anthropic count-tokens API) rather than
+    /// changing this function — its current callers rely on it being
+    /// cheap, infallible, and offline.
     pub fn text_length(&self) -> usize {
         match self {
             MessageContent::Text(s) => s.len(),
@@ -329,6 +349,22 @@ impl TokenUsage {
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens
     }
+
+    /// Prompt-cache hit ratio: `cache_read / (cache_read + cache_creation)`.
+    ///
+    /// Returns `None` when neither value was reported (provider doesn't
+    /// support prompt caching, or no caching activity this turn). Returns
+    /// `Some(ratio)` in `[0.0, 1.0]` otherwise — `Some(0.0)` for a cold
+    /// start where caching was active but produced no hits, `Some(1.0)`
+    /// for a fully-cached turn.
+    pub fn cache_hit_ratio(&self) -> Option<f32> {
+        let denom = self.cache_read_input_tokens + self.cache_creation_input_tokens;
+        if denom == 0 {
+            None
+        } else {
+            Some(self.cache_read_input_tokens as f32 / denom as f32)
+        }
+    }
 }
 
 /// Reply directives extracted from agent output.
@@ -393,6 +429,45 @@ mod tests {
         let usage: TokenUsage = serde_json::from_str(json).unwrap();
         assert_eq!(usage.cache_creation_input_tokens, 0);
         assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn token_usage_cache_hit_ratio_none_when_no_caching() {
+        assert_eq!(TokenUsage::default().cache_hit_ratio(), None);
+    }
+
+    #[test]
+    fn token_usage_cache_hit_ratio_full_hit() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 100,
+        };
+        assert_eq!(usage.cache_hit_ratio(), Some(1.0));
+    }
+
+    #[test]
+    fn token_usage_cache_hit_ratio_partial() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 70,
+        };
+        let ratio = usage.cache_hit_ratio().expect("ratio set");
+        assert!((ratio - 0.7).abs() < 1e-6, "got {ratio}");
+    }
+
+    #[test]
+    fn token_usage_cache_hit_ratio_cold_start_returns_some_zero() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(usage.cache_hit_ratio(), Some(0.0));
     }
 
     #[test]

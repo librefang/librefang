@@ -3037,7 +3037,8 @@ pub async fn pairing_notify(
 pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut commands = vec![
         serde_json::json!({"cmd": "/help", "desc": "Show available commands"}),
-        serde_json::json!({"cmd": "/new", "desc": "Reset session (clear history)"}),
+        serde_json::json!({"cmd": "/new", "desc": "Start a new session (new session id)"}),
+        serde_json::json!({"cmd": "/reset", "desc": "Reset current session (clear history, same session id)"}),
         serde_json::json!({"cmd": "/reboot", "desc": "Hard reset session (full context clear, no summary)"}),
         serde_json::json!({"cmd": "/compact", "desc": "Trigger LLM session compaction"}),
         serde_json::json!({"cmd": "/model", "desc": "Show or switch model (/model [name])"}),
@@ -3085,7 +3086,11 @@ pub async fn get_command(
     // Built-in commands
     let builtins = [
         ("/help", "Show available commands"),
-        ("/new", "Reset session (clear history)"),
+        ("/new", "Start a new session (new session id)"),
+        (
+            "/reset",
+            "Reset current session (clear history, same session id)",
+        ),
         (
             "/reboot",
             "Hard reset session (full context clear, no summary)",

@@ -128,42 +128,19 @@ pub struct BotCommand {
     pub description: String,
 }
 
-/// Built-in slash commands exposed in the Telegram command menu.
+/// Build a `Vec<BotCommand>` for the Telegram command menu.
 ///
-/// These mirror the commands handled by the channel bridge's `handle_command`.
-/// When `TelegramAdapter::commands` is empty (the default), the adapter
-/// registers these automatically on `/start` or the first incoming message.
-/// Telegram allows at most 100 commands; we list the most useful subset.
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("start", "Show welcome message"),
-    ("help", "Show all available commands"),
-    ("agents", "List running agents"),
-    ("agent", "Select an agent to talk to"),
-    ("new", "Reset session (clear messages)"),
-    ("reboot", "Hard reset session (full context clear)"),
-    ("compact", "Trigger LLM session compaction"),
-    ("model", "Show or switch agent model"),
-    ("stop", "Cancel current agent run"),
-    ("usage", "Show session token usage and cost"),
-    ("think", "Toggle extended thinking"),
-    ("models", "List available AI models"),
-    ("providers", "Show configured providers"),
-    ("skills", "List installed skills"),
-    ("hands", "List available and active hands"),
-    ("status", "Show system status"),
-    ("workflows", "List workflows"),
-    ("workflow", "Run a workflow"),
-    ("budget", "Show spending limits and costs"),
-    ("btw", "Ask a side question (ephemeral)"),
-];
-
-/// Build a `Vec<BotCommand>` from [`BUILTIN_COMMANDS`].
+/// Sourced from [`crate::commands::telegram_bot_commands`] — the central
+/// command registry — so this list never drifts from the bridge's
+/// `handle_command` dispatcher. When `TelegramAdapter::commands` is empty
+/// (the default), the adapter registers these automatically on `/start`
+/// or the first incoming message. Telegram allows at most 100 commands.
 fn builtin_bot_commands() -> Vec<BotCommand> {
-    BUILTIN_COMMANDS
-        .iter()
-        .map(|(cmd, desc)| BotCommand {
-            command: (*cmd).to_string(),
-            description: (*desc).to_string(),
+    crate::commands::telegram_bot_commands()
+        .into_iter()
+        .map(|(command, description)| BotCommand {
+            command,
+            description,
         })
         .collect()
 }
@@ -1381,9 +1358,9 @@ impl TelegramAdapter {
     ///
     /// Uses the default scope (all chats) and no language filter.
     /// Called during `start()` with either explicitly configured commands
-    /// or the built-in defaults from [`BUILTIN_COMMANDS`].  Also re-triggered
-    /// from the polling loop on `/start` or first incoming message
-    /// (via [`TelegramApiCtx::set_my_commands`]).
+    /// or the built-in defaults from [`builtin_bot_commands`]. Also
+    /// re-triggered from the polling loop on `/start` or first incoming
+    /// message (via [`TelegramApiCtx::set_my_commands`]).
     pub async fn api_set_my_commands(
         &self,
         commands: &[BotCommand],

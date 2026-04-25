@@ -15,7 +15,7 @@ import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
-import { approvalKeys } from "../lib/queries/keys";
+import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
@@ -211,7 +211,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -335,7 +335,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId)
+    loadAgentSession(loadId, sessionId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -387,7 +387,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           }
         }
       })
-      .catch(() => { /* Session load failure — user will see empty chat */ })
+      .catch((error: unknown) => {
+        // Surface load failures to the user — most commonly a stale
+        // `?sessionId=` URL that no longer points at a session belonging to
+        // this agent (404 from the cross-agent guard) or a malformed UUID
+        // (400). Without this the chat just renders empty with no signal.
+        const message = error instanceof Error ? error.message : t("common.error");
+        onClearError?.(message);
+      })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
@@ -475,6 +482,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 // Refresh agent data so model/provider badge reflects the change
                 if (data.type === "command_result" && cmd === "model") {
                   onModelSwitch?.();
+                }
+                // /new created a fresh backend session; surface its id so the
+                // URL + sessions dropdown reflect the switch in a single step.
+                if (data.type === "command_result" && cmd === "new" && typeof data.session_id === "string" && data.session_id) {
+                  onNewSession?.(data.session_id);
                 }
               }
             } catch { /* ignore non-JSON */ }
@@ -2181,6 +2193,7 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 export function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
@@ -2310,6 +2323,17 @@ export function ChatPage() {
   // param is present, it wins over the server's canonical active session so
   // two browser tabs on the same agent can hold independent sessions.
   const urlSessionId = search?.sessionId || null;
+  const handleBackendNewSession = useCallback((newSessionId: string) => {
+    if (!selectedAgentId) return;
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId: newSessionId },
+      replace: false,
+    });
+    setSessionVersion(v => v + 1);
+    void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
+  }, [selectedAgentId, navigate, queryClient]);
+
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
@@ -2317,6 +2341,7 @@ export function ChatPage() {
     () => void agentsQuery.refetch(),
     (message) => addToast(message, "error"),
     urlSessionId,
+    handleBackendNewSession,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -2431,10 +2456,17 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
-    if (!agents.some(a => a.id === selectedAgentId)) {
-      setSelectedAgentId("");
+    if (agents.some(a => a.id === selectedAgentId)) return;
+    // Not in the current list — before clearing, try expanding the query
+    // to include hand-spawned agents. The URL may point at a hand agent
+    // while `showHandAgents` (a localStorage toggle) is off, which would
+    // otherwise dump the user back to the default agent on every refresh.
+    if (!showHandAgents) {
+      setShowHandAgents(true);
+      return;
     }
-  }, [agents, selectedAgentId, agentsQuery.data]);
+    setSelectedAgentId("");
+  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent
@@ -2633,7 +2665,7 @@ export function ChatPage() {
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
               onModelChange={() => void agentsQuery.refetch()}
-              onOpenConfig={() => navigate({ to: "/config" })}
+              onOpenConfig={() => navigate({ to: "/config/tools" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               attached={attachEnabled && sessionStream.isAttached}
