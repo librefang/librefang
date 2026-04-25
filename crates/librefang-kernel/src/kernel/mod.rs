@@ -8853,10 +8853,18 @@ system_prompt = "You are a helpful assistant."
                 }
                 let taken_crons = self.cron_scheduler.list_jobs(old_id);
                 if !taken_crons.is_empty() {
-                    saved_crons
-                        .entry(old_role.clone())
-                        .or_default()
-                        .extend(taken_crons);
+                    // Dedupe by job id within this snapshot: if two registry
+                    // entries somehow tag the same role (concurrent activation
+                    // racing the `kill_agent` cleanup, or a bug that left two
+                    // tagged agents alive), the same `CronJob` could be
+                    // collected twice and re-added twice — yielding duplicate
+                    // jobs that fire side-by-side. Deterministically keep
+                    // exactly one per `CronJobId`.
+                    let bucket: &mut Vec<librefang_types::scheduler::CronJob> =
+                        saved_crons.entry(old_role.clone()).or_default();
+                    let seen: std::collections::HashSet<librefang_types::scheduler::CronJobId> =
+                        bucket.iter().map(|j| j.id).collect();
+                    bucket.extend(taken_crons.into_iter().filter(|j| !seen.contains(&j.id)));
                 }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
@@ -9149,7 +9157,9 @@ system_prompt = "You are a helpful assistant."
 
         // Restore cron jobs that were snapshotted before kill_agent. They're
         // re-added under the new agent_id for the same role. Runtime state
-        // (next_run, last_run) is reset so jobs get a fresh start.
+        // (last_run) is reset and `next_run` is recomputed from the schedule
+        // so jobs resume on a clean future tick instead of immediately on
+        // the next scheduler poll.
         if !saved_crons.is_empty() {
             let mut total_restored = 0usize;
             for (role, jobs) in saved_crons {
@@ -9157,7 +9167,13 @@ system_prompt = "You are a helpful assistant."
                     let mut restored = 0usize;
                     for mut job in jobs {
                         job.agent_id = new_id;
-                        job.next_run = None;
+                        // Compute the next future fire time from the
+                        // schedule explicitly. `add_job` will overwrite this
+                        // with `compute_next_run` too, but writing it here
+                        // makes the intent ("don't refire immediately just
+                        // because we restored") obvious to readers and
+                        // resilient to future changes in `add_job`.
+                        job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
                         if self.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
