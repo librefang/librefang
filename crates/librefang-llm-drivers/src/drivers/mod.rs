@@ -575,6 +575,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         alt_api_key_env: None,
         hidden: false,
     },
+    ProviderEntry {
+        name: "novita",
+        aliases: &["novita-ai"],
+        base_url: "https://api.novita.ai/openai/v1",
+        api_key_env: "NOVITA_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
 ];
 
 // ── Registry Lookup ──────────────────────────────────────────────
@@ -781,7 +791,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, claude-code, qwen-code, gemini-cli, codex-cli, \
+             azure-openai, vertex-ai, nvidia-nim, novita, claude-code, qwen-code, gemini-cli, codex-cli, \
              qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
              qianfan, volcengine, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
@@ -1065,7 +1075,8 @@ mod tests {
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 39);
+        assert!(providers.contains(&"novita"));
+        assert_eq!(providers.len(), 40);
     }
 
     #[test]
@@ -1111,6 +1122,22 @@ mod tests {
         let d = provider_defaults("huggingface").unwrap();
         assert_eq!(d.base_url, "https://api-inference.huggingface.co/v1");
         assert_eq!(d.api_key_env, "HF_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_novita() {
+        let d = provider_defaults("novita").unwrap();
+        assert_eq!(d.base_url, "https://api.novita.ai/openai/v1");
+        assert_eq!(d.api_key_env, "NOVITA_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_novita_ai_alias() {
+        let d = provider_defaults("novita-ai").unwrap();
+        assert_eq!(d.base_url, "https://api.novita.ai/openai/v1");
+        assert_eq!(d.api_key_env, "NOVITA_API_KEY");
         assert!(d.key_required);
     }
 
