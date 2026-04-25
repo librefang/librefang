@@ -99,7 +99,7 @@ max_history_messages = 12
 
 ## Interaction with token-based context-window trimming
 
-`MAX_HISTORY_MESSAGES` is a *message-count* cap. There is also a
+`DEFAULT_MAX_HISTORY_MESSAGES` is a *message-count* cap. There is also a
 *token-count* cap (`DEFAULT_CONTEXT_WINDOW = 200_000` tokens) that the
 runtime applies independently when the per-turn payload is too large.
 The two caps are not combined — whichever fires first wins:
