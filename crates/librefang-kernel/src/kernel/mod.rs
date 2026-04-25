@@ -4118,6 +4118,7 @@ system_prompt = "You are a helpful assistant."
                 allowed_tools: None,
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: self.config.load().agent_max_iterations,
+                max_history_messages: self.config.load().max_history_messages,
             },
         )
         .await
@@ -4831,6 +4832,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools,
             interrupt: Some(interrupt),
             max_iterations: self.config.load().agent_max_iterations,
+            max_history_messages: self.config.load().max_history_messages,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -4898,6 +4900,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
+            max_history_messages: self.config.load().max_history_messages,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -6936,6 +6939,7 @@ system_prompt = "You are a helpful assistant."
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
+            max_history_messages: cfg.max_history_messages,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

@@ -197,6 +197,7 @@ impl SetupWizard {
             show_progress: true,
             auto_evolve: true,
             channel_overrides: None,
+            max_history_messages: None,
         };
 
         let skills_to_install: Vec<String> = intent
