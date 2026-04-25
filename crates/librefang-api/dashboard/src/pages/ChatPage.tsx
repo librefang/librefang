@@ -1484,7 +1484,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           onClick={() => fileInputRef.current?.click()}
           disabled={!agentId || textareaDisabled}
           title={t("chat.attachment_add", { defaultValue: "Attach file" })}
-          className="group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed bg-surface text-text-dim border border-border-subtle hover:text-text hover:border-border hover:-translate-y-0.5"
+          className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3 sm:px-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed bg-surface text-text-dim border border-border-subtle hover:text-text hover:border-border hover:-translate-y-0.5"
         >
           <Paperclip className="h-4 w-4" />
         </button>
@@ -1494,7 +1494,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
             onClick={sttAvailable ? voiceInput.toggleRecording : undefined}
             disabled={!sttAvailable || textareaDisabled || voiceInput.isTranscribing}
             title={!sttAvailable ? t("chat.voice_not_configured") : voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
-            className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
+            className={`group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3 sm:px-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
               voiceInput.isRecording
                 ? "bg-error/10 text-error border border-error/30 animate-pulse"
                 : voiceInput.isTranscribing
@@ -1510,7 +1510,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
             type="button"
             onClick={onStop}
             title={t("chat.stop_hint")}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
+            className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3.5 sm:px-5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
           >
             <Square className="h-4 w-4 fill-current" />
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
@@ -1521,7 +1521,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           <button
             type="submit"
             disabled={effectiveDisabled || anyUploading || (!message.trim() && !hasSendableAttachments)}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+            className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3.5 sm:px-5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
           >
             {anyUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
