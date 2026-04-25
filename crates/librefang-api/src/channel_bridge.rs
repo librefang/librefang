@@ -1262,6 +1262,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         model_override: None,
                         timeout_secs: None,
                         pre_check_script: None,
+                        pre_script: None,
+                        silent_marker: None,
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
                     delivery_targets: Vec::new(),
