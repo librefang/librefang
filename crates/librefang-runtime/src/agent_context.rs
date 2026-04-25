@@ -163,6 +163,16 @@ fn read_capped(path: &Path) -> io::Result<Option<String>> {
         Ok(_) => bytes.len(),
         Err(e) => e.valid_up_to(),
     };
+    // If the file contains zero valid UTF-8 bytes (e.g. a binary blob or
+    // an interrupted external write), surface this as an I/O error so the
+    // caller can fall back to the cached good content rather than serve
+    // an empty Live Context section.
+    if valid_up_to == 0 && !bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context.md contains no valid UTF-8 prefix",
+        ));
+    }
     bytes.truncate(valid_up_to);
     let content = String::from_utf8(bytes).expect("trimmed to valid UTF-8 boundary above");
 
