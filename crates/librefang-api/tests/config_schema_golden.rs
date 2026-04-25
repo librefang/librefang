@@ -101,6 +101,10 @@ fn kernel_config_schema_matches_golden_fixture() {
     if canon(&actual) != canon(&expected) {
         let actual_lines = actual.lines().count();
         let expected_lines = expected.lines().count();
+        // Print the full actual schema between machine-parseable markers so
+        // the new fixture can be lifted out of the CI log when running
+        // `cargo test --ignored regenerate_golden` is impractical (e.g. on
+        // sandboxed dev environments). Removed once the fixture is updated.
         panic!(
             "KernelConfig schema drifted from golden fixture.\n\
              actual: {actual_lines} lines / {} bytes\n\
@@ -109,9 +113,13 @@ fn kernel_config_schema_matches_golden_fixture() {
              Review the schema diff. If the change is intentional, regenerate:\n\
              \n\
              \tcargo test -p librefang-api --test config_schema_golden \\\n\
-             \t\t-- --ignored regenerate_golden --nocapture\n",
+             \t\t-- --ignored regenerate_golden --nocapture\n\
+             \n\
+             ===BEGIN_ACTUAL_SCHEMA===\n\
+             {actual}\n\
+             ===END_ACTUAL_SCHEMA===\n",
             actual.len(),
-            expected.len()
+            expected.len(),
         );
     }
 }
