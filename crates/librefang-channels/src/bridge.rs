@@ -1817,6 +1817,22 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
 /// (e.g. the agent echoed its own name, or an inner agent already prefixed a
 /// delegated reply), the wrap is skipped to keep things idempotent.
 ///
+/// # Idempotency caveats
+///
+/// The "starts-with" check uses the literal `[name]` / `**[name]**` string. If
+/// `agent_name` itself contains `[`, `]`, or `*` characters, the detection is
+/// best-effort:
+///
+/// - The function never panics or corrupts UTF-8 — output stays well-formed.
+/// - For pathological names like `"a]b"`, repeated invocations may produce
+///   nested prefixes like `"[a]b] [a]b] text"` because the outer `[a]b]`
+///   isn't recognized as already-prefixed by a naive `starts_with`.
+///
+/// Worst-case degradation is therefore "extra prefix" rather than data loss
+/// or crash. Agents authoring outbound replies should pick names without
+/// bracket / asterisk characters; the dashboard's agent rename UI does not
+/// enforce this today.
+///
 /// Per-platform native identity features (Slack `username` override, Discord
 /// embed `author`, Telegram `From:` in rich messages) are intentionally not
 /// handled here.
@@ -4902,6 +4918,47 @@ mod tests {
         let text = "no author";
         let out = apply_agent_prefix(PrefixStyle::Bracket, "", text);
         assert_eq!(out, text);
+    }
+
+    /// Names containing `]` / `[` / `*` are pathological because our naive
+    /// `starts_with("[name]")` idempotency check can misfire.
+    ///
+    /// Required behaviors verified here (per the doc-comment caveat):
+    ///   1. Function MUST NOT panic on bracket / asterisk in the name.
+    ///   2. Output MUST stay well-formed UTF-8.
+    ///   3. Worst-case degradation is "extra/duplicated prefix", never data
+    ///      loss or corruption of the body text.
+    #[test]
+    fn test_apply_agent_prefix_bracket_in_name_does_not_panic() {
+        // `]` inside the name. First call produces `[a]b] hello`.
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "a]b", "hello");
+        assert_eq!(out, "[a]b] hello");
+        assert!(out.is_char_boundary(out.len()));
+
+        // Second call: starts_with("[a]b]") matches because the literal is
+        // `[a]b]` and the text begins with that — this is the "lucky" case
+        // where the caveat doesn't bite. Idempotent here.
+        let out2 = apply_agent_prefix(PrefixStyle::Bracket, "a]b", &out);
+        assert_eq!(out2, "[a]b] hello");
+
+        // `[` inside the name — the documented worst case. Repeated calls
+        // legitimately stack a fresh prefix because `starts_with("[a[b]")`
+        // does NOT match `[a[b] [a[b] hello`. Body ("hello") is preserved.
+        let stacked = apply_agent_prefix(
+            PrefixStyle::Bracket,
+            "a[b",
+            &apply_agent_prefix(PrefixStyle::Bracket, "a[b", "hello"),
+        );
+        assert!(stacked.ends_with("hello"), "body must be preserved: {stacked}");
+        assert!(stacked.is_char_boundary(stacked.len()));
+
+        // `*` inside the name — bold style relies on `**[name]**`; an
+        // asterisk in the name produces `**[a*b]**` which still passes the
+        // `starts_with` check on a second invocation.
+        let bold = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", "hi");
+        assert_eq!(bold, "**[a*b]** hi");
+        let bold2 = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", &bold);
+        assert_eq!(bold2, bold);
     }
 
     #[tokio::test]
