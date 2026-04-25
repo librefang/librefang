@@ -586,7 +586,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const models = modelsQuery.data?.models ?? [];
 
   return (
-    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg">
+    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg" variant="drawer-right">
       <div className="p-6 space-y-4">
         {/* Header info */}
         <div className="flex items-center gap-3">
