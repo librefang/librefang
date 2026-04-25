@@ -313,4 +313,27 @@ mod tests {
 
         let _ = fs::remove_dir_all(&ws);
     }
+
+    /// Regression test for the prompt-injection exfil vector caught in
+    /// review: a symlinked context.md must NOT be followed, even when the
+    /// target is a regular readable file. Without `symlink_metadata` +
+    /// explicit refusal, an attacker who can drop a symlink into the agent
+    /// workspace could point context.md at /etc/passwd and have its
+    /// contents injected into the LLM prompt.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_context_file() {
+        let ws = fresh_workspace("symlink");
+        let real = ws.join("real.md");
+        fs::write(&real, "would-be-leaked content").unwrap();
+        std::os::unix::fs::symlink(&real, ws.join(CONTEXT_FILENAME)).unwrap();
+
+        let loaded = load_context_md(&ws, false);
+        assert!(
+            loaded.is_none(),
+            "symlinked context.md must be refused, got {loaded:?}"
+        );
+
+        let _ = fs::remove_dir_all(&ws);
+    }
 }
