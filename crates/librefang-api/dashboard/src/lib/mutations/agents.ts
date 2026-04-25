@@ -19,6 +19,7 @@ import {
   pauseExperiment,
   completeExperiment,
   resolveApproval,
+  uploadAgentFile,
 } from "../http/client";
 import { agentKeys, approvalKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
@@ -287,6 +288,17 @@ export function useCompleteExperiment() {
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
+  });
+}
+
+// Upload a chat attachment for the given agent. Returns the metadata that
+// callers must thread back through the next /message or WS frame as
+// `attachments[]` — uploads not referenced by a message stay orphaned in
+// the registry until the daemon restarts.
+export function useUploadAgentFile() {
+  return useMutation({
+    mutationFn: ({ agentId, file }: { agentId: string; file: File }) =>
+      uploadAgentFile(agentId, file),
   });
 }
 

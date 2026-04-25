@@ -292,6 +292,23 @@ export interface AgentSessionImage {
   filename?: string;
 }
 
+/** Reference passed back to the agent's `/message` endpoint or WS frame
+ *  after a successful upload. Mirrors `crate::types::AttachmentRef`. */
+export interface AttachmentRef {
+  file_id: string;
+  filename?: string;
+  content_type?: string;
+}
+
+export interface AgentFileUploadResult {
+  file_id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  /** Whisper transcription, populated only for audio uploads. */
+  transcription?: string;
+}
+
 export interface AgentSessionMessage {
   role?: string;
   content?: unknown;
@@ -335,6 +352,8 @@ export interface SendAgentMessageOptions {
    * two browser tabs on the same agent don't race each other.
    */
   session_id?: string | null;
+  /** File attachments uploaded via `/api/agents/{id}/upload`. */
+  attachments?: AttachmentRef[];
 }
 
 export interface ApiActionResponse {
@@ -986,6 +1005,7 @@ export async function sendAgentMessage(
   if (options?.thinking !== undefined) body.thinking = options.thinking;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
+  if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
   return post<AgentMessageResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/message`,
     body,
@@ -1128,6 +1148,25 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
     throw await parseError(response);
   }
   return (await response.json()) as { text: string; provider: string; model: string };
+}
+
+// Upload a chat attachment for an agent. Body is the raw file bytes; backend
+// expects `Content-Type` to match the file MIME and `X-Filename` for the
+// original name. Server-side limits: 10MB and an exact MIME allowlist
+// (image/audio/text/pdf) — callers should still pre-validate to fail fast.
+export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/upload`, {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Filename": encodeURIComponent(file.name),
+    }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as AgentFileUploadResult;
 }
 
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
