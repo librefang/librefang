@@ -66,6 +66,7 @@ export {
   searchMemories,
   getMemoryStats,
   getMemoryConfig,
+  getAgentKvMemory,
   // models
   listModels,
   getModelOverrides,
@@ -282,6 +283,8 @@ export type {
   McpAuthStartResponse,
   McpAuthStatusResponse,
   MemoryItem,
+  AgentKvPair,
+  AgentKvResponse,
   ModelOverrides,
   MediaImageResult,
   MediaMusicResult,

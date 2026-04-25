@@ -545,6 +545,9 @@ export interface MemoryListResponse {
   total?: number;
   offset?: number;
   limit?: number;
+  // Server signals whether proactive memory is enabled in config so the
+  // dashboard can render an explanatory note + fall back to per-agent KV.
+  proactive_enabled?: boolean;
 }
 
 export interface MemoryStatsResponse {
@@ -557,6 +560,23 @@ export interface MemoryStatsResponse {
   auto_memorize_enabled?: boolean;
   auto_retrieve_enabled?: boolean;
   llm_extraction?: boolean;
+  // Mirrors MemoryListResponse — see field doc above.
+  proactive_enabled?: boolean;
+}
+
+// Per-agent KV pair returned by `GET /api/memory/agents/:id/kv`.
+//
+// `created_at` and `source` are best-effort: the underlying substrate may not
+// populate them today, so the dashboard treats them as optional.
+export interface AgentKvPair {
+  key: string;
+  value: unknown;
+  source?: string;
+  created_at?: string;
+}
+
+export interface AgentKvResponse {
+  kv_pairs?: AgentKvPair[];
 }
 
 export interface UsageSummaryResponse {
@@ -2179,6 +2199,13 @@ export async function getMemoryStats(agentId?: string): Promise<MemoryStatsRespo
     return get<MemoryStatsResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/stats`);
   }
   return get<MemoryStatsResponse>("/api/memory/stats");
+}
+
+// List the per-agent KV memory store (always available — independent of
+// `[proactive_memory] enabled`). Used as the fallback view when proactive
+// memory is disabled, and as a complementary view when it is enabled.
+export async function getAgentKvMemory(agentId: string): Promise<AgentKvResponse> {
+  return get<AgentKvResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/kv`);
 }
 
 export async function addMemoryFromText(
