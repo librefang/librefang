@@ -68,6 +68,8 @@ use crate::types;
         routes::clear_agent_history,
         routes::compact_session,
         routes::stop_agent,
+        routes::list_agent_runtime,
+        routes::stop_session,
         routes::set_model,
         routes::set_agent_mode,
         routes::get_agent_traces,

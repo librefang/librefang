@@ -362,7 +362,7 @@ enum Commands {
     Cron(CronCommands),
     /// List conversation sessions.
     #[command(
-        long_about = "List conversation sessions stored by agents.\n\nOptionally filter by agent name or ID.\n\nExamples:\n  librefang sessions              # List all sessions\n  librefang sessions coder        # Filter by agent name\n  librefang sessions --json       # JSON output for scripting"
+        long_about = "List conversation sessions stored by agents.\n\nOptionally filter by agent name or ID. The STATE column reflects whether the session has an in-flight loop (running) or is idle.\n\nExamples:\n  librefang sessions              # List all sessions\n  librefang sessions coder        # Filter by agent name\n  librefang sessions --active     # Only currently-executing sessions\n  librefang sessions --json       # JSON output for scripting"
     )]
     Sessions {
         /// Optional agent name or ID to filter by.
@@ -370,6 +370,9 @@ enum Commands {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Only show sessions that currently have an in-flight loop.
+        #[arg(long)]
+        active: bool,
     },
     /// Tail the LibreFang log file.
     #[command(
@@ -2094,7 +2097,11 @@ fn main() {
             CronCommands::Enable { id } => cmd_cron_toggle(&id, true),
             CronCommands::Disable { id } => cmd_cron_toggle(&id, false),
         },
-        Some(Commands::Sessions { agent, json }) => cmd_sessions(agent.as_deref(), json),
+        Some(Commands::Sessions {
+            agent,
+            json,
+            active,
+        }) => cmd_sessions(agent.as_deref(), json, active),
         Some(Commands::Logs { lines, follow }) => cmd_logs(cli.config, lines, follow),
         Some(Commands::Health { json }) => cmd_health(json),
         Some(Commands::Security(sub)) => match sub {
@@ -10063,7 +10070,7 @@ fn cmd_cron_toggle(id: &str, enable: bool) {
     }
 }
 
-fn cmd_sessions(agent: Option<&str>, json: bool) {
+fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
     let base = require_daemon("sessions");
     let client = daemon_client();
     let url = match agent {
@@ -10071,27 +10078,100 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         None => format!("{base}/api/sessions"),
     };
     let body = daemon_json(client.get(&url).send());
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        );
-        return;
-    }
-    if let Some(arr) = body
+
+    // Build a (agent_id -> set<session_id>) map of currently-running sessions.
+    // Walks the unique agent ids in the listing once and asks the per-agent
+    // runtime endpoint added in #3172. Cheap on dev-scale agent counts; if
+    // this ever becomes a hotspot we can add a single-call /api/runtime.
+    let session_arr_owned: Option<Vec<serde_json::Value>> = body
         .get("sessions")
         .and_then(|v| v.as_array())
-        .or_else(|| body.as_array())
-    {
-        if arr.is_empty() {
-            println!("No sessions found.");
+        .cloned()
+        .or_else(|| body.as_array().cloned());
+    let mut active_sessions: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(arr) = session_arr_owned.as_ref() {
+        let agent_ids: std::collections::HashSet<String> = arr
+            .iter()
+            .filter_map(|s| s["agent_id"].as_str().map(|id| id.to_string()))
+            .collect();
+        for aid in agent_ids {
+            let runtime_url = format!("{base}/api/agents/{aid}/runtime");
+            if let Ok(resp) = client.get(&runtime_url).send() {
+                if let Ok(items) = resp.json::<Vec<serde_json::Value>>() {
+                    let sids: std::collections::HashSet<String> = items
+                        .iter()
+                        .filter_map(|v| v["session_id"].as_str().map(|s| s.to_string()))
+                        .collect();
+                    active_sessions.insert(aid, sids);
+                }
+            }
+        }
+    }
+
+    let is_running = |s: &serde_json::Value| -> bool {
+        let aid = match s["agent_id"].as_str() {
+            Some(a) => a,
+            None => return false,
+        };
+        let sid = match s["session_id"].as_str().or_else(|| s["id"].as_str()) {
+            Some(s) => s,
+            None => return false,
+        };
+        active_sessions
+            .get(aid)
+            .is_some_and(|set| set.contains(sid))
+    };
+
+    if json {
+        // Annotate each session with `state` so JSON consumers see the same
+        // signal as the table renderer.
+        if let Some(arr) = session_arr_owned.as_ref() {
+            let annotated: Vec<serde_json::Value> = arr
+                .iter()
+                .filter(|s| !active_only || is_running(s))
+                .map(|s| {
+                    let mut out = s.clone();
+                    out["state"] = serde_json::Value::String(
+                        if is_running(s) { "running" } else { "idle" }.into(),
+                    );
+                    out
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&annotated).unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        return;
+    }
+    if let Some(arr) = session_arr_owned.as_ref() {
+        let filtered: Vec<&serde_json::Value> = arr
+            .iter()
+            .filter(|s| !active_only || is_running(s))
+            .collect();
+        if filtered.is_empty() {
+            if active_only {
+                println!("No active sessions.");
+            } else {
+                println!("No sessions found.");
+            }
             return;
         }
-        println!("{:<38} {:<16} {:<8} LAST ACTIVE", "ID", "AGENT", "MSGS");
-        println!("{}", "-".repeat(80));
-        for s in arr {
+        println!(
+            "{:<38} {:<16} {:<8} {:<8} LAST ACTIVE",
+            "ID", "AGENT", "MSGS", "STATE"
+        );
+        println!("{}", "-".repeat(90));
+        for s in filtered {
+            let state = if is_running(s) { "running" } else { "idle" };
             println!(
-                "{:<38} {:<16} {:<8} {}",
+                "{:<38} {:<16} {:<8} {:<8} {}",
                 s["session_id"]
                     .as_str()
                     .or_else(|| s["id"].as_str())
@@ -10101,6 +10181,7 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
                     .map(|id| if id.len() > 16 { &id[..16] } else { id })
                     .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
                 s["message_count"].as_u64().unwrap_or(0),
+                state,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())

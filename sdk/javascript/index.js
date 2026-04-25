@@ -232,6 +232,10 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
+  async listAgentRuntime(id) {
+    return this._c._request("GET", `/api/agents/${id}/runtime`);
+  }
+
   async getAgentSession(id, query) {
     return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
   }
@@ -262,6 +266,10 @@ class AgentsResource {
 
   async exportSession(id, session_id) {
     return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/export`);
+  }
+
+  async stopSession(id, session_id) {
+    return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/stop`);
   }
 
   async *attachSessionStream(id, session_id) {

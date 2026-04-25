@@ -323,6 +323,37 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Snapshot of a single in-flight (agent, session) loop, returned by
+/// `GET /api/agents/{id}/runtime`.
+///
+/// The state field is intentionally a single `Running` variant for now —
+/// fine-grained sub-states (`WaitingLLM` / `ExecutingTool(name)`) require
+/// the agent loop to write back its current step, which is a separate
+/// follow-up. The wire format leaves room for that without a breaking
+/// change: deserialisers should treat unknown variants as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningSessionSnapshot {
+    /// The session that's currently executing.
+    pub session_id: SessionId,
+    /// When the loop was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Coarse-grained execution state.
+    #[serde(default)]
+    pub state: RunningSessionState,
+}
+
+/// Coarse-grained execution state for a `RunningSessionSnapshot`. Only
+/// `Running` is emitted today; the enum exists so callers can pattern-match
+/// instead of hard-coding strings, and so future fine-grained states slot
+/// in without breaking the wire format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningSessionState {
+    /// Loop has been spawned and not yet completed.
+    #[default]
+    Running,
+}
+
 /// How sessions are resolved for non-channel (automated) invocations.
 ///
 /// Controls whether background ticks, triggers, and `agent_send` calls

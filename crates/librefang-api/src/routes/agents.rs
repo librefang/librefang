@@ -97,6 +97,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(compact_session),
         )
         .route("/agents/{id}/stop", axum::routing::post(stop_agent))
+        .route(
+            "/agents/{id}/runtime",
+            axum::routing::get(list_agent_runtime),
+        )
+        .route(
+            "/agents/{id}/sessions/{session_id}/stop",
+            axum::routing::post(stop_session),
+        )
         .route("/agents/{id}/model", axum::routing::put(set_model))
         .route(
             "/agents/{id}/traces",
@@ -3025,6 +3033,95 @@ pub async fn stop_agent(
         Ok(false) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "No active run"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// GET /api/agents/{id}/runtime — Snapshot of in-flight loops for the agent.
+///
+/// Returns one entry per `(agent, session)` pair that's currently executing.
+/// Empty array when the agent is idle.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/runtime",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "List of in-flight sessions for the agent", body = serde_json::Value)
+    )
+)]
+pub async fn list_agent_runtime(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let snapshots = state.kernel.list_running_sessions(agent_id);
+    (StatusCode::OK, Json(serde_json::json!(snapshots)))
+}
+
+/// POST /api/agents/{id}/sessions/{session_id}/stop — Cancel a single
+/// in-flight `(agent, session)` loop without affecting the agent's other
+/// concurrent sessions.
+///
+/// Returns `{"status":"ok","stopped":true}` when a loop was running for that
+/// pair, `{"status":"ok","stopped":false}` when nothing was running (already
+/// finished, never started, or the session belongs to a different agent).
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/sessions/{session_id}/stop",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, description = "Cancel a single (agent, session) loop", body = serde_json::Value)
+    )
+)]
+pub async fn stop_session(
+    State(state): State<Arc<AppState>>,
+    Path((id, session_id_str)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let session_id: librefang_types::agent::SessionId = match session_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session id"})),
+            )
+        }
+    };
+    match state.kernel.stop_session_run(agent_id, session_id) {
+        Ok(stopped) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "stopped": stopped})),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

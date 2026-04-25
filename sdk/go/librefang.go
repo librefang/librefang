@@ -364,6 +364,10 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
+func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
 }
@@ -394,6 +398,10 @@ func (r *AgentsResource) ImportSession(id string, data map[string]interface{}) (
 
 func (r *AgentsResource) ExportSession(id string, session_id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil, nil)
+}
+
+func (r *AgentsResource) StopSession(id string, session_id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/stop", id, session_id), nil, nil)
 }
 
 func (r *AgentsResource) AttachSessionStream(id string, session_id string) <-chan map[string]interface{} {
