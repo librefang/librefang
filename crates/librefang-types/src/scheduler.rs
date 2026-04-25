@@ -171,6 +171,53 @@ pub enum CronDelivery {
 }
 
 // ---------------------------------------------------------------------------
+// CronDeliveryTarget (multi-destination fan-out)
+// ---------------------------------------------------------------------------
+
+/// A single destination for multi-destination cron output fan-out.
+///
+/// A cron job may declare zero or more `CronDeliveryTarget`s on its
+/// `delivery_targets` field. When the job fires and produces output, the
+/// delivery engine sends the same output to every target concurrently.
+/// Failures in one target do not abort delivery to the others.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CronDeliveryTarget {
+    /// Deliver via an existing channel adapter (Telegram/Slack/Discord/etc.).
+    Channel {
+        /// Which adapter to use (e.g. `"telegram"`, `"slack"`).
+        channel_type: String,
+        /// Platform-specific recipient (chat ID, user ID, etc.).
+        recipient: String,
+    },
+    /// Deliver via HTTP POST to a webhook URL with a JSON payload.
+    Webhook {
+        /// Destination URL (`http://` or `https://`).
+        url: String,
+        /// Optional `Authorization` header value sent verbatim.
+        #[serde(default)]
+        auth_header: Option<String>,
+    },
+    /// Append or overwrite a local file on disk.
+    LocalFile {
+        /// Absolute or relative path to the output file.
+        path: String,
+        /// If `true`, append to the file; if `false`, overwrite.
+        #[serde(default)]
+        append: bool,
+    },
+    /// Deliver via the existing email channel adapter.
+    Email {
+        /// Recipient email address.
+        to: String,
+        /// Optional subject template (e.g. `"Cron: {job}"`). Literal `{job}`
+        /// placeholders are replaced with the job name at send time.
+        #[serde(default)]
+        subject_template: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // CronJob
 // ---------------------------------------------------------------------------
 
@@ -189,8 +236,13 @@ pub struct CronJob {
     pub schedule: CronSchedule,
     /// What to do when fired.
     pub action: CronAction,
-    /// Where to deliver the result.
+    /// Where to deliver the result (single legacy destination).
     pub delivery: CronDelivery,
+    /// Additional fan-out destinations. May be empty; each target is
+    /// delivered concurrently after the job produces its output. Failures in
+    /// one target do not abort delivery to the others.
+    #[serde(default)]
+    pub delivery_targets: Vec<CronDeliveryTarget>,
     /// Optional peer/user ID to use as the `SenderContext.user_id` when the
     /// job fires. When set, memory lookups keyed by peer (e.g.
     /// `peer:{user_id}:KEY`) will resolve correctly. Defaults to `None`
@@ -445,6 +497,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
             created_at: Utc::now(),
@@ -1061,5 +1114,116 @@ mod tests {
         } else {
             panic!("expected Workflow variant");
         }
+    }
+
+    // -- CronDeliveryTarget serde --
+
+    #[test]
+    fn delivery_target_channel_roundtrip() {
+        let t = CronDeliveryTarget::Channel {
+            channel_type: "telegram".into(),
+            recipient: "12345".into(),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"channel\""), "tag missing: {s}");
+        assert!(s.contains("telegram"));
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_webhook_roundtrip() {
+        let t = CronDeliveryTarget::Webhook {
+            url: "https://example.com/hook".into(),
+            auth_header: Some("Bearer x".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"webhook\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_webhook_default_no_auth() {
+        // auth_header should default to None when omitted.
+        let json = r#"{"type":"webhook","url":"https://x.test/h"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::Webhook {
+                url: "https://x.test/h".into(),
+                auth_header: None,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_target_localfile_roundtrip() {
+        let t = CronDeliveryTarget::LocalFile {
+            path: "/var/log/cron-out.log".into(),
+            append: true,
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"local_file\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_localfile_default_append() {
+        // append should default to false when omitted.
+        let json = r#"{"type":"local_file","path":"/tmp/out.log"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::LocalFile {
+                path: "/tmp/out.log".into(),
+                append: false,
+            }
+        );
+    }
+
+    #[test]
+    fn delivery_target_email_roundtrip() {
+        let t = CronDeliveryTarget::Email {
+            to: "alice@example.com".into(),
+            subject_template: Some("Report: {job}".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"type\":\"email\""), "tag missing: {s}");
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn cron_job_delivery_targets_default_empty() {
+        // Old persisted JSON without `delivery_targets` must still deserialize
+        // (the field has `#[serde(default)]`).
+        let json = serde_json::to_string(&valid_job()).unwrap();
+        // Strip the field to simulate an older payload.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("delivery_targets");
+        let stripped = serde_json::to_string(&v).unwrap();
+        let back: CronJob = serde_json::from_str(&stripped).unwrap();
+        assert!(back.delivery_targets.is_empty());
+    }
+
+    #[test]
+    fn cron_job_with_delivery_targets_roundtrip() {
+        let mut job = valid_job();
+        job.delivery_targets = vec![
+            CronDeliveryTarget::Channel {
+                channel_type: "slack".into(),
+                recipient: "C123".into(),
+            },
+            CronDeliveryTarget::LocalFile {
+                path: "/tmp/out.log".into(),
+                append: true,
+            },
+        ];
+        let json = serde_json::to_string(&job).unwrap();
+        let back: CronJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.delivery_targets.len(), 2);
+        assert_eq!(back.delivery_targets, job.delivery_targets);
     }
 }
