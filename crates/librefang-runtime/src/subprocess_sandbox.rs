@@ -273,9 +273,26 @@ enum ShellWrapperInspection {
     WrapperOpaque(String),
 }
 
+/// Maximum recursion depth when walking nested shell wrappers
+/// (e.g. `bash -c "powershell -Command ..."`). Two levels is more than
+/// any legitimate script needs; deeper nesting almost certainly means
+/// somebody is trying to smuggle an opaque payload past us.
+const MAX_WRAPPER_NEST_DEPTH: usize = 4;
+
 /// Inspect a command: determine whether it is a shell-wrapper invocation
 /// and, if so, classify the form of inline execution.
 fn inspect_shell_wrapper(command: &str) -> ShellWrapperInspection {
+    inspect_shell_wrapper_inner(command, 0)
+}
+
+fn inspect_shell_wrapper_inner(command: &str, depth: usize) -> ShellWrapperInspection {
+    if depth >= MAX_WRAPPER_NEST_DEPTH {
+        // Pathologically deep nesting — refuse rather than recurse forever.
+        return ShellWrapperInspection::WrapperOpaque(format!(
+            "shell wrapper nesting deeper than {MAX_WRAPPER_NEST_DEPTH} levels"
+        ));
+    }
+
     let trimmed = command.trim();
     let base = extract_base_command(trimmed);
 
@@ -308,9 +325,7 @@ fn inspect_shell_wrapper(command: &str) -> ShellWrapperInspection {
             if is_powershell_command_flag(arg) && i + 1 < args.len() {
                 let joined = args[i + 1..].join(" ");
                 let script = strip_outer_quotes(&joined);
-                return ShellWrapperInspection::WrapperInline(extract_inner_script_commands(
-                    script,
-                ));
+                return inspect_inner_script(script, depth + 1);
             }
         }
     }
@@ -328,14 +343,58 @@ fn inspect_shell_wrapper(command: &str) -> ShellWrapperInspection {
             if arg.eq_ignore_ascii_case(flag) && i + 1 < args.len() {
                 let joined = args[i + 1..].join(" ");
                 let script = strip_outer_quotes(&joined);
-                return ShellWrapperInspection::WrapperInline(extract_inner_script_commands(
-                    script,
-                ));
+                return inspect_inner_script(script, depth + 1);
             }
         }
     }
 
     ShellWrapperInspection::WrapperNoInline
+}
+
+/// Walk an inline script, recursively inspecting each segment.
+///
+/// SECURITY: Without this recursion, a wrapper-inside-wrapper invocation
+/// like `bash -c "powershell -EncodedCommand <b64>"` would only have its
+/// outer base names (`bash`, `powershell`) checked against the allowlist;
+/// the inner `-EncodedCommand` payload would never be inspected. We
+/// promote any nested wrapper into `WrapperOpaque` so the validator
+/// rejects the whole command.
+fn inspect_inner_script(script: &str, depth: usize) -> ShellWrapperInspection {
+    let segments = split_script_segments(script);
+    let mut commands = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        // Recurse: if this segment is itself a shell wrapper invocation,
+        // its own inner payload must also be inspected — or rejected when
+        // it is opaque or recursively nested.
+        match inspect_shell_wrapper_inner(seg, depth) {
+            ShellWrapperInspection::NotWrapper | ShellWrapperInspection::WrapperNoInline => {
+                let base = extract_base_command(seg);
+                if !base.is_empty() {
+                    commands.push(base.to_string());
+                }
+            }
+            ShellWrapperInspection::WrapperOpaque(reason) => {
+                return ShellWrapperInspection::WrapperOpaque(format!(
+                    "nested shell wrapper with {reason}"
+                ));
+            }
+            ShellWrapperInspection::WrapperInline(_) => {
+                // A wrapper-with-inline-flag inside another wrapper. We
+                // refuse to flatten arbitrary depth: the safe choice is
+                // to mark the whole command opaque and let the caller
+                // reject it.
+                return ShellWrapperInspection::WrapperOpaque(format!(
+                    "nested shell wrapper invocation '{}'",
+                    extract_base_command(seg)
+                ));
+            }
+        }
+    }
+    ShellWrapperInspection::WrapperInline(commands)
 }
 
 /// Strip a single matching pair of surrounding quotes from a string.
@@ -362,9 +421,10 @@ fn extract_shell_wrapper_commands(command: &str) -> Vec<String> {
     }
 }
 
-/// Extract base command names from an inline script string.
+/// Split an inline script into raw segments on every shell-control token
+/// we recognise.
 ///
-/// Splits on every shell-control token we recognise:
+/// Splits on:
 /// - `&&`, `||`, `|`, `;` — POSIX and PowerShell sequencing.
 /// - `&` — `cmd.exe`'s command separator (NOT background; without `&&`
 ///   it means "run next command unconditionally").
@@ -372,8 +432,11 @@ fn extract_shell_wrapper_commands(command: &str) -> Vec<String> {
 ///
 /// Order matters: `&&` must be tried before `&`, otherwise we'd split inside
 /// the two-character token.
-fn extract_inner_script_commands(script: &str) -> Vec<String> {
-    let mut commands = Vec::new();
+///
+/// Unlike `extract_inner_script_commands`, this preserves each segment's
+/// raw text so callers can re-inspect it (e.g. recursive wrapper detection).
+fn split_script_segments(script: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
     let mut rest = script;
     while !rest.is_empty() {
         // Two-char separators must come before their one-char prefixes.
@@ -389,16 +452,29 @@ fn extract_inner_script_commands(script: &str) -> Vec<String> {
             }
         }
         let segment = &rest[..earliest_pos];
-        let base = extract_base_command(segment);
-        if !base.is_empty() {
-            commands.push(base.to_string());
+        if !segment.trim().is_empty() {
+            segments.push(segment);
         }
         if earliest_pos + earliest_len >= rest.len() {
             break;
         }
         rest = &rest[earliest_pos + earliest_len..];
     }
-    commands
+    segments
+}
+
+/// Extract base command names from an inline script string.
+///
+/// Kept for the test helper; production callers use
+/// `inspect_inner_script` which preserves opaque/nested-wrapper signals.
+#[cfg(test)]
+fn extract_inner_script_commands(script: &str) -> Vec<String> {
+    split_script_segments(script)
+        .into_iter()
+        .map(extract_base_command)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Extract all commands from a shell command string.
@@ -1525,6 +1601,87 @@ mod tests {
         assert!(
             result.is_err(),
             "curl piped into sh must be blocked (curl not in allowlist)"
+        );
+    }
+
+    // ── Nested-wrapper bypass coverage ────────────────────────────────
+    // SECURITY: a wrapper inside a wrapper hides the inner argv from the
+    // outer allowlist check. Without recursion, only the segment base
+    // names (`bash`, `powershell`) would be inspected and the
+    // -EncodedCommand payload would slip through.
+
+    #[test]
+    fn test_nested_bash_powershell_encoded_blocked() {
+        // bash -c "powershell -EncodedCommand <b64>" — even with both
+        // bash and powershell allowlisted, the opaque inner payload
+        // must escalate to a rejection.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["bash".to_string(), "powershell".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(
+            r#"bash -c "powershell -EncodedCommand UmVtb3ZlLUl0ZW0=""#,
+            &policy,
+        );
+        assert!(
+            result.is_err(),
+            "nested powershell -EncodedCommand inside bash -c must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_nested_cmd_c_bash_c_blocked() {
+        // cmd /c "bash -c rm" — outer cmd looks fine, inner bash is a
+        // wrapper-with-flag whose payload (`rm`) is not in the allowlist.
+        // Must be refused as a nested-wrapper invocation rather than
+        // silently allowed by checking only the base names.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["cmd".to_string(), "bash".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(r#"cmd /c "bash -c rm""#, &policy);
+        assert!(
+            result.is_err(),
+            "nested bash -c inside cmd /c must be blocked"
+        );
+    }
+
+    #[test]
+    fn test_bash_c_inner_echo_allowed_when_listed() {
+        // Regression: legitimate bash -c "echo hello" must still be
+        // allowed when both bash and echo are in the allowlist. The
+        // recursion must not over-block flat (non-nested) inner cmds.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["bash".to_string(), "echo".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(r#"bash -c "echo hello""#, &policy);
+        assert!(
+            result.is_ok(),
+            "bash -c with allowlisted echo must be permitted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_nested_powershell_inside_bash_inner_iex_blocked() {
+        // bash -c "powershell -Command 'iex (...)'" — the inner pwsh
+        // call resolves to a `WrapperInline`, which the recursion
+        // promotes to opaque. We never want to flatten arbitrary depth.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["bash".to_string(), "powershell".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(
+            r#"bash -c "powershell -Command iex""#,
+            &policy,
+        );
+        assert!(
+            result.is_err(),
+            "nested powershell -Command inside bash -c must be blocked"
         );
     }
 }
