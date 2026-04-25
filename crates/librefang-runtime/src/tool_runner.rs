@@ -411,7 +411,11 @@ pub async fn execute_tool_raw(
 
     let result = match tool_name {
         // Filesystem tools
-        "file_read" => tool_file_read(input, *workspace_root).await,
+        "file_read" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_read(input, *workspace_root, &extra_refs).await
+        }
         "file_write" => {
             // Enforce named workspace read-only restrictions before the sandbox resolves the path.
             // Agents learn absolute workspace paths from TOOLS.md; an absolute path that falls
@@ -434,12 +438,21 @@ pub async fn execute_tool_raw(
                 }
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
-            tool_file_write(input, *workspace_root).await
+            let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_write(input, *workspace_root, &extra_refs).await
         }
-        "file_list" => tool_file_list(input, *workspace_root).await,
+        "file_list" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_list(input, *workspace_root, &extra_refs).await
+        }
         "apply_patch" => {
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch").await;
-            tool_apply_patch(input, *workspace_root).await
+            // apply_patch needs write access — restrict to rw named workspaces only.
+            let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_apply_patch(input, *workspace_root, &extra_refs).await
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -2203,11 +2216,55 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 /// unrestricted filesystem access. All file operations MUST be confined
 /// to the agent's workspace directory.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
+    resolve_file_path_ext(raw_path, workspace_root, &[])
+}
+
+/// Like [`resolve_file_path`] but accepts additional canonical roots that
+/// should also be considered "inside the sandbox" — used to honor named
+/// workspaces declared in the agent's manifest.
+fn resolve_file_path_ext(
+    raw_path: &str,
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+) -> Result<PathBuf, String> {
     let root = workspace_root.ok_or(
         "Workspace sandbox not configured: file operations are disabled. \
          Set a workspace_root in the agent manifest or kernel config to enable file tools.",
     )?;
-    crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
+    crate::workspace_sandbox::resolve_sandbox_path_ext(raw_path, root, additional_roots)
+}
+
+/// Fetch the named-workspace prefixes (all modes) for the calling agent.
+/// Returns an empty vec when either kernel or agent id is missing.
+fn named_ws_prefixes(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k
+            .named_workspace_prefixes(aid)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Like [`named_ws_prefixes`] but only returns prefixes for read-write
+/// workspaces. Used by `file_write` to widen the writable allowlist.
+fn named_ws_prefixes_writable(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k
+            .named_workspace_prefixes(aid)
+            .into_iter()
+            .filter(|(_, mode)| *mode == librefang_types::agent::WorkspaceMode::ReadWrite)
+            .map(|(p, _)| p)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2269,9 +2326,10 @@ async fn maybe_snapshot(
 async fn tool_file_read(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     tokio::fs::read_to_string(&resolved)
         .await
         .map_err(|e| format!("Failed to read file: {e}"))
@@ -2280,9 +2338,10 @@ async fn tool_file_read(
 async fn tool_file_write(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     let content = input["content"]
         .as_str()
         .ok_or("Missing 'content' parameter")?;
@@ -2304,11 +2363,12 @@ async fn tool_file_write(
 async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or(
         "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
     )?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
         .map_err(|e| format!("Failed to list directory: {e}"))?;
@@ -2337,11 +2397,12 @@ async fn tool_file_list(
 async fn tool_apply_patch(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let patch_str = input["patch"].as_str().ok_or("Missing 'patch' parameter")?;
     let root = workspace_root.ok_or("apply_patch requires a workspace root")?;
     let ops = crate::apply_patch::parse_patch(patch_str)?;
-    let result = crate::apply_patch::apply_patch(&ops, root).await;
+    let result = crate::apply_patch::apply_patch(&ops, root, additional_roots).await;
     if result.is_ok() {
         Ok(result.summary())
     } else {
@@ -6484,6 +6545,387 @@ mod tests {
         .await;
         assert!(result.is_error);
         assert!(result.content.contains("traversal"));
+    }
+
+    // ── Named-workspace read-side support ────────────────────────────────
+    //
+    // Mock kernel that surfaces a configurable list of named workspaces
+    // (paired with their access modes) via `named_workspace_prefixes`.
+    // `readonly_workspace_prefixes` is derived from that list so the existing
+    // file_write denial path stays consistent.
+
+    struct NamedWsKernel {
+        named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+    }
+
+    #[async_trait]
+    impl KernelHandle for NamedWsKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("not used".to_string())
+        }
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
+        fn named_workspace_prefixes(
+            &self,
+            _agent_id: &str,
+        ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
+            self.named.clone()
+        }
+        fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
+            self.named
+                .iter()
+                .filter(|(_, m)| *m == librefang_types::agent::WorkspaceMode::ReadOnly)
+                .map(|(p, _)| p.clone())
+                .collect()
+        }
+    }
+
+    fn make_named_ws_kernel(
+        named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+    ) -> Arc<dyn KernelHandle> {
+        Arc::new(NamedWsKernel { named })
+    }
+
+    #[tokio::test]
+    async fn test_file_read_allows_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("note.txt");
+        std::fs::write(&target, "hello shared").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000001"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert_eq!(result.content, "hello shared");
+    }
+
+    #[tokio::test]
+    async fn test_file_list_allows_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        std::fs::write(shared_canon.join("a.txt"), "a").unwrap();
+        std::fs::write(shared_canon.join("b.txt"), "b").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": shared_canon.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000002"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert!(result.content.contains("a.txt"));
+        assert!(result.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_file_write_allows_rw_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("out.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "wrote-it",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000003"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "wrote-it");
+    }
+
+    #[tokio::test]
+    async fn test_file_write_denies_readonly_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("out.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "should-not-write",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000004"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("read-only"),
+            "expected read-only denial, got: {}",
+            result.content
+        );
+        assert!(!target.exists(), "file should not have been written");
+    }
+
+    #[tokio::test]
+    async fn test_file_read_outside_all_workspaces_still_blocked() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let other = tempfile::tempdir().expect("other");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let other_path = other.path().canonicalize().unwrap().join("nope.txt");
+        std::fs::write(&other_path, "secret").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon, WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": other_path.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000005"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Access denied"),
+            "expected sandbox denial, got: {}",
+            result.content
+        );
     }
 
     #[tokio::test]

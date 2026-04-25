@@ -15749,6 +15749,14 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
+        self.named_workspace_prefixes(agent_id)
+            .into_iter()
+            .filter(|(_, mode)| *mode == WorkspaceMode::ReadOnly)
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    fn named_workspace_prefixes(&self, agent_id: &str) -> Vec<(std::path::PathBuf, WorkspaceMode)> {
         let Ok(aid) = agent_id.parse::<AgentId>() else {
             return vec![];
         };
@@ -15763,12 +15771,15 @@ impl KernelHandle for LibreFangKernel {
             .manifest
             .workspaces
             .iter()
-            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
             .filter_map(|(_, decl)| {
                 if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
                     return None;
                 }
-                workspaces_root.join(&decl.path).canonicalize().ok()
+                workspaces_root
+                    .join(&decl.path)
+                    .canonicalize()
+                    .ok()
+                    .map(|p| (p, decl.mode.clone()))
             })
             .collect()
     }

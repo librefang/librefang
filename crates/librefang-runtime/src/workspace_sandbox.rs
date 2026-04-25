@@ -21,6 +21,29 @@ pub const ERR_SANDBOX_ESCAPE: &str = "resolves outside workspace";
 /// - For new files: canonicalizes the parent directory and appends the filename.
 /// - The final canonical path must start with the canonical workspace root.
 pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<PathBuf, String> {
+    resolve_sandbox_path_ext(user_path, workspace_root, &[])
+}
+
+/// Resolve a user-supplied path within a workspace sandbox, allowing additional
+/// canonical roots (e.g. named workspaces declared in the agent manifest).
+///
+/// Behavior:
+/// - Rejects `..` components outright.
+/// - Relative paths join with `workspace_root` (the primary workspace remains
+///   the implicit base — named workspaces are addressed by their absolute path).
+/// - Absolute paths are accepted if they canonicalize underneath the primary
+///   workspace root OR any of the supplied `additional_roots`.
+/// - `additional_roots` are expected to be ALREADY canonical. Callers that
+///   maintain a list of named-workspace prefixes should canonicalize once at
+///   construction time rather than per-call.
+/// - Symlink-escape protection is preserved: a symlink whose target leaves
+///   every allowed root is still rejected because the canonicalized candidate
+///   no longer starts with any allowed prefix.
+pub fn resolve_sandbox_path_ext(
+    user_path: &str,
+    workspace_root: &Path,
+    additional_roots: &[&Path],
+) -> Result<PathBuf, String> {
     let path = Path::new(user_path);
 
     // Reject any `..` components
@@ -65,23 +88,44 @@ pub fn resolve_sandbox_path(user_path: &str, workspace_root: &Path) -> Result<Pa
                 .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
             canon_parent.join(filename)
         } else {
-            // Parent doesn't exist yet. Build the path from the *canonical* workspace
-            // root so the starts_with check below passes on platforms where the
-            // workspace root itself is a symlink (e.g. macOS /tmp -> /private/tmp).
-            // This is safe because:
-            // 1. We already rejected '..' components
-            // 2. The relative suffix is derived from workspace_root.join(path),
-            //    so no symlinks can exist in the non-existent subtree
-            let relative = candidate
-                .strip_prefix(workspace_root)
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|_| candidate.clone());
-            canon_root.join(relative)
+            // Parent doesn't exist yet. Build the path from the *canonical* root
+            // it lives under so the starts_with check below passes on platforms
+            // where the root itself is a symlink (e.g. macOS /tmp -> /private/tmp).
+            //
+            // For an absolute candidate whose ancestor is one of the additional
+            // roots, rebase onto that canonical root. Otherwise rebase onto the
+            // canonical primary workspace root. This is safe because:
+            // 1. We already rejected `..` components.
+            // 2. The relative suffix is appended to a canonical root and no
+            //    symlinks can exist in the (non-existent) subtree.
+            let mut rebased: Option<PathBuf> = None;
+            if path.is_absolute() {
+                for root in additional_roots {
+                    if let Ok(rel) = candidate.strip_prefix(root) {
+                        rebased = Some(root.join(rel));
+                        break;
+                    }
+                }
+            }
+            if let Some(p) = rebased {
+                p
+            } else {
+                let relative = candidate
+                    .strip_prefix(workspace_root)
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|_| candidate.clone());
+                canon_root.join(relative)
+            }
         }
     };
 
-    // Verify the canonical path is inside the workspace
-    if !canon_candidate.starts_with(&canon_root) {
+    // Verify the canonical path is inside the primary workspace OR one of the
+    // additional allowed roots.
+    let inside_primary = canon_candidate.starts_with(&canon_root);
+    let inside_additional = additional_roots
+        .iter()
+        .any(|root| canon_candidate.starts_with(root));
+    if !inside_primary && !inside_additional {
         return Err(format!(
             "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
              If you have an MCP filesystem server configured, use the \
@@ -180,6 +224,100 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &link_path).unwrap();
 
         let result = resolve_sandbox_path("escape/secret.txt", dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Access denied"));
+    }
+
+    // ---- additional_roots tests (named-workspace read-side support) ----
+
+    #[test]
+    fn test_relative_path_inside_primary_workspace_with_additional() {
+        // Relative paths still resolve under the primary workspace root, even
+        // when additional roots are supplied — additional roots are absolute-only.
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        std::fs::write(primary.path().join("hello.txt"), "hi").unwrap();
+
+        let extra_canon = extra.path().canonicalize().unwrap();
+        let result =
+            resolve_sandbox_path_ext("hello.txt", primary.path(), &[extra_canon.as_path()]);
+        assert!(result.is_ok(), "got: {:?}", result);
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(primary.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_absolute_path_inside_additional_root_allowed() {
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        std::fs::write(extra.path().join("shared.txt"), "shared").unwrap();
+        let extra_canon = extra.path().canonicalize().unwrap();
+        let abs = extra_canon.join("shared.txt");
+
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(result.is_ok(), "got: {:?}", result);
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(&extra_canon));
+    }
+
+    #[test]
+    fn test_absolute_path_outside_all_roots_blocked() {
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        std::fs::write(other.path().join("nope.txt"), "no").unwrap();
+        let extra_canon = extra.path().canonicalize().unwrap();
+        let abs = other.path().join("nope.txt");
+
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Access denied"), "got: {err}");
+    }
+
+    #[test]
+    fn test_dotdot_still_blocked_with_additional_roots() {
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let extra_canon = extra.path().canonicalize().unwrap();
+
+        let result = resolve_sandbox_path_ext(
+            "../../../etc/passwd",
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Path traversal denied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_escape_still_blocked_via_additional_root() {
+        // A symlink that lives inside an additional root but points to a third
+        // directory (outside both primary and additional) must still be denied.
+        let primary = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+
+        let extra_canon = extra.path().canonicalize().unwrap();
+        let link = extra_canon.join("escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let abs = extra_canon.join("escape").join("secret.txt");
+
+        let result = resolve_sandbox_path_ext(
+            abs.to_str().unwrap(),
+            primary.path(),
+            &[extra_canon.as_path()],
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Access denied"));
     }
