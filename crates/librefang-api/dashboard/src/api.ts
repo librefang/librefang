@@ -414,6 +414,20 @@ export type CronDeliveryTarget =
       channel_type: string;
       /** Platform-specific recipient (chat ID, user ID, channel ID). */
       recipient: string;
+      /**
+       * Optional thread/topic id (Slack `thread_ts`, Telegram forum-topic
+       * id). Omit unless the adapter supports threading. Empty strings are
+       * stripped at submit time so the wire shape matches the Rust
+       * `Option<String>` exactly.
+       */
+      thread_id?: string;
+      /**
+       * Optional adapter-key suffix used to disambiguate multiple
+       * configured accounts of the same channel (e.g. two Slack workspaces
+       * keyed `slack:workspace-a` vs `slack:workspace-b`). Omit when only
+       * one account of `channel_type` is configured.
+       */
+      account_id?: string;
     }
   | {
       type: "webhook";

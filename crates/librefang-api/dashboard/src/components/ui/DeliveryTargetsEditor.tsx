@@ -40,6 +40,10 @@ interface DraftState {
   type: CronDeliveryTargetType;
   channel_type: string;
   recipient: string;
+  /** Slack thread_ts / Telegram forum-topic id; optional. */
+  thread_id: string;
+  /** Adapter-key suffix for multi-account adapters; optional. */
+  account_id: string;
   url: string;
   auth_header: string;
   path: string;
@@ -52,6 +56,8 @@ const EMPTY_DRAFT: DraftState = {
   type: "channel",
   channel_type: "telegram",
   recipient: "",
+  thread_id: "",
+  account_id: "",
   url: "",
   auth_header: "",
   path: "",
@@ -73,10 +79,16 @@ function buildTarget(d: DraftState): [CronDeliveryTarget | null, string | null] 
   if (d.type === "channel") {
     if (!d.channel_type.trim()) return [null, "scheduler.delivery.err_channel_type_required"];
     if (!d.recipient.trim()) return [null, "scheduler.delivery.err_recipient_required"];
-    return [
-      { type: "channel", channel_type: d.channel_type.trim(), recipient: d.recipient.trim() },
-      null,
-    ];
+    const target: CronDeliveryTarget = {
+      type: "channel",
+      channel_type: d.channel_type.trim(),
+      recipient: d.recipient.trim(),
+    };
+    // 业务说明: 与 auth_header 一致 — 仅在用户填写时才下发,
+    // 空字符串视为 `Option::None`,保持与 Rust 端 wire shape 对齐。
+    if (d.thread_id.trim()) target.thread_id = d.thread_id.trim();
+    if (d.account_id.trim()) target.account_id = d.account_id.trim();
+    return [target, null];
   }
   if (d.type === "webhook") {
     const url = d.url.trim();
@@ -118,8 +130,14 @@ function targetIcon(t: CronDeliveryTarget): ReactNode {
 
 function targetSummary(t: CronDeliveryTarget): string {
   switch (t.type) {
-    case "channel":
-      return `${t.channel_type} → ${t.recipient}`;
+    case "channel": {
+      let s = `${t.channel_type} → ${t.recipient}`;
+      // Surface the optional routing hints in the summary so the user
+      // can see at a glance which target carries thread/account context.
+      if (t.thread_id) s += ` · thread:${t.thread_id}`;
+      if (t.account_id) s += ` · acct:${t.account_id}`;
+      return s;
+    }
     case "webhook":
       return t.url;
     case "local_file":
@@ -271,54 +289,97 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
 
           {/* Type-specific fields */}
           {draft.type === "channel" && (
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className={SMALL_LABEL}>
-                  {t("scheduler.delivery.channel_type", { defaultValue: "Channel type" })}
-                </label>
-                <select
-                  value={
-                    CHANNEL_PRESETS.some((p) => p.value === draft.channel_type)
-                      ? draft.channel_type
-                      : "__custom__"
-                  }
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setDraft({
-                      ...draft,
-                      channel_type: v === "__custom__" ? "" : v,
-                    });
-                  }}
-                  className={INPUT_CLASS}
-                >
-                  {CHANNEL_PRESETS.map((p) => (
-                    <option key={p.value} value={p.value}>
-                      {p.label}
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={SMALL_LABEL}>
+                    {t("scheduler.delivery.channel_type", { defaultValue: "Channel type" })}
+                  </label>
+                  <select
+                    value={
+                      CHANNEL_PRESETS.some((p) => p.value === draft.channel_type)
+                        ? draft.channel_type
+                        : "__custom__"
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setDraft({
+                        ...draft,
+                        channel_type: v === "__custom__" ? "" : v,
+                      });
+                    }}
+                    className={INPUT_CLASS}
+                  >
+                    {CHANNEL_PRESETS.map((p) => (
+                      <option key={p.value} value={p.value}>
+                        {p.label}
+                      </option>
+                    ))}
+                    <option value="__custom__">
+                      {t("scheduler.delivery.custom", { defaultValue: "Custom…" })}
                     </option>
-                  ))}
-                  <option value="__custom__">
-                    {t("scheduler.delivery.custom", { defaultValue: "Custom…" })}
-                  </option>
-                </select>
-                {!CHANNEL_PRESETS.some((p) => p.value === draft.channel_type) && (
+                  </select>
+                  {!CHANNEL_PRESETS.some((p) => p.value === draft.channel_type) && (
+                    <input
+                      value={draft.channel_type}
+                      onChange={(e) => setDraft({ ...draft, channel_type: e.target.value })}
+                      placeholder="e.g. mattermost"
+                      className={`${INPUT_CLASS} mt-1 font-mono text-xs`}
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className={SMALL_LABEL}>
+                    {t("scheduler.delivery.recipient", { defaultValue: "Recipient" })}
+                  </label>
                   <input
-                    value={draft.channel_type}
-                    onChange={(e) => setDraft({ ...draft, channel_type: e.target.value })}
-                    placeholder="e.g. mattermost"
-                    className={`${INPUT_CLASS} mt-1 font-mono text-xs`}
+                    value={draft.recipient}
+                    onChange={(e) => setDraft({ ...draft, recipient: e.target.value })}
+                    placeholder="chat ID / channel ID"
+                    className={`${INPUT_CLASS} font-mono text-xs`}
                   />
-                )}
+                </div>
               </div>
-              <div>
-                <label className={SMALL_LABEL}>
-                  {t("scheduler.delivery.recipient", { defaultValue: "Recipient" })}
-                </label>
-                <input
-                  value={draft.recipient}
-                  onChange={(e) => setDraft({ ...draft, recipient: e.target.value })}
-                  placeholder="chat ID / channel ID"
-                  className={`${INPUT_CLASS} font-mono text-xs`}
-                />
+              {/*
+                Helper text instead of a hard whitelist on `channel_type`:
+                forward-compat with adapters not yet shipped on the
+                client. Bad values still fail loudly at delivery time
+                (the kernel surfaces the available adapter list in the
+                error message).
+              */}
+              <p className="text-[10px] text-text-dim/60 leading-snug">
+                {t("scheduler.delivery.channel_type_helper", {
+                  defaultValue:
+                    "Custom channel types are passed through as-is. Unknown values fail at delivery time with the list of configured adapters.",
+                })}
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={SMALL_LABEL}>
+                    {t("scheduler.delivery.thread_id", {
+                      defaultValue: "Thread ID (optional)",
+                    })}
+                  </label>
+                  <input
+                    value={draft.thread_id}
+                    onChange={(e) => setDraft({ ...draft, thread_id: e.target.value })}
+                    placeholder="Slack thread_ts / Telegram topic"
+                    className={`${INPUT_CLASS} font-mono text-xs`}
+                  />
+                </div>
+                <div>
+                  <label className={SMALL_LABEL}>
+                    {t("scheduler.delivery.account_id", {
+                      defaultValue: "Account ID (optional)",
+                    })}
+                  </label>
+                  <input
+                    value={draft.account_id}
+                    onChange={(e) => setDraft({ ...draft, account_id: e.target.value })}
+                    placeholder="workspace-b"
+                    className={`${INPUT_CLASS} font-mono text-xs`}
+                  />
+                </div>
               </div>
             </div>
           )}
