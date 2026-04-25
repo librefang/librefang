@@ -97,6 +97,7 @@ librefang/
 │   └── cli-npm/               #   @librefang/cli (npm wrapper)
 ├── deploy/                    # Deployment configs
 │   ├── Dockerfile             #   Docker image
+│   ├── docker-entrypoint.sh   #   Container entrypoint
 │   ├── docker-compose.yml     #   Docker Compose
 │   ├── docker-compose.observability.yml  # Observability stack
 │   ├── OBSERVABILITY.md       #   Observability stack guide
@@ -105,6 +106,7 @@ librefang/
 │   ├── render.yaml            #   Render
 │   ├── gcp/                   #   GCP Terraform
 │   ├── librefang.service      #   systemd unit
+│   ├── worker/                #   Worker deployment configs
 │   ├── otel-collector/        #   OpenTelemetry Collector config
 │   ├── tempo/                 #   Grafana Tempo (trace store)
 │   ├── grafana/               #   Grafana dashboards

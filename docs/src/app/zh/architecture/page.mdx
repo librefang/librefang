@@ -97,6 +97,7 @@ librefang/
 │   └── cli-npm/               #   @librefang/cli (npm 包装器)
 ├── deploy/                    # 部署配置
 │   ├── Dockerfile             #   Docker 镜像
+│   ├── docker-entrypoint.sh   #   容器启动脚本
 │   ├── docker-compose.yml     #   Docker Compose
 │   ├── docker-compose.observability.yml  # 可观测性栈
 │   ├── OBSERVABILITY.md       #   可观测性栈使用指南
@@ -105,6 +106,7 @@ librefang/
 │   ├── render.yaml            #   Render
 │   ├── gcp/                   #   GCP Terraform
 │   ├── librefang.service      #   systemd 服务单元
+│   ├── worker/                #   Worker 部署配置
 │   ├── otel-collector/        #   OpenTelemetry Collector 配置
 │   ├── tempo/                 #   Grafana Tempo（trace 存储）
 │   ├── grafana/               #   Grafana 仪表板
