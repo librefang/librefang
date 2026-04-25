@@ -10131,4 +10131,44 @@ mod tests {
         manifest.max_history_messages = Some(200);
         assert_eq!(resolve_max_history(&manifest, &opts), 200);
     }
+
+    #[test]
+    fn safe_trim_messages_respects_custom_cap() {
+        // Build 20 alternating user/assistant messages so the history is
+        // well above any reasonable small cap. Each pair is one "turn".
+        let mut messages: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Message::user(format!("u{i}"))
+                } else {
+                    Message::assistant(format!("a{i}"))
+                }
+            })
+            .collect();
+        let mut session_messages = messages.clone();
+
+        safe_trim_messages(
+            &mut messages,
+            &mut session_messages,
+            "test-agent",
+            "current",
+            10,
+        );
+
+        assert!(
+            messages.len() <= 10,
+            "messages should be trimmed to <= 10, got {}",
+            messages.len()
+        );
+        assert!(
+            session_messages.len() <= 10,
+            "session_messages should be trimmed to <= 10, got {}",
+            session_messages.len()
+        );
+        assert_eq!(
+            messages.first().map(|m| m.role),
+            Some(Role::User),
+            "history must start with a user turn after trim+repair"
+        );
+    }
 }
