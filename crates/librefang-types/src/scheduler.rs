@@ -321,6 +321,9 @@ impl CronJob {
         // -- delivery --
         self.validate_delivery()?;
 
+        // -- delivery_targets (multi-destination fan-out) --
+        self.validate_delivery_targets()?;
+
         Ok(())
     }
 
@@ -449,6 +452,141 @@ impl CronJob {
         }
         Ok(())
     }
+
+    /// Validate the multi-destination `delivery_targets` list. Cron jobs are
+    /// reachable through the LLM tool surface and the dashboard, so the
+    /// path/host restrictions live here at the input boundary — by the
+    /// time a target reaches `cron_delivery::deliver_*` we trust it.
+    fn validate_delivery_targets(&self) -> Result<(), String> {
+        for (i, target) in self.delivery_targets.iter().enumerate() {
+            match target {
+                CronDeliveryTarget::Channel {
+                    channel_type,
+                    recipient,
+                    ..
+                } => {
+                    if channel_type.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: channel_type must not be empty"
+                        ));
+                    }
+                    if recipient.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: recipient must not be empty"
+                        ));
+                    }
+                }
+                CronDeliveryTarget::Webhook { url, .. } => {
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        return Err(format!(
+                            "delivery_targets[{i}]: webhook URL must start with http:// or https://"
+                        ));
+                    }
+                    if url.len() > MAX_WEBHOOK_URL_LEN {
+                        return Err(format!(
+                            "delivery_targets[{i}]: webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
+                            url.len()
+                        ));
+                    }
+                    // SSRF: refuse hosts that point at the daemon itself or
+                    // at cloud metadata services. Best-effort URL parse —
+                    // malformed URLs were already rejected by the scheme
+                    // prefix check above.
+                    if let Some(host) = extract_url_host(url) {
+                        if is_blocked_webhook_host(&host) {
+                            return Err(format!(
+                                "delivery_targets[{i}]: webhook host '{host}' is not allowed (loopback / link-local / metadata service)"
+                            ));
+                        }
+                    }
+                }
+                CronDeliveryTarget::LocalFile { path, .. } => {
+                    if path.trim().is_empty() {
+                        return Err(format!("delivery_targets[{i}]: file path must not be empty"));
+                    }
+                    let p = std::path::Path::new(path);
+                    if p.is_absolute() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must be workspace-relative, not absolute ({path})"
+                        ));
+                    }
+                    // Windows drive-letter form (`C:\...` or `C:/...`) is
+                    // not flagged absolute on Unix — guard explicitly.
+                    let bytes = path.as_bytes();
+                    if bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && (bytes[2] == b'\\' || bytes[2] == b'/')
+                    {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must be workspace-relative ({path})"
+                        ));
+                    }
+                    if p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    {
+                        return Err(format!(
+                            "delivery_targets[{i}]: LocalFile path must not contain '..' ({path})"
+                        ));
+                    }
+                }
+                CronDeliveryTarget::Email { to, .. } => {
+                    if to.trim().is_empty() {
+                        return Err(format!(
+                            "delivery_targets[{i}]: email recipient must not be empty"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Extract the lowercased host from a URL string. Returns `None` if the URL
+/// cannot be parsed. Used by webhook SSRF validation.
+fn extract_url_host(url: &str) -> Option<String> {
+    // Strip scheme.
+    let after_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    // Host runs until the next '/', '?', '#', or end-of-string.
+    let host_end = after_scheme
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    let host_part = &after_scheme[..host_end];
+    // Strip optional userinfo (user:pass@host).
+    let host_part = host_part.rsplit('@').next().unwrap_or(host_part);
+    // Strip optional port. IPv6 addresses are wrapped in `[...]` so a colon
+    // outside brackets is the port separator.
+    let host = if let Some(stripped) = host_part.strip_prefix('[') {
+        // IPv6 — keep the bracketed form for downstream matching.
+        let close = stripped.find(']')?;
+        &host_part[..=close + 1 - 1] // up to and including ']'
+    } else if let Some(colon) = host_part.find(':') {
+        &host_part[..colon]
+    } else {
+        host_part
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Hosts the daemon refuses to webhook to. Mirrors the dashboard editor
+/// so users see a consistent rejection regardless of where the target
+/// was created.
+fn is_blocked_webhook_host(host: &str) -> bool {
+    matches!(
+        host,
+        "localhost" | "metadata" | "metadata.google.internal" | "metadata.aws.amazon.com"
+    ) || host.starts_with("127.")
+        || host.starts_with("169.254.")
+        || host == "[::1]"
+        || host.starts_with("[fe80:")
+        || host.starts_with("fe80:")
 }
 
 // ---------------------------------------------------------------------------
