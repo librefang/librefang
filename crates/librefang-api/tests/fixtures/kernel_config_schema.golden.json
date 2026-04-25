@@ -13716,6 +13716,15 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "max_history_messages": {
+      "description": "Operator override for the agent message-history trim cap. When set, any agent without its own `max_history_messages` uses this value instead of the compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound per-turn token cost; raise it for long-context models. `None` means \"use the compiled-in default\". Values below 4 are silently clamped at runtime with a warning log.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "max_request_body_bytes": {
       "default": 1048576,
       "description": "Maximum request body size in bytes (global safety net). Individual endpoints may enforce tighter limits.",

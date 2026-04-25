@@ -10069,9 +10069,11 @@ mod tests {
 
     #[test]
     fn resolve_max_history_uses_manifest_when_set() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-a".into();
-        manifest.max_history_messages = Some(7);
+        let manifest = AgentManifest {
+            name: "agent-a".into(),
+            max_history_messages: Some(7),
+            ..AgentManifest::default()
+        };
         let opts = LoopOptions {
             max_history_messages: Some(20),
             ..Default::default()
@@ -10081,8 +10083,10 @@ mod tests {
 
     #[test]
     fn resolve_max_history_falls_back_to_opts_when_manifest_unset() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-b".into();
+        let manifest = AgentManifest {
+            name: "agent-b".into(),
+            ..AgentManifest::default()
+        };
         let opts = LoopOptions {
             max_history_messages: Some(20),
             ..Default::default()
@@ -10092,8 +10096,10 @@ mod tests {
 
     #[test]
     fn resolve_max_history_falls_back_to_default_when_both_unset() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-c".into();
+        let manifest = AgentManifest {
+            name: "agent-c".into(),
+            ..AgentManifest::default()
+        };
         let opts = LoopOptions::default();
         assert_eq!(
             resolve_max_history(&manifest, &opts),
@@ -10103,33 +10109,46 @@ mod tests {
 
     #[test]
     fn resolve_max_history_clamps_below_floor() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-d".into();
-        manifest.max_history_messages = Some(2);
+        let manifest = AgentManifest {
+            name: "agent-d".into(),
+            max_history_messages: Some(2),
+            ..AgentManifest::default()
+        };
         let opts = LoopOptions::default();
         assert_eq!(resolve_max_history(&manifest, &opts), MIN_HISTORY_MESSAGES);
     }
 
     #[test]
     fn resolve_max_history_clamps_zero() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-e".into();
-        manifest.max_history_messages = Some(0);
+        let manifest = AgentManifest {
+            name: "agent-e".into(),
+            max_history_messages: Some(0),
+            ..AgentManifest::default()
+        };
         let opts = LoopOptions::default();
         assert_eq!(resolve_max_history(&manifest, &opts), MIN_HISTORY_MESSAGES);
     }
 
     #[test]
     fn resolve_max_history_passes_through_at_floor_and_above() {
-        let mut manifest = AgentManifest::default();
-        manifest.name = "agent-f".into();
         let opts = LoopOptions::default();
 
-        manifest.max_history_messages = Some(MIN_HISTORY_MESSAGES);
-        assert_eq!(resolve_max_history(&manifest, &opts), MIN_HISTORY_MESSAGES);
+        let manifest_at_floor = AgentManifest {
+            name: "agent-f".into(),
+            max_history_messages: Some(MIN_HISTORY_MESSAGES),
+            ..AgentManifest::default()
+        };
+        assert_eq!(
+            resolve_max_history(&manifest_at_floor, &opts),
+            MIN_HISTORY_MESSAGES
+        );
 
-        manifest.max_history_messages = Some(200);
-        assert_eq!(resolve_max_history(&manifest, &opts), 200);
+        let manifest_above_floor = AgentManifest {
+            name: "agent-f".into(),
+            max_history_messages: Some(200),
+            ..AgentManifest::default()
+        };
+        assert_eq!(resolve_max_history(&manifest_above_floor, &opts), 200);
     }
 
     #[test]
