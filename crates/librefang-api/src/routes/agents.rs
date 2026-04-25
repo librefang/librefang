@@ -1519,6 +1519,16 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     })
 }
 
+/// Query params for `GET /api/agents/{id}/session`.
+///
+/// Using a typed struct (rather than `HashMap<String,String>`) gives us
+/// automatic UUID validation: a malformed `session_id` is rejected by serde
+/// before the handler runs, returning a clean 400.
+#[derive(serde::Deserialize)]
+pub struct GetAgentSessionQuery {
+    pub session_id: Option<uuid::Uuid>,
+}
+
 /// GET /api/agents/:id/session — Get agent session (conversation history).
 #[utoipa::path(
     get,
@@ -1535,10 +1545,19 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session_id"})),
+            );
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -1563,16 +1582,8 @@ pub async fn get_agent_session(
     // the canonical-active session for this request. The returned messages
     // must belong to that exact session; otherwise tabs pinned to different
     // sessions all render whichever session the kernel thinks is active.
-    let target_session_id = match params.get("session_id").map(|s| s.as_str()) {
-        Some(raw) => match raw.parse::<uuid::Uuid>() {
-            Ok(uuid) => librefang_types::agent::SessionId(uuid),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "invalid session_id"})),
-                );
-            }
-        },
+    let target_session_id = match params.session_id {
+        Some(uuid) => librefang_types::agent::SessionId(uuid),
         None => entry.session_id,
     };
 
@@ -1750,16 +1761,34 @@ pub async fn get_agent_session(
                 })),
             )
         }
-        Ok(None) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "session_id": entry.session_id.0.to_string(),
-                "agent_id": agent_id.to_string(),
-                "message_count": 0,
-                "context_window_tokens": 0,
-                "messages": [],
-            })),
-        ),
+        Ok(None) => {
+            // The session row is not materialized in the memory substrate
+            // (e.g. agent just spawned, no messages yet). If the caller pinned
+            // an explicit session_id that does NOT match this agent's
+            // canonical-active id, refuse — otherwise the response would
+            // silently fall back to the agent's own canonical-empty session
+            // under the requested id, hiding the cross-agent guard. The
+            // canonical id is owned by this agent by construction (registry
+            // entry), so matching it is safe to treat as the no-query path.
+            if let Some(requested) = params.session_id {
+                if requested != entry.session_id.0 {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": "session not found for this agent"})),
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": entry.session_id.0.to_string(),
+                    "agent_id": agent_id.to_string(),
+                    "message_count": 0,
+                    "context_window_tokens": 0,
+                    "messages": [],
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
             (
