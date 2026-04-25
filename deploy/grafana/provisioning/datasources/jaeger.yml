@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  - name: Jaeger
+    type: jaeger
+    uid: librefang-jaeger
+    access: proxy
+    # Jaeger's all-in-one image serves both the UI and the query API on
+    # 16686. Grafana's jaeger datasource talks to the same port over the
+    # docker bridge, so 16686 stays open to the host (UI access) AND is
+    # reused as the Grafana datasource backend.
+    url: http://jaeger:16686
+    editable: false
+    jsonData:
+      # Same cross-link as the Tempo datasource: from a span, jump back
+      # into Prometheus filtered by the service/operation labels.
+      tracesToMetrics:
+        datasourceUid: librefang-prometheus
+      # Surface the service-deps graph view inside Grafana's trace
+      # explorer (separate from Jaeger UI's "System Architecture" page).
+      nodeGraph:
+        enabled: true
