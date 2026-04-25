@@ -673,6 +673,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
             created_at: Utc::now(),

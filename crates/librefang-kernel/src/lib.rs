@@ -12,6 +12,7 @@ pub mod capabilities;
 pub mod config;
 pub mod config_reload;
 pub mod cron;
+pub mod cron_delivery;
 pub mod error;
 pub mod event_bus;
 pub mod heartbeat;
@@ -34,5 +35,6 @@ pub mod whatsapp_gateway;
 pub mod wizard;
 pub mod workflow;
 
+pub use cron_delivery::{CronChannelDispatcher, CronDeliveryEngine, DeliveryResult};
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;

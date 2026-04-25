@@ -10467,6 +10467,7 @@ system_prompt = "You are a helpful assistant."
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
@@ -10570,13 +10571,19 @@ system_prompt = "You are a helpful assistant."
                                     Ok(Ok(result)) => {
                                         tracing::info!(job = %job_name, "Cron job completed successfully");
                                         kernel.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel (skip NO_REPLY/silent)
+                                        // Deliver response (skip NO_REPLY/silent). Multi-destination
+                                        // fan-out via `delivery_targets` takes precedence; the
+                                        // legacy single `delivery` path is the fallback when no
+                                        // targets are configured.
                                         if !result.silent {
-                                            cron_deliver_response(
+                                            cron_dispatch_output(
                                                 &kernel,
                                                 agent_id,
+                                                job_id,
+                                                &job_name,
                                                 &result.response,
                                                 &delivery,
+                                                &delivery_targets,
                                             )
                                             .await;
                                         }
@@ -10603,6 +10610,7 @@ system_prompt = "You are a helpful assistant."
                                 tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
                                 let input_text = input.clone().unwrap_or_default();
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let timeout_s = timeout_secs.unwrap_or(300);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
 
@@ -10630,8 +10638,14 @@ system_prompt = "You are a helpful assistant."
                                             Ok(Ok((_run_id, output))) => {
                                                 tracing::info!(job = %job_name, "Cron workflow completed successfully");
                                                 kernel.cron_scheduler.record_success(job_id);
-                                                cron_deliver_response(
-                                                    &kernel, agent_id, &output, &delivery,
+                                                cron_dispatch_output(
+                                                    &kernel,
+                                                    agent_id,
+                                                    job_id,
+                                                    &job_name,
+                                                    &output,
+                                                    &delivery,
+                                                    &delivery_targets,
                                                 )
                                                 .await;
                                             }
@@ -13319,6 +13333,58 @@ fn parse_wake_gate(script_output: &str) -> bool {
     value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
 }
 
+/// Dispatch a cron job's output. When `delivery_targets` is non-empty the
+/// multi-destination fan-out engine handles delivery (each target is
+/// attempted concurrently and failures are independent). When empty the
+/// legacy single-destination [`cron_deliver_response`] path runs unchanged
+/// — preserving full backward compatibility for jobs that only use
+/// `job.delivery`.
+async fn cron_dispatch_output(
+    kernel: &Arc<LibreFangKernel>,
+    agent_id: AgentId,
+    job_id: librefang_types::scheduler::CronJobId,
+    job_name: &str,
+    response: &str,
+    delivery: &librefang_types::scheduler::CronDelivery,
+    delivery_targets: &[librefang_types::scheduler::CronDeliveryTarget],
+) {
+    if response.is_empty() {
+        return;
+    }
+
+    if !delivery_targets.is_empty() {
+        let engine = crate::cron_delivery::CronDeliveryEngine::new(kernel.clone());
+        let results = engine
+            .deliver(
+                delivery_targets,
+                &job_id.to_string(),
+                &agent_id.to_string(),
+                job_name,
+                response,
+            )
+            .await;
+        for r in &results {
+            if r.success {
+                tracing::info!(
+                    job = %job_name,
+                    target = %r.target,
+                    "Cron fan-out delivered"
+                );
+            } else {
+                tracing::warn!(
+                    job = %job_name,
+                    target = %r.target,
+                    error = %r.error.as_deref().unwrap_or(""),
+                    "Cron fan-out delivery failed"
+                );
+            }
+        }
+        return;
+    }
+
+    cron_deliver_response(kernel, agent_id, response, delivery).await;
+}
+
 /// Deliver a cron job's agent response to the configured delivery target.
 async fn cron_deliver_response(
     kernel: &LibreFangKernel,
@@ -14087,7 +14153,7 @@ impl KernelHandle for LibreFangKernel {
         job_json: serde_json::Value,
     ) -> Result<String, String> {
         use librefang_types::scheduler::{
-            CronAction, CronDelivery, CronJob, CronJobId, CronSchedule,
+            CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
         };
 
         let name = job_json["name"]
@@ -14109,6 +14175,13 @@ impl KernelHandle for LibreFangKernel {
             // originating channel without explicit `delivery` config.
             // Issue #2338.
             CronDelivery::LastChannel
+        };
+        // Optional multi-destination fan-out targets. Empty when omitted.
+        let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
+            serde_json::from_value(job_json["delivery_targets"].clone())
+                .map_err(|e| format!("Invalid delivery_targets: {e}"))?
+        } else {
+            Vec::new()
         };
         // At-schedules are inherently single-execution; default one_shot=true for them
         // so the job auto-deletes after firing instead of lingering as a zombie (#2808).
@@ -14134,6 +14207,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
+            delivery_targets,
             peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
             session_mode,
             enabled: true,
@@ -15979,6 +16053,25 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 
     fn uptime_secs(&self) -> u64 {
         self.booted_at.elapsed().as_secs()
+    }
+}
+
+/// Allow the cron multi-destination delivery engine to invoke channel
+/// adapters by delegating to the kernel's existing `send_channel_message`
+/// (the same path used for the legacy single-destination cron delivery).
+#[async_trait::async_trait]
+impl crate::cron_delivery::CronChannelDispatcher for LibreFangKernel {
+    async fn send_channel_message(
+        &self,
+        channel: &str,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        <LibreFangKernel as librefang_runtime::kernel_handle::KernelHandle>::send_channel_message(
+            self, channel, recipient, message, None, None,
+        )
+        .await
+        .map(|_| ())
     }
 }
 

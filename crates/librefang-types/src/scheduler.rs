@@ -171,6 +171,48 @@ pub enum CronDelivery {
 }
 
 // ---------------------------------------------------------------------------
+// CronDeliveryTarget (multi-destination fan-out)
+// ---------------------------------------------------------------------------
+
+/// A single destination for multi-destination cron output fan-out.
+///
+/// A cron job may declare zero or more `CronDeliveryTarget`s on its
+/// `delivery_targets` field. When the job fires and produces output, the
+/// delivery engine sends the same output to every target concurrently.
+/// Failures in one target do not abort delivery to the others.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CronDeliveryTarget {
+    /// Deliver via an existing channel adapter (Telegram/Slack/Discord/etc.).
+    Channel {
+        /// Channel adapter identifier (e.g. `"telegram"`, `"slack"`).
+        channel: String,
+        /// Platform-specific recipient (chat ID, user ID, etc.).
+        to: String,
+    },
+    /// Deliver via HTTP POST to a webhook URL with a JSON payload.
+    Webhook {
+        /// Destination URL (`http://` or `https://`).
+        url: String,
+    },
+    /// Append (or create) a local file on disk with the job output.
+    File {
+        /// Path to the output file. Path components containing `..` are
+        /// rejected at validation time and at delivery time.
+        path: String,
+    },
+    /// Deliver via the existing email channel adapter.
+    Email {
+        /// Recipient email address.
+        to: String,
+        /// Optional subject template (literal `{job}` placeholders are
+        /// replaced with the job name at send time).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // CronJob
 // ---------------------------------------------------------------------------
 
@@ -189,8 +231,15 @@ pub struct CronJob {
     pub schedule: CronSchedule,
     /// What to do when fired.
     pub action: CronAction,
-    /// Where to deliver the result.
+    /// Legacy single-destination delivery. Retained for backward compatibility.
+    /// When `delivery_targets` is non-empty it takes precedence and this field
+    /// is ignored at runtime.
     pub delivery: CronDelivery,
+    /// Multi-destination fan-out targets. May be empty; each target is
+    /// delivered concurrently after the job produces its output. When
+    /// non-empty this list takes precedence over `delivery`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_targets: Vec<CronDeliveryTarget>,
     /// Optional peer/user ID to use as the `SenderContext.user_id` when the
     /// job fires. When set, memory lookups keyed by peer (e.g.
     /// `peer:{user_id}:KEY`) will resolve correctly. Defaults to `None`
@@ -384,6 +433,71 @@ impl CronJob {
             }
             CronDelivery::None | CronDelivery::LastChannel => {}
         }
+
+        // -- delivery_targets (multi-destination fan-out) --
+        // Each target is independently validated. Empty `delivery_targets`
+        // is the historical case and is fine.
+        for (idx, target) in self.delivery_targets.iter().enumerate() {
+            target
+                .validate()
+                .map_err(|e| format!("delivery_targets[{idx}]: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl CronDeliveryTarget {
+    /// Validate a single target. Mirrors the per-variant rules used for
+    /// the legacy single `CronDelivery` plus the path-traversal guard that
+    /// the engine also enforces at delivery time.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            CronDeliveryTarget::Channel { channel, to } => {
+                if channel.is_empty() {
+                    return Err("channel must not be empty".into());
+                }
+                if to.is_empty() {
+                    return Err("recipient (to) must not be empty".into());
+                }
+            }
+            CronDeliveryTarget::Webhook { url } => {
+                if url.is_empty() {
+                    return Err("webhook url must not be empty".into());
+                }
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err("webhook url must start with http:// or https://".into());
+                }
+                if url.len() > MAX_WEBHOOK_URL_LEN {
+                    return Err(format!(
+                        "webhook url too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
+                        url.len()
+                    ));
+                }
+            }
+            CronDeliveryTarget::File { path } => {
+                if path.is_empty() {
+                    return Err("file path must not be empty".into());
+                }
+                // Reject parent-dir traversal in any path component. The
+                // engine re-checks this at delivery time as defence in depth.
+                let p = std::path::Path::new(path);
+                if p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err("file path must not contain '..' components".into());
+                }
+            }
+            CronDeliveryTarget::Email { to, subject } => {
+                if to.is_empty() {
+                    return Err("email recipient (to) must not be empty".into());
+                }
+                if let Some(s) = subject {
+                    if s.is_empty() {
+                        return Err("email subject must not be empty when provided".into());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -445,6 +559,7 @@ mod tests {
                 text: "ping".into(),
             },
             delivery: CronDelivery::None,
+            delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
             created_at: Utc::now(),
@@ -1061,5 +1176,150 @@ mod tests {
         } else {
             panic!("expected Workflow variant");
         }
+    }
+
+    // -- CronDeliveryTarget validation -------------------------------------
+
+    #[test]
+    fn delivery_target_channel_empty_channel() {
+        let t = CronDeliveryTarget::Channel {
+            channel: String::new(),
+            to: "user".into(),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("channel must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn delivery_target_channel_empty_to() {
+        let t = CronDeliveryTarget::Channel {
+            channel: "telegram".into(),
+            to: String::new(),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("recipient"), "{err}");
+    }
+
+    #[test]
+    fn delivery_target_webhook_bad_scheme() {
+        let t = CronDeliveryTarget::Webhook {
+            url: "ftp://example.com/h".into(),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("http://"), "{err}");
+    }
+
+    #[test]
+    fn delivery_target_webhook_ok() {
+        let t = CronDeliveryTarget::Webhook {
+            url: "https://example.com/h".into(),
+        };
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn delivery_target_file_empty_path() {
+        let t = CronDeliveryTarget::File {
+            path: String::new(),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("path must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn delivery_target_file_parent_dir_rejected() {
+        let t = CronDeliveryTarget::File {
+            path: "../etc/passwd".into(),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains(".."), "{err}");
+
+        let t2 = CronDeliveryTarget::File {
+            path: "logs/../../boot.txt".into(),
+        };
+        let err2 = t2.validate().unwrap_err();
+        assert!(err2.contains(".."), "{err2}");
+    }
+
+    #[test]
+    fn delivery_target_file_ok() {
+        let t = CronDeliveryTarget::File {
+            path: "logs/cron.log".into(),
+        };
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn delivery_target_email_empty_to() {
+        let t = CronDeliveryTarget::Email {
+            to: String::new(),
+            subject: None,
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("recipient"), "{err}");
+    }
+
+    #[test]
+    fn delivery_target_email_ok() {
+        let t = CronDeliveryTarget::Email {
+            to: "alice@example.com".into(),
+            subject: Some("Cron: {job}".into()),
+        };
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn delivery_targets_propagate_errors_in_job() {
+        let mut job = valid_job();
+        job.delivery_targets = vec![
+            CronDeliveryTarget::Channel {
+                channel: "telegram".into(),
+                to: "12345".into(),
+            },
+            CronDeliveryTarget::Webhook {
+                url: "ftp://nope".into(),
+            },
+        ];
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("delivery_targets[1]"), "{err}");
+        assert!(err.contains("http://"), "{err}");
+    }
+
+    #[test]
+    fn delivery_targets_empty_is_ok() {
+        let job = valid_job();
+        assert!(job.delivery_targets.is_empty());
+        assert!(job.validate(0).is_ok());
+    }
+
+    #[test]
+    fn delivery_targets_serde_kind_tag() {
+        let t = CronDeliveryTarget::Channel {
+            channel: "slack".into(),
+            to: "C12345".into(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"kind\":\"channel\""), "{json}");
+        let back: CronDeliveryTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_targets_serde_default_when_missing() {
+        // Pre-existing JSON without the new field must deserialize fine.
+        let json = serde_json::json!({
+            "id": CronJobId::new().to_string(),
+            "agent_id": AgentId::new().to_string(),
+            "name": "legacy-job",
+            "enabled": true,
+            "schedule": { "kind": "every", "every_secs": 3600 },
+            "action": { "kind": "system_event", "text": "ping" },
+            "delivery": { "kind": "none" },
+            "created_at": Utc::now().to_rfc3339(),
+            "last_run": null,
+            "next_run": null,
+        });
+        let back: CronJob = serde_json::from_value(json).unwrap();
+        assert!(back.delivery_targets.is_empty());
     }
 }

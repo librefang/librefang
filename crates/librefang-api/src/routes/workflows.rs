@@ -1470,6 +1470,7 @@ pub async fn create_schedule(
         schedule: librefang_types::scheduler::CronSchedule::Cron { expr: cron, tz },
         action,
         delivery: librefang_types::scheduler::CronDelivery::None,
+        delivery_targets: Vec::new(),
         peer_id: None,
         session_mode: req["session_mode"]
             .as_str()
