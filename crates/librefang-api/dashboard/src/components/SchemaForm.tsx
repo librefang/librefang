@@ -125,7 +125,7 @@ function validateSectionRequired(
     const v = values[fKey];
     if (f.required && (v === undefined || v === null || v === "")) {
       errors.push(`${pathPrefix}.${fKey}`);
-    } else if (f.type === "number" && hasInvalidNumberValue(v, f.required)) {
+    } else if (f.type === "number" && hasInvalidNumberValue(v, f.required ?? false)) {
       errors.push(`${pathPrefix}.${fKey}`);
     }
   }
@@ -162,7 +162,7 @@ function validateRequired(
     const v = values[key];
     if (field.required && (v === undefined || v === null || v === "")) {
       errors.push(key);
-    } else if (field.type === "number" && hasInvalidNumberValue(v, field.required)) {
+    } else if (field.type === "number" && hasInvalidNumberValue(v, field.required ?? false)) {
       errors.push(key);
     }
   }

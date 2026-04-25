@@ -1099,14 +1099,59 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
 // Mirrored client-side so we can reject locally before pushing bytes over
 // the wire — the backend still enforces the real limit.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-// Restricted to image MIMEs because that's the only branch the agent loop
-// currently consumes: `routes/agents.rs::resolve_attachments()` skips any
-// attachment whose Content-Type doesn't start with `image/`. The /upload
-// endpoint itself accepts a wider set (audio for transcription, pdf/text)
-// but those paths aren't wired into the chat send pipeline yet — offering
-// them here would silently drop user context. Mirrors
-// `librefang_types::media::ALLOWED_IMAGE_TYPES`.
-const ATTACHMENT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
+// Types the agent loop currently consumes via
+// `routes/agents.rs::resolve_attachments()`:
+//   - image/* — passed inline as base64 image blocks
+//   - application/pdf — text-extracted via pdf-extract
+//   - text-like files (text/*, JSON, YAML, TOML, code/data extensions) —
+//     read as UTF-8 and inlined as a text block, truncated at 200K chars
+// audio/* is accepted by `/upload` (auto-transcribed via the media engine)
+// but the transcription path returns a stub today, so it's left out here.
+//
+// Extensions in the accept attribute are needed because browsers commonly
+// set empty / `application/octet-stream` for code files like .rs / .py.
+const PDF_MIME = "application/pdf";
+const TEXT_LIKE_EXTENSIONS = [
+  // Plain text & docs
+  ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".log",
+  // Config & data
+  ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf", ".cfg", ".env", ".properties",
+  // Web
+  ".html", ".htm", ".css", ".scss", ".sass", ".less",
+  // JS/TS family
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+  // Other languages
+  ".py", ".rs", ".go", ".java", ".kt", ".kts", ".swift", ".scala", ".clj", ".ex", ".exs",
+  ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".m", ".mm",
+  ".rb", ".php", ".pl", ".lua", ".r", ".jl", ".dart", ".zig", ".nim",
+  // Shell
+  ".sh", ".bash", ".zsh", ".fish", ".ps1",
+  // Query / schema
+  ".sql", ".graphql", ".gql", ".proto",
+  // Notebooks
+  ".ipynb",
+];
+const TEXT_LIKE_MIMES = [
+  "text/*",
+  "application/json",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/x-toml",
+  "application/x-ipynb+json",
+  "application/javascript",
+  "application/x-javascript",
+  "application/typescript",
+  "application/sql",
+  "application/graphql",
+];
+const ATTACHMENT_ACCEPT = [
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+  PDF_MIME,
+  ...TEXT_LIKE_MIMES,
+  ...TEXT_LIKE_EXTENSIONS,
+].join(",");
 
 interface PendingAttachment {
   /** Stable client id used to track this entry across upload state changes. */
@@ -1211,6 +1256,23 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   // ── Attachment upload pipeline ────────────────────────────────────────────
 
   const isImageMime = (mime: string) => mime.startsWith("image/");
+  const isPdfMime = (mime: string) => mime === PDF_MIME;
+  const isTextLikeMime = (mime: string) => {
+    if (mime.startsWith("text/")) return true;
+    return TEXT_LIKE_MIMES.includes(mime);
+  };
+  const hasTextLikeExtension = (filename: string) => {
+    const lower = filename.toLowerCase();
+    return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  };
+  // Browsers often leave `file.type` empty for code files (e.g. `.rs`),
+  // so we fall back to extension matching — matching the backend's
+  // `is_text_like_attachment` logic.
+  const isSupportedFile = (file: File) =>
+    isImageMime(file.type)
+    || isPdfMime(file.type)
+    || isTextLikeMime(file.type)
+    || hasTextLikeExtension(file.name);
 
   const enqueueFiles = useCallback((files: File[]) => {
     if (!agentId || files.length === 0) return;
@@ -1218,11 +1280,12 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
       const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
       const isImage = isImageMime(file.type);
+      // Local preview only makes sense for images; PDFs render as a file chip.
       const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
-      // Drop/paste bypasses <input accept>, so we still need to enforce
-      // image-only here — non-image attachments would upload but the agent
-      // loop would silently discard them.
-      if (!isImage) {
+      // Drop/paste bypasses <input accept>, so we still enforce the
+      // supported-type check here — anything else would upload but the agent
+      // loop would silently discard it.
+      if (!isSupportedFile(file)) {
         setAttachments(prev => [...prev, {
           localId,
           filename: file.name,
@@ -1230,7 +1293,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           contentType: file.type || "application/octet-stream",
           previewUrl,
           status: "error",
-          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Only images are supported (png, jpeg, webp, gif)" }),
+          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Unsupported file type. Allowed: images, PDF, and common text/code files." }),
         }]);
         continue;
       }
@@ -1490,7 +1553,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         </button>
       </div>
       )}
-      <div className="flex gap-2 sm:gap-3 items-end">
+      <div className="flex gap-2 sm:gap-3 items-start">
         <div className="flex-1">
           <textarea
             ref={textareaRef}

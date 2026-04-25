@@ -429,7 +429,22 @@ async fn handle_agent_ws(
     _guard: WsConnectionGuard,
     explicit_session: Option<SessionId>,
 ) {
-    info!(agent_id = %id_str, "WebSocket connected");
+    // Per-connection identity. Lets us distinguish concurrent reconnects
+    // (same agent_id, different conn_id) from a single client retrying.
+    let conn_id = uuid::Uuid::new_v4().simple().to_string();
+    let connected_at = std::time::Instant::now();
+    info!(
+        agent_id = %id_str,
+        conn_id = %conn_id,
+        client_ip = %client_ip,
+        explicit_session = ?explicit_session.map(|s| s.to_string()),
+        "WebSocket connected"
+    );
+
+    // Reason for the eventual disconnect — set at each exit point so the
+    // closing log line tells you whether it was a client close, an idle
+    // timeout, a protocol error, or stream EOF.
+    let mut disconnect_reason: &'static str = "stream_end";
 
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
@@ -515,12 +530,13 @@ async fn handle_agent_ws(
             msg = receiver.next() => {
                 match msg {
                     Some(m) => m,
-                    None => break, // Stream ended
+                    // Init value of `disconnect_reason` ("stream_end") is read here.
+                    None => break,
                 }
             }
             _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity.elapsed())) => {
                 let timeout_secs = ws_idle_timeout.as_secs();
-                info!(agent_id = %id_str, timeout_secs, "WebSocket idle timeout");
+                info!(agent_id = %id_str, conn_id = %conn_id, timeout_secs, "WebSocket idle timeout");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
@@ -528,6 +544,7 @@ async fn handle_agent_ws(
                         "content": format!("Connection closed due to inactivity ({timeout_secs}s timeout)"),
                     }),
                 ).await;
+                disconnect_reason = "idle_timeout";
                 break;
             }
         };
@@ -535,7 +552,8 @@ async fn handle_agent_ws(
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
-                debug!(error = %e, "WebSocket receive error");
+                debug!(agent_id = %id_str, conn_id = %conn_id, error = %e, "WebSocket receive error");
+                disconnect_reason = "receive_error";
                 break;
             }
         };
@@ -585,8 +603,23 @@ async fn handle_agent_ws(
                 )
                 .await;
             }
-            Message::Close(_) => {
-                info!(agent_id = %id_str, "WebSocket closed by client");
+            Message::Close(frame) => {
+                let close_code = frame
+                    .as_ref()
+                    .map(|f| f.code.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
+                let close_reason_text = frame
+                    .as_ref()
+                    .map(|f| f.reason.to_string())
+                    .unwrap_or_default();
+                info!(
+                    agent_id = %id_str,
+                    conn_id = %conn_id,
+                    close_code = %close_code,
+                    close_reason = %close_reason_text,
+                    "WebSocket closed by client"
+                );
+                disconnect_reason = "client_close";
                 break;
             }
             Message::Ping(data) => {
@@ -600,7 +633,13 @@ async fn handle_agent_ws(
 
     // Cleanup
     update_handle.abort();
-    info!(agent_id = %id_str, "WebSocket disconnected");
+    info!(
+        agent_id = %id_str,
+        conn_id = %conn_id,
+        reason = %disconnect_reason,
+        duration_secs = connected_at.elapsed().as_secs(),
+        "WebSocket disconnected"
+    );
 }
 
 // ---------------------------------------------------------------------------

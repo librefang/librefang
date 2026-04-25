@@ -632,9 +632,26 @@ impl OpenAIDriver {
                         }
                     }
                     if !parts.is_empty() && !has_tool_results {
+                        // session_repair already coalesced adjacent Text
+                        // blocks at the message-content layer, so `parts`
+                        // contains at most one Text run plus any Image /
+                        // File parts. If the whole thing collapses to a
+                        // single Text part we send it as a plain string —
+                        // maximally compatible with the long tail of
+                        // OpenAI-compatible backends whose multi-part
+                        // handling is shaky even at size 1.
+                        let content = if parts.len() == 1 {
+                            if let OaiContentPart::Text { text } = &parts[0] {
+                                OaiMessageContent::Text(text.clone())
+                            } else {
+                                OaiMessageContent::Parts(parts)
+                            }
+                        } else {
+                            OaiMessageContent::Parts(parts)
+                        };
                         oai_messages.push(OaiMessage {
                             role: "user".to_string(),
-                            content: Some(OaiMessageContent::Parts(parts)),
+                            content: Some(content),
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
