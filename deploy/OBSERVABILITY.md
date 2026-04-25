@@ -18,7 +18,7 @@ docker compose -f docker-compose.observability.yml up -d
 
 # 4. Open Grafana
 open http://localhost:3000    # admin / admin
-# 5. (optional) Open Jaeger for trace-debug UI
+# 5. Open Jaeger for trace-debug UI
 open http://localhost:16686
 ```
 
@@ -29,6 +29,14 @@ trace-to-metric correlation) and Jaeger (standalone trace-debugging UI:
 waterfall, span diff, service deps). Tempo is the long-term store; Jaeger is
 ephemeral (in-memory, wiped on container restart) and is meant for live
 debugging.
+
+The Jaeger container is **required by the trace pipeline**, not optional:
+the collector's `traces` pipeline includes `otlp/jaeger` as an exporter,
+so starting the stack without `jaeger` will leave the collector logging
+`ConnectionRefused` on every batch. To run a Tempo-only stack, comment
+out the `otlp/jaeger` exporter (and remove it from
+`service.pipelines.traces.exporters`) in `otel-collector/config.yaml`
+and drop the `jaeger` service from `docker-compose.observability.yml`.
 
 ## Available Metrics
 
