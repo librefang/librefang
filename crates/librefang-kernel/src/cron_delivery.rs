@@ -339,7 +339,22 @@ async fn deliver_webhook(
 
 /// Append or overwrite `output` at `path`. Creates parent directories when
 /// missing. Returns `Err(msg)` on any I/O failure.
+///
+/// SECURITY: rejects paths containing `..` components before doing any I/O.
+/// Cron delivery targets can be set through the LLM tool surface and the
+/// dashboard, neither of which we can fully trust to restrict the path —
+/// without this check `LocalFile { path: "../../etc/passwd" }` would
+/// happily overwrite arbitrary files outside the agent workspace.
 async fn deliver_local_file(path: &Path, append: bool, output: &str) -> Result<(), String> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "path traversal rejected: '..' component in {}",
+            path.display()
+        ));
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             tokio::fs::create_dir_all(parent)
