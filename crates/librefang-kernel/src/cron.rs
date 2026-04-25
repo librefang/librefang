@@ -74,6 +74,9 @@ pub struct CronScheduler {
     jobs: DashMap<CronJobId, JobMeta>,
     /// Path to the persistence file (`<home>/cron_jobs.json`).
     persist_path: PathBuf,
+    /// Daemon home directory (e.g. `~/.librefang`). Used to enforce the
+    /// `<home>/scripts/` allowlist on `pre_script.argv[0]` at validation time.
+    home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
 }
@@ -88,6 +91,7 @@ impl CronScheduler {
         Self {
             jobs: DashMap::new(),
             persist_path: home_dir.join("data").join("cron_jobs.json"),
+            home_dir: home_dir.to_path_buf(),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
         }
     }
@@ -164,8 +168,11 @@ impl CronScheduler {
             .filter(|r| r.value().job.agent_id == job.agent_id)
             .count();
 
-        // CronJob.validate returns Result<(), String>
-        job.validate(agent_count)
+        // CronJob.validate_with_home returns Result<(), String>.
+        // Passing `Some(home_dir)` enables the `<home>/scripts/` allowlist
+        // check on `pre_script.argv[0]` and the dangerous-env-key denylist
+        // on `pre_script.env` (defends against `LD_PRELOAD`, `PATH`, etc.).
+        job.validate_with_home(agent_count, Some(&self.home_dir))
             .map_err(LibreFangError::InvalidInput)?;
 
         // Compute initial next_run

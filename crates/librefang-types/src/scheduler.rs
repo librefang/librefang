@@ -222,6 +222,61 @@ pub enum PreScriptValidationError {
         /// The path that could not be canonicalized.
         path: String,
     },
+    /// `env` contains a key from the dangerous-keys denylist (e.g.
+    /// `LD_PRELOAD`, `PATH`) that would defeat the path allowlist.
+    #[error("pre_script.env contains dangerous key `{key}` that would defeat the path allowlist")]
+    DangerousEnvKey {
+        /// The offending env key (preserved in original case for the user).
+        key: String,
+    },
+}
+
+/// Environment variable keys that, if attacker-controlled, defeat the
+/// path allowlist on `argv[0]`. Setting any of these in `PreScript.env`
+/// is rejected by `validate_pre_script`.
+///
+/// References:
+/// - `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` — glibc dynamic linker
+///   inject arbitrary code into the spawned process.
+/// - `DYLD_INSERT_LIBRARIES` / `DYLD_LIBRARY_PATH` / `DYLD_FALLBACK_LIBRARY_PATH`
+///   — Darwin equivalent.
+/// - `PATH` — `argv[0]` is allowlisted but PATH-rewriting hijacks any
+///   `subprocess.Popen("subcmd")` style call inside the script.
+/// - `IFS` — POSIX shell field-splitter rewrite.
+const DANGEROUS_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "PATH",
+    "IFS",
+];
+
+/// Returns true if `key` matches one of [`DANGEROUS_ENV_KEYS`] under an
+/// ASCII case-insensitive comparison.
+///
+/// Linux/macOS env keys are case-sensitive, but the danger keys are
+/// canonical uppercase; matching case-insensitively is defence-in-depth
+/// (a subprocess might lowercase / mixed-case the key) and matches
+/// Windows env semantics where keys are case-insensitive.
+fn is_dangerous_env_key(key: &str) -> bool {
+    DANGEROUS_ENV_KEYS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(key))
+}
+
+/// Reject any [`PreScript`] whose `env` contains a key on the
+/// dangerous-keys denylist. Path-independent: callable from contexts
+/// where the daemon home directory is not available.
+pub fn validate_pre_script_env(script: &PreScript) -> Result<(), PreScriptValidationError> {
+    for key in script.env.keys() {
+        if is_dangerous_env_key(key) {
+            return Err(PreScriptValidationError::DangerousEnvKey { key: key.clone() });
+        }
+    }
+    Ok(())
 }
 
 /// Validate a [`PreScript`] against the home-directory allowlist.
@@ -240,6 +295,10 @@ pub fn validate_pre_script(
     script: &PreScript,
     home_dir: &std::path::Path,
 ) -> Result<(), PreScriptValidationError> {
+    // Reject dangerous env keys before touching the filesystem — fast fail and
+    // keeps the security check independent of the home directory existing.
+    validate_pre_script_env(script)?;
+
     let argv0 = script
         .argv
         .first()
@@ -424,7 +483,25 @@ impl CronJob {
     /// `existing_count` is the number of jobs the owning agent already has
     /// (excluding this job if it already exists). Returns `Ok(())` or an
     /// error message describing the first validation failure.
+    ///
+    /// Forwards to [`CronJob::validate_with_home`] with `home_dir = None`,
+    /// meaning the dangerous-env-key denylist is enforced but the
+    /// `<home_dir>/scripts/` path allowlist is skipped (callers without
+    /// a daemon home directory in hand still get the security floor).
     pub fn validate(&self, existing_count: usize) -> Result<(), String> {
+        self.validate_with_home(existing_count, None)
+    }
+
+    /// Same as [`CronJob::validate`] but additionally enforces the
+    /// `<home_dir>/scripts/` path allowlist on any `pre_script.argv[0]`.
+    /// Pass the daemon home (typically `~/.librefang`) as `home_dir` from
+    /// production code paths; pass `None` only from tests or contexts
+    /// where the path check is intentionally deferred.
+    pub fn validate_with_home(
+        &self,
+        existing_count: usize,
+        home_dir: Option<&std::path::Path>,
+    ) -> Result<(), String> {
         // -- job count cap --
         if existing_count >= MAX_JOBS_PER_AGENT {
             return Err(format!(
@@ -457,7 +534,7 @@ impl CronJob {
         self.validate_schedule()?;
 
         // -- action --
-        self.validate_action()?;
+        self.validate_action(home_dir)?;
 
         // -- delivery --
         self.validate_delivery()?;
@@ -501,7 +578,7 @@ impl CronJob {
         Ok(())
     }
 
-    fn validate_action(&self) -> Result<(), String> {
+    fn validate_action(&self, home_dir: Option<&std::path::Path>) -> Result<(), String> {
         match &self.action {
             CronAction::SystemEvent { text } => {
                 if text.is_empty() {
@@ -517,6 +594,7 @@ impl CronJob {
             CronAction::AgentTurn {
                 message,
                 timeout_secs,
+                pre_script,
                 ..
             } => {
                 if message.is_empty() {
@@ -538,6 +616,15 @@ impl CronJob {
                         return Err(format!(
                             "timeout_secs too large ({t}, max {MAX_TIMEOUT_SECS})"
                         ));
+                    }
+                }
+                // pre_script: env denylist always runs; path allowlist only
+                // runs when the caller supplied a daemon home directory.
+                if let Some(ps) = pre_script {
+                    if let Some(home) = home_dir {
+                        validate_pre_script(ps, home).map_err(|e| e.to_string())?;
+                    } else {
+                        validate_pre_script_env(ps).map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -1762,6 +1849,151 @@ mod tests {
             }
             other => panic!("expected AgentTurn, got {other:?}"),
         }
+    }
+
+    // -- PreScript dangerous-env denylist (review fix for PR #3145) --
+
+    fn pre_script_with_env(home: &std::path::Path, key: &str, value: &str) -> PreScript {
+        let scripts = home.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let script_path = scripts.join("safe.sh");
+        if !script_path.exists() {
+            std::fs::write(&script_path, "#!/bin/sh\n").unwrap();
+        }
+        let mut env = std::collections::HashMap::new();
+        env.insert(key.into(), value.into());
+        PreScript {
+            argv: vec!["safe.sh".into()],
+            cwd: None,
+            env,
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_ld_preload() {
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "LD_PRELOAD", "/tmp/evil.so");
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::DangerousEnvKey { key }) => {
+                assert_eq!(key, "LD_PRELOAD");
+            }
+            other => panic!("expected DangerousEnvKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_path_override() {
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "PATH", "/tmp/evil:/bin");
+        assert!(matches!(
+            validate_pre_script(&script, home.path()),
+            Err(PreScriptValidationError::DangerousEnvKey { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_dyld_insert() {
+        let home = fixture_home_with_script("safe.sh");
+        let script =
+            pre_script_with_env(home.path(), "DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib");
+        assert!(matches!(
+            validate_pre_script(&script, home.path()),
+            Err(PreScriptValidationError::DangerousEnvKey { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_script_validation_rejects_dangerous_env_case_insensitive() {
+        // ASCII case-insensitive matching: `Ld_Preload` is rejected even
+        // though the canonical form is uppercase. Mirrors the Windows env
+        // semantics and defends against subprocesses that lowercase keys.
+        let home = fixture_home_with_script("safe.sh");
+        let script = pre_script_with_env(home.path(), "Ld_Preload", "/tmp/evil.so");
+        match validate_pre_script(&script, home.path()) {
+            Err(PreScriptValidationError::DangerousEnvKey { key }) => {
+                assert_eq!(key, "Ld_Preload", "original casing preserved in error");
+            }
+            other => panic!("expected DangerousEnvKey for mixed case, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_script_validation_accepts_safe_env_keys() {
+        // Arbitrary non-denylist keys must round-trip cleanly. Specifically
+        // includes names that *contain* substrings of denylist entries
+        // (`HOME_OVERRIDE` ⊃ no denylist match) to confirm we match whole
+        // keys, not substrings.
+        let home = fixture_home_with_script("safe.sh");
+        let mut env = std::collections::HashMap::new();
+        env.insert("MY_API_KEY".into(), "secret".into());
+        env.insert("HOME_OVERRIDE".into(), "/tmp/work".into());
+        env.insert("CUSTOM_LD_FLAG".into(), "x".into());
+        let script = PreScript {
+            argv: vec!["safe.sh".into()],
+            cwd: None,
+            env,
+        };
+        validate_pre_script(&script, home.path())
+            .expect("safe env keys must pass dangerous-key denylist");
+    }
+
+    #[test]
+    fn cron_job_validate_rejects_pre_script_with_dangerous_env() {
+        // End-to-end: a cron job carrying a poisoned pre_script.env is
+        // rejected at the `CronJob::validate` boundary so ill-formed
+        // payloads never reach the scheduler. Path allowlist is skipped
+        // here (home_dir = None) but the env denylist still fires.
+        let mut env = std::collections::HashMap::new();
+        env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
+        let mut job = valid_job();
+        job.action = CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: Some(PreScript {
+                argv: vec!["scripts/safe.sh".into()],
+                cwd: None,
+                env,
+            }),
+            silent_marker: None,
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(
+            err.contains("LD_PRELOAD") && err.contains("dangerous"),
+            "expected dangerous-key error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cron_job_validate_with_home_rejects_pre_script_outside_allowlist() {
+        // Companion test: when home_dir IS provided, both env denylist and
+        // path allowlist run. A path-escape with a benign env still fails
+        // on the path check, proving the path branch is wired up.
+        let home = fixture_home_with_script("safe.sh");
+        let mut job = valid_job();
+        #[cfg(unix)]
+        let outside = "/bin/sh".to_string();
+        #[cfg(not(unix))]
+        let outside =
+            std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        job.action = CronAction::AgentTurn {
+            message: "hello".into(),
+            model_override: None,
+            timeout_secs: None,
+            pre_check_script: None,
+            pre_script: Some(PreScript {
+                argv: vec![outside],
+                cwd: None,
+                env: Default::default(),
+            }),
+            silent_marker: None,
+        };
+        let err = job.validate_with_home(0, Some(home.path())).unwrap_err();
+        assert!(
+            err.contains("allowlist"),
+            "expected allowlist error, got: {err}"
+        );
     }
 
     #[test]
