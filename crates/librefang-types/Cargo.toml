@@ -22,6 +22,7 @@ fluent = { workspace = true }
 unic-langid = { workspace = true }
 regex-lite = { workspace = true }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

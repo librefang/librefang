@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Definition of a tool that an agent can use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,11 +213,18 @@ pub struct DecisionTrace {
 
 /// Normalize a JSON Schema for cross-provider compatibility.
 ///
-/// Some providers (Gemini, Groq) reject `anyOf` in tool schemas.
-/// This function:
+/// Several providers (Gemini, Groq, OpenAI strict mode, …) ship strict JSON
+/// Schema validators that reject keywords Anthropic accepts natively (e.g.
+/// `anyOf`, `$ref`, `additionalProperties`, type unions). This function:
 /// - Converts `anyOf` arrays of simple types to flat `enum` arrays
-/// - Strips `$schema` keys (not accepted by most providers)
+/// - Strips `$schema`, `$defs`, `$ref`, `additionalProperties`, `format`, …
+/// - Resolves `$ref` against `$defs` before stripping
 /// - Recursively walks `properties` and `items`
+/// - Injects a fallback `items: {type: "string"}` for `array` schemas missing
+///   `items` (otherwise Gemini returns `INVALID_ARGUMENT`)
+///
+/// Anthropic is short-circuited at the top — its API accepts the schema as-is.
+/// Every other provider goes through `normalize_schema_for_strict_validators`.
 pub fn normalize_schema_for_provider(
     schema: &serde_json::Value,
     provider: &str,
@@ -225,10 +233,17 @@ pub fn normalize_schema_for_provider(
     if provider == "anthropic" {
         return schema.clone();
     }
-    normalize_schema_recursive(schema)
+    normalize_schema_for_strict_validators(schema)
 }
 
-fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
+/// Recursive worker for `normalize_schema_for_provider`.
+///
+/// Despite historical naming this routine is **not Gemini-specific** — it runs
+/// for every non-Anthropic provider (gemini, openai, groq, deepseek, bedrock,
+/// vertex, …) because they all share strict-validator semantics. Any change
+/// here affects all of them; verify against each driver before tightening
+/// behaviour.
+fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_json::Value {
     let obj = match schema.as_object() {
         Some(o) => o,
         None => {
@@ -237,7 +252,7 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
             if let Some(s) = schema.as_str() {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
                     if parsed.is_object() {
-                        return normalize_schema_recursive(&parsed);
+                        return normalize_schema_for_strict_validators(&parsed);
                     }
                 }
             }
@@ -328,7 +343,10 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
             if let Some(props) = value.as_object() {
                 let mut new_props = serde_json::Map::new();
                 for (prop_name, prop_schema) in props {
-                    new_props.insert(prop_name.clone(), normalize_schema_recursive(prop_schema));
+                    new_props.insert(
+                        prop_name.clone(),
+                        normalize_schema_for_strict_validators(prop_schema),
+                    );
                 }
                 result.insert(key.clone(), serde_json::Value::Object(new_props));
                 continue;
@@ -337,19 +355,30 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
 
         // Recurse into items
         if key == "items" {
-            result.insert(key.clone(), normalize_schema_recursive(value));
+            result.insert(key.clone(), normalize_schema_for_strict_validators(value));
             continue;
         }
 
         result.insert(key.clone(), value.clone());
     }
 
-    // Gemini requires `items` for every array-typed parameter.
-    // JSON Schema allows arrays without `items`, but the Gemini API rejects
-    // such schemas with INVALID_ARGUMENT. Inject a default string items schema
-    // so MCP tools (and any other source) don't break Gemini requests.
+    // Strict-validator providers (Gemini in particular) require `items` for
+    // every array-typed parameter. JSON Schema allows arrays without `items`,
+    // but the Gemini API rejects such schemas with INVALID_ARGUMENT.
+    //
+    // Fallback: inject `{"type": "string"}` so the request is at least accepted.
+    // This is **better than dropping the tool**, but not ideal: when the array
+    // truly contains numbers/objects the model will be told it is a `string[]`
+    // and may produce wrong arguments. Tool authors / MCP servers SHOULD always
+    // declare an explicit `items` schema; we emit a `warn!` so the gap is
+    // surfaced in logs rather than silently papered over.
     if result.get("type").and_then(|t| t.as_str()) == Some("array") && !result.contains_key("items")
     {
+        warn!(
+            "JSON Schema array without `items` — injecting fallback `{{\"type\":\"string\"}}` \
+             for strict-validator providers (Gemini etc.). The schema author should declare \
+             items explicitly; the string fallback may produce wrong tool arguments for non-string arrays."
+        );
         result.insert("items".to_string(), serde_json::json!({"type": "string"}));
     }
 
