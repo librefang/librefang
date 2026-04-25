@@ -225,18 +225,10 @@ pub enum RedactedBlock {
 
 /// Compute the prompt-cache hit ratio for an aggregate `TokenUsage`.
 ///
-/// Returns `None` when neither cache_read nor cache_creation tokens were
-/// reported (e.g. provider doesn't support prompt caching). Returns
-/// `Some(ratio)` in `[0.0, 1.0]` otherwise — `Some(0.0)` for a cold-start
-/// turn where caching was active but produced no hits, `Some(1.0)` for a
-/// fully-cached turn.
+/// Thin re-export over [`TokenUsage::cache_hit_ratio`] kept for callers
+/// that already pass usage through this module's public API.
 pub fn compute_cache_hit_ratio(usage: &TokenUsage) -> Option<f32> {
-    let denom = usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
-    if denom == 0 {
-        None
-    } else {
-        Some(usage.cache_read_input_tokens as f32 / denom as f32)
-    }
+    usage.cache_hit_ratio()
 }
 
 impl TrajectoryBundle {
@@ -273,13 +265,17 @@ impl TrajectoryBundle {
 
     /// Stamp the trajectory's metadata with a cache hit ratio computed from
     /// the supplied aggregate `TokenUsage`. Convenience wrapper around
-    /// [`compute_cache_hit_ratio`].
+    /// [`TokenUsage::cache_hit_ratio`].
     ///
-    /// Intended to be called by export sites (HTTP route, CLI exporter)
-    /// once they've gathered cumulative usage for the session — the
-    /// exporter itself does not see token counts.
+    /// `TrajectoryExporter` itself never sees per-turn token counts (the
+    /// `Session` substrate stores `context_window_tokens` only, not the
+    /// `cache_creation` / `cache_read` split). This builder is the API
+    /// surface for callers further up the stack — the HTTP export route
+    /// and CLI exporter — that aggregate `TokenUsage` from the kernel's
+    /// metering layer and stamp the bundle before serialization. Wiring
+    /// those call sites is a follow-up.
     pub fn with_cache_hit_ratio(mut self, usage: &TokenUsage) -> Self {
-        self.metadata.cache_hit_ratio = compute_cache_hit_ratio(usage);
+        self.metadata.cache_hit_ratio = usage.cache_hit_ratio();
         self
     }
 }
@@ -801,31 +797,18 @@ mod tests {
     }
 
     #[test]
-    fn compute_cache_hit_ratio_none_when_no_caching() {
-        let usage = TokenUsage::default();
-        assert_eq!(compute_cache_hit_ratio(&usage), None);
-    }
-
-    #[test]
-    fn compute_cache_hit_ratio_full_hit() {
+    fn compute_cache_hit_ratio_delegates_to_token_usage() {
+        // Smoke test for the public re-export — full coverage of the
+        // ratio math lives in `librefang_types::message::TokenUsage`.
+        assert_eq!(compute_cache_hit_ratio(&TokenUsage::default()), None);
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 70,
         };
-        assert_eq!(compute_cache_hit_ratio(&usage), Some(1.0));
-    }
-
-    #[test]
-    fn compute_cache_hit_ratio_cold_start_returns_some_zero() {
-        let usage = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 0,
-            cache_creation_input_tokens: 100,
-            cache_read_input_tokens: 0,
-        };
-        assert_eq!(compute_cache_hit_ratio(&usage), Some(0.0));
+        let ratio = compute_cache_hit_ratio(&usage).expect("ratio set");
+        assert!((ratio - 0.7).abs() < 1e-6, "got {ratio}");
     }
 
     #[test]
