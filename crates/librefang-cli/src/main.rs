@@ -1670,10 +1670,15 @@ fn init_tracing_stderr(log_level: &str) {
     // INFO-level `#[instrument]` spans are filtered out before OTel ever
     // sees them). Per-layer filtering keeps stderr terse while OTel
     // receives the full span tree.
+    // Force stderr explicitly: machine-readable subcommands like
+    // `doctor --json` expect a clean stdout stream. The fmt layer's
+    // default writer is stdout, which would interleave tracing output
+    // with the JSON payload and corrupt downstream parsers.
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
         .compact()
+        .with_writer(std::io::stderr)
         .with_filter(env_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
@@ -1793,6 +1798,23 @@ fn load_log_dir_from_config() -> Option<PathBuf> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("log_dir")?.as_str().map(PathBuf::from)
+}
+
+/// Write `msg` followed by a newline to stdout, exiting with code 0 on
+/// `BrokenPipe`. Use this instead of `println!` for machine-readable (JSON)
+/// output that is commonly piped into other tools — e.g.
+/// `librefang doctor --json | head -1`. Without this wrapper, SIGPIPE/EPIPE
+/// surfaces as a panic on the next write attempt.
+fn write_stdout_safe(msg: &str) {
+    let out = std::io::stdout();
+    let mut lock = out.lock();
+    if let Err(e) = writeln!(lock, "{}", msg) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("error: failed writing to stdout: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn main() {
@@ -5877,13 +5899,12 @@ fn cmd_doctor(json: bool, repair: bool) {
     }
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        write_stdout_safe(
+            &serde_json::to_string_pretty(&serde_json::json!({
                 "all_ok": all_ok,
                 "checks": checks,
             }))
-            .unwrap_or_default()
+            .unwrap_or_default(),
         );
     } else {
         println!();
