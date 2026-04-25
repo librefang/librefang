@@ -189,6 +189,17 @@ pub enum CronDeliveryTarget {
         channel_type: String,
         /// Platform-specific recipient (chat ID, user ID, etc.).
         recipient: String,
+        /// Optional thread/topic id (e.g. Slack `thread_ts`, Telegram
+        /// forum-topic id). Reserved up front so adding it later does not
+        /// break persisted JSON. `None` preserves the historical behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        /// Optional adapter-key suffix used to disambiguate multiple
+        /// configured accounts of the same channel (e.g. two Slack
+        /// workspaces). Resolved into the `<channel>:<account_id>` adapter
+        /// lookup key by `LibreFangKernel::send_channel_message`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
     },
     /// Deliver via HTTP POST to a webhook URL with a JSON payload.
     Webhook {
@@ -1123,12 +1134,51 @@ mod tests {
         let t = CronDeliveryTarget::Channel {
             channel_type: "telegram".into(),
             recipient: "12345".into(),
+            thread_id: None,
+            account_id: None,
         };
         let s = serde_json::to_string(&t).unwrap();
         assert!(s.contains("\"type\":\"channel\""), "tag missing: {s}");
         assert!(s.contains("telegram"));
+        // `skip_serializing_if = "Option::is_none"` keeps the wire shape
+        // identical to the pre-thread_id payload so old persisted JSON
+        // round-trips unchanged.
+        assert!(!s.contains("thread_id"), "thread_id leaked when None: {s}");
+        assert!(!s.contains("account_id"), "account_id leaked when None: {s}");
         let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_channel_with_thread_and_account_roundtrip() {
+        let t = CronDeliveryTarget::Channel {
+            channel_type: "slack".into(),
+            recipient: "C123".into(),
+            thread_id: Some("1700000000.000100".into()),
+            account_id: Some("workspace-b".into()),
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(s.contains("\"thread_id\":\"1700000000.000100\""));
+        assert!(s.contains("\"account_id\":\"workspace-b\""));
+        let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn delivery_target_channel_legacy_payload_deserializes() {
+        // Pre-existing persisted payloads without thread_id/account_id must
+        // still deserialize cleanly thanks to #[serde(default)].
+        let json = r#"{"type":"channel","channel_type":"telegram","recipient":"12345"}"#;
+        let back: CronDeliveryTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            CronDeliveryTarget::Channel {
+                channel_type: "telegram".into(),
+                recipient: "12345".into(),
+                thread_id: None,
+                account_id: None,
+            }
+        );
     }
 
     #[test]
@@ -1215,6 +1265,8 @@ mod tests {
             CronDeliveryTarget::Channel {
                 channel_type: "slack".into(),
                 recipient: "C123".into(),
+                thread_id: None,
+                account_id: None,
             },
             CronDeliveryTarget::LocalFile {
                 path: "/tmp/out.log".into(),

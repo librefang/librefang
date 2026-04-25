@@ -13351,9 +13351,11 @@ impl crate::cron_delivery::CronChannelSender for KernelCronBridge {
         channel_type: &str,
         recipient: &str,
         message: &str,
+        thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String> {
         self.kernel
-            .send_channel_message(channel_type, recipient, message, None, None)
+            .send_channel_message(channel_type, recipient, message, thread_id, account_id)
             .await
             .map(|_| ())
     }

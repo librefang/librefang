@@ -64,12 +64,18 @@ impl DeliveryResult {
 #[async_trait]
 pub trait CronChannelSender: Send + Sync {
     /// Deliver `message` via the channel adapter named `channel_type` to
-    /// `recipient`. Returns `Err(human_readable_reason)` on failure.
+    /// `recipient`. `thread_id` selects an in-channel thread/topic when the
+    /// adapter supports it; `account_id` disambiguates between multiple
+    /// configured accounts of the same channel (via the
+    /// `<channel>:<account_id>` adapter-key suffix). Returns
+    /// `Err(human_readable_reason)` on failure.
     async fn send_channel_message(
         &self,
         channel_type: &str,
         recipient: &str,
         message: &str,
+        thread_id: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(), String>;
 }
 
@@ -142,11 +148,32 @@ impl CronDeliveryEngine {
             CronDeliveryTarget::Channel {
                 channel_type,
                 recipient,
+                thread_id,
+                account_id,
             } => {
-                let desc = format!("channel:{channel_type} -> {recipient}");
+                // Routing hints (`thread_id`, `account_id`) are appended to
+                // the descriptor so log scrapers can correlate failures with
+                // the configured target.
+                let mut desc = format!("channel:{channel_type} -> {recipient}");
+                if let Some(t) = thread_id.as_deref() {
+                    if !t.is_empty() {
+                        desc.push_str(&format!(" (thread={t})"));
+                    }
+                }
+                if let Some(a) = account_id.as_deref() {
+                    if !a.is_empty() {
+                        desc.push_str(&format!(" [account={a}]"));
+                    }
+                }
                 match self
                     .channel_sender
-                    .send_channel_message(channel_type, recipient, output)
+                    .send_channel_message(
+                        channel_type,
+                        recipient,
+                        output,
+                        thread_id.as_deref(),
+                        account_id.as_deref(),
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -201,7 +228,7 @@ impl CronDeliveryEngine {
                 let body = format!("{subject}\n\n{output}");
                 match self
                     .channel_sender
-                    .send_channel_message("email", to, &body)
+                    .send_channel_message("email", to, &body, None, None)
                     .await
                 {
                     Ok(()) => {
@@ -299,10 +326,16 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// Captured arguments of a single `send_channel_message` invocation.
+    /// The trailing `Option<String>` slots track the new `thread_id` and
+    /// `account_id` plumbing so tests can assert they round-trip from
+    /// `CronDeliveryTarget::Channel` through the engine.
+    type SenderCall = (String, String, String, Option<String>, Option<String>);
+
     /// Mock channel sender that records every call. Optionally fails for
     /// specific channel names.
     struct MockSender {
-        calls: Mutex<Vec<(String, String, String)>>,
+        calls: Mutex<Vec<SenderCall>>,
         fail_on_channel: Option<String>,
     }
 
@@ -321,7 +354,7 @@ mod tests {
             })
         }
 
-        fn calls(&self) -> Vec<(String, String, String)> {
+        fn calls(&self) -> Vec<SenderCall> {
             self.calls.lock().unwrap().clone()
         }
     }
@@ -333,11 +366,15 @@ mod tests {
             channel_type: &str,
             recipient: &str,
             message: &str,
+            thread_id: Option<&str>,
+            account_id: Option<&str>,
         ) -> Result<(), String> {
             self.calls.lock().unwrap().push((
                 channel_type.to_string(),
                 recipient.to_string(),
                 message.to_string(),
+                thread_id.map(str::to_string),
+                account_id.map(str::to_string),
             ));
             if let Some(ref failing) = self.fail_on_channel {
                 if failing == channel_type {
@@ -499,6 +536,8 @@ mod tests {
         let target = CronDeliveryTarget::Channel {
             channel_type: "slack".to_string(),
             recipient: "C12345".to_string(),
+            thread_id: None,
+            account_id: None,
         };
         let results = engine.deliver(&[target], "alerts", "fire").await;
         assert!(results[0].success, "error: {:?}", results[0].error);
@@ -507,6 +546,39 @@ mod tests {
         assert_eq!(calls[0].0, "slack");
         assert_eq!(calls[0].1, "C12345");
         assert_eq!(calls[0].2, "fire");
+        assert!(calls[0].3.is_none(), "thread_id should be None when unset");
+        assert!(calls[0].4.is_none(), "account_id should be None when unset");
+    }
+
+    #[tokio::test]
+    async fn channel_target_passes_thread_and_account() {
+        // Regression: thread_id and account_id must reach the channel
+        // sender so multi-account / threaded adapters can route correctly.
+        let sender = MockSender::new();
+        let engine = test_engine(sender.clone());
+        let target = CronDeliveryTarget::Channel {
+            channel_type: "slack".to_string(),
+            recipient: "C12345".to_string(),
+            thread_id: Some("1700000000.000100".to_string()),
+            account_id: Some("workspace-b".to_string()),
+        };
+        let results = engine.deliver(&[target], "alerts", "fire").await;
+        assert!(results[0].success, "error: {:?}", results[0].error);
+        let calls = sender.calls();
+        assert_eq!(calls[0].3.as_deref(), Some("1700000000.000100"));
+        assert_eq!(calls[0].4.as_deref(), Some("workspace-b"));
+        // The descriptor should include the routing hints so log scrapers
+        // can correlate failures with the configured target.
+        assert!(
+            results[0].target.contains("thread="),
+            "expected thread hint in descriptor, got {:?}",
+            results[0].target
+        );
+        assert!(
+            results[0].target.contains("account="),
+            "expected account hint in descriptor, got {:?}",
+            results[0].target
+        );
     }
 
     // -- Email target --------------------------------------------------------
@@ -546,6 +618,8 @@ mod tests {
             CronDeliveryTarget::Channel {
                 channel_type: "slack".to_string(),
                 recipient: "C1".to_string(),
+                thread_id: None,
+                account_id: None,
             },
         ];
 

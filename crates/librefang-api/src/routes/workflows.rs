@@ -1592,6 +1592,15 @@ pub async fn update_schedule(
     // Multi-destination fan-out targets: full replacement when supplied.
     // Validation is done on the kernel side via serde, but reject obviously
     // malformed payloads (non-array) up front to give a clearer 400.
+    //
+    // Semantics intentionally differ between `null` and `[]`:
+    //   * field omitted        — leave existing targets untouched.
+    //   * `delivery_targets:null` — same as omitted (preserves the
+    //     existing list). The kernel `update_job` checks `is_null()` and
+    //     skips the patch.
+    //   * `delivery_targets:[]` — explicit clear; kernel deserializes the
+    //     empty array and replaces the list with `Vec::new()`.
+    // Callers that want to clear all targets must send `[]`, not `null`.
     if let Some(targets) = req.get("delivery_targets") {
         if !targets.is_null() && !targets.is_array() {
             return ApiErrorResponse::bad_request(

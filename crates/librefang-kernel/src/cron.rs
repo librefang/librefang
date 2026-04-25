@@ -1586,6 +1586,8 @@ mod tests {
             CronDeliveryTarget::Channel {
                 channel_type: "slack".into(),
                 recipient: "C123".into(),
+                thread_id: None,
+                account_id: None,
             },
             CronDeliveryTarget::LocalFile {
                 path: "/tmp/x.log".into(),
