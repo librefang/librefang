@@ -906,6 +906,141 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     kernel.shutdown();
 }
 
+/// Regression test for issue #3135 — hand-level `skills = [...]` allowlist
+/// MUST propagate into each derived per-role agent's `AgentManifest.skills`,
+/// otherwise `sorted_enabled_skills` treats the empty list as "unrestricted"
+/// and inlines every installed skill into every role's prompt.
+///
+/// The merge logic lives in `activate_hand_with_id` (kernel/mod.rs ~9057):
+/// - hand_skills empty + agent_skills empty   → agent_skills stays empty (unrestricted)
+/// - hand_skills non-empty + agent_skills empty → agent_skills := hand_skills
+/// - hand_skills non-empty + agent_skills non-empty → intersection
+#[test]
+fn test_hand_skills_propagate_to_derived_agent_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-skills-propagation");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Hand with a top-level allowlist of two skills and one worker role
+    // that does NOT set its own `skills` field — must inherit ["alpha", "beta"].
+    let hand_toml = r#"
+id = "skills-prop-test"
+version = "0.1.0"
+name = "Skills Propagation Test Hand"
+description = "Regression fixture for issue #3135"
+category = "communication"
+
+skills = ["alpha", "beta"]
+
+[agents.worker]
+name = "skills-prop-worker"
+description = "Inherits hand-level skills allowlist"
+
+[agents.worker.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+    kernel
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand("skills-prop-test", HashMap::new())
+        .expect("hand should activate without unmet requirements");
+
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let entry = kernel
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry");
+
+    assert_eq!(
+        entry.manifest.skills,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "hand-level skills allowlist must propagate into AgentManifest.skills \
+         on the derived per-role agent (issue #3135)"
+    );
+
+    kernel.shutdown();
+}
+
+/// Companion to the propagation test: when the per-role agent ALSO declares
+/// its own `skills` field, the merge must intersect with the hand-level
+/// allowlist (per the documented semantics in `activate_hand_with_id`).
+#[test]
+fn test_hand_skills_intersect_per_role_overrides() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-skills-intersect");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Hand allows alpha+beta+gamma; agent independently lists alpha+delta.
+    // Expected effective list: ["alpha"] (intersection).
+    let hand_toml = r#"
+id = "skills-intersect-test"
+version = "0.1.0"
+name = "Skills Intersect Test Hand"
+description = "Regression fixture for issue #3135 (intersection branch)"
+category = "communication"
+
+skills = ["alpha", "beta", "gamma"]
+
+[agents.worker]
+name = "skills-intersect-worker"
+description = "Has its own skills list — should be intersected"
+skills = ["alpha", "delta"]
+
+[agents.worker.model]
+provider = "default"
+model = "default"
+system_prompt = "You are a test worker."
+"#;
+
+    kernel
+        .hand_registry
+        .install_from_content(hand_toml, "")
+        .expect("install hand from content");
+
+    let instance = kernel
+        .activate_hand("skills-intersect-test", HashMap::new())
+        .expect("hand should activate without unmet requirements");
+
+    let agent_id = instance
+        .agent_id()
+        .expect("derived agent id from activated hand");
+    let entry = kernel
+        .registry
+        .get(agent_id)
+        .expect("hand-derived agent must be in the registry");
+
+    assert_eq!(
+        entry.manifest.skills,
+        vec!["alpha".to_string()],
+        "per-role agent skills list must be intersected with the hand-level \
+         allowlist — only skills present in BOTH lists survive"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_available_tools_returns_empty_when_tools_disabled() {
     let tmp = tempfile::tempdir().unwrap();
