@@ -1657,6 +1657,19 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
+                // Skip malformed tool calls (empty ID or name can happen if
+                // streaming chunks arrive out of order or are dropped by proxy,
+                // e.g. the GitHub Copilot proxy occasionally drops the function
+                // name chunk). Replaying these to the API yields
+                // "tool call must have a tool call ID and function name" errors.
+                if id.is_empty() || name.is_empty() {
+                    warn!(
+                        tool_id = %id,
+                        tool_name = %name,
+                        "Skipping tool call with empty ID or name from streaming response"
+                    );
+                    continue;
+                }
                 let input: serde_json::Value = match parse_tool_args(arguments) {
                     Ok(v) => ensure_object(v),
                     Err(e) => {
