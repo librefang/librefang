@@ -101,10 +101,13 @@ fn kernel_config_schema_matches_golden_fixture() {
     if canon(&actual) != canon(&expected) {
         let actual_lines = actual.lines().count();
         let expected_lines = expected.lines().count();
-        // Print the full actual schema between machine-parseable markers so
-        // the new fixture can be lifted out of the CI log when running
-        // `cargo test --ignored regenerate_golden` is impractical (e.g. on
-        // sandboxed dev environments). Removed once the fixture is updated.
+        // Print the full actual schema base64-encoded between markers so the
+        // new fixture can be lifted out of the CI log. GitHub Actions secret
+        // masking rewrites `Authorization: <token>` into `Authorization: ***`,
+        // which corrupts raw JSON; base64 sidesteps that. Removed once the
+        // fixture is updated.
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(actual.as_bytes());
         panic!(
             "KernelConfig schema drifted from golden fixture.\n\
              actual: {actual_lines} lines / {} bytes\n\
@@ -115,9 +118,9 @@ fn kernel_config_schema_matches_golden_fixture() {
              \tcargo test -p librefang-api --test config_schema_golden \\\n\
              \t\t-- --ignored regenerate_golden --nocapture\n\
              \n\
-             ===BEGIN_ACTUAL_SCHEMA===\n\
-             {actual}\n\
-             ===END_ACTUAL_SCHEMA===\n",
+             ===BEGIN_ACTUAL_SCHEMA_B64===\n\
+             {b64}\n\
+             ===END_ACTUAL_SCHEMA_B64===\n",
             actual.len(),
             expected.len(),
         );
