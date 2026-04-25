@@ -52,6 +52,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [\[oauth\]](#oauth)
   - [\[auth\_profiles\]](#auth_profiles)
   - [\[tool\_policy\]](#tool_policy)
+  - [\[tool\_timeouts\]](#tool_timeouts)
   - [\[proactive\_memory\]](#proactive_memory)
   - [\[context\_engine\]](#context_engine)
   - [\[audit\]](#audit)
@@ -154,6 +155,7 @@ usage_footer = "full"                 # off | tokens | cost | full
 prompt_caching = true                 # Enable LLM prompt caching
 stable_prefix_mode = false            # Reduce prompt cache invalidation
 max_cron_jobs = 500                   # Global max cron jobs
+tool_timeout_secs = 300               # Global timeout for all tools (seconds)
 cors_origin = []                      # CORS allowed origins
 include = []                          # Config file includes
 
@@ -166,6 +168,13 @@ include = []                          # Config file includes
 [provider_regions]
 # qwen = "intl"        # Use Qwen international endpoint (dashscope-intl)
 # minimax = "china"    # Use MiniMax China endpoint (MINIMAX_CN_API_KEY)
+
+# --- Tool Timeouts ---
+[tool_timeouts]
+agent_send = 600                       # Override for agent_send tool
+agent_spawn = 600                      # Override for agent_spawn tool
+"mcp_browser_*" = 900                  # Glob pattern for browser MCP tools
+shell_exec = 300                       # Override for shell_exec tool
 
 # --- Default LLM Provider ---
 [default_model]
@@ -501,6 +510,8 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
 | `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |
 | `provider_regions` | map of string→string | `{}` | Provider region selection. Maps provider ID to a region name defined in the provider's registry TOML (e.g., `qwen = "intl"`). Overrides the provider's base URL and optionally its API key env var. Applied before `provider_urls` (lower priority). |
+| `tool_timeout_secs` | u64 | `300` | Global timeout in seconds for all tool executions. Can be overridden per-tool via `[tool_timeouts]` section. |
+| `tool_timeouts` | map of string→u64 | `{}` | Per-tool timeout overrides. Keys are exact tool names or glob patterns. See `[tool_timeouts]` section for details. |
 
 **`mode` values:**
 
@@ -2603,6 +2614,35 @@ tools = ["web_search", "web_fetch"]
 |-------|------|-------------|
 | `name` | string | Group name (e.g., `"web_tools"`, `"code_tools"`). |
 | `tools` | list of strings | Tool name patterns included in this group. |
+
+---
+
+### `[tool_timeouts]`
+
+Configures per-tool execution timeouts. The global default timeout applies to all tools unless overridden by exact name or glob pattern.
+
+```toml
+# Global default timeout for all tools (seconds)
+tool_timeout_secs = 300
+
+# Per-tool timeout overrides (exact match or glob pattern)
+[tool_timeouts]
+agent_send = 600
+agent_spawn = 600
+"mcp_browser_*" = 900
+shell_exec = 300
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tool_timeout_secs` | u64 | `300` | Global timeout in seconds for all tool executions. Increase for browser automation or long-running builds. |
+| `tool_timeouts` | map of string→u64 | `{}` | Per-tool timeout overrides. Keys are exact tool names or glob patterns (e.g., `"mcp_browser_*"`). Exact matches take priority over glob patterns; among globs, the longest matching pattern wins (most specific first). Falls back to `tool_timeout_secs` when no entry matches. |
+
+**Resolution order:**
+
+1. Exact tool name match in `tool_timeouts`
+2. Longest matching glob pattern in `tool_timeouts`
+3. Global `tool_timeout_secs`
 
 ---
 
