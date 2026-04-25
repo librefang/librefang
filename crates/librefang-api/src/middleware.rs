@@ -397,10 +397,14 @@ pub async fn auth(
     //
     // Dashboard assets (JS/CSS/font chunks) are always public — they contain
     // no sensitive data and the SPA shell needs them to render even the
-    // inline login page returned for unauthenticated browsers.
+    // inline login page returned for unauthenticated browsers. The same
+    // applies to `/locales/*.json` — translation bundles are static i18n
+    // resources fetched by the SPA shell before any auth flow runs.
     let is_dashboard_asset = path.starts_with("/dashboard/assets/");
-    let dashboard_shell_public =
-        (!auth_state.dashboard_auth_enabled && is_dashboard_path) || is_dashboard_asset;
+    let is_locale_bundle = path.starts_with("/locales/");
+    let dashboard_shell_public = (!auth_state.dashboard_auth_enabled && is_dashboard_path)
+        || is_dashboard_asset
+        || is_locale_bundle;
 
     let always_public_get_only = is_get
         && (matches!(
