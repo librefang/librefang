@@ -13361,26 +13361,43 @@ impl crate::cron_delivery::CronChannelSender for KernelCronBridge {
     }
 }
 
+/// Sentinel body sent when the agent / workflow produced no output but the
+/// caller still wants every fan-out target invoked (heartbeat semantics).
+/// Plain text so all adapters render it identically.
+const CRON_EMPTY_OUTPUT_HEARTBEAT: &str = "(cron heartbeat: empty output)";
+
 /// Fan out `output` to every target in `delivery_targets` concurrently.
 ///
 /// Best-effort: never returns an error, because the cron job itself has
 /// already succeeded by the time we get here. Per-target failures are
 /// counted and logged. The legacy single-destination `delivery` field is
 /// handled separately by [`cron_deliver_response`].
+///
+/// **Empty output is not silently dropped.** When `output.is_empty()` we
+/// substitute a short heartbeat marker so every configured target still
+/// fires — the previous early-return swallowed the delivery entirely and
+/// broke liveness-style cron jobs (e.g. "ping #ops every hour even when I
+/// have nothing to say"). Cron jobs that genuinely want to skip empty-
+/// output runs should not configure fan-out targets at all.
 async fn cron_fan_out_targets(
     kernel: &Arc<LibreFangKernel>,
     job_name: &str,
     output: &str,
     targets: &[librefang_types::scheduler::CronDeliveryTarget],
 ) {
-    if targets.is_empty() || output.is_empty() {
+    if targets.is_empty() {
         return;
     }
+    let payload: &str = if output.is_empty() {
+        CRON_EMPTY_OUTPUT_HEARTBEAT
+    } else {
+        output
+    };
     let sender: Arc<dyn crate::cron_delivery::CronChannelSender> = Arc::new(KernelCronBridge {
         kernel: kernel.clone(),
     });
     let engine = crate::cron_delivery::CronDeliveryEngine::new(sender);
-    let results = engine.deliver(targets, job_name, output).await;
+    let results = engine.deliver(targets, job_name, payload).await;
     let total = results.len();
     let failures = results.iter().filter(|r| !r.success).count();
     let successes = total - failures;

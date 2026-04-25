@@ -99,13 +99,16 @@ pub struct CronDeliveryEngine {
 
 impl CronDeliveryEngine {
     /// Build a new engine using the given channel sender and a fresh
-    /// `reqwest::Client`. Falls back to the default client if the builder
-    /// fails (which effectively never happens on supported platforms).
+    /// `reqwest::Client`. The HTTP client construction failing would mean
+    /// the daemon is in an unrecoverable state (no TLS backend, no resolver,
+    /// etc.), so we surface it loudly via `expect` rather than silently
+    /// downgrading to `Client::default()` and producing confusing
+    /// per-webhook errors at delivery time.
     pub fn new(channel_sender: Arc<dyn CronChannelSender>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
             .build()
-            .unwrap_or_default();
+            .expect("HTTP client build failed for cron fan-out engine");
         Self {
             channel_sender,
             http,
@@ -181,20 +184,7 @@ impl CronDeliveryEngine {
                 thread_id,
                 account_id,
             } => {
-                // Routing hints (`thread_id`, `account_id`) are appended to
-                // the descriptor so log scrapers can correlate failures with
-                // the configured target.
-                let mut desc = format!("channel:{channel_type} -> {recipient}");
-                if let Some(t) = thread_id.as_deref() {
-                    if !t.is_empty() {
-                        desc.push_str(&format!(" (thread={t})"));
-                    }
-                }
-                if let Some(a) = account_id.as_deref() {
-                    if !a.is_empty() {
-                        desc.push_str(&format!(" [account={a}]"));
-                    }
-                }
+                let desc = describe_target(target);
                 match self
                     .channel_sender
                     .send_channel_message(
@@ -250,11 +240,16 @@ impl CronDeliveryEngine {
             } => {
                 let desc = format!("email:{to}");
                 let subject = render_subject(subject_template.as_deref(), job_name);
-                // The existing email channel adapter sends via SMTP and does
-                // not expose a subject/to pair on the trait, so we route a
-                // formatted message through it. Most adapters treat the
-                // recipient as a destination identifier; the email adapter
-                // uses it as the RCPT TO address.
+                // TODO(#3102): the existing email channel adapter takes
+                // `(channel_type, recipient, message)` only — it does not
+                // expose a dedicated `subject` parameter on the trait. As
+                // a stop-gap we prepend the rendered subject as the first
+                // line of the body so the recipient sees it; adapters that
+                // already extract a leading `Subject:` header line will
+                // surface it as the real RFC 5322 subject. Otherwise the
+                // subject lands inside the body. A follow-up PR should add
+                // a typed `subject` parameter to the email adapter and
+                // route it through here so it lands in the actual headers.
                 let body = format!("{subject}\n\n{output}");
                 match self
                     .channel_sender
