@@ -130,6 +130,25 @@ fn current_process_rss_mb() -> Option<u64> {
     }
 }
 
+/// Returns `true` when at least one web search provider is configured —
+/// either an API-key-based provider with its env var set, or SearXNG with a
+/// non-empty URL. Drives the dashboard's "Configure API key" warning chip;
+/// must stay in sync with the providers actually wired into the search
+/// runtime, otherwise the UI nags users who already have a working setup.
+fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
+    let env_set = |env_var: &str| {
+        std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some()
+    };
+    !web.searxng.url.trim().is_empty()
+        || env_set(&web.tavily.api_key_env)
+        || env_set(&web.brave.api_key_env)
+        || env_set(&web.jina.api_key_env)
+        || env_set(&web.perplexity.api_key_env)
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -870,20 +889,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     );
 
     // ── Web ──
-    // Check if at least one search provider has a configured API key
-    let search_available = [
-        &config.web.tavily.api_key_env,
-        &config.web.brave.api_key_env,
-        &config.web.jina.api_key_env,
-        &config.web.perplexity.api_key_env,
-    ]
-    .iter()
-    .any(|env_var| {
-        std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-    });
+    let search_available = is_web_search_configured(&config.web);
     set!("web", {
         "search_provider": format!("{:?}", config.web.search_provider),
         "cache_ttl_minutes": config.web.cache_ttl_minutes,
@@ -2243,20 +2249,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     let providers = providers_result.unwrap_or_default();
     let channels = channels_result.unwrap_or_default();
 
-    // Check if at least one web search provider has a configured API key
-    let web_search_available = [
-        &cfg.web.tavily.api_key_env,
-        &cfg.web.brave.api_key_env,
-        &cfg.web.jina.api_key_env,
-        &cfg.web.perplexity.api_key_env,
-    ]
-    .iter()
-    .any(|env_var| {
-        std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-    });
+    let web_search_available = is_web_search_configured(&cfg.web);
 
     serde_json::json!({
         "health": health,
@@ -2268,4 +2261,53 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "workflowCount": workflow_count,
         "webSearchAvailable": web_search_available,
     })
+}
+
+#[cfg(test)]
+mod web_search_configured_tests {
+    use super::is_web_search_configured;
+    use librefang_types::config::WebConfig;
+
+    /// Point every API-key env-var lookup at a unique never-set name so the
+    /// helper's only path to "configured" in these tests is via SearXNG. This
+    /// keeps the assertions stable even on hosts that happen to export
+    /// `TAVILY_API_KEY` / `BRAVE_API_KEY` / etc. for unrelated reasons.
+    fn web_with_unset_keys(suffix: &str) -> WebConfig {
+        let mut web = WebConfig::default();
+        web.tavily.api_key_env = format!("LF_TEST_TAVILY_UNSET_{suffix}");
+        web.brave.api_key_env = format!("LF_TEST_BRAVE_UNSET_{suffix}");
+        web.jina.api_key_env = format!("LF_TEST_JINA_UNSET_{suffix}");
+        web.perplexity.api_key_env = format!("LF_TEST_PERPLEXITY_UNSET_{suffix}");
+        web.searxng.url = String::new();
+        web
+    }
+
+    #[test]
+    fn searxng_url_alone_counts_as_configured() {
+        let mut web = web_with_unset_keys("searxng_alone");
+        web.searxng.url = "https://search.example.com".to_string();
+        assert!(
+            is_web_search_configured(&web),
+            "non-empty SearXNG URL must satisfy the configured check — it does not need an API key"
+        );
+    }
+
+    #[test]
+    fn empty_searxng_and_unset_keys_is_unconfigured() {
+        let web = web_with_unset_keys("all_empty");
+        assert!(
+            !is_web_search_configured(&web),
+            "no SearXNG URL and no API keys must report unconfigured"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_searxng_url_does_not_count() {
+        let mut web = web_with_unset_keys("whitespace");
+        web.searxng.url = "   ".to_string();
+        assert!(
+            !is_web_search_configured(&web),
+            "whitespace-only SearXNG URL must not satisfy the configured check"
+        );
+    }
 }
