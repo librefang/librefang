@@ -10467,6 +10467,7 @@ system_prompt = "You are a helpful assistant."
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
@@ -10579,6 +10580,16 @@ system_prompt = "You are a helpful assistant."
                                                 &delivery,
                                             )
                                             .await;
+                                            // Fan out to multi-destination
+                                            // delivery_targets (best-effort,
+                                            // failure-isolated).
+                                            cron_fan_out_targets(
+                                                &kernel,
+                                                &job_name,
+                                                &result.response,
+                                                &delivery_targets,
+                                            )
+                                            .await;
                                         }
                                     }
                                     Ok(Err(e)) => {
@@ -10603,6 +10614,7 @@ system_prompt = "You are a helpful assistant."
                                 tracing::debug!(job = %job_name, workflow = %workflow_id, "Cron: firing workflow");
                                 let input_text = input.clone().unwrap_or_default();
                                 let delivery = job.delivery.clone();
+                                let delivery_targets = job.delivery_targets.clone();
                                 let timeout_s = timeout_secs.unwrap_or(300);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
 
@@ -10632,6 +10644,13 @@ system_prompt = "You are a helpful assistant."
                                                 kernel.cron_scheduler.record_success(job_id);
                                                 cron_deliver_response(
                                                     &kernel, agent_id, &output, &delivery,
+                                                )
+                                                .await;
+                                                cron_fan_out_targets(
+                                                    &kernel,
+                                                    &job_name,
+                                                    &output,
+                                                    &delivery_targets,
                                                 )
                                                 .await;
                                             }
@@ -13319,6 +13338,75 @@ fn parse_wake_gate(script_output: &str) -> bool {
     value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
 }
 
+/// Adapter from the kernel's `send_channel_message` to the
+/// `CronChannelSender` trait used by the multi-target fan-out engine.
+struct KernelCronBridge {
+    kernel: Arc<LibreFangKernel>,
+}
+
+#[async_trait::async_trait]
+impl crate::cron_delivery::CronChannelSender for KernelCronBridge {
+    async fn send_channel_message(
+        &self,
+        channel_type: &str,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        self.kernel
+            .send_channel_message(channel_type, recipient, message, None, None)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Fan out `output` to every target in `delivery_targets` concurrently.
+///
+/// Best-effort: never returns an error, because the cron job itself has
+/// already succeeded by the time we get here. Per-target failures are
+/// counted and logged. The legacy single-destination `delivery` field is
+/// handled separately by [`cron_deliver_response`].
+async fn cron_fan_out_targets(
+    kernel: &Arc<LibreFangKernel>,
+    job_name: &str,
+    output: &str,
+    targets: &[librefang_types::scheduler::CronDeliveryTarget],
+) {
+    if targets.is_empty() || output.is_empty() {
+        return;
+    }
+    let sender: Arc<dyn crate::cron_delivery::CronChannelSender> = Arc::new(KernelCronBridge {
+        kernel: kernel.clone(),
+    });
+    let engine = crate::cron_delivery::CronDeliveryEngine::new(sender);
+    let results = engine.deliver(targets, job_name, output).await;
+    let total = results.len();
+    let failures = results.iter().filter(|r| !r.success).count();
+    let successes = total - failures;
+    if failures == 0 {
+        tracing::info!(
+            job = %job_name,
+            targets = total,
+            "Cron fan-out: all {successes} target(s) delivered"
+        );
+    } else {
+        tracing::warn!(
+            job = %job_name,
+            total = total,
+            ok = successes,
+            failed = failures,
+            "Cron fan-out: partial delivery"
+        );
+        for r in results.iter().filter(|r| !r.success) {
+            tracing::warn!(
+                job = %job_name,
+                target = %r.target,
+                error = %r.error.as_deref().unwrap_or(""),
+                "Cron fan-out: target failed"
+            );
+        }
+    }
+}
+
 /// Deliver a cron job's agent response to the configured delivery target.
 async fn cron_deliver_response(
     kernel: &LibreFangKernel,
@@ -14087,7 +14175,7 @@ impl KernelHandle for LibreFangKernel {
         job_json: serde_json::Value,
     ) -> Result<String, String> {
         use librefang_types::scheduler::{
-            CronAction, CronDelivery, CronJob, CronJobId, CronSchedule,
+            CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
         };
 
         let name = job_json["name"]
@@ -14127,6 +14215,16 @@ impl KernelHandle for LibreFangKernel {
                 None
             };
 
+        // Multi-destination fan-out targets. Optional; missing/null = empty.
+        // Validate each entry up front so a bad shape produces a clear error
+        // before the job is added (rather than failing silently at fire time).
+        let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
+            serde_json::from_value(job_json["delivery_targets"].clone())
+                .map_err(|e| format!("Invalid delivery_targets: {e}"))?
+        } else {
+            Vec::new()
+        };
+
         let job = CronJob {
             id: CronJobId::new(),
             agent_id: aid,
@@ -14134,6 +14232,7 @@ impl KernelHandle for LibreFangKernel {
             schedule,
             action,
             delivery,
+            delivery_targets,
             peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
             session_mode,
             enabled: true,

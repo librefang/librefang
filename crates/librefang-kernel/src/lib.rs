@@ -12,6 +12,7 @@ pub mod capabilities;
 pub mod config;
 pub mod config_reload;
 pub mod cron;
+pub mod cron_delivery;
 pub mod error;
 pub mod event_bus;
 pub mod heartbeat;
