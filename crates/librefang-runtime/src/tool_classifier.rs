@@ -43,6 +43,13 @@ fn classify_by_name(name: &str) -> ToolApprovalClass {
             ToolApprovalClass::ControlPlane
         }
         "approval_request" | "totp_request" => ToolApprovalClass::Interactive,
+        // Skill-evolution tools (skill_evolve_update / _patch / _delete /
+        // _rollback / _write_file / _remove_file) all mutate workspace
+        // skill files. The parallel dispatcher projects their `name`
+        // input into a virtual scope (`skill::<name>`); classifying them
+        // as Mutating lets that projection fire instead of falling back
+        // to the conservative `Unknown` → `WriteShared` path.
+        s if s.starts_with("skill_evolve_") => ToolApprovalClass::Mutating,
         _ => ToolApprovalClass::Unknown,
     }
 }
@@ -260,6 +267,33 @@ mod tests {
         assert_eq!(
             classify_tool("brand_new_tool", None),
             ToolApprovalClass::Unknown
+        );
+    }
+
+    /// `skill_evolve_*` is the only prefix-matched family; verify each
+    /// concrete name resolves to `Mutating` so the parallel dispatcher's
+    /// virtual-scope projection (`skill::<name>`) actually runs.
+    #[test]
+    fn skill_evolve_prefix_is_mutating() {
+        for n in [
+            "skill_evolve_update",
+            "skill_evolve_patch",
+            "skill_evolve_delete",
+            "skill_evolve_rollback",
+            "skill_evolve_write_file",
+            "skill_evolve_remove_file",
+        ] {
+            assert_eq!(
+                classify_tool(n, None),
+                ToolApprovalClass::Mutating,
+                "{n} should be Mutating"
+            );
+        }
+        // Bare `skill_evolve` (no trailing underscore + suffix) is *not*
+        // a real tool and must fall through to Unknown.
+        assert_eq!(
+            classify_tool("skill_evolve", None),
+            ToolApprovalClass::Unknown,
         );
     }
 

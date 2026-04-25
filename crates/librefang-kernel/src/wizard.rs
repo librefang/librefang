@@ -160,6 +160,8 @@ impl SetupWizard {
                 system_prompt,
                 api_key_env: None,
                 base_url: None,
+                context_window: None,
+                max_output_tokens: None,
                 extra_params: std::collections::HashMap::new(),
             },
             resources: ResourceQuota::default(),

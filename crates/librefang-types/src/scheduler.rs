@@ -502,7 +502,9 @@ impl CronJob {
                 }
                 CronDeliveryTarget::LocalFile { path, .. } => {
                     if path.trim().is_empty() {
-                        return Err(format!("delivery_targets[{i}]: file path must not be empty"));
+                        return Err(format!(
+                            "delivery_targets[{i}]: file path must not be empty"
+                        ));
                     }
                     let p = std::path::Path::new(path);
                     if p.is_absolute() {

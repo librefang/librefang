@@ -601,6 +601,25 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     /// Optional base URL override for the provider.
     pub base_url: Option<String>,
+    /// Optional override for this model's context window (in tokens).
+    ///
+    /// When set, takes precedence over registry / runtime-probed values.
+    /// Use it to force a value when the model's actual context differs
+    /// from what the catalog reports (e.g. a self-hosted Ollama model
+    /// configured with `num_ctx` smaller than the model's nominal
+    /// length, or a vLLM endpoint with a custom `--max-model-len`).
+    ///
+    /// `None` (the default) means "let the runtime resolve it from the
+    /// registry, persisted cache, or live `/v1/models` probe".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Optional override for this model's maximum output tokens.
+    ///
+    /// Same precedence and semantics as [`Self::context_window`]. Useful
+    /// when a self-hosted endpoint advertises a smaller usable cap than
+    /// the catalog default (e.g. a quantised checkpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Provider-specific extension parameters that are flattened directly
     /// into the API request body.
     ///
@@ -623,6 +642,8 @@ impl Default for ModelConfig {
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: std::collections::HashMap::new(),
         }
     }
@@ -1996,6 +2017,8 @@ model = "llama-3.3-70b-versatile"
             system_prompt: "test".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: extra,
         };
 

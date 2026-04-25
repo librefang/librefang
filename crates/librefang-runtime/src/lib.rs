@@ -48,6 +48,8 @@ pub mod mcp_server;
 pub mod media;
 pub mod media_understanding;
 pub mod model_catalog;
+pub mod model_metadata;
+pub mod parallel_dispatch;
 pub mod pdf_text;
 pub mod pii_filter;
 pub mod plugin_manager;
