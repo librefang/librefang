@@ -1295,7 +1295,10 @@
       "err_recipient_required": "接收者必填",
       "err_url_required": "Webhook URL 必填",
       "err_url_scheme": "Webhook URL 必须以 http:// 或 https:// 开头",
+      "err_url_blocked_host": "Webhook 主机不允许 (loopback / 链路本地 / metadata 服务)",
       "err_path_required": "文件路径必填",
+      "err_path_absolute": "文件路径必须是工作区相对路径,不能是绝对路径",
+      "err_path_traversal": "文件路径不能包含 '..'",
       "err_email_required": "收件邮箱必填"
     }
   },

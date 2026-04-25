@@ -1314,7 +1314,10 @@
       "err_recipient_required": "Recipient is required",
       "err_url_required": "Webhook URL is required",
       "err_url_scheme": "Webhook URL must start with http:// or https://",
+      "err_url_blocked_host": "Webhook host is not allowed (loopback / link-local / metadata service)",
       "err_path_required": "File path is required",
+      "err_path_absolute": "File path must be workspace-relative, not absolute",
+      "err_path_traversal": "File path must not contain '..'",
       "err_email_required": "Recipient email is required"
     }
   },

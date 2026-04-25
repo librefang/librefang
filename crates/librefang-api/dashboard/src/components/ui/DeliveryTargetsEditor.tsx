@@ -36,7 +36,7 @@ interface DeliveryTargetsEditorProps {
   disabled?: boolean;
 }
 
-interface DraftState {
+export interface DraftState {
   type: CronDeliveryTargetType;
   channel_type: string;
   recipient: string;
@@ -75,7 +75,34 @@ const EMPTY_DRAFT: DraftState = {
  * non-null the draft is invalid; the caller should surface the message
  * and not commit.
  */
-function buildTarget(d: DraftState): [CronDeliveryTarget | null, string | null] {
+// Hostnames the backend SSRF-rejects. Mirrored here so users get
+// instant feedback in the form instead of a round-trip + toast.
+const SSRF_BLOCKED_HOSTS = new Set([
+  "localhost",
+  "metadata",
+  "metadata.google.internal",
+  "metadata.aws.amazon.com",
+]);
+
+function isBlockedWebhookHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  if (SSRF_BLOCKED_HOSTS.has(lower)) return true;
+  // Loopback IPv4 (127.0.0.0/8) and link-local (169.254.0.0/16, the
+  // cloud-metadata range). String-only check — full CIDR parsing isn't
+  // needed for an instant-feedback UX layer; the backend has the real
+  // enforcement.
+  if (/^127\./.test(host)) return true;
+  if (/^169\.254\./.test(host)) return true;
+  // IPv6 loopback / link-local.
+  if (lower === "::1" || lower.startsWith("[::1]")) return true;
+  if (lower.startsWith("fe80:") || lower.startsWith("[fe80:")) return true;
+  return false;
+}
+
+/** Exported so unit tests can drive the validator directly without
+ *  spinning up a full component render. Pure function — same input
+ *  yields same `[target, error]` tuple, no side effects. */
+export function buildTarget(d: DraftState): [CronDeliveryTarget | null, string | null] {
   if (d.type === "channel") {
     if (!d.channel_type.trim()) return [null, "scheduler.delivery.err_channel_type_required"];
     if (!d.recipient.trim()) return [null, "scheduler.delivery.err_recipient_required"];
@@ -96,6 +123,16 @@ function buildTarget(d: DraftState): [CronDeliveryTarget | null, string | null] 
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
       return [null, "scheduler.delivery.err_url_scheme"];
     }
+    // Mirror the backend SSRF rejection (cron_delivery::validate_webhook_url)
+    // so users see the error in the form, not after a save round-trip.
+    try {
+      const parsed = new URL(url);
+      if (isBlockedWebhookHost(parsed.hostname)) {
+        return [null, "scheduler.delivery.err_url_blocked_host"];
+      }
+    } catch {
+      return [null, "scheduler.delivery.err_url_scheme"];
+    }
     const t: CronDeliveryTarget = { type: "webhook", url };
     if (d.auth_header.trim()) t.auth_header = d.auth_header.trim();
     return [t, null];
@@ -103,6 +140,14 @@ function buildTarget(d: DraftState): [CronDeliveryTarget | null, string | null] 
   if (d.type === "local_file") {
     const path = d.path.trim();
     if (!path) return [null, "scheduler.delivery.err_path_required"];
+    // Mirror the backend `deliver_local_file` rejections so the form
+    // surfaces the error before the save round-trip.
+    if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) {
+      return [null, "scheduler.delivery.err_path_absolute"];
+    }
+    if (path.split(/[\\/]/).some((seg) => seg === "..")) {
+      return [null, "scheduler.delivery.err_path_traversal"];
+    }
     return [{ type: "local_file", path, append: !!d.append }, null];
   }
   if (d.type === "email") {
