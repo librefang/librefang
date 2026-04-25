@@ -313,6 +313,18 @@ const TEAM_TAIL_MARKER: &str = "\n\n---\n\n## Your Team";
 /// fenced form is absent. Re-append always uses the fenced form, so a single
 /// drift cycle migrates each agent forward and this constant becomes dead
 /// once every persisted prompt has been re-rendered.
+///
+/// SAFETY: this string is a substring of [`TEAM_TAIL_MARKER`]
+/// (`"\n\n---\n\n## Your Team"`), so a naive `find()` against this constant
+/// will match a fenced prompt and truncate too late, dropping the
+/// `\n\n---\n\n` fence into the visible prompt. Every caller MUST check
+/// [`TEAM_TAIL_MARKER`] first and only fall back to this when the fenced
+/// form is absent (see [`apply_team_block_to_manifest`]).
+///
+/// TODO(remove after migration window): once telemetry confirms every
+/// persisted prompt has been touched by at least one drift cycle (post-#3164
+/// rollout), drop this constant and its fallback branch. Tracking issue:
+/// see `LEGACY_TEAM_TAIL_MARKER` references for the cleanup sites.
 const LEGACY_TEAM_TAIL_MARKER: &str = "\n\n## Your Team";
 
 /// Append (or refresh) the rendered `## User Configuration` block on a

@@ -2741,3 +2741,141 @@ system_prompt = "STABLE PROMPT"
 
     kernel.shutdown();
 }
+
+/// Negative-path coverage for the `hand_role:` tag lookup at
+/// `kernel/mod.rs:~3057`. When a hand-derived agent carries the `hand:<id>`
+/// tag but is missing the `hand_role:<role>` companion (e.g. activated by an
+/// older codepath that didn't stamp it, or a hand-stitched record imported
+/// from elsewhere), the drift branch must:
+///
+///   1. Not panic — the role lookup is a guard, not an assertion.
+///   2. Apply the disk TOML body change so config edits still propagate.
+///   3. Skip the skill / team re-render — without the role we can't pick the
+///      right per-role override, so we'd rather drop the rendered tails than
+///      stamp the wrong content.
+///
+/// The next `hand activate` re-stamps both tags and restores the tails; this
+/// test only proves the boot path degrades gracefully in the meantime.
+#[test]
+fn boot_drift_skips_tail_render_when_hand_role_tag_missing() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let hand_id = "rolelesshand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+
+    let hand_toml = r#"
+id = "rolelesshand"
+version = "1.0.0"
+name = "Roleless Hand"
+description = "missing-role drift test"
+category = "other"
+
+[agents.main]
+name = "operator"
+description = "the only agent"
+module = "builtin:chat"
+
+[agents.main.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+    std::fs::write(hand_dir.join("SKILL.md"), "skill notes").unwrap();
+
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("main");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    // Force a body-text drift so the drift branch fires.
+    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
+    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "main", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:operator");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "the only agent".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        manifest.model.system_prompt =
+            "BASE PROMPT\n\n---\n\n## Reference Knowledge\n\nskill notes".to_string();
+        // Crucial: only the `hand:` tag is stamped — `hand_role:` is missing.
+        manifest.tags = vec![format!("hand:{hand_id}")];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}")],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    // Second boot must not panic even though hand_role tag is absent.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:operator");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    // Drift applied the disk TOML body change.
+    assert!(
+        prompt.contains("BASE PROMPT v2"),
+        "drift must have applied disk TOML body even without hand_role; got: {prompt}"
+    );
+    // Reference Knowledge tail is gone — disk_manifest replaced the prompt
+    // and the role-keyed re-render was skipped.
+    assert!(
+        !prompt.contains("## Reference Knowledge"),
+        "skill tail must NOT be re-rendered when hand_role tag is missing; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}
