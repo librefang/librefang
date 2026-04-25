@@ -121,19 +121,55 @@ fn store_cached(path: &Path, content: &str) {
 /// Read the file, returning `Ok(None)` if it is missing or empty, and
 /// `Ok(Some(...))` if it has usable content. Oversized files are truncated to
 /// [`MAX_CONTEXT_BYTES`] so prompt size remains bounded.
+///
+/// The read itself is capped — a multi-GB file will not be slurped into
+/// memory just to be truncated afterwards.
 fn read_capped(path: &Path) -> io::Result<Option<String>> {
-    let meta = match fs::metadata(path) {
+    use std::io::Read;
+
+    // SECURITY: use symlink_metadata so we can refuse symlinks. Without
+    // this, an attacker (e.g. via prompt injection that lets the agent
+    // create files in its workspace) could point `.identity/context.md`
+    // at `/etc/passwd` and have its contents injected into the LLM
+    // prompt on the next turn.
+    let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    if meta.file_type().is_symlink() {
+        warn!(
+            path = %path.display(),
+            "Refusing to read context.md: target is a symlink"
+        );
+        return Ok(None);
+    }
     if !meta.is_file() {
         return Ok(None);
     }
-    let content = fs::read_to_string(path)?;
+
+    // Cap the read at MAX_CONTEXT_BYTES + 4 (max UTF-8 char length) so we
+    // never load more than the cap into memory. The +4 slop lets us trim
+    // back to the last valid UTF-8 boundary if the cap landed mid-codepoint.
+    let cap = (MAX_CONTEXT_BYTES as usize).saturating_add(4);
+    let mut bytes = Vec::with_capacity(cap.min((meta.len() as usize).saturating_add(1)));
+    fs::File::open(path)?
+        .take(cap as u64)
+        .read_to_end(&mut bytes)?;
+
+    // Trim to the last valid UTF-8 boundary, in case the cap split a
+    // multi-byte character. Any bytes beyond that point are dropped.
+    let valid_up_to = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    bytes.truncate(valid_up_to);
+    let content = String::from_utf8(bytes).expect("trimmed to valid UTF-8 boundary above");
+
     if content.trim().is_empty() {
         return Ok(None);
     }
+
     if meta.len() > MAX_CONTEXT_BYTES {
         let truncated = crate::str_utils::safe_truncate_str(&content, MAX_CONTEXT_BYTES as usize);
         return Ok(Some(truncated.to_string()));
