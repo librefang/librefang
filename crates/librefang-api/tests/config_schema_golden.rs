@@ -101,6 +101,12 @@ fn kernel_config_schema_matches_golden_fixture() {
     if canon(&actual) != canon(&expected) {
         let actual_lines = actual.lines().count();
         let expected_lines = expected.lines().count();
+        // Embed the actual schema as base64 in the panic message so CI logs
+        // expose the full drifted schema. Reviewers can decode the marker
+        // block to recover the new fixture without re-running the test
+        // locally — useful when CI fails on a platform we don't have at hand.
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(actual.as_bytes());
         panic!(
             "KernelConfig schema drifted from golden fixture.\n\
              actual: {actual_lines} lines / {} bytes\n\
@@ -109,9 +115,13 @@ fn kernel_config_schema_matches_golden_fixture() {
              Review the schema diff. If the change is intentional, regenerate:\n\
              \n\
              \tcargo test -p librefang-api --test config_schema_golden \\\n\
-             \t\t-- --ignored regenerate_golden --nocapture\n",
+             \t\t-- --ignored regenerate_golden --nocapture\n\
+             \n\
+             ===BEGIN_ACTUAL_SCHEMA_B64===\n\
+             {b64}\n\
+             ===END_ACTUAL_SCHEMA_B64===\n",
             actual.len(),
-            expected.len()
+            expected.len(),
         );
     }
 }
