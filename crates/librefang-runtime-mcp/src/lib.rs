@@ -648,8 +648,16 @@ impl McpConnection {
                 // Tools already discovered during connect (rmcp handles this)
                 for tool in tools {
                     let description = tool.description.as_deref().unwrap_or("");
-                    let input_schema =
+                    let mut input_schema =
                         serde_json::Value::Object(tool.input_schema.as_ref().clone());
+                    // Preserve MCP `annotations` hints by translating them into
+                    // a `metadata.tool_class` entry on the schema so the
+                    // runtime tool classifier can pick safe parallel candidates.
+                    let ann_value = tool
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| serde_json::to_value(a).ok());
+                    inject_annotation_class(&mut input_schema, ann_value.as_ref());
                     conn.register_tool(&tool.name, description, input_schema);
                 }
             }
@@ -1049,7 +1057,7 @@ impl McpConnection {
                 for tool in tools_array {
                     let raw_name = tool["name"].as_str().unwrap_or("unnamed");
                     let description = tool["description"].as_str().unwrap_or("");
-                    let input_schema = tool
+                    let mut input_schema = tool
                         .get("inputSchema")
                         .cloned()
                         .and_then(|v| match &v {
@@ -1062,6 +1070,11 @@ impl McpConnection {
                             _ => None,
                         })
                         .unwrap_or(serde_json::json!({"type": "object"}));
+
+                    // Preserve MCP `annotations` hints (readOnlyHint /
+                    // destructiveHint) by translating them into a
+                    // `metadata.tool_class` entry the runtime classifier can read.
+                    inject_annotation_class(&mut input_schema, tool.get("annotations"));
 
                     self.register_tool(raw_name, description, input_schema);
                 }
@@ -1249,7 +1262,67 @@ impl McpConnection {
             input_schema,
         });
     }
+}
 
+/// Translate MCP `tools/list` annotations into a `metadata.tool_class` field
+/// inside the tool's JSON Schema so `runtime/tool_classifier.rs` can pick it
+/// up via `explicit_class_from_schema`.
+///
+/// MCP spec defaults: `readOnlyHint = false`, `destructiveHint = true`.
+/// We map `(read_only=true, destructive=false)` to `readonly_search`; any
+/// other combination is treated as `mutating`. When `annotations` is absent,
+/// the schema is left untouched so existing heuristics still apply.
+///
+/// `idempotentHint` and `openWorldHint` are intentionally ignored at this
+/// layer — the current `ToolApprovalClass` enum has no idempotent / open-world
+/// variants, so threading them through would just mean noise that the
+/// classifier discards. If the projection in
+/// `runtime/tool_classifier.rs::ParallelSafety` ever grows finer-grained
+/// classes (e.g. an idempotent_mutating tier for safer batch retries), wire
+/// the additional hints in here.
+///
+/// Inputs come from server-controlled `tools/list` payloads, so the helper
+/// must never panic on malformed shapes — it silently no-ops if `schema`
+/// is not an object or `annotations` is not an object.
+fn inject_annotation_class(
+    schema: &mut serde_json::Value,
+    annotations: Option<&serde_json::Value>,
+) {
+    let Some(ann) = annotations.and_then(|v| v.as_object()) else {
+        return;
+    };
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // Spec defaults when a hint is missing.
+    let read_only = ann
+        .get("readOnlyHint")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let destructive = ann
+        .get("destructiveHint")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let class = if read_only && !destructive {
+        "readonly_search"
+    } else {
+        "mutating"
+    };
+
+    if !obj.contains_key("metadata") {
+        obj.insert("metadata".to_string(), serde_json::json!({}));
+    }
+    if let Some(meta) = obj.get_mut("metadata").and_then(|v| v.as_object_mut()) {
+        meta.insert(
+            "tool_class".to_string(),
+            serde_json::Value::String(class.to_string()),
+        );
+    }
+}
+
+impl McpConnection {
     /// Call a tool on the MCP server.
     pub async fn call_tool(
         &mut self,
@@ -2633,5 +2706,149 @@ mod tests {
 
         let err = ClientInitializeError::ConnectionClosed("simulated".to_string());
         assert!(McpConnection::extract_auth_header_from_error(&err).is_none());
+    }
+
+    // ── inject_annotation_class — MCP tool annotation propagation ────────
+
+    #[test]
+    fn inject_annotation_readonly_sets_readonly_search() {
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(
+            schema["metadata"]["tool_class"].as_str(),
+            Some("readonly_search")
+        );
+    }
+
+    #[test]
+    fn inject_annotation_destructive_sets_mutating() {
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_default_destructive_when_missing() {
+        // Per MCP spec, when destructiveHint is missing the default is true,
+        // so the tool must be classified as `mutating`.
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({"readOnlyHint": false});
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_no_annotations_preserves_schema() {
+        let original = serde_json::json!({
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+        });
+        let mut schema = original.clone();
+        inject_annotation_class(&mut schema, None);
+        assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn inject_annotation_preserves_existing_metadata() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "metadata": {"foo": "bar"},
+        });
+        let ann = serde_json::json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["foo"].as_str(), Some("bar"));
+        assert_eq!(
+            schema["metadata"]["tool_class"].as_str(),
+            Some("readonly_search")
+        );
+    }
+
+    #[test]
+    fn inject_annotation_existing_tool_class_overwritten() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "metadata": {"tool_class": "readonly_search"},
+        });
+        let ann = serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_non_object_schema_is_noop() {
+        // Defensive: a malformed schema (e.g. a bare bool) must not panic.
+        let mut schema = serde_json::json!(true);
+        let ann = serde_json::json!({"readOnlyHint": true});
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema, serde_json::json!(true));
+    }
+
+    #[test]
+    fn inject_annotation_non_object_annotations_is_noop() {
+        let original = serde_json::json!({"type": "object"});
+        let mut schema = original.clone();
+        let ann = serde_json::json!("not-an-object");
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema, original);
+    }
+
+    /// Producer/consumer string contract: the literals `inject_annotation_class`
+    /// emits must round-trip through `ToolApprovalClass::from_snake_case` to
+    /// the corresponding variants. Without this, a typo or a future rename in
+    /// either crate would silently fall back to `Unknown` → `WriteShared` and
+    /// the whole MCP-tool parallelisation fix becomes a no-op.
+    #[test]
+    fn injected_class_strings_parse_into_approval_class() {
+        use librefang_types::tool_class::ToolApprovalClass;
+
+        // readOnly + non-destructive → "readonly_search" → ReadonlySearch
+        let mut schema_ro = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_ro,
+            Some(&serde_json::json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+            })),
+        );
+        let class_str = schema_ro["metadata"]["tool_class"]
+            .as_str()
+            .expect("readonly path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::ReadonlySearch),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
+
+        // destructive → "mutating" → Mutating
+        let mut schema_mut = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_mut,
+            Some(&serde_json::json!({
+                "readOnlyHint": false,
+                "destructiveHint": true,
+            })),
+        );
+        let class_str = schema_mut["metadata"]["tool_class"]
+            .as_str()
+            .expect("mutating path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::Mutating),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
     }
 }
