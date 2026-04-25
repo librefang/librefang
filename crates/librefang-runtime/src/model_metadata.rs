@@ -515,7 +515,11 @@ fn looks_like_ollama(provider: &str, base_url: Option<&str>) -> bool {
 /// bug we'd rather fall back from than cache.
 fn parse_anthropic_model(json: &serde_json::Value) -> Option<u64> {
     let n = json.get("context_window").and_then(|v| v.as_u64())?;
-    if n > 0 { Some(n) } else { None }
+    if n > 0 {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 /// Probe Anthropic's `GET /v1/models/{model}` endpoint.
@@ -588,11 +592,7 @@ fn parse_openai_model(json: &serde_json::Value) -> Option<u64> {
 /// gateways like LiteLLM to 401 on what should be an open route.
 /// Callers that need bearer auth should rely on the registry (L2) or
 /// extend this branch in a follow-up.
-async fn probe_openai_compat(
-    client: &reqwest::Client,
-    base_url: &str,
-    model: &str,
-) -> Option<u64> {
+async fn probe_openai_compat(client: &reqwest::Client, base_url: &str, model: &str) -> Option<u64> {
     let url = format!("{}/v1/models/{}", base_url.trim_end_matches('/'), model);
     let resp = client
         .get(&url)
@@ -827,9 +827,11 @@ mod tests {
             entry("anthropic", "claude-opus-4-7", 1_000_000),
             entry("copilot", "claude-opus-4-7", 128_000),
         ]);
-        let r_anthropic = resolve_model_metadata(&cat, home, &req("anthropic", "claude-opus-4-7")).await;
+        let r_anthropic =
+            resolve_model_metadata(&cat, home, &req("anthropic", "claude-opus-4-7")).await;
         assert_eq!(r_anthropic.entry.context_window, 1_000_000);
-        let r_copilot = resolve_model_metadata(&cat, home, &req("copilot", "claude-opus-4-7")).await;
+        let r_copilot =
+            resolve_model_metadata(&cat, home, &req("copilot", "claude-opus-4-7")).await;
         assert_eq!(r_copilot.entry.context_window, 128_000);
     }
 
@@ -878,7 +880,8 @@ mod tests {
         // not the Default200kAnthropic tail. To reach the tail we need
         // a model id outside the table but a provider that's anthropic.
         let cat = catalog_with(vec![]);
-        let r = resolve_model_metadata(&cat, home, &req("anthropic", "totally-unknown-model")).await;
+        let r =
+            resolve_model_metadata(&cat, home, &req("anthropic", "totally-unknown-model")).await;
         assert_eq!(r.source, MetadataSource::Default200kAnthropic);
         assert_eq!(r.entry.context_window, 200_000);
     }
@@ -942,7 +945,8 @@ mod tests {
         // Request carries `openrouter:claude-opus-4-7` but the catalog
         // entry is keyed on the bare id.
         let cat = catalog_with(vec![entry("anthropic", "claude-opus-4-7", 1_000_000)]);
-        let r = resolve_model_metadata(&cat, home, &req("anthropic", "openrouter:claude-opus-4-7")).await;
+        let r = resolve_model_metadata(&cat, home, &req("anthropic", "openrouter:claude-opus-4-7"))
+            .await;
         assert_eq!(r.source, MetadataSource::Registry);
         assert_eq!(r.entry.context_window, 1_000_000);
     }
@@ -1132,7 +1136,10 @@ mod tests {
         assert!(looks_like_ollama("OLLAMA", None));
         assert!(looks_like_ollama("ollama-cloud", None));
         assert!(looks_like_ollama("custom", Some("http://10.0.0.5:11434")));
-        assert!(!looks_like_ollama("custom", Some("https://api.example.com")));
+        assert!(!looks_like_ollama(
+            "custom",
+            Some("https://api.example.com")
+        ));
         assert!(!looks_like_ollama("anthropic", None));
     }
 
