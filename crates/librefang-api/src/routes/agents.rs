@@ -989,13 +989,19 @@ pub fn resolve_attachments(
     for att in attachments {
         // Look up metadata from the upload registry
         let meta = UPLOAD_REGISTRY.get(&att.file_id);
-        let (content_type, filename) = if let Some(ref m) = meta {
+        let (raw_content_type, filename) = if let Some(ref m) = meta {
             (m.content_type.clone(), m.filename.clone())
         } else if !att.content_type.is_empty() {
             (att.content_type.clone(), att.file_id.clone())
         } else {
             continue; // Skip unknown attachments
         };
+
+        // Normalize MIME for downstream branching: drop parameters
+        // (`application/pdf; charset=binary`) and lowercase. Without this,
+        // a `Content-Type: Application/PDF` header would skip the PDF branch
+        // and silently drop the attachment.
+        let content_type = librefang_types::media::mime_base(&raw_content_type);
 
         // Validate file_id is a UUID to prevent path traversal
         if uuid::Uuid::parse_str(&att.file_id).is_err() {
