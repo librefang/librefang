@@ -292,6 +292,49 @@ pub fn detect_connection_locality(addr: &SocketAddr, headers: &HeaderMap) -> Con
 }
 
 // ---------------------------------------------------------------------------
+// Agent existence retry helper
+// ---------------------------------------------------------------------------
+
+/// Verify an agent exists by polling `lookup` up to `max_attempts` times,
+/// sleeping `backoff` between attempts.
+///
+/// Returns `true` as soon as `lookup` returns `true`; returns `false` only
+/// after every attempt has failed. Used to absorb the race where a client
+/// initiates a WebSocket upgrade before the kernel finishes registering a
+/// freshly spawned agent (#804).
+async fn verify_agent_exists_with_retry<F>(
+    mut lookup: F,
+    agent_id: &str,
+    max_attempts: u32,
+    backoff: Duration,
+) -> bool
+where
+    F: FnMut() -> bool,
+{
+    if lookup() {
+        return true;
+    }
+    // First lookup failed; up to (max_attempts - 1) more tries with backoff.
+    for attempt in 1..max_attempts {
+        debug!(
+            agent_id = %agent_id,
+            attempt,
+            "Agent not found yet, retrying in 200ms"
+        );
+        tokio::time::sleep(backoff).await;
+        if lookup() {
+            return true;
+        }
+    }
+    warn!(
+        agent_id = %agent_id,
+        max_attempts,
+        "Agent not found after 5 lookup attempts"
+    );
+    false
+}
+
+// ---------------------------------------------------------------------------
 // WS Upgrade Handler
 // ---------------------------------------------------------------------------
 
@@ -371,8 +414,17 @@ pub async fn agent_ws(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
+    // Verify agent exists.
+    // Retry up to 5 times with 200ms backoff to handle a timing race where
+    // the client connects before the agent finishes registering (#804).
+    if !verify_agent_exists_with_retry(
+        || state.kernel.agent_registry().get(agent_id).is_some(),
+        &id,
+        5,
+        Duration::from_millis(200),
+    )
+    .await
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
@@ -2137,5 +2189,64 @@ mod tests {
         );
         let locality = detect_connection_locality(&addr, &headers);
         assert_eq!(locality.forwarded_ip.unwrap().to_string(), "1.1.1.1");
+    }
+
+    // -----------------------------------------------------------------------
+    // verify_agent_exists_with_retry
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn verify_agent_exists_returns_true_immediately_when_present() {
+        let mut calls: u32 = 0;
+        let found = verify_agent_exists_with_retry(
+            || {
+                calls += 1;
+                true
+            },
+            "agent-1",
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(found);
+        assert_eq!(calls, 1, "should not retry when first lookup succeeds");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verify_agent_exists_succeeds_on_third_attempt() {
+        // Simulates the WS-vs-registration race: two misses, then registered.
+        use std::cell::Cell;
+        let calls: Cell<u32> = Cell::new(0);
+        let found = verify_agent_exists_with_retry(
+            || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                n >= 3
+            },
+            "agent-race",
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(found, "retry must succeed once registry has the agent");
+        assert_eq!(calls.get(), 3, "should stop polling on first success");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verify_agent_exists_returns_false_after_all_attempts() {
+        use std::cell::Cell;
+        let calls: Cell<u32> = Cell::new(0);
+        let found = verify_agent_exists_with_retry(
+            || {
+                calls.set(calls.get() + 1);
+                false
+            },
+            "agent-missing",
+            5,
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(!found);
+        assert_eq!(calls.get(), 5, "should attempt exactly max_attempts times");
     }
 }
