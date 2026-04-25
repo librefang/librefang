@@ -119,7 +119,7 @@ pub struct AuditState {
     pub status_msg: String,
 }
 
-pub enum AuditAction {
+pub enum AuditUIAction {
     Continue,
     Refresh,
     VerifyChain,
@@ -158,9 +158,9 @@ impl AuditState {
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> AuditAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> AuditUIAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return AuditAction::Continue;
+            return AuditUIAction::Continue;
         }
 
         let total = self.filtered.len();
@@ -179,11 +179,11 @@ impl AuditState {
                 self.action_filter = self.action_filter.next();
                 self.refilter();
             }
-            KeyCode::Char('v') => return AuditAction::VerifyChain,
-            KeyCode::Char('r') => return AuditAction::Refresh,
+            KeyCode::Char('v') => return AuditUIAction::VerifyChain,
+            KeyCode::Char('r') => return AuditUIAction::Refresh,
             _ => {}
         }
-        AuditAction::Continue
+        AuditUIAction::Continue
     }
 }
 
