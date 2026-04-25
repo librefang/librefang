@@ -28,6 +28,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
 | `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |
 | `provider_regions` | map of string→string | `{}` | Provider region selection. Maps provider ID to a region name defined in the provider's registry TOML (e.g., `qwen = "intl"`). Overrides the provider's base URL and optionally its API key env var. Applied before `provider_urls` (lower priority). |
+| `max_history_messages` | usize or null | `null` | Operator override for the per-agent message-history trim cap. `null` = use the compiled-in default (`40`). See [`max_history_messages`](#max_history_messages) below. |
 
 **`mode` values:**
 
@@ -186,11 +187,12 @@ timeout_secs = 15
 
 | Value | Description |
 |-------|-------------|
-| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Perplexity, then DuckDuckGo, based on which API keys are available. |
+| `auto` | Cascading fallback: tries Tavily, then Brave, then Jina, then Perplexity, then SearXNG (if `web.searxng.url` is set), then DuckDuckGo, based on which API keys / URLs are available. |
 | `brave` | Brave Search API. Requires `BRAVE_API_KEY`. |
 | `jina` | Jina AI search and grounding. Requires `JINA_API_KEY`. |
 | `tavily` | Tavily AI-native search. Requires `TAVILY_API_KEY`. |
 | `perplexity` | Perplexity AI search. Requires `PERPLEXITY_API_KEY`. |
+| `searxng` | Self-hosted SearXNG instance. Requires `web.searxng.url`. No API key. |
 | `duckduckgo` | DuckDuckGo HTML scraping. No API key needed. |
 
 #### `[web.brave]`
@@ -254,6 +256,26 @@ model = "sonar"
 |-------|------|---------|-------------|
 | `api_key_env` | string | `"PERPLEXITY_API_KEY"` | Environment variable name holding the Perplexity API key. |
 | `model` | string | `"sonar"` | Perplexity model to use for search queries. |
+
+#### `[web.searxng]`
+
+Self-hosted SearXNG provider. Disabled by default — set `url` to opt in. No API key is required; LibreFang talks to the instance over the public `/search?format=json` endpoint and discovers categories via `/config`.
+
+```toml
+[web.searxng]
+url = "https://search.example.com"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | `""` | Base URL of the SearXNG instance. Empty disables the provider. Trailing slashes are tolerated. |
+
+**Notes:**
+- Categories are validated dynamically against the instance's `/config` endpoint and cached for 5 minutes; an invalid category surfaces the available list back to the agent.
+- Pagination uses SearXNG's 1-indexed `pageno` query param (`pageno=0` is rejected up front).
+- Public SearXNG instances reject the `limit` parameter, so `max_results` is enforced client-side after fetching.
+- Results returned to the LLM are filtered to `title` / `url` / `content` / `published_date` only — engine-level scoring noise is stripped.
+- When `search_provider = "auto"`, SearXNG only runs if `url` is non-empty; otherwise the cascade skips it.
 
 #### `[web.fetch]`
 
