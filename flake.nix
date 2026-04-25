@@ -72,6 +72,11 @@
             ./crates/librefang-desktop/icons
             ./crates/librefang-desktop/gen
             ./packages/whatsapp-gateway
+            ./deploy/docker-compose.observability.yml
+            ./deploy/grafana
+            ./deploy/otel-collector
+            ./deploy/prometheus
+            ./deploy/tempo
           ];
         };
 
