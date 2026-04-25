@@ -6372,6 +6372,14 @@ system_prompt = "You are a helpful assistant."
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
+        // Sticky-flip: this is the single chokepoint for "agent processed a
+        // real message" — any inbound message, channel event, autonomous
+        // tick, cron fire, or fork that produces an LLM call routes here.
+        // The heartbeat monitor uses this flag (not a time window) to
+        // decide whether an idle agent should be flagged unresponsive.
+        // Idempotent: subsequent calls only refresh `last_active`.
+        self.registry.mark_processed_message(agent_id);
+
         // Derive session ID. Resolution order (highest priority first):
         //
         // 1. Explicit override from the HTTP caller (multi-tab / multi-session UIs).
