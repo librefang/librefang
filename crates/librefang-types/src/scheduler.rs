@@ -1144,7 +1144,10 @@ mod tests {
         // identical to the pre-thread_id payload so old persisted JSON
         // round-trips unchanged.
         assert!(!s.contains("thread_id"), "thread_id leaked when None: {s}");
-        assert!(!s.contains("account_id"), "account_id leaked when None: {s}");
+        assert!(
+            !s.contains("account_id"),
+            "account_id leaked when None: {s}"
+        );
         let back: CronDeliveryTarget = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
     }

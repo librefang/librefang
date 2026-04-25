@@ -159,9 +159,7 @@ impl CronDeliveryEngine {
                         );
                         DeliveryResult::err(
                             desc,
-                            format!(
-                                "delivery timed out after {PER_TARGET_TIMEOUT_SECS}s"
-                            ),
+                            format!("delivery timed out after {PER_TARGET_TIMEOUT_SECS}s"),
                         )
                     }
                 }
