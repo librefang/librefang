@@ -18,9 +18,17 @@ docker compose -f docker-compose.observability.yml up -d
 
 # 4. Open Grafana
 open http://localhost:3000    # admin / admin
+# 5. (optional) Open Jaeger for trace-debug UI
+open http://localhost:16686
 ```
 
 Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every 15 seconds.
+
+The OTel collector fans traces out to both Tempo (queried from Grafana for
+trace-to-metric correlation) and Jaeger (standalone trace-debugging UI:
+waterfall, span diff, service deps). Tempo is the long-term store; Jaeger is
+ephemeral (in-memory, wiped on container restart) and is meant for live
+debugging.
 
 ## Available Metrics
 

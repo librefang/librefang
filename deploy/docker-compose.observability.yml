@@ -15,6 +15,19 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - tempo
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: librefang-jaeger
+    # 16686 is the Jaeger UI. The OTLP receiver on 4317 stays internal —
+    # the host's 4317 is the otel-collector; collector forwards to
+    # jaeger:4317 over the docker bridge.
+    ports:
+      - "16686:16686"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
     restart: unless-stopped
 
   tempo:
