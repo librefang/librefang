@@ -119,31 +119,47 @@
 
         desktopCargoArtifacts = craneLib.buildDepsOnly desktopArgs;
 
+        # Desktop entry assembled with the standard nixpkgs helper so the
+        # output matches XDG conventions (proper escaping, hicolor icon
+        # theme layout, no manual heredoc).
+        librefangDesktopItem = pkgs.makeDesktopItem {
+          name = "librefang-desktop";
+          desktopName = "LibreFang";
+          comment = "Open-source Agent Operating System";
+          exec = "librefang-desktop";
+          icon = "librefang-desktop";
+          terminal = false;
+          type = "Application";
+          categories = [ "Development" "Utility" ];
+          keywords = [ "AI" "Agent" "LLM" "Automation" ];
+          # Match the GTK app id Tauri reports so launchers can pair the
+          # window with its menu entry / icon.
+          startupWMClass = "librefang-desktop";
+        };
+
         librefang-desktop = craneLib.buildPackage (desktopArgs // {
           cargoArtifacts = desktopCargoArtifacts;
           doCheck = false;
+          # `copyDesktopItems` is a no-op on darwin; gating the hook on
+          # Linux keeps the macOS build path unchanged.
+          nativeBuildInputs = nativeBuildInputs
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.copyDesktopItems ];
+          desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [ librefangDesktopItem ];
           postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             patchelf --add-rpath "${pkgs.libayatana-appindicator}/lib" "$out/bin/librefang-desktop"
           '';
           postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            mkdir -p "$out/share/applications"
-            mkdir -p "$out/share/icons/hicolor/128x128/apps"
-
-            cat > "$out/share/applications/librefang-desktop.desktop" << 'EOF'
-[Desktop Entry]
-Name=LibreFang
-Comment=Open-source Agent Operating System
-Exec=librefang-desktop
-Icon=librefang-desktop
-Terminal=false
-Type=Application
-Categories=Productivity;AI;
-Keywords=AI;Agent;LLM;Automation;
-StartupWMClass=librefang-desktop
-EOF
-
-            cp ${./crates/librefang-desktop/icons/icon.png} "$out/share/icons/hicolor/128x128/apps/librefang-desktop.png"
-            update-desktop-database "$out/share/applications" 2>/dev/null || true
+            # Install icons into the hicolor theme at every native size we
+            # ship in the repo so DEs can pick the right one without
+            # rescaling. Icon name must match the desktop entry's Icon= key.
+            install -Dm644 ${./crates/librefang-desktop/icons/32x32.png} \
+              "$out/share/icons/hicolor/32x32/apps/librefang-desktop.png"
+            install -Dm644 ${./crates/librefang-desktop/icons/128x128.png} \
+              "$out/share/icons/hicolor/128x128/apps/librefang-desktop.png"
+            install -Dm644 ${./crates/librefang-desktop/icons/128x128@2x.png} \
+              "$out/share/icons/hicolor/256x256/apps/librefang-desktop.png"
+            install -Dm644 ${./crates/librefang-desktop/icons/icon.png} \
+              "$out/share/icons/hicolor/512x512/apps/librefang-desktop.png"
           '';
           meta = with pkgs.lib; {
             description = "LibreFang — Open-source Agent Operating System (desktop UI)";
