@@ -250,7 +250,23 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
         );
     }
 
-    if stats != RepairStats::default() {
+    // Distinguish "real repair" (data-integrity issues we had to clean
+    // up) from "routine normalization" (consecutive same-role merge or
+    // tool-result reordering — both are legitimate session-history
+    // shapes that this pass intentionally collapses every turn).
+    // `messages_merged` fires on every multi-turn streaming session with
+    // back-to-back assistant chunks, so logging it at WARN trains
+    // operators to ignore the message — and a real
+    // `orphaned`/`synthetic`/`rescued`/`positional_synthetic`/
+    // `duplicates`/`empty_messages` event later gets tuned out with it.
+    let had_real_repair = stats.orphaned_results_removed > 0
+        || stats.empty_messages_removed > 0
+        || stats.synthetic_results_inserted > 0
+        || stats.duplicates_removed > 0
+        || stats.misplaced_results_rescued > 0
+        || stats.positional_synthetic_inserted > 0;
+
+    if had_real_repair {
         warn!(
             orphaned = stats.orphaned_results_removed,
             empty = stats.empty_messages_removed,
@@ -263,6 +279,14 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             messages_before = pre_merge_len,
             messages_after = post_merge_len,
             "Session repair applied fixes"
+        );
+    } else if stats != RepairStats::default() {
+        debug!(
+            merged = stats.messages_merged,
+            reordered = stats.results_reordered,
+            messages_before = pre_merge_len,
+            messages_after = post_merge_len,
+            "Session repair normalized history (no integrity issues)"
         );
     }
 
