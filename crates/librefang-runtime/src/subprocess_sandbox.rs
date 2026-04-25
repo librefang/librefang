@@ -354,9 +354,11 @@ fn strip_outer_quotes(s: &str) -> &str {
     }
 }
 
-/// Backwards-compatible helper used by tests and the metachar bypass branch:
+/// Backwards-compatible helper used by tests:
 /// returns the inner command list if the wrapper has a recognised inline flag,
-/// or an empty vec otherwise.
+/// or an empty vec otherwise. Production callers use `inspect_shell_wrapper`
+/// directly to distinguish opaque-payload wrappers from no-inline-flag.
+#[cfg(test)]
 fn extract_shell_wrapper_commands(command: &str) -> Vec<String> {
     match inspect_shell_wrapper(command) {
         ShellWrapperInspection::WrapperInline(cmds) => cmds,
