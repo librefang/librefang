@@ -54,14 +54,12 @@ pub fn extract_text_from_pdf(bytes: &[u8]) -> Result<String, String> {
     // Truncate by char count, not byte count, so we don't split a UTF-8 codepoint.
     let mut out =
         String::with_capacity(raw.len().min(MAX_PDF_TEXT_CHARS + TRUNCATION_MARKER.len()));
-    let mut count = 0usize;
-    for c in raw.chars() {
+    for (count, c) in raw.chars().enumerate() {
         if count >= MAX_PDF_TEXT_CHARS {
             out.push_str(TRUNCATION_MARKER);
             break;
         }
         out.push(c);
-        count += 1;
     }
 
     Ok(out)

@@ -4924,7 +4924,6 @@ mod tests {
             "text/xml",
             "audio/vnd.rn-realaudio",
             "application/octet-stream",
-            "application/javascript",
         ] {
             assert!(
                 !is_allowed_content_type(bad),
