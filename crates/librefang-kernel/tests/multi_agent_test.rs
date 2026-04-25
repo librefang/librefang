@@ -408,6 +408,115 @@ fn test_multi_agent_hand_state_persists_coordinator_role() {
     kernel.shutdown();
 }
 
+/// A hand with `[[settings]]` declaring two keys with non-empty defaults.
+const HAND_WITH_SETTINGS: &str = r#"
+id = "test-settings"
+name = "Test Settings Hand"
+description = "Has [[settings]] for default-seeding tests"
+category = "content"
+icon = "⚙️"
+
+[[settings]]
+key = "verbosity"
+label = "Verbosity"
+setting_type = "select"
+default = "normal"
+[[settings.options]]
+value = "quiet"
+label = "Quiet"
+[[settings.options]]
+value = "normal"
+label = "Normal"
+
+[[settings]]
+key = "max_concurrency"
+label = "Max concurrency"
+setting_type = "text"
+default = "5"
+
+[agent]
+name = "settings-agent"
+description = "Test agent"
+module = "builtin:chat"
+provider = "default"
+model = "default"
+system_prompt = "You are a settings agent."
+"#;
+
+#[test]
+fn test_activation_seeds_schema_defaults_into_config() {
+    let config = test_config("seed-defaults");
+    let state_path = config.home_dir.join("data").join("hand_state.json");
+
+    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
+    install_hand(&kernel, HAND_WITH_SETTINGS);
+
+    // Activate with NO user overrides — all keys should be filled from defaults.
+    let instance = kernel
+        .activate_hand("test-settings", HashMap::new())
+        .unwrap();
+
+    assert_eq!(
+        instance.config.get("verbosity").and_then(|v| v.as_str()),
+        Some("normal"),
+        "verbosity should be seeded from schema default"
+    );
+    assert_eq!(
+        instance
+            .config
+            .get("max_concurrency")
+            .and_then(|v| v.as_str()),
+        Some("5"),
+        "max_concurrency should be seeded from schema default"
+    );
+
+    // Persisted state on disk should reflect the seeded values, not `{}`.
+    let state_json = std::fs::read_to_string(&state_path).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+    let inst = state["instances"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["hand_id"] == "test-settings"))
+        .expect("persisted instance should exist");
+    assert_eq!(inst["config"]["verbosity"], "normal");
+    assert_eq!(inst["config"]["max_concurrency"], "5");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_activation_preserves_user_overrides_over_defaults() {
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config("seed-defaults-override")).unwrap();
+    install_hand(&kernel, HAND_WITH_SETTINGS);
+
+    // User overrides one key; the other should still get the default.
+    let mut user_config = HashMap::new();
+    user_config.insert(
+        "verbosity".to_string(),
+        serde_json::Value::String("quiet".to_string()),
+    );
+
+    let instance = kernel
+        .activate_hand("test-settings", user_config)
+        .unwrap();
+
+    assert_eq!(
+        instance.config.get("verbosity").and_then(|v| v.as_str()),
+        Some("quiet"),
+        "user override must win over schema default"
+    );
+    assert_eq!(
+        instance
+            .config
+            .get("max_concurrency")
+            .and_then(|v| v.as_str()),
+        Some("5"),
+        "untouched key should still receive its schema default"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_multiple_hands_coexist() {
     let kernel = LibreFangKernel::boot_with_config(test_config("coexist")).unwrap();
