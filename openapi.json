@@ -4595,6 +4595,7 @@
           "proactive-memory"
         ],
         "summary": "List all proactive memories, optionally filtered by category, with pagination.",
+        "description": "When proactive memory is disabled in config, returns an empty list with\n`proactive_enabled: false` (HTTP 200) so the dashboard can render an\nexplanatory note instead of treating a config state as a server error.",
         "operationId": "memory_list",
         "parameters": [
           {
@@ -5305,6 +5306,7 @@
           "proactive-memory"
         ],
         "summary": "Get memory statistics across all agents.",
+        "description": "When proactive memory is disabled, returns `{stats: null, proactive_enabled: false}`\nat HTTP 200 — disabled is a config state, not an error.",
         "operationId": "memory_stats",
         "responses": {
           "200": {

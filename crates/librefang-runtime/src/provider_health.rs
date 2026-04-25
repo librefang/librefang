@@ -177,7 +177,13 @@ impl Default for ProbeCache {
 ///
 /// `base_url` should be the provider's base URL from the catalog (e.g.,
 /// `http://localhost:11434/v1` for Ollama, `http://localhost:8000/v1` for vLLM).
-pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
+///
+/// `api_key` is forwarded as `Authorization: Bearer <key>` when `Some` and
+/// non-empty. Required when the local provider is fronted by an
+/// authenticating reverse proxy (e.g. Open WebUI exposes ollama under
+/// `/ollama/v1` behind a JWT) — a bare `None` keeps the original
+/// "no auth" behaviour for direct-to-localhost setups.
+pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str>) -> ProbeResult {
     let start = Instant::now();
 
     let client = match crate::http_client::proxied_client_builder()
@@ -210,7 +216,21 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
         (format!("{trimmed}/models"), false)
     };
 
-    let resp = match client.get(&url).send().await {
+    // Attach Bearer token when an api_key was supplied. Ollama itself
+    // ignores Authorization headers (and bare ollama servers should not
+    // be passed a key here), but reverse-proxy frontends like Open WebUI
+    // require them — without this, the probe always 401s and the
+    // catalog flips to LocalOffline even though the underlying ollama
+    // is healthy.
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            req = req.header("Authorization", format!("Bearer {trimmed}"));
+        }
+    }
+
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return ProbeResult {
@@ -342,12 +362,13 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 pub async fn probe_provider_cached(
     provider: &str,
     base_url: &str,
+    api_key: Option<&str>,
     cache: &ProbeCache,
 ) -> ProbeResult {
     if let Some(cached) = cache.get(provider) {
         return cached;
     }
-    let result = probe_provider(provider, base_url).await;
+    let result = probe_provider(provider, base_url, api_key).await;
     cache.insert(provider, result.clone());
     result
 }
@@ -443,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_unreachable_returns_error() {
         // Probe a port that's almost certainly not running a server
-        let result = probe_provider("ollama", "http://127.0.0.1:19999").await;
+        let result = probe_provider("ollama", "http://127.0.0.1:19999", None).await;
         assert!(!result.reachable);
         assert!(result.error.is_some());
     }

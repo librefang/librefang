@@ -189,6 +189,10 @@ pub async fn memory_search(
 // ---------------------------------------------------------------------------
 
 /// List all proactive memories, optionally filtered by category, with pagination.
+///
+/// When proactive memory is disabled in config, returns an empty list with
+/// `proactive_enabled: false` (HTTP 200) so the dashboard can render an
+/// explanatory note instead of treating a config state as a server error.
 #[utoipa::path(
     get,
     path = "/api/memory",
@@ -204,9 +208,18 @@ pub async fn memory_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemoryListQuery>,
 ) -> impl IntoResponse {
-    let store = match get_pm_store(&state) {
-        Ok(s) => s,
-        Err(e) => return e,
+    // Graceful degradation: proactive memory disabled → empty list, not 500.
+    let Some(store) = state.kernel.proactive_memory_store().cloned() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": [],
+                "total": 0,
+                "offset": params.offset,
+                "limit": params.limit.min(100),
+                "proactive_enabled": false,
+            })),
+        );
     };
 
     let limit = params.limit.min(100);
@@ -224,6 +237,7 @@ pub async fn memory_list(
                     "total": total,
                     "offset": offset,
                     "limit": limit,
+                    "proactive_enabled": true,
                 })),
             )
         }
@@ -453,6 +467,9 @@ pub async fn memory_bulk_delete(
 // ---------------------------------------------------------------------------
 
 /// Get memory statistics across all agents.
+///
+/// When proactive memory is disabled, returns `{stats: null, proactive_enabled: false}`
+/// at HTTP 200 — disabled is a config state, not an error.
 #[utoipa::path(
     get,
     path = "/api/memory/stats",
@@ -460,14 +477,31 @@ pub async fn memory_bulk_delete(
     responses((status = 200, description = "Memory statistics", body = serde_json::Value))
 )]
 pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let store = match get_pm_store(&state) {
-        Ok(s) => s,
-        Err(e) => return e,
+    // Graceful degradation: proactive memory disabled → null stats, not 500.
+    let Some(store) = state.kernel.proactive_memory_store().cloned() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "stats": null,
+                "proactive_enabled": false,
+            })),
+        );
     };
 
-    // Aggregate stats across ALL agents so the dashboard shows global totals
+    // Aggregate stats across ALL agents so the dashboard shows global totals.
+    // Merge `proactive_enabled: true` into the stats object so callers can
+    // branch on a single field regardless of which path returned.
     match store.stats_all().await {
-        Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
+        Ok(stats) => {
+            let mut value = serde_json::json!(stats);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "proactive_enabled".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            (StatusCode::OK, Json(value))
+        }
         Err(e) => internal_error(e),
     }
 }

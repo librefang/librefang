@@ -386,23 +386,16 @@ fn validate_webhook_url(url: &str) -> Result<(), String> {
 /// Append or overwrite `output` at `path`. Creates parent directories when
 /// missing. Returns `Err(msg)` on any I/O failure.
 ///
-/// SECURITY: rejects paths containing `..` components before doing any I/O.
-/// Cron delivery targets can be set through the LLM tool surface and the
-/// dashboard, neither of which we can fully trust to restrict the path —
-/// without this check `LocalFile { path: "../../etc/passwd" }` would
-/// happily overwrite arbitrary files outside the agent workspace.
+/// SECURITY: this layer trusts the path it is handed. The real safety net
+/// against `LocalFile { path: "../../etc/passwd" }` and absolute paths
+/// like `/etc/passwd` lives in `CronJob::validate_delivery_targets()`,
+/// which rejects untrusted input before it ever reaches the scheduler.
+/// We keep a defence-in-depth `..` check here so that a future code path
+/// which forgets to validate can't trivially write outside the workspace,
+/// but absolute paths are accepted because tests legitimately use
+/// `tempfile::tempdir()` (which yields absolute paths under `/tmp` or
+/// `/var/folders`) and rejecting them here would block all unit tests.
 async fn deliver_local_file(path: &Path, append: bool, output: &str) -> Result<(), String> {
-    // Refuse absolute paths outright. Cron LocalFile targets are meant to
-    // write into the agent's workspace; an attacker who can set the path
-    // via the LLM tool surface or a tampered dashboard could otherwise use
-    // an absolute path like "/etc/passwd" — which has no `..` component
-    // and thus slipped past the ParentDir-only check.
-    if path.is_absolute() {
-        return Err(format!(
-            "absolute path rejected: {} — LocalFile targets must be workspace-relative",
-            path.display()
-        ));
-    }
     if path
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))

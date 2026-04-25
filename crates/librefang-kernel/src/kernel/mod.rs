@@ -4163,6 +4163,12 @@ system_prompt = "You are a helpful assistant."
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
                 is_group: false,
                 was_mentioned: false,
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -5396,6 +5402,12 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -6813,6 +6825,12 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                // Re-read context.md per turn by default so external writers
+                // (cron jobs, integrations) reach the LLM on the next message.
+                // Opt out via `cache_context = true` on the manifest.
+                context_md: manifest.workspace.as_ref().and_then(|w| {
+                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+                }),
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -15731,6 +15749,14 @@ impl KernelHandle for LibreFangKernel {
     }
 
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
+        self.named_workspace_prefixes(agent_id)
+            .into_iter()
+            .filter(|(_, mode)| *mode == WorkspaceMode::ReadOnly)
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    fn named_workspace_prefixes(&self, agent_id: &str) -> Vec<(std::path::PathBuf, WorkspaceMode)> {
         let Ok(aid) = agent_id.parse::<AgentId>() else {
             return vec![];
         };
@@ -15744,13 +15770,16 @@ impl KernelHandle for LibreFangKernel {
         entry
             .manifest
             .workspaces
-            .iter()
-            .filter(|(_, decl)| decl.mode == WorkspaceMode::ReadOnly)
-            .filter_map(|(_, decl)| {
+            .values()
+            .filter_map(|decl| {
                 if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
                     return None;
                 }
-                workspaces_root.join(&decl.path).canonicalize().ok()
+                workspaces_root
+                    .join(&decl.path)
+                    .canonicalize()
+                    .ok()
+                    .map(|p| (p, decl.mode.clone()))
             })
             .collect()
     }
@@ -16195,7 +16224,28 @@ pub async fn probe_and_update_local_provider(
     base_url: &str,
     log_offline_as_warn: bool,
 ) -> librefang_runtime::provider_health::ProbeResult {
-    let result = librefang_runtime::provider_health::probe_provider(provider_id, base_url).await;
+    // Forward the provider's api_key (when configured) so reverse-proxy
+    // frontends like Open WebUI accept the listing request. Without this,
+    // the probe always 401s and the catalog flips to LocalOffline even
+    // when the underlying ollama is healthy.
+    let api_key = {
+        let catalog = kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let env_var = catalog
+            .get_provider(provider_id)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_")));
+        std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
+    };
+    let result = librefang_runtime::provider_health::probe_provider(
+        provider_id,
+        base_url,
+        api_key.as_deref(),
+    )
+    .await;
     if result.reachable {
         info!(
             provider = %provider_id,
