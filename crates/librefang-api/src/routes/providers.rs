@@ -1729,7 +1729,10 @@ fn normalize_base_url(input: &str) -> String {
     let trimmed = input.trim().trim_end_matches('/').to_string();
     // After scheme there must be host[:port][/path…]. Find the first '/'
     // after the scheme separator to know whether a path was supplied.
-    let after_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
     let has_path = after_scheme.find('/').is_some();
     if has_path {
         // User supplied an explicit path — respect it.
