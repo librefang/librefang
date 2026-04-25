@@ -135,7 +135,14 @@ pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(ToOwned::to_owned)
-        .or_else(|| ws_query_param(uri, "token"))
+        .or_else(|| {
+            // Use plain percent-decoding (NOT form-urlencoded) so literal `+`
+            // characters in base64-derived tokens are preserved instead of
+            // being turned into spaces. See issue #962 (ported from openfang).
+            uri.query()
+                .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+                .map(crate::percent_decode)
+        })
 }
 
 /// Validates the WebSocket `Origin` header against allowed origins.
@@ -1784,6 +1791,48 @@ mod tests {
             ws_auth_token(&headers, &uri).as_deref(),
             Some("header-token")
         );
+    }
+
+    /// Issue #962 (ported from openfang): WS auth tokens often contain
+    /// base64 chars (`+`, `/`, `=`). The query-param branch must percent-decode
+    /// (so `%2B` -> `+`) but must NOT apply form-urlencoded semantics
+    /// (which would turn a literal `+` into a space).
+    #[test]
+    fn test_ws_auth_token_percent_decodes_base64_chars() {
+        // Percent-encoded base64 token round-trips losslessly.
+        let uri: Uri = "/ws?token=abc%2Bdef%2Fghi%3D".parse().unwrap();
+        assert_eq!(
+            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
+            Some("abc+def/ghi=")
+        );
+    }
+
+    #[test]
+    fn test_ws_auth_token_preserves_literal_plus() {
+        // Literal `+` (not %20 / not space) MUST be preserved as `+`,
+        // not turned into a space the way x-www-form-urlencoded would.
+        let uri: Uri = "/ws?token=abc+def/ghi=".parse().unwrap();
+        assert_eq!(
+            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
+            Some("abc+def/ghi=")
+        );
+    }
+
+    #[test]
+    fn test_percent_decode_round_trip() {
+        use crate::percent_decode;
+        assert_eq!(percent_decode("abc%2Bdef"), "abc+def");
+        assert_eq!(percent_decode("a%2Fb%3D"), "a/b=");
+        // Literal `+` is preserved (not converted to space).
+        assert_eq!(percent_decode("abc+def"), "abc+def");
+        // Mixed: literal `+` and percent-encoded `/` together.
+        assert_eq!(percent_decode("a+b%2Fc"), "a+b/c");
+        // Lowercase hex.
+        assert_eq!(percent_decode("%2b%2f%3d"), "+/=");
+        // Malformed escape: leave as-is.
+        assert_eq!(percent_decode("%ZZ"), "%ZZ");
+        // Trailing `%` with no hex pair: leave as-is.
+        assert_eq!(percent_decode("abc%"), "abc%");
     }
 
     #[test]

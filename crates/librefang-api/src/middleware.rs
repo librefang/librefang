@@ -515,13 +515,18 @@ pub async fn auth(
 
     // Also check ?token= query parameter (for EventSource/SSE clients that
     // cannot set custom headers, same approach as WebSocket auth).
-    let query_token = request
+    //
+    // Percent-decode (but NOT form-urlencoded) so literal `+` characters in
+    // base64-derived tokens are preserved instead of being turned into spaces.
+    // See issue #962 (ported from openfang).
+    let query_token_decoded = request
         .uri()
         .query()
-        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
+        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+        .map(crate::percent_decode);
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let query_auth = query_token.map(&matches_any);
+    let query_auth = query_token_decoded.as_deref().map(&matches_any);
 
     // Accept if either auth method matches a static API key or legacy token
     if header_auth == Some(true) || query_auth == Some(true) {
@@ -532,7 +537,7 @@ pub async fn auth(
     // Also prune expired sessions opportunistically. Cookie token is only
     // consulted for `/dashboard/*` navigation (filtered upstream).
     let provided_token = api_token
-        .or(query_token)
+        .or(query_token_decoded.as_deref())
         .or(cookie_session_token.as_deref());
     if let Some(token_str) = provided_token {
         let mut sessions = auth_state.active_sessions.write().await;
