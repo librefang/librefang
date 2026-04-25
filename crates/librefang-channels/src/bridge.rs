@@ -1501,7 +1501,7 @@ fn leading_vocative_name(text: &str) -> Option<String> {
 /// the matched pattern — this captures the Beeper-screenshot case
 /// `"Caterina, chiedi al Signore..."` where "Signore" is mentioned but the
 /// turn is addressed to Caterina.
-pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
+fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
     if text.is_empty() || pattern.is_empty() {
         return false;
     }
@@ -1541,7 +1541,7 @@ pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
 /// Heuristic: extract a leading `<Capitalized>[,!]` token and look it up
 /// (case-insensitively) in the participant roster. If found and not equal
 /// to `agent_name`, the turn is addressed to someone else.
-pub fn is_addressed_to_other_participant(
+fn is_addressed_to_other_participant(
     text: &str,
     participants: &[ParticipantRef],
     agent_name: &str,
