@@ -8,6 +8,7 @@ import {
   updateTrigger,
   deleteTrigger,
 } from "../http/client";
+import type { CronDeliveryTarget } from "../http/client";
 import type { TriggerPatch, CreateTriggerPayload } from "../../api";
 import { cronKeys, scheduleKeys, triggerKeys, workflowKeys } from "../queries/keys";
 
@@ -52,6 +53,25 @@ export function useRunSchedule() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: runSchedule,
+    onSuccess: () => invalidateScheduleCaches(qc),
+  });
+}
+
+/**
+ * Replace a schedule's fan-out `delivery_targets` list.
+ *
+ * The backend treats `delivery_targets` as a full replace — passing an
+ * empty array clears all configured fan-out destinations (legacy single
+ * `delivery` is unaffected). Internally this is just `updateSchedule`
+ * with only the `delivery_targets` field set, but exposing it as its own
+ * hook keeps call sites simple and keeps the cache-invalidation contract
+ * identical to other schedule writes.
+ */
+export function useSetScheduleDeliveryTargets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, targets }: { id: string; targets: CronDeliveryTarget[] }) =>
+      updateSchedule(id, { delivery_targets: targets }),
     onSuccess: () => invalidateScheduleCaches(qc),
   });
 }
