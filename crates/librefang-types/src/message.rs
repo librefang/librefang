@@ -169,7 +169,27 @@ impl MessageContent {
         MessageContent::Text(content.into())
     }
 
-    /// Get the total character length of text in this content.
+    /// Total UTF-8 byte length of textual payload across all blocks.
+    ///
+    /// **Upper-bound token estimate, not an exact count.**
+    ///
+    /// Callers that use this to estimate LLM token usage should treat the
+    /// returned value as a rough cap, not a real tokenization. The current
+    /// implementation returns `String::len()` which is the **byte** length
+    /// (per Rust semantics, not the user-facing "char count"). For
+    /// most modern LLM tokenizers (BPE/tiktoken-style), 1 token ≈ 4 bytes
+    /// of English-prose UTF-8 and somewhat less for CJK / source code, so
+    /// `text_length / 4` is a conservative ceiling.
+    ///
+    /// `ToolUse` blocks include the tool name plus the JSON-serialised
+    /// arguments — also counted in bytes — to keep tool-heavy turns from
+    /// looking artificially small. Images / image-files are skipped: they
+    /// have their own provider-specific token cost models.
+    ///
+    /// If exact token counts ever become necessary, swap callers to a real
+    /// tokenizer (tiktoken-rs, anthropic count-tokens API) rather than
+    /// changing this function — its current callers rely on it being
+    /// cheap, infallible, and offline.
     pub fn text_length(&self) -> usize {
         match self {
             MessageContent::Text(s) => s.len(),
