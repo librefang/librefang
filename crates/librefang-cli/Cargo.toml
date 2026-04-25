@@ -23,6 +23,7 @@ librefang-channels = { path = "../librefang-channels", default-features = false 
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-extensions = { path = "../librefang-extensions" }
+librefang-memory = { path = "../librefang-memory" }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }

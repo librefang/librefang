@@ -5,13 +5,17 @@
 //! All tokens are stored in the credential vault with `Zeroizing<String>`.
 
 use crate::{ExtensionError, ExtensionResult, OAuthTemplate};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
+
+// Canonical OAuth token type lives in `librefang-types`. Re-export so existing
+// callers can keep their `extensions::oauth::OAuthTokens` import path.
+pub use librefang_types::oauth::OAuthTokens;
 
 /// Default OAuth client IDs for public PKCE flows.
 /// These are safe to embed — PKCE doesn't require a client_secret.
@@ -49,39 +53,6 @@ pub fn resolve_client_ids(
     }
 
     resolved
-}
-
-/// OAuth2 token response (raw from provider, for deserialization).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OAuthTokens {
-    /// Access token for API calls.
-    pub access_token: String,
-    /// Refresh token for renewal (if provided).
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    /// Token type (usually "Bearer").
-    #[serde(default)]
-    pub token_type: String,
-    /// Seconds until access_token expires.
-    #[serde(default)]
-    pub expires_in: u64,
-    /// Scopes granted.
-    #[serde(default)]
-    pub scope: String,
-}
-
-impl OAuthTokens {
-    /// Get the access token as a Zeroizing string.
-    pub fn access_token_zeroizing(&self) -> Zeroizing<String> {
-        Zeroizing::new(self.access_token.clone())
-    }
-
-    /// Get the refresh token as a Zeroizing string.
-    pub fn refresh_token_zeroizing(&self) -> Option<Zeroizing<String>> {
-        self.refresh_token
-            .as_ref()
-            .map(|t| Zeroizing::new(t.clone()))
-    }
 }
 
 /// PKCE code verifier and challenge pair.

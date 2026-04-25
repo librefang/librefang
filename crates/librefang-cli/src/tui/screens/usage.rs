@@ -10,6 +10,14 @@ use ratatui::widgets::{Block, Borders, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
+//
+// These are display-only projections of the canonical usage records that live
+// in `librefang-memory`. They drop fields the screen does not show
+// (`total_tool_calls` on summary; latency / total tokens on model rows) and
+// rename `call_count` → `total_calls` / `model` → `model_id` to match the UI
+// labels rendered below. Use the `From<&memory::…>` impls below when the data
+// originates in-process from the kernel; the daemon JSON path in
+// `tui/event.rs` reads the wire keys directly.
 
 #[derive(Clone, Default)]
 pub struct UsageSummary {
@@ -19,6 +27,19 @@ pub struct UsageSummary {
     pub total_calls: u64,
 }
 
+impl From<&librefang_memory::usage::UsageSummary> for UsageSummary {
+    fn from(s: &librefang_memory::usage::UsageSummary) -> Self {
+        // The memory side also tracks `total_tool_calls`, which the Summary
+        // screen does not surface today.
+        Self {
+            total_input_tokens: s.total_input_tokens,
+            total_output_tokens: s.total_output_tokens,
+            total_cost_usd: s.total_cost_usd,
+            total_calls: s.call_count,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ModelUsage {
     pub model_id: String,
@@ -26,6 +47,18 @@ pub struct ModelUsage {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub calls: u64,
+}
+
+impl From<&librefang_memory::usage::ModelUsage> for ModelUsage {
+    fn from(m: &librefang_memory::usage::ModelUsage) -> Self {
+        Self {
+            model_id: m.model.clone(),
+            input_tokens: m.total_input_tokens,
+            output_tokens: m.total_output_tokens,
+            cost_usd: m.total_cost_usd,
+            calls: m.call_count,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
