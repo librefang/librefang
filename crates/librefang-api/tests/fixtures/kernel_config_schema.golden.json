@@ -9540,6 +9540,37 @@
       },
       "type": "object"
     },
+    "ParallelToolsConfig": {
+      "description": "Configuration for the agent loop's parallel tool dispatcher.\n\nPR-3 ships the schema only; the agent loop still runs tool calls strictly sequentially. PR-4 wires the dispatcher into the runtime and PR-5 flips `enabled` on by default.\n\n```toml [parallel_tools] enabled = false max_concurrent = 4 mcp_default_safety = \"write_shared\"   # or \"read_only\" mcp_readonly_allowlist = [\"mcp__github__list_issues\"] ```\n\nFalls back to fully sequential execution when `enabled = false`.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Master switch. Default `false` so PR-3 ships with no behaviour change. PR-5 will flip the default to `true` after the streaming dispatcher integration lands.",
+          "type": "boolean"
+        },
+        "max_concurrent": {
+          "default": 4,
+          "description": "Cap on concurrent tool calls within a single bucket. `0` = uncapped (use the bucket size). The dispatcher honours this when launching futures via `join_all`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mcp_default_safety": {
+          "default": "write_shared",
+          "description": "Default `ParallelSafety` class assigned to MCP tools whose servers don't carry `readOnlyHint` annotations. Conservative default `\"write_shared\"` keeps unannotated MCP tools serialised (one per bucket) instead of optimistically parallelising. Accepted values: `\"read_only\"` | `\"write_shared\"`. PR-4 will promote this to a typed enum once the dispatcher consumes it.",
+          "type": "string"
+        },
+        "mcp_readonly_allowlist": {
+          "default": [],
+          "description": "Explicit allowlist of MCP tool names that should be treated as `ReadOnly` regardless of `mcp_default_safety`. Names match the fully-namespaced form (`mcp__server__name`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "PerplexitySearchConfig": {
       "description": "Perplexity Search API configuration.",
       "properties": {
@@ -13894,6 +13925,20 @@
         "token_expiry_secs": 300
       },
       "description": "Device pairing configuration."
+    },
+    "parallel_tools": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ParallelToolsConfig"
+        }
+      ],
+      "default": {
+        "enabled": false,
+        "max_concurrent": 4,
+        "mcp_default_safety": "write_shared",
+        "mcp_readonly_allowlist": []
+      },
+      "description": "Parallel-tool dispatcher configuration. PR-3 schema only — runtime integration lands in PR-4. See [`ParallelToolsConfig`]."
     },
     "plugins": {
       "allOf": [
