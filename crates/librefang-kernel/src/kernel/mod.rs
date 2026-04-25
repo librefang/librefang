@@ -10347,46 +10347,45 @@ system_prompt = "You are a helpful assistant."
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
-                                // Cron jobs use a synthetic SenderContext so they
-                                // get their own isolated session (channel="cron").
+                                // Cron jobs synthesize their SenderContext locally
+                                // so memory/peer lookups still see channel="cron".
                                 //
-                                // Exception: when `session_mode = "new"` the job
-                                // requested per-fire isolation. In that case we
-                                // skip the fixed channel session and instead pass
-                                // a `session_mode_override` of `New` so each fire
-                                // receives its own fresh SessionId.
+                                // Session resolution by `job.session_mode`:
+                                //   * None / Some(Persistent) — all fires share
+                                //     the agent's `(agent, channel="cron")`
+                                //     persistent session (historical default).
+                                //   * Some(New) — each fire receives a fresh
+                                //     deterministic session via
+                                //     `SessionId::for_cron_run(agent, run_key)`.
+                                //     We pass it as `session_id_override` (rather
+                                //     than relying on `session_mode_override`
+                                //     alone) because the channel-derived branch
+                                //     in `send_message_full` would otherwise
+                                //     win over the mode override and route
+                                //     every fire back to the persistent
+                                //     `(agent, "cron")` session — see
+                                //     CLAUDE.md note on cron + session_mode.
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
-                                let (sender_ctx_owned, mode_override) = if wants_new_session {
-                                    let cron_sender = SenderContext {
-                                        channel: "cron".to_string(),
-                                        user_id: job.peer_id.clone().unwrap_or_default(),
-                                        display_name: "cron".to_string(),
-                                        is_group: false,
-                                        was_mentioned: false,
-                                        thread_id: None,
-                                        account_id: None,
-                                        is_internal_cron: true,
-                                        ..Default::default()
-                                    };
-                                    (
-                                        Some(cron_sender),
-                                        Some(librefang_types::agent::SessionMode::New),
-                                    )
-                                } else {
-                                    let cron_sender = SenderContext {
-                                        channel: "cron".to_string(),
-                                        user_id: job.peer_id.clone().unwrap_or_default(),
-                                        display_name: "cron".to_string(),
-                                        is_group: false,
-                                        was_mentioned: false,
-                                        thread_id: None,
-                                        account_id: None,
-                                        is_internal_cron: true,
-                                        ..Default::default()
-                                    };
-                                    (Some(cron_sender), None)
+                                let cron_sender = SenderContext {
+                                    channel: "cron".to_string(),
+                                    user_id: job.peer_id.clone().unwrap_or_default(),
+                                    display_name: "cron".to_string(),
+                                    is_group: false,
+                                    was_mentioned: false,
+                                    thread_id: None,
+                                    account_id: None,
+                                    is_internal_cron: true,
+                                    ..Default::default()
                                 };
+                                let sender_ctx_owned = Some(cron_sender);
+                                let (mode_override, fire_session_override) =
+                                    crate::cron::cron_fire_session_override(
+                                        agent_id,
+                                        job.session_mode,
+                                        job.id,
+                                        chrono::Utc::now(),
+                                    );
                                 let sender_ctx = sender_ctx_owned.as_ref();
 
                                 // Prune the persistent cron session before firing
@@ -10440,7 +10439,7 @@ system_prompt = "You are a helpful assistant."
                                         sender_ctx,
                                         mode_override,
                                         None,
-                                        None,
+                                        fire_session_override,
                                     ),
                                 )
                                 .await

@@ -220,6 +220,13 @@ const CHANNEL_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0xa3, 0x4e, 0x7c, 0x01, 0x8f, 0x2b, 0x4d, 0x6a, 0x91, 0x5c, 0xd7, 0x3e, 0xf4, 0x0a, 0xb8, 0x52,
 ]);
 
+/// Distinct UUID v5 namespace for per-fire cron session IDs. Disjoint from
+/// `CHANNEL_SESSION_NAMESPACE` so a `for_cron_run` id can never collide with
+/// a `for_channel` id even if input strings happen to coincide.
+const CRON_RUN_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x7e, 0x91, 0x2c, 0x4f, 0xb5, 0xa3, 0x48, 0xd1, 0xa0, 0x6c, 0xe2, 0x83, 0x1f, 0x57, 0xc4, 0x09,
+]);
+
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
@@ -234,6 +241,26 @@ impl SessionId {
         let name = format!("{}:{}", agent_id.0, channel.to_lowercase());
         Self(uuid::Uuid::new_v5(
             &CHANNEL_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+
+    /// Derive a per-fire cron session id keyed by `(agent, run_key)`.
+    ///
+    /// Used when a cron job is configured with `session_mode = "new"` and
+    /// each fire must land on its own isolated session — prior fires must
+    /// not leak context into the current run, and the agent's persistent
+    /// `(agent, "cron")` session must stay untouched.
+    ///
+    /// `run_key` should uniquely identify the fire (typical choice:
+    /// `"<job_uuid>:<rfc3339_timestamp>"`). Lower-cased before hashing so
+    /// a caller's case quirks don't fan id space. Determinism (vs.
+    /// `SessionId::new()`) makes a fire's session id reproducible from logs
+    /// for debugging.
+    pub fn for_cron_run(agent_id: AgentId, run_key: &str) -> Self {
+        let name = format!("{}:{}", agent_id.0, run_key.to_lowercase());
+        Self(uuid::Uuid::new_v5(
+            &CRON_RUN_SESSION_NAMESPACE,
             name.as_bytes(),
         ))
     }
@@ -1989,5 +2016,35 @@ model = "llama-3.3-70b-versatile"
     fn session_id_from_str_rejects_garbage() {
         use std::str::FromStr;
         assert!(SessionId::from_str("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn for_cron_run_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let a = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        let b = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn for_cron_run_distinguishes_fires() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let fire_a = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        let fire_b = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:05:00Z");
+        assert_ne!(
+            fire_a, fire_b,
+            "different fires must yield different sessions"
+        );
+    }
+
+    #[test]
+    fn for_cron_run_distinct_from_for_channel_cron() {
+        // Same input string, different namespaces → different UUIDs. Prevents
+        // a per-fire cron session from ever colliding with the persistent
+        // (agent, channel="cron") session.
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let persistent = SessionId::for_channel(agent, "cron");
+        let isolated = SessionId::for_cron_run(agent, "cron");
+        assert_ne!(persistent, isolated);
     }
 }
