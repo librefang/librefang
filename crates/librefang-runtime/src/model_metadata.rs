@@ -22,7 +22,7 @@
 //! call sites in `kernel/mod.rs` with a single `resolve_model_metadata`
 //! invocation.
 
-use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier, Modality};
+use librefang_types::model_catalog::{Modality, ModelCatalogEntry, ModelTier};
 use std::borrow::Cow;
 
 use crate::model_catalog::ModelCatalog;
@@ -371,7 +371,7 @@ pub fn resolve_model_metadata<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier, Modality};
+    use librefang_types::model_catalog::{Modality, ModelCatalogEntry, ModelTier};
 
     /// Build a minimal in-memory catalog with the given entries; bypasses
     /// the TOML loader so unit tests don't need fixtures on disk.
@@ -498,8 +498,14 @@ mod tests {
 
     #[test]
     fn provider_prefix_stripped_for_known_providers() {
-        assert_eq!(strip_provider_prefix("openrouter:claude-opus-4-7"), "claude-opus-4-7");
-        assert_eq!(strip_provider_prefix("anthropic:claude-haiku-4-5"), "claude-haiku-4-5");
+        assert_eq!(
+            strip_provider_prefix("openrouter:claude-opus-4-7"),
+            "claude-opus-4-7"
+        );
+        assert_eq!(
+            strip_provider_prefix("anthropic:claude-haiku-4-5"),
+            "claude-haiku-4-5"
+        );
         assert_eq!(strip_provider_prefix("local:my-llama"), "my-llama");
     }
 
@@ -510,7 +516,10 @@ mod tests {
         assert_eq!(strip_provider_prefix("qwen:7b"), "qwen:7b");
         assert_eq!(strip_provider_prefix("llama:0.5b"), "llama:0.5b");
         assert_eq!(strip_provider_prefix("qwen:latest"), "qwen:latest");
-        assert_eq!(strip_provider_prefix("llama3:70b-q4_K_M"), "llama3:70b-q4_K_M");
+        assert_eq!(
+            strip_provider_prefix("llama3:70b-q4_K_M"),
+            "llama3:70b-q4_K_M"
+        );
         assert_eq!(strip_provider_prefix("qwen:q4"), "qwen:q4");
         assert_eq!(strip_provider_prefix("mistral:fp16"), "mistral:fp16");
         assert_eq!(strip_provider_prefix("llama2:instruct"), "llama2:instruct");
@@ -572,5 +581,4 @@ mod tests {
         assert_eq!(r.entry.provider, "ollama");
         assert_eq!(r.entry.id, "totally-unknown");
     }
-
 }

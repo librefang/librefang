@@ -64,10 +64,7 @@ impl ModelCatalog {
     /// without going through TOML loading. Used by sibling modules' unit
     /// tests (`model_metadata`, etc.) so they can inject deterministic
     /// fixtures without touching the filesystem.
-    pub fn from_entries(
-        models: Vec<ModelCatalogEntry>,
-        providers: Vec<ProviderInfo>,
-    ) -> Self {
+    pub fn from_entries(models: Vec<ModelCatalogEntry>, providers: Vec<ProviderInfo>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         for m in &models {
             for alias in &m.aliases {
@@ -418,9 +415,10 @@ impl ModelCatalog {
 
         // Pass 2: alias resolution restricted to the provider.
         if let Some(canonical) = self.aliases.get(&want_id) {
-            return self.models.iter().find(|m| {
-                m.provider.to_lowercase() == want_provider && m.id == *canonical
-            });
+            return self
+                .models
+                .iter()
+                .find(|m| m.provider.to_lowercase() == want_provider && m.id == *canonical);
         }
 
         None
@@ -1322,11 +1320,9 @@ id = "acme"
     #[test]
     fn test_find_model_for_provider_case_insensitive_provider() {
         let catalog = test_catalog();
-        assert!(
-            catalog
-                .find_model_for_provider("ANTHROPIC", "claude-sonnet-4-20250514")
-                .is_some(),
-        );
+        assert!(catalog
+            .find_model_for_provider("ANTHROPIC", "claude-sonnet-4-20250514")
+            .is_some(),);
     }
 
     /// Alias resolution is also provider-scoped: `"sonnet"` must resolve
