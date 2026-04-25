@@ -433,8 +433,9 @@ fn extract_shell_wrapper_commands(command: &str) -> Vec<String> {
 /// Order matters: `&&` must be tried before `&`, otherwise we'd split inside
 /// the two-character token.
 ///
-/// Unlike `extract_inner_script_commands`, this preserves each segment's
-/// raw text so callers can re-inspect it (e.g. recursive wrapper detection).
+/// Preserves each segment's raw text so callers can re-inspect it
+/// recursively (`inspect_inner_script` runs `inspect_shell_wrapper` on every
+/// segment to catch nested wrappers like `bash -c "powershell -enc …"`).
 fn split_script_segments(script: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut rest = script;
@@ -461,20 +462,6 @@ fn split_script_segments(script: &str) -> Vec<&str> {
         rest = &rest[earliest_pos + earliest_len..];
     }
     segments
-}
-
-/// Extract base command names from an inline script string.
-///
-/// Kept for the test helper; production callers use
-/// `inspect_inner_script` which preserves opaque/nested-wrapper signals.
-#[cfg(test)]
-fn extract_inner_script_commands(script: &str) -> Vec<String> {
-    split_script_segments(script)
-        .into_iter()
-        .map(extract_base_command)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
 }
 
 /// Extract all commands from a shell command string.
@@ -1675,10 +1662,7 @@ mod tests {
             allowed_commands: vec!["bash".to_string(), "powershell".to_string()],
             ..ExecPolicy::default()
         };
-        let result = validate_command_allowlist(
-            r#"bash -c "powershell -Command iex""#,
-            &policy,
-        );
+        let result = validate_command_allowlist(r#"bash -c "powershell -Command iex""#, &policy);
         assert!(
             result.is_err(),
             "nested powershell -Command inside bash -c must be blocked"

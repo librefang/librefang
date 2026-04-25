@@ -2190,11 +2190,7 @@ fn atomic_write_leaves_no_tmp_file_on_success() {
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
         .collect();
     assert!(
         leftovers.is_empty(),
@@ -2235,9 +2231,7 @@ fn atomic_write_no_partial_state_under_concurrency() {
     for _ in 0..200 {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             assert!(
-                contents == "seed = 0\n"
-                    || contents == payload_a
-                    || contents == payload_b,
+                contents == "seed = 0\n" || contents == payload_a || contents == payload_b,
                 "reader observed corrupt/partial state: {} bytes",
                 contents.len()
             );
