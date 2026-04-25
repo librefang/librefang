@@ -260,20 +260,20 @@ pub fn validate_pre_script(
 
     // Canonicalize both sides so symlink targets and `..` traversal collapse
     // to their real on-disk paths before the prefix comparison runs.
-    let resolved =
-        candidate
-            .canonicalize()
-            .map_err(|_| PreScriptValidationError::NotFound {
-                path: candidate.display().to_string(),
-            })?;
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|_| PreScriptValidationError::NotFound {
+            path: candidate.display().to_string(),
+        })?;
     // The scripts root may not exist yet on a fresh install; treat that as
     // "nothing is on the allowlist", which makes any path fail allowlist.
-    let allow_root = scripts_root.canonicalize().map_err(|_| {
-        PreScriptValidationError::OutsideAllowlist {
-            path: resolved.display().to_string(),
-            home_dir: scripts_root.display().to_string(),
-        }
-    })?;
+    let allow_root =
+        scripts_root
+            .canonicalize()
+            .map_err(|_| PreScriptValidationError::OutsideAllowlist {
+                path: resolved.display().to_string(),
+                home_dir: scripts_root.display().to_string(),
+            })?;
 
     // Component-level prefix check rejects e.g. `/home/X-other` vs `/home/X`.
     if !resolved.starts_with(&allow_root) {
@@ -1629,7 +1629,8 @@ mod tests {
         #[cfg(unix)]
         let outside = "/bin/sh";
         #[cfg(not(unix))]
-        let outside = std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        let outside =
+            std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
         let script = PreScript {
             argv: vec![outside.to_string()],
             cwd: None,
