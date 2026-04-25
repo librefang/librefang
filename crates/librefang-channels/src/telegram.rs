@@ -23,6 +23,10 @@ use zeroize::Zeroizing;
 
 // Backoff and long-poll timeout are now configurable via TelegramConfig.
 
+/// Bound startup control-plane calls so a flaky Local Bot API cannot block
+/// daemon boot forever.
+const STARTUP_API_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Default Telegram Bot API base URL.
 const DEFAULT_API_URL: &str = "https://api.telegram.org";
 
@@ -1394,7 +1398,13 @@ impl TelegramAdapter {
             .map(|c| serde_json::json!({"command": c.command, "description": c.description}))
             .collect();
         let body = serde_json::json!({ "commands": cmds });
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(STARTUP_API_TIMEOUT)
+            .json(&body)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
             warn!("Telegram setMyCommands failed: {body_text}");
@@ -1656,6 +1666,7 @@ impl ChannelAdapter for TelegramAdapter {
                 .client
                 .post(&delete_url)
                 .json(&serde_json::json!({"drop_pending_updates": false}))
+                .timeout(STARTUP_API_TIMEOUT)
                 .send()
                 .await
             {

@@ -9,7 +9,7 @@
 
 use chrono::{Duration, Utc};
 use dashmap::DashMap;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId, SessionMode};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::scheduler::{CronJob, CronJobId, CronSchedule};
 use serde::{Deserialize, Serialize};
@@ -558,14 +558,108 @@ pub fn compute_next_run_after(
 }
 
 // ---------------------------------------------------------------------------
+// Per-fire session derivation
+// ---------------------------------------------------------------------------
+
+/// Compute `(session_mode_override, session_id_override)` for a cron fire.
+///
+/// `session_mode = Some(New)` means each fire must land on its own isolated
+/// session: the channel-derived branch in `send_message_full` would otherwise
+/// always route cron back to the persistent `(agent, "cron")` session
+/// because the synthetic `SenderContext{channel:"cron"}` wins over a
+/// session-mode override (see CLAUDE.md note on cron + session_mode). We
+/// bypass that by handing `send_message_full` an explicit
+/// `session_id_override` derived from the job id and fire timestamp via
+/// [`SessionId::for_cron_run`], so the override path takes priority over
+/// the channel branch.
+///
+/// `Persistent` (or `None` — historical default) returns `(None, None)`,
+/// preserving the long-standing `(agent, "cron")` shared-session behaviour.
+pub fn cron_fire_session_override(
+    agent_id: AgentId,
+    job_session_mode: Option<SessionMode>,
+    job_id: CronJobId,
+    fire_time: chrono::DateTime<chrono::Utc>,
+) -> (Option<SessionMode>, Option<SessionId>) {
+    if job_session_mode != Some(SessionMode::New) {
+        return (None, None);
+    }
+    let run_key = format!(
+        "{}:{}",
+        job_id.0,
+        fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
+    (
+        Some(SessionMode::New),
+        Some(SessionId::for_cron_run(agent_id, &run_key)),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Timelike};
+    use chrono::{Duration, TimeZone, Timelike};
     use librefang_types::scheduler::{CronAction, CronDelivery};
+
+    #[test]
+    fn fire_session_override_persistent_returns_none() {
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        let now = chrono::Utc::now();
+        // Default (no per-job override) — historical persistent cron session.
+        let (mode, sid) = cron_fire_session_override(agent, None, job_id, now);
+        assert!(mode.is_none());
+        assert!(sid.is_none());
+        // Explicit Persistent same.
+        let (mode, sid) =
+            cron_fire_session_override(agent, Some(SessionMode::Persistent), job_id, now);
+        assert!(mode.is_none());
+        assert!(sid.is_none());
+    }
+
+    #[test]
+    fn fire_session_override_new_yields_isolated_id() {
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        let now = chrono::Utc::now();
+        let (mode, sid) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, now);
+        assert_eq!(mode, Some(SessionMode::New));
+        let sid = sid.expect("New must produce a session id override");
+        // And it must NOT collide with the persistent (agent, "cron") session.
+        assert_ne!(sid, SessionId::for_channel(agent, "cron"));
+    }
+
+    #[test]
+    fn fire_session_override_new_distinguishes_two_fires() {
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        // Two distinct timestamps representing two fires.
+        let t1 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let t2 = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 5, 0).unwrap();
+        let (_, sid_a) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t1);
+        let (_, sid_b) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t2);
+        assert_ne!(
+            sid_a, sid_b,
+            "two fires of the same New-mode job must yield distinct session ids"
+        );
+    }
+
+    #[test]
+    fn fire_session_override_new_is_deterministic_per_fire() {
+        // Reproducibility: same (agent, job_id, fire_time) must always derive
+        // the same session id — useful for log correlation when a fire's
+        // session id is referenced after the fact.
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        let t = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let (_, sid_a) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t);
+        let (_, sid_b) = cron_fire_session_override(agent, Some(SessionMode::New), job_id, t);
+        assert_eq!(sid_a, sid_b);
+    }
 
     /// Build a minimal valid `CronJob` with an `Every` schedule.
     fn make_job(agent_id: AgentId) -> CronJob {

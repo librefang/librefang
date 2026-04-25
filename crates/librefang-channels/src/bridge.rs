@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{
-    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
+    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat, PrefixStyle,
 };
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
@@ -1809,6 +1809,95 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .unwrap_or(&message.sender.platform_id)
 }
 
+/// Wrap an outbound message with the responding agent's name according to
+/// `style`.
+///
+/// Applied once at the top of the final response text (never per streaming
+/// chunk). If the text already starts with the exact bracketed agent label
+/// (e.g. the agent echoed its own name, or an inner agent already prefixed a
+/// delegated reply), the wrap is skipped to keep things idempotent.
+///
+/// Per-platform native identity features (Slack `username` override, Discord
+/// embed `author`, Telegram `From:` in rich messages) are intentionally not
+/// handled here.
+pub(crate) fn apply_agent_prefix(style: PrefixStyle, agent_name: &str, text: &str) -> String {
+    if matches!(style, PrefixStyle::Off) || agent_name.is_empty() {
+        return text.to_string();
+    }
+    let bracket = format!("[{agent_name}]");
+    let bold = format!("**[{agent_name}]**");
+    if text.starts_with(&bracket) || text.starts_with(&bold) {
+        return text.to_string();
+    }
+    match style {
+        PrefixStyle::Off => text.to_string(),
+        PrefixStyle::Bracket => format!("{bracket} {text}"),
+        PrefixStyle::BoldBracket => format!("{bold} {text}"),
+    }
+}
+
+/// Look up an agent's display name by id.
+///
+/// Returns `None` if the kernel can't list agents or the id is not currently
+/// known. Only called when `prefix_agent_name` is enabled, so the extra
+/// `list_agents()` round-trip is pay-per-use.
+async fn resolve_agent_name(handle: &Arc<dyn ChannelBridgeHandle>, id: AgentId) -> Option<String> {
+    handle
+        .list_agents()
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|(aid, name)| (aid == id).then_some(name))
+}
+
+/// Apply `prefix_agent_name` to an outbound agent response if configured.
+///
+/// Safe to call on every success path: resolves the agent name lazily and
+/// returns the original text unchanged when the style is `Off`.
+async fn maybe_prefix_response(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+    text: String,
+) -> String {
+    let style = overrides
+        .map(|o| o.prefix_agent_name)
+        .unwrap_or(PrefixStyle::Off);
+    if matches!(style, PrefixStyle::Off) {
+        return text;
+    }
+    match resolve_agent_name(handle, agent_id).await {
+        Some(name) => apply_agent_prefix(style, &name, &text),
+        None => text,
+    }
+}
+
+/// Resolve the leading prefix chunk (e.g. `"[coder] "`) for streaming output,
+/// or `None` if prefixing is disabled / agent name unknown.
+///
+/// Used by the streaming success path to inject the prefix as the first
+/// delta — `apply_agent_prefix` only handles the non-streaming "wrap full
+/// text" case.
+async fn resolve_prefix_chunk(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+) -> Option<String> {
+    let style = overrides.map(|o| o.prefix_agent_name)?;
+    if matches!(style, PrefixStyle::Off) {
+        return None;
+    }
+    let name = resolve_agent_name(handle, agent_id).await?;
+    if name.is_empty() {
+        return None;
+    }
+    match style {
+        PrefixStyle::Off => None,
+        PrefixStyle::Bracket => Some(format!("[{name}] ")),
+        PrefixStyle::BoldBracket => Some(format!("**[{name}]** ")),
+    }
+}
+
 /// Send a response, applying output formatting and optional threading.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
@@ -1920,6 +2009,7 @@ async fn handle_send_error<F, Fut>(
     ct_str: &str,
     thread_id: Option<&str>,
     output_format: OutputFormat,
+    overrides: Option<&ChannelOverrides>,
     send_fn: F,
 ) where
     F: FnOnce(AgentId) -> Fut,
@@ -1933,6 +2023,7 @@ async fn handle_send_error<F, Fut>(
             Ok(response) => {
                 send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Done).await;
                 if !response.is_empty() {
+                    let response = maybe_prefix_response(handle, overrides, new_id, response).await;
                     send_response(adapter, sender, response, thread_id, output_format).await;
                 }
                 handle
@@ -2925,6 +3016,7 @@ async fn dispatch_message(
     // Auto-reply check — if enabled, the engine decides whether to process this message.
     // If auto-reply is enabled but suppressed for this message, skip agent call entirely.
     if let Some(reply) = handle.check_auto_reply(agent_id, &text).await {
+        let reply = maybe_prefix_response(handle, overrides.as_ref(), agent_id, reply).await;
         send_response(adapter, &message.sender, reply, thread_id, output_format).await;
         handle
             .record_delivery(
@@ -2996,13 +3088,32 @@ async fn dispatch_message(
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
+                // Resolve the agent-name prefix once up-front so it can be
+                // injected as the very first delta — without this, streaming
+                // adapters (e.g. Telegram) would never show the prefix on the
+                // success path. `None` when prefix is disabled, agent unknown,
+                // or the agent has no display name.
+                let prefix_chunk = resolve_prefix_chunk(handle, overrides.as_ref(), agent_id).await;
+
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
                 let mut buffered_text = String::new();
                 let buffer_handle = tokio::spawn({
+                    let prefix_chunk = prefix_chunk.clone();
                     let mut buffered = String::new();
                     async move {
+                        // Inject the prefix as the first delta so it becomes
+                        // part of the streamed message. Mirror it into the
+                        // buffer so the stream-fail fallback path's
+                        // idempotency check (`apply_agent_prefix`) sees an
+                        // already-prefixed buffer and skips re-prefixing.
+                        if let Some(ref p) = prefix_chunk {
+                            buffered.push_str(p);
+                            if adapter_tx.send(p.clone()).await.is_err() {
+                                return buffered;
+                            }
+                        }
                         while let Some(delta) = delta_rx.recv().await {
                             buffered.push_str(&delta);
                             // Best-effort forward — if adapter dropped rx, stop.
@@ -3075,6 +3186,17 @@ async fn dispatch_message(
                         if !buffered_text.is_empty()
                             && (kernel_ok || !adapter.suppress_error_responses())
                         {
+                            let buffered_text = if kernel_ok {
+                                maybe_prefix_response(
+                                    handle,
+                                    overrides.as_ref(),
+                                    agent_id,
+                                    buffered_text,
+                                )
+                                .await
+                            } else {
+                                buffered_text
+                            };
                             send_response(
                                 adapter,
                                 &message.sender,
@@ -3201,6 +3323,11 @@ async fn dispatch_message(
         };
         send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
         if !accumulated.is_empty() && (success || !adapter.suppress_error_responses()) {
+            let accumulated = if success {
+                maybe_prefix_response(handle, overrides.as_ref(), agent_id, accumulated).await
+            } else {
+                accumulated
+            };
             send_response(
                 adapter,
                 &message.sender,
@@ -3241,6 +3368,8 @@ async fn dispatch_message(
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             if !response.is_empty() {
+                let response =
+                    maybe_prefix_response(handle, overrides.as_ref(), agent_id, response).await;
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             handle
@@ -3276,6 +3405,7 @@ async fn dispatch_message(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_ref(),
                 |new_id| {
                     let h = handle.clone();
                     let t = text.clone();
@@ -3906,6 +4036,7 @@ async fn dispatch_with_blocks(
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             if !response.is_empty() {
+                let response = maybe_prefix_response(handle, overrides, agent_id, response).await;
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             if let Some(j) = journal {
@@ -3941,6 +4072,7 @@ async fn dispatch_with_blocks(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides,
                 |new_id| {
                     let h = handle.clone();
                     async move {
@@ -4719,6 +4851,186 @@ mod tests {
             default_output_format_for_channel("discord"),
             OutputFormat::Markdown
         );
+        assert_eq!(
+            default_output_format_for_channel("signal"),
+            OutputFormat::PlainText
+        );
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_off_is_identity() {
+        let text = "hello world";
+        let out = apply_agent_prefix(PrefixStyle::Off, "coder", text);
+        assert_eq!(out, text);
+        assert_eq!(out.as_bytes(), text.as_bytes());
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_bracket() {
+        let out = apply_agent_prefix(
+            PrefixStyle::Bracket,
+            "platform-architect",
+            "Here's my take.",
+        );
+        assert_eq!(out, "[platform-architect] Here's my take.");
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_bold_bracket() {
+        let out = apply_agent_prefix(PrefixStyle::BoldBracket, "coder", "All green.");
+        assert_eq!(out, "**[coder]** All green.");
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_idempotent_bracket() {
+        let already = "[coder] already prefixed";
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "coder", already);
+        assert_eq!(out, already);
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_idempotent_bold_bracket() {
+        let already = "**[coder]** already bold";
+        let out = apply_agent_prefix(PrefixStyle::BoldBracket, "coder", already);
+        assert_eq!(out, already);
+        let out2 = apply_agent_prefix(PrefixStyle::Bracket, "coder", already);
+        assert_eq!(out2, already);
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_empty_name_is_noop() {
+        let text = "no author";
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "", text);
+        assert_eq!(out, text);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_off_is_byte_identical() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides::default();
+        let input = "Hello from the agent.".to_string();
+        let original_bytes = input.clone();
+        let out = maybe_prefix_response(&handle, Some(&overrides), agent_id, input).await;
+        assert_eq!(out.as_bytes(), original_bytes.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_bracket_wraps() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out =
+            maybe_prefix_response(&handle, Some(&overrides), agent_id, "Hi".to_string()).await;
+        assert_eq!(out, "[coder] Hi");
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_bold_bracket_wraps() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::BoldBracket,
+            ..Default::default()
+        };
+        let out =
+            maybe_prefix_response(&handle, Some(&overrides), agent_id, "Hi".to_string()).await;
+        assert_eq!(out, "**[coder]** Hi");
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_unknown_agent_falls_back() {
+        let known = AgentId::new();
+        let unknown = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(known, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = maybe_prefix_response(&handle, Some(&overrides), unknown, "Hi".to_string()).await;
+        assert_eq!(out, "Hi");
+    }
+
+    #[test]
+    fn test_prefix_style_default_is_off_and_serde_snake_case() {
+        assert_eq!(PrefixStyle::default(), PrefixStyle::Off);
+        let v: PrefixStyle = serde_json::from_str("\"bracket\"").unwrap();
+        assert_eq!(v, PrefixStyle::Bracket);
+        let v: PrefixStyle = serde_json::from_str("\"bold_bracket\"").unwrap();
+        assert_eq!(v, PrefixStyle::BoldBracket);
+        let v: PrefixStyle = serde_json::from_str("\"off\"").unwrap();
+        assert_eq!(v, PrefixStyle::Off);
+    }
+
+    #[test]
+    fn test_channel_overrides_default_prefix_off() {
+        let o = ChannelOverrides::default();
+        assert_eq!(o.prefix_agent_name, PrefixStyle::Off);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_off_returns_none() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides::default();
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("[coder] "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bold_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::BoldBracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("**[coder]** "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_unknown_agent() {
+        let known = AgentId::new();
+        let unknown = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(known, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), unknown).await;
+        assert!(out.is_none());
     }
 
     #[tokio::test]

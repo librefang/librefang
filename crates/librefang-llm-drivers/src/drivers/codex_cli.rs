@@ -224,6 +224,10 @@ impl LlmDriver for CodexCliDriver {
             },
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
+    }
 }
 
 /// Check if the Codex CLI is available.

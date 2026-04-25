@@ -69,6 +69,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(export_session),
         )
         .route(
+            "/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(export_session_trajectory),
+        )
+        .route(
             "/agents/{id}/sessions/import",
             axum::routing::post(import_session),
         )
@@ -902,10 +906,82 @@ pub async fn list_agents(
     .into_response()
 }
 
-/// Resolve uploaded file attachments into ContentBlock::Image blocks.
+/// Hard cap on inlined text-attachment length (chars). Mirrors the PDF
+/// truncation cap so a 5 MB `.log` paste doesn't blow the LLM context.
+const MAX_TEXT_ATTACHMENT_CHARS: usize = 200_000;
+const TEXT_TRUNCATION_MARKER: &str =
+    "\n\n[…file truncated at 200K chars; content continues beyond this point…]";
+
+/// Decide whether an attachment looks like a UTF-8 text/code/data file
+/// the LLM can read directly. Browsers don't set `content_type` reliably
+/// for code files (`.rs`, `.py` typically come through as empty or
+/// `application/octet-stream`), so we fall back to extension matching.
+fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
+    if content_type.starts_with("text/") {
+        return true;
+    }
+    let known_mime = matches!(
+        content_type,
+        "application/json"
+            | "application/xml"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "application/toml"
+            | "application/x-toml"
+            | "application/x-ipynb+json"
+            | "application/javascript"
+            | "application/x-javascript"
+            | "application/typescript"
+            | "application/sql"
+            | "application/graphql"
+    );
+    if known_mime {
+        return true;
+    }
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        // Plain text & docs
+        "txt" | "md" | "markdown" | "rst" | "csv" | "tsv" | "log"
+        // Config & data
+        | "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "conf" | "cfg" | "env" | "properties"
+        // Web
+        | "html" | "htm" | "css" | "scss" | "sass" | "less"
+        // JS/TS family
+        | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "vue" | "svelte"
+        // Other languages
+        | "py" | "rs" | "go" | "java" | "kt" | "kts" | "swift" | "scala" | "clj" | "ex" | "exs"
+        | "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "hh" | "m" | "mm"
+        | "rb" | "php" | "pl" | "lua" | "r" | "jl" | "dart" | "zig" | "nim"
+        // Shell
+        | "sh" | "bash" | "zsh" | "fish" | "ps1"
+        // Query / schema
+        | "sql" | "graphql" | "gql" | "proto"
+        // Notebooks
+        | "ipynb"
+        // Build files (no extension is rare; keep names like Dockerfile out — accept attribute can't match those)
+        | "dockerfile" | "makefile"
+    )
+}
+
+/// Resolve uploaded file attachments into content blocks.
 ///
-/// Reads each file from the upload directory, base64-encodes it, and
-/// returns image content blocks ready to insert into a session message.
+/// Reads each file from the upload directory and produces blocks the
+/// agent loop can consume:
+///   - `image/*` → `ContentBlock::Image` (base64-encoded inline)
+///   - `application/pdf` → `ContentBlock::Text` with a `[Attached PDF: <filename>]`
+///     header followed by extracted plain text (truncated at 200K chars).
+///     Scanned/image-only PDFs surface as a text note explaining no text
+///     was extractable, so the LLM at least sees the attachment exists.
+///   - text-like files (any `text/*`, `application/json|xml|yaml|toml|…`,
+///     plus common code/data extensions) → `ContentBlock::Text` with a
+///     `[Attached file: <filename>]` header. Read as UTF-8 lossy and
+///     truncated at 200K chars.
+///   - everything else → skipped with a warn log.
 pub fn resolve_attachments(
     attachments: &[AttachmentRef],
 ) -> Vec<librefang_types::message::ContentBlock> {
@@ -917,18 +993,19 @@ pub fn resolve_attachments(
     for att in attachments {
         // Look up metadata from the upload registry
         let meta = UPLOAD_REGISTRY.get(&att.file_id);
-        let content_type = if let Some(ref m) = meta {
-            m.content_type.clone()
+        let (raw_content_type, filename) = if let Some(ref m) = meta {
+            (m.content_type.clone(), m.filename.clone())
         } else if !att.content_type.is_empty() {
-            att.content_type.clone()
+            (att.content_type.clone(), att.file_id.clone())
         } else {
             continue; // Skip unknown attachments
         };
 
-        // Only process image types
-        if !content_type.starts_with("image/") {
-            continue;
-        }
+        // Normalize MIME for downstream branching: drop parameters
+        // (`application/pdf; charset=binary`) and lowercase. Without this,
+        // a `Content-Type: Application/PDF` header would skip the PDF branch
+        // and silently drop the attachment.
+        let content_type = librefang_types::media::mime_base(&raw_content_type);
 
         // Validate file_id is a UUID to prevent path traversal
         if uuid::Uuid::parse_str(&att.file_id).is_err() {
@@ -936,37 +1013,129 @@ pub fn resolve_attachments(
         }
 
         let file_path = upload_dir.join(&att.file_id);
-        match std::fs::read(&file_path) {
-            Ok(data) => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                blocks.push(librefang_types::message::ContentBlock::Image {
-                    media_type: content_type,
-                    data: b64,
-                });
+
+        if content_type.starts_with("image/") {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        content_type = %content_type,
+                        size_bytes = data.len(),
+                        "Resolved image attachment into Image block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Image {
+                        media_type: content_type,
+                        data: b64,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read image upload");
+                }
             }
-            Err(e) => {
-                tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read upload for attachment");
+        } else if content_type == "application/pdf" {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
+                    let body = match librefang_runtime::pdf_text::extract_text_from_pdf(&data) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            tracing::warn!(
+                                file_id = %att.file_id,
+                                filename = %filename,
+                                error = %e,
+                                "PDF text extraction failed; surfacing as note to LLM"
+                            );
+                            format!("[Could not extract text: {e}]")
+                        }
+                    };
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        size_bytes = data.len(),
+                        extracted_chars = body.chars().count(),
+                        "Resolved PDF attachment into Text block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Text {
+                        text: format!("{header}\n\n{body}"),
+                        provider_metadata: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read PDF upload");
+                }
             }
+        } else if is_text_like_attachment(&content_type, &filename) {
+            match std::fs::read(&file_path) {
+                Ok(data) => {
+                    let raw = String::from_utf8_lossy(&data);
+                    let total_chars = raw.chars().count();
+                    let (body, truncated) = if total_chars > MAX_TEXT_ATTACHMENT_CHARS {
+                        let mut s: String = raw.chars().take(MAX_TEXT_ATTACHMENT_CHARS).collect();
+                        s.push_str(TEXT_TRUNCATION_MARKER);
+                        (s, true)
+                    } else {
+                        (raw.into_owned(), false)
+                    };
+                    let suffix = if truncated { ", truncated" } else { "" };
+                    let header = format!(
+                        "[Attached file: {} ({} bytes{})]",
+                        filename,
+                        data.len(),
+                        suffix
+                    );
+                    tracing::info!(
+                        file_id = %att.file_id,
+                        filename = %filename,
+                        content_type = %content_type,
+                        size_bytes = data.len(),
+                        kept_chars = body.chars().count(),
+                        truncated,
+                        "Resolved text attachment into Text block"
+                    );
+                    blocks.push(librefang_types::message::ContentBlock::Text {
+                        text: format!("{header}\n\n{body}"),
+                        provider_metadata: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(file_id = %att.file_id, error = %e, "Failed to read text upload");
+                }
+            }
+        } else {
+            tracing::warn!(
+                file_id = %att.file_id,
+                content_type = %content_type,
+                filename = %filename,
+                "Attachment type not yet wired into the agent loop; skipping"
+            );
         }
     }
 
     blocks
 }
 
-/// Pre-insert image attachments into an agent's session so the LLM can see them.
+/// Pre-insert attachment content blocks (image / extracted-text-from-PDF /
+/// text files) into an agent's session so the LLM can see them.
 ///
-/// This injects image content blocks into the session BEFORE the kernel
-/// adds the text user message, so the LLM receives: [..., User(images), User(text)].
+/// Injects a single user-role message containing all blocks BEFORE the
+/// kernel adds the user's text message, so the LLM receives:
+/// `[..., User(attach_blocks), User(text)]`. session_repair will merge
+/// those two consecutive user-role messages into one for the wire format.
 pub fn inject_attachments_into_session(
     kernel: &LibreFangKernel,
     agent_id: AgentId,
-    image_blocks: Vec<librefang_types::message::ContentBlock>,
+    attachment_blocks: Vec<librefang_types::message::ContentBlock>,
 ) {
     use librefang_types::message::{Message, MessageContent, Role};
 
     let entry = match kernel.agent_registry().get(agent_id) {
         Some(e) => e,
-        None => return,
+        None => {
+            tracing::warn!(agent_id = ?agent_id, "Cannot inject attachments: agent not found in registry");
+            return;
+        }
     };
 
     let mut session = match kernel.memory_substrate().get_session(entry.session_id) {
@@ -980,15 +1149,46 @@ pub fn inject_attachments_into_session(
         },
     };
 
+    let block_count = attachment_blocks.len();
+    let block_kinds: Vec<&'static str> = attachment_blocks
+        .iter()
+        .map(|b| match b {
+            librefang_types::message::ContentBlock::Image { .. } => "image",
+            librefang_types::message::ContentBlock::Text { .. } => "text",
+            librefang_types::message::ContentBlock::ImageFile { .. } => "image_file",
+            librefang_types::message::ContentBlock::ToolUse { .. } => "tool_use",
+            librefang_types::message::ContentBlock::ToolResult { .. } => "tool_result",
+            librefang_types::message::ContentBlock::Thinking { .. } => "thinking",
+            librefang_types::message::ContentBlock::Unknown => "unknown",
+        })
+        .collect();
+
     session.messages.push(Message {
         role: Role::User,
-        content: MessageContent::Blocks(image_blocks),
+        content: MessageContent::Blocks(attachment_blocks),
         pinned: false,
         timestamp: Some(chrono::Utc::now()),
     });
 
+    let total_messages_after = session.messages.len();
+
     if let Err(e) = kernel.memory_substrate().save_session(&session) {
-        tracing::warn!(error = %e, "Failed to save session with image attachments");
+        tracing::warn!(
+            agent_id = ?agent_id,
+            session_id = ?entry.session_id,
+            block_count,
+            error = %e,
+            "Failed to save session with attachment blocks"
+        );
+    } else {
+        tracing::info!(
+            agent_id = ?agent_id,
+            session_id = ?entry.session_id,
+            block_count,
+            block_kinds = ?block_kinds,
+            total_messages_after,
+            "Injected attachment blocks into session"
+        );
     }
 }
 
@@ -1319,12 +1519,25 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     })
 }
 
+/// Query params for `GET /api/agents/{id}/session`.
+///
+/// Using a typed struct (rather than `HashMap<String,String>`) gives us
+/// automatic UUID validation: a malformed `session_id` is rejected by serde
+/// before the handler runs, returning a clean 400.
+#[derive(serde::Deserialize)]
+pub struct GetAgentSessionQuery {
+    pub session_id: Option<uuid::Uuid>,
+}
+
 /// GET /api/agents/:id/session — Get agent session (conversation history).
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/session",
     tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
+    ),
     responses(
         (status = 200, description = "Get agent conversation session history", body = serde_json::Value)
     )
@@ -1332,9 +1545,19 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    query: Result<Query<GetAgentSessionQuery>, axum::extract::rejection::QueryRejection>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let Query(params) = match query {
+        Ok(q) => q,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session_id"})),
+            );
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -1355,12 +1578,30 @@ pub async fn get_agent_session(
         }
     };
 
+    // Callers (e.g. the dashboard tab with `?sessionId=` pinned) can override
+    // the canonical-active session for this request. The returned messages
+    // must belong to that exact session; otherwise tabs pinned to different
+    // sessions all render whichever session the kernel thinks is active.
+    let target_session_id = match params.session_id {
+        Some(uuid) => librefang_types::agent::SessionId(uuid),
+        None => entry.session_id,
+    };
+
     match state
         .kernel
         .memory_substrate()
-        .get_session(entry.session_id)
+        .get_session(target_session_id)
     {
         Ok(Some(session)) => {
+            // Reject cross-agent reads when the caller passed an explicit
+            // session_id — prevents leaking one agent's history via another's
+            // id.
+            if session.agent_id != agent_id {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "session not found for this agent"})),
+                );
+            }
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
             // collects all tool_use entries keyed by id; pass 2 attaches results.
@@ -1520,16 +1761,34 @@ pub async fn get_agent_session(
                 })),
             )
         }
-        Ok(None) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "session_id": entry.session_id.0.to_string(),
-                "agent_id": agent_id.to_string(),
-                "message_count": 0,
-                "context_window_tokens": 0,
-                "messages": [],
-            })),
-        ),
+        Ok(None) => {
+            // The session row is not materialized in the memory substrate
+            // (e.g. agent just spawned, no messages yet). If the caller pinned
+            // an explicit session_id that does NOT match this agent's
+            // canonical-active id, refuse — otherwise the response would
+            // silently fall back to the agent's own canonical-empty session
+            // under the requested id, hiding the cross-agent guard. The
+            // canonical id is owned by this agent by construction (registry
+            // entry), so matching it is safe to treat as the no-query path.
+            if let Some(requested) = params.session_id {
+                if requested != entry.session_id.0 {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": "session not found for this agent"})),
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": entry.session_id.0.to_string(),
+                    "agent_id": agent_id.to_string(),
+                    "message_count": 0,
+                    "context_window_tokens": 0,
+                    "messages": [],
+                })),
+            )
+        }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
             (
@@ -2148,6 +2407,187 @@ pub async fn export_session(
             ),
         ),
     }
+}
+
+/// GET /api/agents/{id}/sessions/{session_id}/trajectory — Export a redacted
+/// trajectory (audit trail) for the given session.
+///
+/// Returns a privacy-redacted bundle of the session messages plus metadata
+/// (agent name, model, system prompt fingerprint, librefang version). Intended
+/// for support, audit, and compliance flows.
+///
+/// Query parameters:
+/// - `format=json` (default): single JSON object response.
+/// - `format=jsonl`: NDJSON, first line is metadata header, subsequent lines
+///   are messages one-per-line. `Content-Type: application/x-ndjson`.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/sessions/{session_id}/trajectory",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID to export"),
+        ("format" = Option<String>, Query, description = "Response format: 'json' (default) or 'jsonl'"),
+    ),
+    responses(
+        (status = 200, description = "Redacted trajectory bundle", body = serde_json::Value),
+        (status = 400, description = "Invalid agent or session ID"),
+        (status = 404, description = "Agent or session not found"),
+    )
+)]
+pub async fn export_session_trajectory(
+    State(state): State<Arc<AppState>>,
+    Path((id, session_id_str)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    use librefang_kernel::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
+
+    let (
+        err_invalid_id,
+        err_session_invalid,
+        err_not_found,
+        err_session_not_found,
+        err_generic_key,
+    ) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-session-invalid-id"),
+            t.t("api-error-agent-not-found"),
+            "Session not found".to_string(),
+            "api-error-generic".to_string(),
+        )
+    };
+
+    // Parse agent ID.
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err_invalid_id})),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse session ID.
+    let session_id = match session_id_str.parse::<uuid::Uuid>() {
+        Ok(uuid) => librefang_types::agent::SessionId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err_session_invalid})),
+            )
+                .into_response();
+        }
+    };
+
+    // Lookup agent → 404 if missing.
+    let agent_entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": err_not_found})),
+            )
+                .into_response();
+        }
+    };
+
+    // Build redaction policy. Use the agent's workspace as the path-collapse
+    // root when present.
+    let mut policy = RedactionPolicy::default();
+    if let Some(ws) = agent_entry.manifest.workspace.clone() {
+        policy = policy.with_workspace_root(ws);
+    }
+
+    let exporter = TrajectoryExporter::new(state.kernel.memory_substrate().clone(), policy);
+    let agent_ctx = AgentContext {
+        name: agent_entry.name.clone(),
+        model: agent_entry.manifest.model.model.clone(),
+        provider: agent_entry.manifest.model.provider.clone(),
+        system_prompt: agent_entry.manifest.model.system_prompt.clone(),
+    };
+
+    // Sessions are persisted lazily on first message. If the row is missing
+    // but the requested session_id matches the agent's currently-registered
+    // session (authoritative ownership signal from the registry), treat it
+    // as an empty session rather than 404.
+    let bundle = match state.kernel.memory_substrate().get_session(session_id) {
+        Ok(None) if session_id == agent_entry.session_id => {
+            exporter.empty_bundle(agent_id, session_id, agent_ctx)
+        }
+        Ok(_) => match exporter.export_session(agent_id, session_id, agent_ctx) {
+            Ok(b) => b,
+            Err(librefang_types::error::LibreFangError::Memory(msg))
+                if msg.contains("not found") =>
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_session_not_found})),
+                )
+                    .into_response();
+            }
+            Err(librefang_types::error::LibreFangError::Memory(msg))
+                if msg.contains("does not belong") =>
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_session_not_found})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response();
+        }
+    };
+
+    let format = params
+        .get("format")
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "json".to_string());
+
+    let (body, content_type, ext): (String, &'static str, &'static str) = if format == "jsonl" {
+        (bundle.to_jsonl(), "application/x-ndjson", "jsonl")
+    } else {
+        (bundle.to_json().to_string(), "application/json", "json")
+    };
+
+    let filename = format!("trajectory-{}.{}", session_id.0, ext);
+    let disposition = format!("attachment; filename=\"{}\"", filename);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to build response"})),
+            )
+                .into_response()
+        })
 }
 
 /// POST /api/agents/{id}/sessions/import — Import a previously exported session.
@@ -4231,30 +4671,72 @@ const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 /// sourced from `librefang_types::media::{ALLOWED_IMAGE_TYPES,
 /// ALLOWED_AUDIO_TYPES}` so the upload endpoint, the channel bridge, and
 /// `MediaAttachment::validate()` can never drift.
-const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] =
-    &["text/plain", "text/markdown", "text/csv", "application/pdf"];
-
-/// Exact-match MIME allowlist for `/api/agents/{id}/upload`.
 ///
-/// Historically this was the prefix list `["image/", "text/",
-/// "application/pdf", "audio/"]`, which accepted any `image/*` subtype —
-/// including `image/svg+xml` (scriptable → XSS / SSRF via `<use
-/// xlink:href>`), `image/x-icon`, `image/tiff`, `image/heic` — and every
-/// `text/*` subtype including `text/html` and `text/xml`. That
+/// Browsers send a wide variety of `Content-Type` values for the same file
+/// kind (`.json` → `application/json`; `.yaml` → `application/x-yaml` /
+/// `application/yaml`; `.ipynb` → `application/x-ipynb+json` / sometimes
+/// `application/json`), so this list is intentionally exhaustive on the
+/// safe subset.
+const EXTRA_ALLOWED_UPLOAD_TYPES: &[&str] = &[
+    "application/pdf",
+    // Plain text + tables
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "text/tab-separated-values",
+    // Structured data
+    "application/json",
+    "application/x-ipynb+json",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+    "application/toml",
+    "application/x-toml",
+    "application/sql",
+    "application/graphql",
+    // Code (often delivered with these MIMEs)
+    "application/javascript",
+    "application/x-javascript",
+    "application/typescript",
+];
+
+/// MIME allowlist for `/api/agents/{id}/upload`.
+///
+/// Historically this was a permissive prefix list (`image/`, `text/`,
+/// `application/pdf`, `audio/`) which accepted dangerous subtypes like
+/// `image/svg+xml` (scriptable → XSS / SSRF), `text/html` (stored XSS
+/// via downstream renderers), and `text/xml` (XXE / SSRF). That
 /// contradicted the SECURITY.md promise of *"Media type whitelist
 /// (png/jpeg/gif/webp)"*.
 ///
-/// The new check is exact-match against the canonical
-/// `librefang_types::media::ALLOWED_IMAGE_TYPES` +
-/// `ALLOWED_AUDIO_TYPES` constants, so the upload endpoint and
-/// `MediaAttachment::validate()` share a single source of truth and
-/// cannot drift.
+/// The check now combines:
+///   1. Exact match against the canonical media constants
+///      (`ALLOWED_IMAGE_TYPES`, `ALLOWED_AUDIO_TYPES`).
+///   2. Exact match against `EXTRA_ALLOWED_UPLOAD_TYPES` (PDF + curated
+///      text/data/code MIMEs).
+///   3. **Any other `text/*` subtype** EXCEPT `text/html` and `text/xml`.
+///      Browsers tag many code files (`.rs`, `.py`, `.go`, `.sh`, …) as
+///      `text/x-rust`, `text/x-python`, `text/x-shellscript` etc. — those
+///      are safe to inline because the agent loop reads them as plain
+///      UTF-8 and never executes/renders them. HTML/XML stay blocked
+///      because downstream consumers (markdown renderer, XML parsers)
+///      could be tricked into XSS / XXE.
 fn is_allowed_content_type(ct: &str) -> bool {
     use librefang_types::media::{mime_base, ALLOWED_AUDIO_TYPES, ALLOWED_IMAGE_TYPES};
     let base = mime_base(ct);
-    ALLOWED_IMAGE_TYPES.contains(&base.as_str())
+    if ALLOWED_IMAGE_TYPES.contains(&base.as_str())
         || ALLOWED_AUDIO_TYPES.contains(&base.as_str())
         || EXTRA_ALLOWED_UPLOAD_TYPES.contains(&base.as_str())
+    {
+        return true;
+    }
+    if let Some(subtype) = base.strip_prefix("text/") {
+        // Anything text-like is fine to ingest as a plain-text attachment,
+        // except formats that get rendered/parsed by downstream tooling
+        // and could carry an exploit payload.
+        return !matches!(subtype, "html" | "xml");
+    }
+    false
 }
 
 /// POST /api/agents/{id}/upload — Upload a file attachment.
@@ -4701,7 +5183,6 @@ mod tests {
             "text/xml",
             "audio/vnd.rn-realaudio",
             "application/octet-stream",
-            "application/javascript",
         ] {
             assert!(
                 !is_allowed_content_type(bad),

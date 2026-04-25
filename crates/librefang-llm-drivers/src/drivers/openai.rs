@@ -500,6 +500,33 @@ struct OaiPromptTokensDetails {
     cached_tokens: u64,
 }
 
+/// Strip trailing assistant messages that would trigger "prefill not supported"
+/// errors on the Copilot proxy for Claude models.
+/// Only strips assistant messages that have no tool_calls (tool call messages
+/// are part of the protocol and must stay). Checks the model name to only
+/// apply for Claude models which enforce this restriction.
+fn strip_trailing_empty_assistant(messages: &mut Vec<OaiMessage>, model: &str) {
+    let is_claude = model.contains("claude");
+
+    while messages.last().is_some_and(|m| {
+        m.role == "assistant"
+            && m.tool_calls.is_none()
+            && if is_claude {
+                // Claude via Copilot: strip any trailing assistant without tool_calls
+                true
+            } else {
+                // Other models: only strip truly empty messages
+                match &m.content {
+                    None => true,
+                    Some(OaiMessageContent::Text(t)) => t.trim().is_empty(),
+                    _ => false,
+                }
+            }
+    }) {
+        messages.pop();
+    }
+}
+
 impl OpenAIDriver {
     /// Build the `OaiRequest` from a `CompletionRequest`.
     ///
@@ -632,9 +659,26 @@ impl OpenAIDriver {
                         }
                     }
                     if !parts.is_empty() && !has_tool_results {
+                        // session_repair already coalesced adjacent Text
+                        // blocks at the message-content layer, so `parts`
+                        // contains at most one Text run plus any Image /
+                        // File parts. If the whole thing collapses to a
+                        // single Text part we send it as a plain string —
+                        // maximally compatible with the long tail of
+                        // OpenAI-compatible backends whose multi-part
+                        // handling is shaky even at size 1.
+                        let content = if parts.len() == 1 {
+                            if let OaiContentPart::Text { text } = &parts[0] {
+                                OaiMessageContent::Text(text.clone())
+                            } else {
+                                OaiMessageContent::Parts(parts)
+                            }
+                        } else {
+                            OaiMessageContent::Parts(parts)
+                        };
                         oai_messages.push(OaiMessage {
                             role: "user".to_string(),
-                            content: Some(OaiMessageContent::Parts(parts)),
+                            content: Some(content),
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
@@ -725,6 +769,8 @@ impl OpenAIDriver {
                 },
             })
             .collect();
+
+        strip_trailing_empty_assistant(&mut oai_messages, &request.model);
 
         // Guard: an empty message list would produce an unparseable API response
         // (typically "EOF while parsing a value at line 1 column 0").
@@ -1657,6 +1703,19 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
+                // Skip malformed tool calls (empty ID or name can happen if
+                // streaming chunks arrive out of order or are dropped by proxy,
+                // e.g. the GitHub Copilot proxy occasionally drops the function
+                // name chunk). Replaying these to the API yields
+                // "tool call must have a tool call ID and function name" errors.
+                if id.is_empty() || name.is_empty() {
+                    warn!(
+                        tool_id = %id,
+                        tool_name = %name,
+                        "Skipping tool call with empty ID or name from streaming response"
+                    );
+                    continue;
+                }
                 let input: serde_json::Value = match parse_tool_args(arguments) {
                     Ok(v) => ensure_object(v),
                     Err(e) => {
@@ -1691,6 +1750,11 @@ impl LlmDriver for OpenAIDriver {
             }
 
             let stop_reason = match finish_reason.as_deref() {
+                // If the upstream said "tool_calls" but we filtered them all
+                // out (e.g. Copilot proxy dropped function-name chunks),
+                // downgrade to EndTurn so the agent loop doesn't stage an
+                // empty tool-use turn that nothing can execute.
+                Some("tool_calls") if tool_calls.is_empty() => StopReason::EndTurn,
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
@@ -1735,6 +1799,10 @@ impl LlmDriver for OpenAIDriver {
             status: 0,
             message: "Max retries exceeded".to_string(),
         })
+    }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
     }
 }
 
@@ -2591,5 +2659,97 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("extra_body").is_none());
+    }
+
+    fn make_msg(role: &str, content: Option<&str>, has_tool_calls: bool) -> OaiMessage {
+        OaiMessage {
+            role: role.to_string(),
+            content: content.map(|c| OaiMessageContent::Text(c.to_string())),
+            tool_calls: if has_tool_calls {
+                Some(vec![OaiToolCall {
+                    id: "call_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: OaiFunction {
+                        name: "test".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+            } else {
+                None
+            },
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn test_strip_trailing_empty_assistant_non_claude_keeps_non_empty() {
+        // For non-Claude models, a trailing assistant with non-empty text must be kept
+        // (otherwise the agent loop would never terminate).
+        let mut msgs = vec![
+            make_msg("user", Some("hi"), false),
+            make_msg("assistant", Some("hello there"), false),
+        ];
+        strip_trailing_empty_assistant(&mut msgs, "gpt-4o");
+        assert_eq!(
+            msgs.len(),
+            2,
+            "non-empty assistant should survive for non-Claude"
+        );
+    }
+
+    #[test]
+    fn test_strip_trailing_empty_assistant_non_claude_strips_empty() {
+        let mut msgs = vec![
+            make_msg("user", Some("hi"), false),
+            make_msg("assistant", Some("   "), false),
+            make_msg("assistant", None, false),
+        ];
+        strip_trailing_empty_assistant(&mut msgs, "gpt-4o");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn test_strip_trailing_empty_assistant_claude_strips_non_empty() {
+        // Claude via Copilot: strip any trailing assistant without tool_calls,
+        // even if it has non-empty text — Anthropic rejects assistant prefill.
+        let mut msgs = vec![
+            make_msg("user", Some("hi"), false),
+            make_msg("assistant", Some("partial response"), false),
+        ];
+        strip_trailing_empty_assistant(&mut msgs, "claude-3-5-sonnet");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn test_strip_trailing_empty_assistant_keeps_tool_calls() {
+        // Assistant messages with tool_calls are protocol-essential and must stay
+        // for both Claude and non-Claude models.
+        let mut claude_msgs = vec![
+            make_msg("user", Some("hi"), false),
+            make_msg("assistant", None, true),
+        ];
+        strip_trailing_empty_assistant(&mut claude_msgs, "claude-3-5-sonnet");
+        assert_eq!(claude_msgs.len(), 2);
+
+        let mut gpt_msgs = vec![
+            make_msg("user", Some("hi"), false),
+            make_msg("assistant", None, true),
+        ];
+        strip_trailing_empty_assistant(&mut gpt_msgs, "gpt-4o");
+        assert_eq!(gpt_msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_strip_trailing_empty_assistant_claude_keeps_user_last() {
+        let mut msgs = vec![
+            make_msg("assistant", Some("earlier"), false),
+            make_msg("user", Some("now"), false),
+        ];
+        strip_trailing_empty_assistant(&mut msgs, "claude-3-opus");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs.last().unwrap().role, "user");
     }
 }

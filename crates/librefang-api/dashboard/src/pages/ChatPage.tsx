@@ -13,8 +13,9 @@ import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
-import { approvalKeys } from "../lib/queries/keys";
+import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
@@ -210,7 +211,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -334,7 +335,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId)
+    loadAgentSession(loadId, sessionId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -386,7 +387,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           }
         }
       })
-      .catch(() => { /* Session load failure — user will see empty chat */ })
+      .catch((error: unknown) => {
+        // Surface load failures to the user — most commonly a stale
+        // `?sessionId=` URL that no longer points at a session belonging to
+        // this agent (404 from the cross-agent guard) or a malformed UUID
+        // (400). Without this the chat just renders empty with no signal.
+        const message = error instanceof Error ? error.message : t("common.error");
+        onClearError?.(message);
+      })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
@@ -474,6 +482,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 // Refresh agent data so model/provider badge reflects the change
                 if (data.type === "command_result" && cmd === "model") {
                   onModelSwitch?.();
+                }
+                // /new created a fresh backend session; surface its id so the
+                // URL + sessions dropdown reflect the switch in a single step.
+                if (data.type === "command_result" && cmd === "new" && typeof data.session_id === "string" && data.session_id) {
+                  onNewSession?.(data.session_id);
                 }
               }
             } catch { /* ignore non-JSON */ }
@@ -1098,14 +1111,59 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
 // Mirrored client-side so we can reject locally before pushing bytes over
 // the wire — the backend still enforces the real limit.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-// Restricted to image MIMEs because that's the only branch the agent loop
-// currently consumes: `routes/agents.rs::resolve_attachments()` skips any
-// attachment whose Content-Type doesn't start with `image/`. The /upload
-// endpoint itself accepts a wider set (audio for transcription, pdf/text)
-// but those paths aren't wired into the chat send pipeline yet — offering
-// them here would silently drop user context. Mirrors
-// `librefang_types::media::ALLOWED_IMAGE_TYPES`.
-const ATTACHMENT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
+// Types the agent loop currently consumes via
+// `routes/agents.rs::resolve_attachments()`:
+//   - image/* — passed inline as base64 image blocks
+//   - application/pdf — text-extracted via pdf-extract
+//   - text-like files (text/*, JSON, YAML, TOML, code/data extensions) —
+//     read as UTF-8 and inlined as a text block, truncated at 200K chars
+// audio/* is accepted by `/upload` (auto-transcribed via the media engine)
+// but the transcription path returns a stub today, so it's left out here.
+//
+// Extensions in the accept attribute are needed because browsers commonly
+// set empty / `application/octet-stream` for code files like .rs / .py.
+const PDF_MIME = "application/pdf";
+const TEXT_LIKE_EXTENSIONS = [
+  // Plain text & docs
+  ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".log",
+  // Config & data
+  ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf", ".cfg", ".env", ".properties",
+  // Web
+  ".html", ".htm", ".css", ".scss", ".sass", ".less",
+  // JS/TS family
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+  // Other languages
+  ".py", ".rs", ".go", ".java", ".kt", ".kts", ".swift", ".scala", ".clj", ".ex", ".exs",
+  ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".m", ".mm",
+  ".rb", ".php", ".pl", ".lua", ".r", ".jl", ".dart", ".zig", ".nim",
+  // Shell
+  ".sh", ".bash", ".zsh", ".fish", ".ps1",
+  // Query / schema
+  ".sql", ".graphql", ".gql", ".proto",
+  // Notebooks
+  ".ipynb",
+];
+const TEXT_LIKE_MIMES = [
+  "text/*",
+  "application/json",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/x-toml",
+  "application/x-ipynb+json",
+  "application/javascript",
+  "application/x-javascript",
+  "application/typescript",
+  "application/sql",
+  "application/graphql",
+];
+const ATTACHMENT_ACCEPT = [
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+  PDF_MIME,
+  ...TEXT_LIKE_MIMES,
+  ...TEXT_LIKE_EXTENSIONS,
+].join(",");
 
 interface PendingAttachment {
   /** Stable client id used to track this entry across upload state changes. */
@@ -1210,6 +1268,23 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   // ── Attachment upload pipeline ────────────────────────────────────────────
 
   const isImageMime = (mime: string) => mime.startsWith("image/");
+  const isPdfMime = (mime: string) => mime === PDF_MIME;
+  const isTextLikeMime = (mime: string) => {
+    if (mime.startsWith("text/")) return true;
+    return TEXT_LIKE_MIMES.includes(mime);
+  };
+  const hasTextLikeExtension = (filename: string) => {
+    const lower = filename.toLowerCase();
+    return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  };
+  // Browsers often leave `file.type` empty for code files (e.g. `.rs`),
+  // so we fall back to extension matching — matching the backend's
+  // `is_text_like_attachment` logic.
+  const isSupportedFile = (file: File) =>
+    isImageMime(file.type)
+    || isPdfMime(file.type)
+    || isTextLikeMime(file.type)
+    || hasTextLikeExtension(file.name);
 
   const enqueueFiles = useCallback((files: File[]) => {
     if (!agentId || files.length === 0) return;
@@ -1217,11 +1292,12 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
       const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
       const isImage = isImageMime(file.type);
+      // Local preview only makes sense for images; PDFs render as a file chip.
       const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
-      // Drop/paste bypasses <input accept>, so we still need to enforce
-      // image-only here — non-image attachments would upload but the agent
-      // loop would silently discard them.
-      if (!isImage) {
+      // Drop/paste bypasses <input accept>, so we still enforce the
+      // supported-type check here — anything else would upload but the agent
+      // loop would silently discard it.
+      if (!isSupportedFile(file)) {
         setAttachments(prev => [...prev, {
           localId,
           filename: file.name,
@@ -1229,7 +1305,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           contentType: file.type || "application/octet-stream",
           previewUrl,
           status: "error",
-          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Only images are supported (png, jpeg, webp, gif)" }),
+          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Unsupported file type. Allowed: images, PDF, and common text/code files." }),
         }]);
         continue;
       }
@@ -1489,7 +1565,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
         </button>
       </div>
       )}
-      <div className="flex gap-2 sm:gap-3 items-end">
+      <div className="flex gap-2 sm:gap-3 items-start">
         <div className="flex-1">
           <textarea
             ref={textareaRef}
@@ -1570,7 +1646,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
@@ -1578,6 +1654,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
   onOpenConfig: () => void;
+  /** True while the multi-client SSE attach stream is open. */
+  attached?: boolean;
+  /** Number of SSE events received on the attach stream (for operator visibility). */
+  attachedEventCount?: number;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1707,6 +1787,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
             {t("chat.ws_connected")}
+          </Badge>
+        )}
+        {attached && (
+          <Badge variant="brand" dot>
+            <Eye className="h-2.5 w-2.5 mr-0.5" />
+            {t("chat.session_attach_watching", { defaultValue: "Watching" })}
+            {typeof attachedEventCount === "number" && attachedEventCount > 0
+              ? ` (${attachedEventCount})`
+              : ""}
           </Badge>
         )}
         <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
@@ -2104,6 +2193,7 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 export function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
@@ -2233,6 +2323,17 @@ export function ChatPage() {
   // param is present, it wins over the server's canonical active session so
   // two browser tabs on the same agent can hold independent sessions.
   const urlSessionId = search?.sessionId || null;
+  const handleBackendNewSession = useCallback((newSessionId: string) => {
+    if (!selectedAgentId) return;
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId: newSessionId },
+      replace: false,
+    });
+    setSessionVersion(v => v + 1);
+    void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
+  }, [selectedAgentId, navigate, queryClient]);
+
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
@@ -2240,6 +2341,7 @@ export function ChatPage() {
     () => void agentsQuery.refetch(),
     (message) => addToast(message, "error"),
     urlSessionId,
+    handleBackendNewSession,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -2300,6 +2402,17 @@ export function ChatPage() {
   }, [sessionsQuery.data]);
   const activeSessionId = urlSessionId ?? serverActiveSessionId;
 
+  // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
+  // server-side route ships in a separate PR; until that lands the hook
+  // silently no-ops on the 404 it returns. We watch a session that another
+  // client (CLI, desktop, second browser tab) may already be driving over
+  // its own /message/stream connection.
+  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!activeSessionId;
+  const sessionStream = useSessionStream(
+    attachEnabled ? selectedAgentId : null,
+    attachEnabled ? activeSessionId ?? null : null,
+  );
+
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
   // URL carries its own sessionId, and the send path forwards it per-request.
   const handleSwitchSession = useCallback(async (sessionId: string) => {
@@ -2343,10 +2456,17 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
-    if (!agents.some(a => a.id === selectedAgentId)) {
-      setSelectedAgentId("");
+    if (agents.some(a => a.id === selectedAgentId)) return;
+    // Not in the current list — before clearing, try expanding the query
+    // to include hand-spawned agents. The URL may point at a hand agent
+    // while `showHandAgents` (a localStorage toggle) is off, which would
+    // otherwise dump the user back to the default agent on every refresh.
+    if (!showHandAgents) {
+      setShowHandAgents(true);
+      return;
     }
-  }, [agents, selectedAgentId, agentsQuery.data]);
+    setSelectedAgentId("");
+  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent
@@ -2548,6 +2668,8 @@ export function ChatPage() {
               onOpenConfig={() => navigate({ to: "/config" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
+              attached={attachEnabled && sessionStream.isAttached}
+              attachedEventCount={sessionStream.events.length}
               onWebSearchChange={async (mode) => {
                 try {
                   await patchAgentConfigMutation.mutateAsync({

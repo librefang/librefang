@@ -28,7 +28,9 @@ pub mod session;
 pub mod structured;
 pub mod usage;
 
+mod session_store;
 mod substrate;
+pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
 
 // Re-export types for convenience

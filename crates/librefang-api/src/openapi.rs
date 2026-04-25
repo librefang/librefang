@@ -60,6 +60,7 @@ use crate::types;
         routes::create_agent_session,
         routes::switch_agent_session,
         routes::export_session,
+        routes::export_session_trajectory,
         routes::import_session,
         routes::reset_session,
         routes::reboot_session,

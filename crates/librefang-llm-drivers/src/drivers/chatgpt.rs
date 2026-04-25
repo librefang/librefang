@@ -924,6 +924,10 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
 
         Ok(response)
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
+    }
 }
 
 #[cfg(test)]

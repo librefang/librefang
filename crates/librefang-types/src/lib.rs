@@ -26,10 +26,13 @@ pub mod serde_compat;
 pub mod subagent;
 pub mod taint;
 pub mod tool;
+pub mod tool_class;
 pub mod tool_compat;
 pub mod tool_policy;
 pub mod webhook;
 pub mod workflow_template;
+
+pub use tool_class::ToolApprovalClass;
 
 /// Check if a response is a NO\_REPLY sentinel. Matches:
 /// - Exact `"NO_REPLY"` (original behaviour)

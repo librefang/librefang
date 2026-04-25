@@ -232,8 +232,8 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
-  async getAgentSession(id) {
-    return this._c._request("GET", `/api/agents/${id}/session`);
+  async getAgentSession(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/session`, undefined, query);
   }
 
   async compactSession(id) {
@@ -266,6 +266,10 @@ class AgentsResource {
 
   async switchAgentSession(id, session_id) {
     return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/switch`);
+  }
+
+  async exportSessionTrajectory(id, session_id, query) {
+    return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/trajectory`, undefined, query);
   }
 
   async getAgentSkills(id) {

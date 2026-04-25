@@ -4,7 +4,9 @@
 //! system prompt extraction, and retry on 429/529 errors.
 
 use crate::backoff::standard_retry_delay;
-use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CompletionRequest, CompletionResponse, LlmDriver, LlmError, LlmFamily, StreamEvent,
+};
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -762,6 +764,10 @@ impl LlmDriver for AnthropicDriver {
             message: "Max retries exceeded".to_string(),
         })
     }
+
+    fn family(&self) -> LlmFamily {
+        LlmFamily::Anthropic
+    }
 }
 
 /// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
@@ -1029,6 +1035,15 @@ mod tests {
         let msg = Message::user("Hello");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
+    }
+
+    #[test]
+    fn test_anthropic_driver_family_is_anthropic() {
+        let driver = AnthropicDriver::new(
+            "test-key".to_string(),
+            "https://api.anthropic.com".to_string(),
+        );
+        assert_eq!(driver.family(), LlmFamily::Anthropic);
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! Replaces the scattered `push_str` prompt injection throughout the codebase
 //! with a single, testable, ordered prompt builder.
 
+use crate::str_utils::safe_truncate_str;
+
 // ---------------------------------------------------------------------------
 // Skill prompt context budget
 // ---------------------------------------------------------------------------
@@ -1116,7 +1118,9 @@ fn cap_str(s: &str, max_chars: usize) -> String {
             .nth(max_chars)
             .map(|(i, _)| i)
             .unwrap_or(s.len());
-        format!("{}...", &s[..end])
+        // Defense in depth: walk back to a char boundary in case `end` is ever
+        // produced by something other than `char_indices` in the future.
+        format!("{}...", safe_truncate_str(s, end))
     }
 }
 
@@ -1923,5 +1927,37 @@ mod tests {
     fn prompt_builder_canali_uscita_absent_without_notify_owner() {
         let prompt = build_system_prompt(&basic_ctx());
         assert!(!prompt.contains("## Output Channels"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cap_str — UTF-8 boundary safety
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cap_str_handles_cjk_without_panic() {
+        // Each CJK char is 3 bytes in UTF-8.
+        let input = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}";
+        // Capping at 3 chars must not panic and must end at a char boundary.
+        let out = cap_str(input, 3);
+        assert!(out.ends_with("..."));
+        // Strip the suffix and verify the prefix is itself valid UTF-8 that
+        // contains exactly 3 CJK chars.
+        let prefix = out.trim_end_matches("...");
+        assert_eq!(prefix.chars().count(), 3);
+    }
+
+    #[test]
+    fn cap_str_handles_emoji_without_panic() {
+        // Each emoji is 4 bytes in UTF-8.
+        let input = "\u{1f600}\u{1f601}\u{1f602}\u{1f603}\u{1f604}";
+        let out = cap_str(input, 2);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.trim_end_matches("...").chars().count(), 2);
+    }
+
+    #[test]
+    fn cap_str_within_limit_returns_unchanged() {
+        let input = "\u{4f60}\u{597d}";
+        assert_eq!(cap_str(input, 10), input);
     }
 }

@@ -305,6 +305,8 @@ pub struct LibreFangKernel {
     pub(crate) capabilities: CapabilityManager,
     /// Event bus.
     pub(crate) event_bus: EventBus,
+    /// Session lifecycle event bus (push-based pub/sub for session-scoped events).
+    pub(crate) session_lifecycle_bus: Arc<crate::session_lifecycle::SessionLifecycleBus>,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
@@ -1433,6 +1435,13 @@ impl LibreFangKernel {
         &self.event_bus
     }
 
+    /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
+    /// it across tasks).
+    #[inline]
+    pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
+        Arc::clone(&self.session_lifecycle_bus)
+    }
+
     /// OFP peer node (set once at startup).
     #[inline]
     pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
@@ -1790,9 +1799,13 @@ impl LibreFangKernel {
                 config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
                 if !config.provider_urls.contains_key("ollama") {
+                    // Use 127.0.0.1: on macOS `localhost` resolves to ::1 first
+                    // and Ollama only binds IPv4, so the IPv6 attempt fails
+                    // without reliable fallback. See PROVIDER_REGISTRY in
+                    // librefang-llm-drivers for the same reasoning.
                     config.provider_urls.insert(
                         "ollama".to_string(),
-                        "http://localhost:11434/v1".to_string(),
+                        "http://127.0.0.1:11434/v1".to_string(),
                     );
                 }
             } else {
@@ -2631,6 +2644,9 @@ impl LibreFangKernel {
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
+            session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
+                256,
+            )),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
@@ -5048,17 +5064,28 @@ system_prompt = "You are a helpful assistant."
             }
         };
 
-        let mut session = self
+        let existing_session = self
             .memory
             .get_session(effective_session_id)
-            .map_err(KernelError::LibreFang)?
-            .unwrap_or_else(|| librefang_memory::session::Session {
-                id: effective_session_id,
-                agent_id,
-                messages: Vec::new(),
-                context_window_tokens: 0,
-                label: None,
-            });
+            .map_err(KernelError::LibreFang)?;
+        let session_was_new = existing_session.is_none();
+        let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
+            id: effective_session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        });
+
+        // Lifecycle: emit SessionCreated only when get_session returned None.
+        if session_was_new {
+            self.session_lifecycle_bus.publish(
+                crate::session_lifecycle::SessionLifecycleEvent::SessionCreated {
+                    agent_id,
+                    session_id: effective_session_id,
+                },
+            );
+        }
 
         // Check if auto-compaction is needed: message-count OR token-count trigger
         let needs_compact = {
@@ -5317,6 +5344,15 @@ system_prompt = "You are a helpful assistant."
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
+        // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
+        // Arc separately keeps it usable inside the async block via `kernel_clone`.
+        self.session_lifecycle_bus.publish(
+            crate::session_lifecycle::SessionLifecycleEvent::TurnStarted {
+                agent_id,
+                session_id: effective_session_id,
+            },
+        );
+
         let handle = tokio::spawn(async move {
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on
@@ -5516,6 +5552,16 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
 
+                    // Lifecycle: emit TurnCompleted alongside record_usage. Use
+                    // post-loop session length for message_count.
+                    kernel_clone.session_lifecycle_bus.publish(
+                        crate::session_lifecycle::SessionLifecycleEvent::TurnCompleted {
+                            agent_id,
+                            session_id: effective_session_id,
+                            message_count: session.messages.len(),
+                        },
+                    );
+
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
@@ -5643,6 +5689,15 @@ system_prompt = "You are a helpful assistant."
                 Err(e) => {
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
+                    // Lifecycle: emit TurnFailed before cleanup so subscribers
+                    // see the failure with the live session_id still valid.
+                    kernel_clone.session_lifecycle_bus.publish(
+                        crate::session_lifecycle::SessionLifecycleEvent::TurnFailed {
+                            agent_id,
+                            session_id: effective_session_id,
+                            error: e.to_string(),
+                        },
+                    );
                     if !loop_opts.is_fork {
                         kernel_clone.session_interrupts.remove(&agent_id);
                         kernel_clone.running_tasks.remove(&agent_id);
@@ -8541,6 +8596,17 @@ system_prompt = "You are a helpful assistant."
             "ok",
         );
 
+        // Lifecycle: agent has been removed from the registry; sessions tied
+        // to this agent are no longer active. Use the agent name as the
+        // best-effort reason — call sites that need richer context can extend
+        // the variant in a future change.
+        self.session_lifecycle_bus.publish(
+            crate::session_lifecycle::SessionLifecycleEvent::AgentTerminated {
+                agent_id,
+                reason: format!("kill_agent(name={})", entry.name),
+            },
+        );
+
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
         Ok(())
     }
@@ -8632,6 +8698,17 @@ system_prompt = "You are a helpful assistant."
         // Kill existing agents with matching hand tag (reactivation cleanup)
         let hand_tag = format!("hand:{hand_id}");
         let mut saved_triggers = std::collections::BTreeMap::new();
+        // Snapshot cron jobs per-role BEFORE kill_agent destroys them.
+        // kill_agent calls remove_agent_jobs() which deletes the jobs from
+        // memory and persists an empty cron_jobs.json to disk. The
+        // reassign_agent_jobs() call below would always be a no-op without
+        // this snapshot — same pattern as saved_triggers above. Fixes the
+        // silent loss of cron jobs across every daemon restart for
+        // hand-style agents.
+        let mut saved_crons: std::collections::BTreeMap<
+            String,
+            Vec<librefang_types::scheduler::CronJob>,
+        > = std::collections::BTreeMap::new();
         for entry in self.registry.list() {
             if entry.tags.contains(&hand_tag) {
                 let old_id = entry.id;
@@ -8649,13 +8726,22 @@ system_prompt = "You are a helpful assistant."
                         .or_insert_with(Vec::new)
                         .extend(taken_triggers);
                 }
+                let taken_crons = self.cron_scheduler.list_jobs(old_id);
+                if !taken_crons.is_empty() {
+                    saved_crons
+                        .entry(old_role.clone())
+                        .or_default()
+                        .extend(taken_crons);
+                }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
-                // Migrate cron jobs to the same role in the new hand.
-                // Pass `instance_id` (the caller's parameter) so that
-                // `activate_hand()` (None) preserves legacy IDs while
-                // `activate_hand_with_id(_, _, Some(uuid))` uses the new format.
+                // Belt-and-braces: also reassign any jobs that somehow still
+                // reference the old UUID. After kill_agent's remove_agent_jobs
+                // wipes everything, this is a no-op in practice — the snapshot
+                // above is the primary mechanism. Kept as a safety net for
+                // edge cases like out-of-band cron creation between kill and
+                // respawn.
                 let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
@@ -8933,6 +9019,47 @@ system_prompt = "You are a helpful assistant."
             }
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after hand reactivation: {e}");
+            }
+        }
+
+        // Restore cron jobs that were snapshotted before kill_agent. They're
+        // re-added under the new agent_id for the same role. Runtime state
+        // (next_run, last_run) is reset so jobs get a fresh start.
+        if !saved_crons.is_empty() {
+            let mut total_restored = 0usize;
+            for (role, jobs) in saved_crons {
+                if let Some(&new_id) = agent_ids_map.get(&role) {
+                    let mut restored = 0usize;
+                    for mut job in jobs {
+                        job.agent_id = new_id;
+                        job.next_run = None;
+                        job.last_run = None;
+                        if self.cron_scheduler.add_job(job, false).is_ok() {
+                            restored += 1;
+                        }
+                    }
+                    if restored > 0 {
+                        info!(
+                            hand = %hand_id,
+                            role = %role,
+                            agent = %new_id,
+                            restored,
+                            "Restored cron jobs after hand reactivation"
+                        );
+                    }
+                    total_restored += restored;
+                } else {
+                    warn!(
+                        hand = %hand_id,
+                        role = %role,
+                        "Dropping saved cron jobs for removed hand role during reactivation"
+                    );
+                }
+            }
+            if total_restored > 0 {
+                if let Err(e) = self.cron_scheduler.persist() {
+                    warn!("Failed to persist cron jobs after restoration: {e}");
+                }
             }
         }
 
@@ -10399,46 +10526,45 @@ system_prompt = "You are a helpful assistant."
                                 let kh: std::sync::Arc<
                                     dyn librefang_runtime::kernel_handle::KernelHandle,
                                 > = kernel.clone();
-                                // Cron jobs use a synthetic SenderContext so they
-                                // get their own isolated session (channel="cron").
+                                // Cron jobs synthesize their SenderContext locally
+                                // so memory/peer lookups still see channel="cron".
                                 //
-                                // Exception: when `session_mode = "new"` the job
-                                // requested per-fire isolation. In that case we
-                                // skip the fixed channel session and instead pass
-                                // a `session_mode_override` of `New` so each fire
-                                // receives its own fresh SessionId.
+                                // Session resolution by `job.session_mode`:
+                                //   * None / Some(Persistent) — all fires share
+                                //     the agent's `(agent, channel="cron")`
+                                //     persistent session (historical default).
+                                //   * Some(New) — each fire receives a fresh
+                                //     deterministic session via
+                                //     `SessionId::for_cron_run(agent, run_key)`.
+                                //     We pass it as `session_id_override` (rather
+                                //     than relying on `session_mode_override`
+                                //     alone) because the channel-derived branch
+                                //     in `send_message_full` would otherwise
+                                //     win over the mode override and route
+                                //     every fire back to the persistent
+                                //     `(agent, "cron")` session — see
+                                //     CLAUDE.md note on cron + session_mode.
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
-                                let (sender_ctx_owned, mode_override) = if wants_new_session {
-                                    let cron_sender = SenderContext {
-                                        channel: "cron".to_string(),
-                                        user_id: job.peer_id.clone().unwrap_or_default(),
-                                        display_name: "cron".to_string(),
-                                        is_group: false,
-                                        was_mentioned: false,
-                                        thread_id: None,
-                                        account_id: None,
-                                        is_internal_cron: true,
-                                        ..Default::default()
-                                    };
-                                    (
-                                        Some(cron_sender),
-                                        Some(librefang_types::agent::SessionMode::New),
-                                    )
-                                } else {
-                                    let cron_sender = SenderContext {
-                                        channel: "cron".to_string(),
-                                        user_id: job.peer_id.clone().unwrap_or_default(),
-                                        display_name: "cron".to_string(),
-                                        is_group: false,
-                                        was_mentioned: false,
-                                        thread_id: None,
-                                        account_id: None,
-                                        is_internal_cron: true,
-                                        ..Default::default()
-                                    };
-                                    (Some(cron_sender), None)
+                                let cron_sender = SenderContext {
+                                    channel: "cron".to_string(),
+                                    user_id: job.peer_id.clone().unwrap_or_default(),
+                                    display_name: "cron".to_string(),
+                                    is_group: false,
+                                    was_mentioned: false,
+                                    thread_id: None,
+                                    account_id: None,
+                                    is_internal_cron: true,
+                                    ..Default::default()
                                 };
+                                let sender_ctx_owned = Some(cron_sender);
+                                let (mode_override, fire_session_override) =
+                                    crate::cron::cron_fire_session_override(
+                                        agent_id,
+                                        job.session_mode,
+                                        job.id,
+                                        chrono::Utc::now(),
+                                    );
                                 let sender_ctx = sender_ctx_owned.as_ref();
 
                                 // Prune the persistent cron session before firing
@@ -10492,7 +10618,7 @@ system_prompt = "You are a helpful assistant."
                                         sender_ctx,
                                         mode_override,
                                         None,
-                                        None,
+                                        fire_session_override,
                                     ),
                                 )
                                 .await

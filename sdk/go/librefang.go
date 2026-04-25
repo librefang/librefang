@@ -364,8 +364,8 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
-func (r *AgentsResource) GetAgentSession(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, nil)
+func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
 }
 
 func (r *AgentsResource) CompactSession(id string) (interface{}, error) {
@@ -398,6 +398,10 @@ func (r *AgentsResource) ExportSession(id string, session_id string) (interface{
 
 func (r *AgentsResource) SwitchAgentSession(id string, session_id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil, nil)
+}
+
+func (r *AgentsResource) ExportSessionTrajectory(id string, session_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/trajectory", id, session_id), nil, query)
 }
 
 func (r *AgentsResource) GetAgentSkills(id string) (interface{}, error) {

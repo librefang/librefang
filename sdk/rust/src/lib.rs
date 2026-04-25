@@ -340,8 +340,8 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/model", id), Some(data), &[]).await
     }
 
-    pub async fn get_agent_session(&self, id: &str) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/session", id), None, &[]).await
+    pub async fn get_agent_session(&self, id: &str, session_id: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/session", id), None, &[("session_id", session_id)]).await
     }
 
     pub async fn compact_session(&self, id: &str) -> Result<Value> {
@@ -374,6 +374,10 @@ impl AgentsResource {
 
     pub async fn switch_agent_session(&self, id: &str, session_id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/sessions/{}/switch", id, session_id), None, &[]).await
+    }
+
+    pub async fn export_session_trajectory(&self, id: &str, session_id: &str, format: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/sessions/{}/trajectory", id, session_id), None, &[("format", format)]).await
     }
 
     pub async fn get_agent_skills(&self, id: &str) -> Result<Value> {

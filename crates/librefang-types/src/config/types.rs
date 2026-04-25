@@ -39,6 +39,31 @@ pub enum GroupPolicy {
     Ignore,
 }
 
+/// Prefix style applied to outbound agent messages on a channel.
+///
+/// When enabled, the channel bridge wraps the responding agent's reply with
+/// its name so end-users can tell which agent authored the message when
+/// multiple agents share the same channel. Default is `Off` to preserve
+/// existing behavior.
+///
+/// Platform-native identity (e.g. Slack per-message bot username override,
+/// Discord embed author field) is intentionally out of scope here.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixStyle {
+    /// No prefix — byte-identical to pre-feature behavior.
+    #[default]
+    Off,
+    /// Plain bracketed name: `[agent-name] text`.
+    Bracket,
+    /// Bold bracketed name via markdown: `**[agent-name]** text`.
+    /// Renders bold on platforms that support markdown (Discord, Telegram
+    /// markdown mode, Slack mrkdwn treats it as bold too).
+    BoldBracket,
+}
+
 /// Output format hint for channel-specific message formatting.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -174,6 +199,12 @@ pub struct ChannelOverrides {
     /// re-classification in `sticky_heuristic` mode.
     #[serde(default = "default_auto_route_divergence")]
     pub auto_route_divergence_count: u32,
+    /// Prefix outbound messages with the responding agent's name.
+    ///
+    /// Defaults to `PrefixStyle::Off` so enabling this feature is opt-in per
+    /// channel and existing configs keep their current output byte-for-byte.
+    #[serde(default)]
+    pub prefix_agent_name: PrefixStyle,
 }
 
 impl Default for ChannelOverrides {
@@ -204,6 +235,7 @@ impl Default for ChannelOverrides {
             auto_route_confidence_threshold: default_auto_route_confidence(),
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
+            prefix_agent_name: PrefixStyle::Off,
         }
     }
 }
@@ -342,7 +374,10 @@ pub enum SearchProvider {
     Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
+    /// SearXNG self-hosted search (no API key needed).
+    Searxng,
+    /// Auto-select based on available API keys
+    /// (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -367,6 +402,8 @@ pub struct WebConfig {
     pub perplexity: PerplexitySearchConfig,
     /// Jina Search configuration.
     pub jina: JinaSearchConfig,
+    /// SearXNG self-hosted search configuration.
+    pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -385,6 +422,7 @@ impl Default for WebConfig {
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
             jina: JinaSearchConfig::default(),
+            searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -491,6 +529,19 @@ impl Default for JinaSearchConfig {
             no_cache: false,
         }
     }
+}
+
+/// SearXNG self-hosted search configuration.
+///
+/// Requires only a `url`; SearXNG public instances reject `limit` and the
+/// LLM-facing `max_results` is taken from the per-call `tool_args` (the
+/// runtime truncates client-side after fetching).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SearxngSearchConfig {
+    /// Base URL of the SearXNG instance (e.g., "https://search.example.com").
+    /// Empty means the provider is disabled.
+    pub url: String,
 }
 
 /// Web fetch configuration.
