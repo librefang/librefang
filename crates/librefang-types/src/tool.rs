@@ -905,8 +905,7 @@ mod tests {
         for provider in ["gemini", "openai", "groq"] {
             let result = normalize_schema_for_provider(&schema, provider);
             assert_eq!(
-                result["properties"]["tags"]["items"]["type"],
-                "string",
+                result["properties"]["tags"]["items"]["type"], "string",
                 "provider={provider} must inject string items fallback"
             );
         }
@@ -915,7 +914,9 @@ mod tests {
         // injected (Anthropic does not require items for array params).
         let anthropic_result = normalize_schema_for_provider(&schema, "anthropic");
         assert!(
-            anthropic_result["properties"]["tags"].get("items").is_none(),
+            anthropic_result["properties"]["tags"]
+                .get("items")
+                .is_none(),
             "anthropic must NOT inject items — schema is passed through unchanged"
         );
     }
