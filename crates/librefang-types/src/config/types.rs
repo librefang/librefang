@@ -39,6 +39,31 @@ pub enum GroupPolicy {
     Ignore,
 }
 
+/// Prefix style applied to outbound agent messages on a channel.
+///
+/// When enabled, the channel bridge wraps the responding agent's reply with
+/// its name so end-users can tell which agent authored the message when
+/// multiple agents share the same channel. Default is `Off` to preserve
+/// existing behavior.
+///
+/// Platform-native identity (e.g. Slack per-message bot username override,
+/// Discord embed author field) is intentionally out of scope here.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixStyle {
+    /// No prefix — byte-identical to pre-feature behavior.
+    #[default]
+    Off,
+    /// Plain bracketed name: `[agent-name] text`.
+    Bracket,
+    /// Bold bracketed name via markdown: `**[agent-name]** text`.
+    /// Renders bold on platforms that support markdown (Discord, Telegram
+    /// markdown mode, Slack mrkdwn treats it as bold too).
+    BoldBracket,
+}
+
 /// Output format hint for channel-specific message formatting.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -174,6 +199,12 @@ pub struct ChannelOverrides {
     /// re-classification in `sticky_heuristic` mode.
     #[serde(default = "default_auto_route_divergence")]
     pub auto_route_divergence_count: u32,
+    /// Prefix outbound messages with the responding agent's name.
+    ///
+    /// Defaults to `PrefixStyle::Off` so enabling this feature is opt-in per
+    /// channel and existing configs keep their current output byte-for-byte.
+    #[serde(default)]
+    pub prefix_agent_name: PrefixStyle,
 }
 
 impl Default for ChannelOverrides {
@@ -204,6 +235,7 @@ impl Default for ChannelOverrides {
             auto_route_confidence_threshold: default_auto_route_confidence(),
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
+            prefix_agent_name: PrefixStyle::Off,
         }
     }
 }
