@@ -1,0 +1,50 @@
+// Grafana Alloy config for LibreFang's local dev stack.
+//
+// Tails the daemon log file (mounted read-only from the host at
+// /var/log/librefang/) and pushes lines to Loki. Adds a stable
+// `service="librefang"` label so Grafana queries match the service
+// name reported by the OTel/Tempo/Jaeger pipeline — that's what makes
+// the trace ↔ log jump work via Grafana's derived fields once the
+// daemon stamps trace_id into log lines (separate PR; container
+// plumbing is in place either way).
+
+logging {
+	level  = "warn"
+	format = "logfmt"
+}
+
+local.file_match "librefang_logs" {
+	path_targets = [
+		{__path__ = "/var/log/librefang/*.log"},
+	]
+	sync_period = "5s"
+}
+
+loki.source.file "librefang" {
+	targets    = local.file_match.librefang_logs.targets
+	forward_to = [loki.process.librefang.receiver]
+}
+
+loki.process "librefang" {
+	// Stamp every log line with a stable service label and surface the
+	// originating filename (daemon.log vs tui.log) so users can filter
+	// on which surface produced the line.
+	stage.static_labels {
+		values = {
+			service = "librefang",
+			job     = "librefang",
+		}
+	}
+
+	stage.label_drop {
+		values = ["filename"]
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
