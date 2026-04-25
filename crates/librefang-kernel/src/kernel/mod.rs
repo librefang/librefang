@@ -8612,7 +8612,7 @@ system_prompt = "You are a helpful assistant."
                 if !taken_crons.is_empty() {
                     saved_crons
                         .entry(old_role.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .extend(taken_crons);
                 }
                 if let Err(e) = self.kill_agent(old_id) {
