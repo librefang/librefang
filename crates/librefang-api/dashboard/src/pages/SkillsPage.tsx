@@ -1173,6 +1173,7 @@ function SkillDetailModal({
       onClose={onClose}
       title={detail?.name ?? skillName ?? ""}
       size="xl"
+      variant="drawer-right"
     >
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
