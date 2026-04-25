@@ -4042,6 +4042,7 @@ system_prompt = "You are a helpful assistant."
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
+                .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
@@ -5095,10 +5096,13 @@ system_prompt = "You are a helpful assistant."
         // `sender_context.channel == AUTO_DREAM_CHANNEL`.
         let driver = self.resolve_driver(&entry.manifest)?;
 
-        // Look up model's actual context window from the catalog
+        // Look up model's actual context window from the catalog. Filter out
+        // 0 so image/audio entries (no context window) fall through to the
+        // caller's default rather than poisoning compaction math.
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
             cat.find_model(&entry.manifest.model.model)
                 .map(|m| m.context_window as usize)
+                .filter(|w| *w > 0)
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
@@ -6763,10 +6767,13 @@ system_prompt = "You are a helpful assistant."
 
         let driver = self.resolve_driver(&manifest)?;
 
-        // Look up model's actual context window from the catalog
+        // Look up model's actual context window from the catalog. Filter out
+        // 0 so image/audio entries (no context window) fall through to the
+        // caller's default rather than poisoning compaction math.
         let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
+                .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
@@ -8322,7 +8329,9 @@ system_prompt = "You are a helpful assistant."
             &entry.manifest.model.provider,
         );
 
-        // Resolve the agent's actual context window from the model catalog
+        // Resolve the agent's actual context window from the model catalog.
+        // Filter out 0 so image/audio entries (no context window) fall back
+        // to the 200K default instead of feeding 0 into compaction math.
         let agent_ctx_window = self
             .model_catalog
             .read()
@@ -8330,6 +8339,7 @@ system_prompt = "You are a helpful assistant."
             .and_then(|cat| {
                 cat.find_model(&entry.manifest.model.model)
                     .map(|m| m.context_window as usize)
+                    .filter(|w| *w > 0)
             })
             .unwrap_or(200_000);
 

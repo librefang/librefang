@@ -164,6 +164,8 @@ export {
   reloadChannels,
   sendCommsMessage,
   postCommsTask,
+  // attachments
+  uploadAgentFile,
   // media
   generateImage,
   synthesizeSpeech,

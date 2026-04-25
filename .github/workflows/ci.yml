@@ -175,6 +175,46 @@ jobs:
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
 
+  # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
+  # Regenerates openapi.json and the four SDKs and fails if anything differs
+  # from what was committed. The pre-commit hook tries to keep these in sync
+  # locally with a heuristic, but the heuristic is best-effort — this job is
+  # the authoritative gate. Pure Rust changes can move the spec via utoipa
+  # schemas in other crates (librefang-types, etc.), so we run on any rust
+  # change rather than gating on routes/ alone.
+  openapi-drift:
+    name: OpenAPI Drift
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: openapi-drift-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+      - name: Regenerate openapi.json
+        run: cargo xtask codegen --openapi
+      - name: Regenerate SDKs
+        run: python3 scripts/codegen-sdks.py
+      - name: Verify no drift
+        run: |
+          if ! git diff --exit-code -- openapi.json sdk/; then
+            echo "::error::openapi.json or generated SDKs are out of sync with the source code."
+            echo "Reproduce locally:"
+            echo "  cargo xtask codegen --openapi"
+            echo "  python3 scripts/codegen-sdks.py"
+            echo "Then commit the regenerated openapi.json and sdk/* files."
+            exit 1
+          fi
+          echo "openapi.json and SDKs are in sync."
+
   # ── Security audit (independent) ───────────────────────────────────────────────
   security:
     name: Security

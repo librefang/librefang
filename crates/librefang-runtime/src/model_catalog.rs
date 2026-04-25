@@ -161,6 +161,13 @@ impl ModelCatalog {
                             model.provider = pid.clone();
                         }
                     }
+                    // Reject malformed text entries (zero context_window /
+                    // max_output_tokens) so we fail at parse instead of
+                    // silently feeding 0 into compaction / budget math.
+                    if let Err(e) = model.validate() {
+                        tracing::warn!("Skipping invalid catalog entry: {e}");
+                        continue;
+                    }
                     models.push(model);
                 }
             }
@@ -731,6 +738,7 @@ impl ModelCatalog {
                 supports_streaming: supports_tools,
                 supports_thinking,
                 aliases: Vec::new(),
+                ..Default::default()
             });
             added += 1;
         }
@@ -879,6 +887,11 @@ impl ModelCatalog {
                     // No provider info at all — skip this model
                     continue;
                 }
+            }
+            // Modality-aware schema gate (see ModelCatalogEntry::validate).
+            if let Err(e) = model.validate() {
+                tracing::warn!("Skipping invalid catalog entry: {e}");
+                continue;
             }
             let lower_id = model.id.to_lowercase();
             let lower_provider = model.provider.to_lowercase();
@@ -1582,6 +1595,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: vec!["custom-qwen".to_string()],
+            ..Default::default()
         });
 
         assert!(added);
@@ -1610,6 +1624,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         assert!(catalog.add_custom_model(ModelCatalogEntry {
@@ -1626,6 +1641,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         let qwen_count = catalog
@@ -1669,6 +1685,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         // find_model should now return the custom entry, not the builtin
