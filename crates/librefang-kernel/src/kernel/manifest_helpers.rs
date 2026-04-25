@@ -307,26 +307,6 @@ const SKILL_REFERENCE_TAIL_MARKER: &str = "\n\n---\n\n## Reference Knowledge";
 /// match the marker and cause `find()` to truncate user-authored content.
 const TEAM_TAIL_MARKER: &str = "\n\n---\n\n## Your Team";
 
-/// Pre-fence form of the team marker, kept only for backwards-compatible
-/// strip on agents that were activated before the fence was added. Detection
-/// (`find()`) checks the fenced form first; this is only consulted when the
-/// fenced form is absent. Re-append always uses the fenced form, so a single
-/// drift cycle migrates each agent forward and this constant becomes dead
-/// once every persisted prompt has been re-rendered.
-///
-/// SAFETY: this string is a substring of [`TEAM_TAIL_MARKER`]
-/// (`"\n\n---\n\n## Your Team"`), so a naive `find()` against this constant
-/// will match a fenced prompt and truncate too late, dropping the
-/// `\n\n---\n\n` fence into the visible prompt. Every caller MUST check
-/// [`TEAM_TAIL_MARKER`] first and only fall back to this when the fenced
-/// form is absent (see [`apply_team_block_to_manifest`]).
-///
-/// TODO(remove after migration window): once telemetry confirms every
-/// persisted prompt has been touched by at least one drift cycle (post-#3164
-/// rollout), drop this constant and its fallback branch. Tracking issue:
-/// see `LEGACY_TEAM_TAIL_MARKER` references for the cleanup sites.
-const LEGACY_TEAM_TAIL_MARKER: &str = "\n\n## Your Team";
-
 /// Append (or refresh) the rendered `## User Configuration` block on a
 /// manifest's `model.system_prompt` from a hand's `[[settings]]` schema +
 /// instance config.
@@ -454,22 +434,12 @@ pub(super) fn apply_team_block_to_manifest(
     // Always strip first — covers the case where the hand was edited from
     // multi-agent down to single-agent so the stale Team tail must drop.
     //
-    // Check the fenced marker first; fall back to the pre-fence form so
-    // prompts persisted before the fence was introduced still get cleaned
-    // up. Once stripped + re-appended, the prompt carries the fenced form
-    // and the legacy lookup never matches again for that agent.
-    //
     // Ordering note: this helper is the LAST tail appended at activation
     // (settings -> reference -> team). Truncating at the team marker only
     // drops the team block itself — no later tail can be lost. If a future
     // change inserts a new tail after team, this strip will need to widen
     // (or that tail's helper must run before this one).
-    let strip_idx = manifest
-        .model
-        .system_prompt
-        .find(TEAM_TAIL_MARKER)
-        .or_else(|| manifest.model.system_prompt.find(LEGACY_TEAM_TAIL_MARKER));
-    if let Some(idx) = strip_idx {
+    if let Some(idx) = manifest.model.system_prompt.find(TEAM_TAIL_MARKER) {
         manifest.model.system_prompt.truncate(idx);
     }
 
@@ -866,33 +836,6 @@ system_prompt = "BASE-WORKER"
         assert!(
             !prompt.contains("- **lead**:"),
             "self must not appear in own team list"
-        );
-    }
-
-    #[test]
-    fn apply_team_block_migrates_legacy_unfenced_tail_in_place() {
-        // Regression: agents activated before the fence was added carry the
-        // pre-fence form (`\n\n## Your Team`). Re-rendering must strip the
-        // legacy tail in place and re-append using the fenced form so a
-        // single drift cycle migrates the persisted blob forward.
-        let def = parse_hand(MULTI_AGENT_HAND, "");
-        let mut m = manifest_with_prompt(
-            "BASE\n\n## Your Team\n\n- **worker**: stale text (use agent_send to message)",
-        );
-        apply_team_block_to_manifest(&mut m, "lead", &def);
-        let prompt = &m.model.system_prompt;
-        assert!(
-            !prompt.contains("stale text"),
-            "legacy unfenced tail must be stripped, not duplicated"
-        );
-        assert_eq!(
-            prompt.matches("## Your Team").count(),
-            1,
-            "exactly one team block must remain after migration"
-        );
-        assert!(
-            prompt.contains("\n\n---\n\n## Your Team\n\n"),
-            "migrated prompt must carry the fenced form"
         );
     }
 
