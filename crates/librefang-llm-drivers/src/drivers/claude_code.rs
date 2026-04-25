@@ -1149,6 +1149,10 @@ impl LlmDriver for ClaudeCodeDriver {
             usage: final_usage,
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::Anthropic
+    }
 }
 
 /// Check if the Claude Code CLI is available.

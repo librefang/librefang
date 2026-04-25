@@ -950,6 +950,10 @@ impl LlmDriver for QwenCodeDriver {
         let prepared = Self::build_prompt(&request);
         self.stream_inner(&prepared, &request, &tx).await
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
+    }
 }
 
 /// Check if the Qwen Code CLI is available.

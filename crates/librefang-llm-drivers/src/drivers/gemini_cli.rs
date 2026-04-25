@@ -220,6 +220,10 @@ impl LlmDriver for GeminiCliDriver {
             },
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::Google
+    }
 }
 
 /// Check if the Gemini CLI is available.

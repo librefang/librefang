@@ -1736,6 +1736,10 @@ impl LlmDriver for OpenAIDriver {
             message: "Max retries exceeded".to_string(),
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
+    }
 }
 
 /// Extract `<think>...</think>` blocks from content text.
