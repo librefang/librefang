@@ -153,7 +153,11 @@ impl AuditCheck for VaultKeyCheck {
                 );
             }
         };
-        match base64::engine::general_purpose::STANDARD.decode(raw.trim().as_bytes()) {
+        // Match production: `decode_master_key` in librefang-extensions/src/vault.rs
+        // does NOT trim — so neither do we. A trailing newline that production
+        // would reject must also fail here, otherwise this check is a false
+        // negative (says OK while real vault unlock errors out).
+        match base64::engine::general_purpose::STANDARD.decode(raw.as_bytes()) {
             Err(e) => AuditResult::error(
                 NAME,
                 format!("LIBREFANG_VAULT_KEY is not valid base64: {e}"),
@@ -229,7 +233,18 @@ impl AuditCheck for ApiListenAddrCheck {
                         .into(),
                 ),
             ),
-            Ok(addr) if addr.port() != 0 && addr.port() < 1024 => AuditResult::warn(
+            Ok(addr) if addr.port() == 0 => AuditResult::warn(
+                NAME,
+                format!(
+                    "api_listen `{addr}` uses port 0 (OS-assigned ephemeral); clients can't \
+                     discover the daemon URL after bind."
+                ),
+                Some(
+                    "Pick an explicit port (default 4545), e.g. `127.0.0.1:4545`."
+                        .into(),
+                ),
+            ),
+            Ok(addr) if addr.port() < 1024 => AuditResult::warn(
                 NAME,
                 format!(
                     "api_listen port {} is privileged (<1024); daemon will fail to bind without root.",
@@ -302,10 +317,24 @@ mod tests {
 
     // ── VaultKeyCheck ──────────────────────────────────────────────────────
 
+    /// Process-wide lock for tests that mutate `LIBREFANG_VAULT_KEY`. `cargo
+    /// test` runs tests in parallel by default, and env-var mutation is
+    /// process-global, so without serialization these races clobber each
+    /// other (and `run_all_returns_one_result_per_check`, which also reads
+    /// the env var). No external dep needed — std `Mutex` is enough.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`.
-    /// Restores the original value on drop. Tests touching env vars must
-    /// not run in parallel — see `--test-threads=1` if expanded.
+    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests
+    /// (and any other env-var test in this binary) don't race. The original
+    /// value is restored before the lock is released.
     fn with_vault_key<F: FnOnce() -> AuditResult>(value: Option<&str>, f: F) -> AuditResult {
+        // poison is fine — a panicking sibling test shouldn't make the rest
+        // hang or incorrectly skip.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("LIBREFANG_VAULT_KEY").ok();
         match value {
             Some(v) => std::env::set_var("LIBREFANG_VAULT_KEY", v),
@@ -391,6 +420,18 @@ mod tests {
     }
 
     #[test]
+    fn api_listen_port_zero_is_warn() {
+        // Port 0 = OS-assigned ephemeral. Daemon binds, but the chosen port
+        // is unknowable to clients — practically broken for a service users
+        // are supposed to connect to. Must NOT silently pass.
+        let tmp = tmp_home();
+        write_config(tmp.path(), "api_listen = \"127.0.0.1:0\"\n");
+        let ctx = ctx_with_home(tmp.path().to_path_buf());
+        let r = ApiListenAddrCheck.run(&ctx);
+        assert_eq!(r.severity, Severity::Warn);
+    }
+
+    #[test]
     fn api_listen_normal_port_is_pass() {
         let tmp = tmp_home();
         write_config(tmp.path(), "api_listen = \"127.0.0.1:4545\"\n");
@@ -436,6 +477,11 @@ mod tests {
 
     #[test]
     fn run_all_returns_one_result_per_check() {
+        // `run_all` invokes `VaultKeyCheck`, which reads `LIBREFANG_VAULT_KEY`.
+        // Hold `env_lock` so this can't race with `with_vault_key` callers
+        // mid-flight — otherwise the result count is fine, but the
+        // observed env state is non-deterministic for any future asserts here.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tmp_home();
         let ctx = ctx_with_home(tmp.path().to_path_buf());
         let results = run_all(&ctx);
