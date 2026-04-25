@@ -420,3 +420,60 @@ max_history_messages = 12
 
 ---
 
+### `[provider_request_timeout_secs]`
+
+按 provider 的 LLM driver HTTP 请求 timeout。没设条目就用 driver 内置默认（OpenAI 兼容驱动通常 60 秒，Ollama 更长）。
+
+```toml
+[provider_request_timeout_secs]
+ollama = 300        # 本地模型加载 + 首 token 冷启动
+anthropic = 120
+openai = 90
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| (provider id) → `u64` | map | `{}` | 按 provider 的总请求 timeout（秒）。`complete()` 和 `stream()` 路径都生效。driver 缓存 key 包含 timeout，所以改了会触发新 client 构造（不会跨 timeout 命中缓存）。 |
+
+按模型粒度的覆盖也可以在 agent 层 `agent.toml: model.request_timeout_secs` 实现，给慢的长上下文模型做精细调优。
+
+---
+
+### `[browser]`
+
+浏览器工具配置。LibreFang 默认按会话启动一个本地 Chromium 实例。设 `cdp_endpoint` 改为附加到已运行的浏览器（Browserless、带 `--remote-debugging-port` 的 headful Chrome 等）。
+
+```toml
+[browser]
+# 默认：每个 session 启动本地无头 Chromium
+# 设了 cdp_endpoint 改为 attach 到已存在 / 远程的浏览器
+cdp_endpoint = "http://browser-host:9222"
+cdp_auth_token_env = "LIBREFANG_CDP_TOKEN"   # 可选 bearer token 环境变量
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `cdp_endpoint` | string \| null | `null` | 设了就走 CDP attach 而不是启动新进程。可接受形式：`http[s]://host:port`、`ws[s]://host:port`、`ws[s]://host:port/devtools/browser/<id>`。HTTP 形式会通过 `/json/list` 发现一个 page。 |
+| `cdp_auth_token_env` | string \| null | `null` | 持有 bearer token 的环境变量名（Browserless 等用）。token 以 `Authorization: Bearer <token>` 发送。 |
+
+attach 模式下，本地启动路径被完全绕过；`Drop` 不会终止外部浏览器。
+
+---
+
+### Cron 会话大小上限
+
+当 cron 任务共用持久 session 时（默认 `session_mode = "persistent"`），那个 session 的历史每次触发都增长。两个可选上限会在每次触发前从最早消息开始裁掉，避免膨胀。
+
+```toml
+[kernel]
+cron_session_max_tokens = 50000
+cron_session_max_messages = 100
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `cron_session_max_tokens` | u64 \| null | `null` | 估算 token 的硬上限（用 `librefang_runtime::compactor::estimate_token_count`）。`null` = 不限制。 |
+| `cron_session_max_messages` | u64 \| null | `null` | 消息数硬上限。`null` = 不限制。 |
+
+`session_mode = "new"` 时**跳过**裁切——那种触发本身就拿全新 session，不会带旧状态。两个上限同时生效（哪个先触发哪个裁更多）。
+

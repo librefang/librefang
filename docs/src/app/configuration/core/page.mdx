@@ -422,3 +422,62 @@ max_history_messages = 12
 For deeper detail (what gets trimmed, the safe-trim algorithm, where the value flows through the runtime), see the architecture note at `docs/architecture/message-history-trimming.md`.
 
 ---
+
+### `[provider_request_timeout_secs]`
+
+Per-provider HTTP request timeout for LLM driver calls. Without an entry, the driver uses its built-in default (typically 60 s for the OpenAI-compatible driver, longer for Ollama).
+
+```toml
+[provider_request_timeout_secs]
+ollama = 300        # local model loading + first-token cold start
+anthropic = 120
+openai = 90
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| (provider id) → `u64` | map | `{}` | Per-provider total request timeout in seconds. Applies to both `complete()` and `stream()` paths. The driver cache key includes the timeout so changing it triggers fresh client construction (no cross-timeout cache hits). |
+
+Per-model overrides are also possible at the agent level via `agent.toml: model.request_timeout_secs` for fine-grained tuning of slow long-context models.
+
+---
+
+### `[browser]`
+
+Browser tool configuration. By default LibreFang launches a local Chromium instance. Set `cdp_endpoint` to attach to an already-running browser (Browserless, headful Chrome with `--remote-debugging-port`, etc.) instead.
+
+```toml
+[browser]
+# Default: spawn a local headless Chromium per session
+# Set cdp_endpoint to attach to a remote / pre-launched browser instead
+cdp_endpoint = "http://browser-host:9222"
+cdp_auth_token_env = "LIBREFANG_CDP_TOKEN"   # optional bearer token env var
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cdp_endpoint` | string \| null | `null` | When set, attach via CDP instead of spawning. Accepted: `http[s]://host:port`, `ws[s]://host:port`, `ws[s]://host:port/devtools/browser/<id>`. The HTTP form discovers a page via `/json/list`. |
+| `cdp_auth_token_env` | string \| null | `null` | Env-var name holding a bearer token (Browserless and similar). Token is sent as `Authorization: Bearer <token>`. |
+
+In attach mode the existing local-launch path is completely bypassed; `Drop` does not terminate the external browser.
+
+---
+
+### Cron session size limits
+
+When cron jobs share a persistent session (the default — `session_mode = "persistent"`), that session's history grows with each fire. Two optional caps prune the oldest messages from the front before each fire so the session does not balloon.
+
+```toml
+[kernel]
+cron_session_max_tokens = 50000
+cron_session_max_messages = 100
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cron_session_max_tokens` | u64 \| null | `null` | Hard cap on estimated tokens (via `librefang_runtime::compactor::estimate_token_count`). `null` = uncapped. |
+| `cron_session_max_messages` | u64 \| null | `null` | Hard cap on message count. `null` = uncapped. |
+
+Pruning is **skipped** when `session_mode = "new"` — those fires always start fresh and never carry stale state. Both caps apply jointly (whichever fires first prunes more).
+
+---
