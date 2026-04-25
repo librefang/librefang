@@ -3071,6 +3071,21 @@ impl LibreFangKernel {
                                                             &role,
                                                             &def,
                                                         );
+                                                    } else {
+                                                        // Hand membership is known (we're inside
+                                                        // the `hand:<id>` branch) but the role tag
+                                                        // wasn't stamped — this agent will boot
+                                                        // without skill discoverability or peer
+                                                        // awareness until somebody re-runs
+                                                        // `hand activate`. Log so the silent
+                                                        // degradation is at least greppable.
+                                                        debug!(
+                                                            agent = %name,
+                                                            hand = %hand_id,
+                                                            "hand_role:<role> tag missing on \
+                                                             hand-derived agent; skipping skill/team \
+                                                             tail re-render until next hand activate"
+                                                        );
                                                     }
                                                 }
                                             }

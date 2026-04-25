@@ -301,10 +301,19 @@ const USER_CONFIG_TAIL_MARKER: &str = "\n\n---\n\n## User Configuration";
 const SKILL_REFERENCE_TAIL_MARKER: &str = "\n\n---\n\n## Reference Knowledge";
 
 /// Marker that introduces the rendered `## Your Team` tail — peer roster
-/// for multi-agent hands. Note the separator differs from the other two
-/// (no leading `\n\n---\n\n`) because activation appends it directly
-/// after the skill content rather than as a fresh markdown section.
-const TEAM_TAIL_MARKER: &str = "\n\n## Your Team";
+/// for multi-agent hands. Uses the same `\n\n---\n\n` fence as the other
+/// two tails so the heading is unambiguous: a SKILL.md or base prompt that
+/// happens to contain a literal `## Your Team` line cannot accidentally
+/// match the marker and cause `find()` to truncate user-authored content.
+const TEAM_TAIL_MARKER: &str = "\n\n---\n\n## Your Team";
+
+/// Pre-fence form of the team marker, kept only for backwards-compatible
+/// strip on agents that were activated before the fence was added. Detection
+/// (`find()`) checks the fenced form first; this is only consulted when the
+/// fenced form is absent. Re-append always uses the fenced form, so a single
+/// drift cycle migrates each agent forward and this constant becomes dead
+/// once every persisted prompt has been re-rendered.
+const LEGACY_TEAM_TAIL_MARKER: &str = "\n\n## Your Team";
 
 /// Append (or refresh) the rendered `## User Configuration` block on a
 /// manifest's `model.system_prompt` from a hand's `[[settings]]` schema +
@@ -382,6 +391,14 @@ pub(super) fn apply_skill_reference_block_to_manifest(
 ) {
     // Always strip first — covers the case where skill content is now
     // empty (skill removed from hand) so the stale tail doesn't linger.
+    //
+    // Ordering note: at activation this helper runs BEFORE
+    // `apply_team_block_to_manifest`, so a stale team tail (which sits
+    // downstream of the skill marker) is also dropped by this truncate
+    // and re-appended afterwards. If callers ever invert the order,
+    // `apply_team_block_to_manifest` must be widened to strip both
+    // markers — otherwise a re-render leaves the team block stranded
+    // before the freshly appended skill block.
     if let Some(idx) = manifest
         .model
         .system_prompt
@@ -424,7 +441,23 @@ pub(super) fn apply_team_block_to_manifest(
 ) {
     // Always strip first — covers the case where the hand was edited from
     // multi-agent down to single-agent so the stale Team tail must drop.
-    if let Some(idx) = manifest.model.system_prompt.find(TEAM_TAIL_MARKER) {
+    //
+    // Check the fenced marker first; fall back to the pre-fence form so
+    // prompts persisted before the fence was introduced still get cleaned
+    // up. Once stripped + re-appended, the prompt carries the fenced form
+    // and the legacy lookup never matches again for that agent.
+    //
+    // Ordering note: this helper is the LAST tail appended at activation
+    // (settings -> reference -> team). Truncating at the team marker only
+    // drops the team block itself — no later tail can be lost. If a future
+    // change inserts a new tail after team, this strip will need to widen
+    // (or that tail's helper must run before this one).
+    let strip_idx = manifest
+        .model
+        .system_prompt
+        .find(TEAM_TAIL_MARKER)
+        .or_else(|| manifest.model.system_prompt.find(LEGACY_TEAM_TAIL_MARKER));
+    if let Some(idx) = strip_idx {
         manifest.model.system_prompt.truncate(idx);
     }
 
@@ -447,7 +480,7 @@ pub(super) fn apply_team_block_to_manifest(
     }
 
     if !peer_lines.is_empty() {
-        let team_block = format!("\n\n## Your Team\n\n{}", peer_lines.join("\n"));
+        let team_block = format!("\n\n---\n\n## Your Team\n\n{}", peer_lines.join("\n"));
         manifest.model.system_prompt = format!("{}{team_block}", manifest.model.system_prompt);
     }
 }
@@ -811,12 +844,43 @@ system_prompt = "BASE-WORKER"
         let mut m = manifest_with_prompt("BASE");
         apply_team_block_to_manifest(&mut m, "lead", &def);
         let prompt = &m.model.system_prompt;
-        assert!(prompt.contains("\n\n## Your Team\n\n"));
+        assert!(
+            prompt.contains("\n\n---\n\n## Your Team\n\n"),
+            "team block must use the fenced marker so a literal `## Your Team` \
+             elsewhere in the prompt cannot collide with the strip lookup"
+        );
         assert!(prompt.contains("- **worker**:"));
         assert!(prompt.contains("executes tasks (use agent_send to message)"));
         assert!(
             !prompt.contains("- **lead**:"),
             "self must not appear in own team list"
+        );
+    }
+
+    #[test]
+    fn apply_team_block_migrates_legacy_unfenced_tail_in_place() {
+        // Regression: agents activated before the fence was added carry the
+        // pre-fence form (`\n\n## Your Team`). Re-rendering must strip the
+        // legacy tail in place and re-append using the fenced form so a
+        // single drift cycle migrates the persisted blob forward.
+        let def = parse_hand(MULTI_AGENT_HAND, "");
+        let mut m = manifest_with_prompt(
+            "BASE\n\n## Your Team\n\n- **worker**: stale text (use agent_send to message)",
+        );
+        apply_team_block_to_manifest(&mut m, "lead", &def);
+        let prompt = &m.model.system_prompt;
+        assert!(
+            !prompt.contains("stale text"),
+            "legacy unfenced tail must be stripped, not duplicated"
+        );
+        assert_eq!(
+            prompt.matches("## Your Team").count(),
+            1,
+            "exactly one team block must remain after migration"
+        );
+        assert!(
+            prompt.contains("\n\n---\n\n## Your Team\n\n"),
+            "migrated prompt must carry the fenced form"
         );
     }
 
