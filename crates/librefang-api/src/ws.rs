@@ -1174,19 +1174,23 @@ async fn handle_command(
 ) -> serde_json::Value {
     match cmd {
         "new" => match state.kernel.create_agent_session(agent_id, None) {
-            Ok(info) => {
-                let sid = info
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                serde_json::json!({
+            Ok(info) => match info.get("session_id").and_then(|v| v.as_str()) {
+                Some(sid) if !sid.is_empty() => serde_json::json!({
                     "type": "command_result",
                     "command": "new",
                     "message": "New session created.",
                     "session_id": sid,
-                })
-            }
+                }),
+                // The kernel returned success but no session_id — treat as a
+                // hard failure rather than emitting an empty string the
+                // dashboard would silently swallow (frontend reads `sid`
+                // truthy and skips the navigate, leaving the URL stale on the
+                // old session). Surface explicitly so the user sees the bug.
+                _ => serde_json::json!({
+                    "type": "error",
+                    "content": "New session failed: kernel returned no session_id",
+                }),
+            },
             Err(e) => {
                 serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
             }
