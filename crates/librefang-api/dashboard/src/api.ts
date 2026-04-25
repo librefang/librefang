@@ -1155,6 +1155,17 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
   return (await response.json()) as { text: string; provider: string; model: string };
 }
 
+// HTTP header values must be visible-ASCII (RFC 7230). Browsers reject
+// non-ASCII bytes in fetch headers, so we replace anything outside
+// 0x20–0x7e (and the header-breaking quote/CR/LF) with `_` before sending
+// the original filename. This loses fidelity for unicode names but never
+// throws, and keeps the server-side label render-safe — no decode pass
+// needed at display time.
+function sanitizeFilenameForHeader(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.replace(/[^\x20-\x7e]|["\r\n]/g, "_");
+}
+
 // Upload a chat attachment for an agent. Body is the raw file bytes; backend
 // expects `Content-Type` to match the file MIME and `X-Filename` for the
 // original name. Server-side limits: 10MB and an exact MIME allowlist
@@ -1164,7 +1175,7 @@ export async function uploadAgentFile(agentId: string, file: File): Promise<Agen
     method: "POST",
     headers: buildHeaders({
       "Content-Type": file.type || "application/octet-stream",
-      "X-Filename": encodeURIComponent(file.name),
+      "X-Filename": sanitizeFilenameForHeader(file.name),
     }),
     body: file,
   });

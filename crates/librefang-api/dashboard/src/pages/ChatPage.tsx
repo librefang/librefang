@@ -906,13 +906,13 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                   >
                     <img
                       src={src}
-                      alt={img.filename ? decodeURIComponent(img.filename) : "attachment"}
+                      alt={img.filename || "attachment"}
                       className="block max-h-[240px] w-auto object-contain bg-main/30"
                     />
                   </a>
                 );
               }
-              const label = img.filename ? decodeURIComponent(img.filename) : img.file_id;
+              const label = img.filename || img.file_id;
               return (
                 <a
                   key={img.file_id}
@@ -1098,10 +1098,14 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
 // Mirrored client-side so we can reject locally before pushing bytes over
 // the wire — the backend still enforces the real limit.
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-// Mirrors `is_allowed_content_type` in routes/agents.rs. Kept liberal to
-// avoid divergence — if the server's allowlist tightens, the upload will
-// fail with a 400 and we surface that error per-attachment.
-const ATTACHMENT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,audio/mpeg,audio/wav,audio/webm,audio/ogg,audio/mp4,text/plain,text/markdown,text/csv,application/pdf";
+// Restricted to image MIMEs because that's the only branch the agent loop
+// currently consumes: `routes/agents.rs::resolve_attachments()` skips any
+// attachment whose Content-Type doesn't start with `image/`. The /upload
+// endpoint itself accepts a wider set (audio for transcription, pdf/text)
+// but those paths aren't wired into the chat send pipeline yet — offering
+// them here would silently drop user context. Mirrors
+// `librefang_types::media::ALLOWED_IMAGE_TYPES`.
+const ATTACHMENT_ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
 
 interface PendingAttachment {
   /** Stable client id used to track this entry across upload state changes. */
@@ -1212,7 +1216,23 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
     for (const file of files) {
       const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
-      const previewUrl = isImageMime(file.type) ? URL.createObjectURL(file) : undefined;
+      const isImage = isImageMime(file.type);
+      const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
+      // Drop/paste bypasses <input accept>, so we still need to enforce
+      // image-only here — non-image attachments would upload but the agent
+      // loop would silently discard them.
+      if (!isImage) {
+        setAttachments(prev => [...prev, {
+          localId,
+          filename: file.name,
+          size: file.size,
+          contentType: file.type || "application/octet-stream",
+          previewUrl,
+          status: "error",
+          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Only images are supported (png, jpeg, webp, gif)" }),
+        }]);
+        continue;
+      }
       if (tooLarge) {
         setAttachments(prev => [...prev, {
           localId,
