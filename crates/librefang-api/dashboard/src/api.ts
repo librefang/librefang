@@ -2992,6 +2992,44 @@ export interface McpTransport {
   url?: string;
 }
 
+/** TaintRuleId — must match the snake-cased serde tag of the Rust enum. */
+export type TaintRuleId =
+  | "authorization_literal"
+  | "key_value_secret"
+  | "well_known_prefix"
+  | "opaque_token"
+  | "pii_email"
+  | "pii_phone"
+  | "pii_credit_card"
+  | "pii_ssn"
+  | "sensitive_key_name";
+
+/** Tool-level baseline action when no path entry matches. */
+export type McpTaintToolAction = "scan" | "skip";
+
+/** Severity action for a named rule set. */
+export type McpTaintRuleSetAction = "block" | "warn" | "log";
+
+export interface McpTaintPathPolicy {
+  skip_rules: TaintRuleId[];
+}
+
+export interface McpTaintToolPolicy {
+  default?: McpTaintToolAction;
+  paths?: Record<string, McpTaintPathPolicy>;
+  rule_sets?: string[];
+}
+
+export interface McpTaintPolicy {
+  tools?: Record<string, McpTaintToolPolicy>;
+}
+
+export interface NamedTaintRuleSet {
+  name: string;
+  action?: McpTaintRuleSetAction;
+  rules?: TaintRuleId[];
+}
+
 export interface McpServerConfigured {
   /** Stable identifier; falls back to `name` when the backend omits it. */
   id?: string;
@@ -3003,6 +3041,10 @@ export interface McpServerConfigured {
   /** Catalog template this server was installed from, when applicable. */
   template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
+  /** Issue #3050: per-server taint scanning toggle. */
+  taint_scanning?: boolean;
+  /** Issue #3050: granular per-tool / per-path / per-rule taint policy. */
+  taint_policy?: McpTaintPolicy;
 }
 
 export interface McpServerConnected {

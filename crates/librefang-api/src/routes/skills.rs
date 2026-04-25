@@ -3344,6 +3344,10 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
                 "auth_state": auth_state,
+                // Issue #3050: surface taint config so the dashboard tree
+                // editor can hydrate without a separate fetch.
+                "taint_scanning": s.taint_scanning,
+                "taint_policy": s.taint_policy,
             })
         })
         .collect();
@@ -3441,6 +3445,10 @@ pub async fn get_mcp_server(
         "timeout_secs": entry.timeout_secs,
         "env": entry.env,
         "connected": false,
+        // Issue #3050: surface taint config so the dashboard tree editor
+        // can hydrate without a separate fetch.
+        "taint_scanning": entry.taint_scanning,
+        "taint_policy": entry.taint_policy,
     });
 
     // Check live connection status

@@ -90,6 +90,7 @@ async fn test_http_connect_calls_oauth_provider_load_token() {
         oauth_config: None,
         taint_scanning: true,
         taint_policy: None,
+        taint_rule_sets: vec![],
         roots: vec![],
     };
 

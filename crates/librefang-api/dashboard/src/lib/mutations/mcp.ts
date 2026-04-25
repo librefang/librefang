@@ -8,6 +8,7 @@ import {
   startMcpAuth,
   revokeMcpAuth,
 } from "../http/client";
+import type { McpTaintPolicy } from "../../api";
 import { mcpKeys } from "../queries/keys";
 
 function invalidateMcpServer(qc: QueryClient, id: string) {
@@ -82,5 +83,36 @@ export function useRevokeMcpAuth() {
   return useMutation({
     mutationFn: revokeMcpAuth,
     onSuccess: (_data, id) => invalidateMcpServer(qc, id),
+  });
+}
+
+/**
+ * Issue #3050: dedicated mutation for the taint policy tree editor.
+ *
+ * The PUT `/api/mcp/servers/{name}` route revalidates the body as a full
+ * `McpServerConfigEntry` (it requires `transport`), so we have to send the
+ * existing server config plus the new taint fields rather than a partial.
+ * Pass `existing` (the current `McpServerConfigured` from the GET response)
+ * and the mutation merges in the updated taint fields.
+ */
+export function useUpdateMcpTaintPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      existing,
+      taint_scanning,
+      taint_policy,
+    }: {
+      existing: { id?: string; name: string; [k: string]: unknown };
+      taint_scanning?: boolean;
+      taint_policy?: McpTaintPolicy;
+    }) =>
+      updateMcpServer(existing.id ?? existing.name, {
+        ...existing,
+        taint_scanning,
+        taint_policy,
+      }),
+    onSuccess: (_data, variables) =>
+      invalidateMcpServer(qc, variables.existing.id ?? variables.existing.name),
   });
 }
