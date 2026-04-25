@@ -2894,6 +2894,35 @@ impl LibreFangKernel {
                                                     "Failed to persist TOML update: {e}"
                                                 );
                                             }
+
+                                            // Re-materialize named workspaces and rewrite TOOLS.md
+                                            // so a HAND.toml gaining `[agents.<role>.workspaces]`
+                                            // (or any other manifest change that affects what's
+                                            // injected into TOOLS.md) takes effect on `restart`
+                                            // without forcing a hand deactivate/reactivate cycle —
+                                            // which would destroy triggers, cron jobs, and runtime
+                                            // sessions. Both helpers are idempotent: the dir is
+                                            // create_dir_all'd, TOOLS.md is force-rewritten with
+                                            // truncate, and user-editable identity files use
+                                            // create_new so manual edits are preserved.
+                                            //
+                                            // Skip when workspace is None — a manifest without a
+                                            // resolved workspace path has never been spawned, so
+                                            // the normal spawn flow at register_agent() will run
+                                            // these helpers when activation eventually happens.
+                                            if let Some(ref ws_dir) = entry.manifest.workspace {
+                                                let resolved_workspaces = ensure_named_workspaces(
+                                                    &cfg.effective_workspaces_dir(),
+                                                    &entry.manifest.workspaces,
+                                                );
+                                                if entry.manifest.generate_identity_files {
+                                                    generate_identity_files(
+                                                        ws_dir,
+                                                        &entry.manifest,
+                                                        &resolved_workspaces,
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                     None => {
