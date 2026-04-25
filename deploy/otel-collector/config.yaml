@@ -13,6 +13,13 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+extensions:
+  # health_check exposes /, /health/status etc. on 13133. Used by docker
+  # compose's healthcheck so dependents (prometheus, grafana) only start
+  # after the collector is actually accepting OTLP traffic.
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 processors:
   batch: {}
 
@@ -37,6 +44,7 @@ exporters:
       insecure: true
 
 service:
+  extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]

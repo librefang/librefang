@@ -1,6 +1,8 @@
 # LibreFang Observability
 
-Prometheus + Grafana monitoring stack for LibreFang.
+Full local telemetry stack for LibreFang: metrics (Prometheus), traces
+(Tempo + Jaeger), and logs (Loki + Alloy), all unified in Grafana with
+trace ↔ metric ↔ log cross-linking.
 
 ## Quick Start
 
@@ -22,20 +24,54 @@ open http://localhost:3000    # admin / admin
 open http://localhost:16686
 ```
 
-Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every 15 seconds.
+Prometheus scrapes `http://host.docker.internal:4545/api/metrics` every
+15 seconds. Alloy tails `${HOME}/.librefang/logs/*.log` and pushes lines
+to Loki. The OTel collector receives OTLP traces from the daemon and
+fans them out to Tempo, Jaeger, and stdout.
 
-The OTel collector fans traces out to both Tempo (queried from Grafana for
-trace-to-metric correlation) and Jaeger (standalone trace-debugging UI:
-waterfall, span diff, service deps). Tempo is the long-term store; Jaeger is
-ephemeral (in-memory, wiped on container restart) and is meant for live
-debugging.
+## What runs in the stack
 
-Both backends are auto-provisioned as Grafana datasources
+| Service | Port | Purpose |
+|---|---|---|
+| Grafana | 3000 | Unified UI for metrics / traces / logs |
+| Prometheus | 9090 | Metrics store (scrapes daemon `/api/metrics`) |
+| OTel Collector | 4317 / 4318 | Receives OTLP from the daemon, fans out |
+| Tempo | 3200 | Trace store (Grafana correlation backend) |
+| Jaeger | 16686 | Standalone trace-debug UI (waterfall, diff, deps) |
+| Loki | 3100 | Log store (queried from Grafana) |
+| Alloy | 12345 | Log collector (tails daemon log files) |
+
+Both trace backends are auto-provisioned as Grafana datasources
 (`librefang-tempo`, `librefang-jaeger`), so Grafana's Explore page can
-query either side and dashboards can use derived fields to jump from a
-metric panel into the matching trace. Same `trace_id` flows through both
-exporters, so a trace opened in Grafana and the same `trace_id` pasted
-into the Jaeger UI return the identical span tree.
+query either side. Same `trace_id` flows through both exporters, so a
+trace opened in Grafana and the same `trace_id` pasted into the Jaeger
+UI return the identical span tree.
+
+Loki is also auto-provisioned (`librefang-loki`). The datasource has
+`derivedFields` configured to extract `trace_id="<32-hex>"` from log
+lines and turn it into a clickable link that opens the matching trace
+in Tempo or Jaeger. The link wiring is in place, but it only lights up
+once daemon log lines actually carry the `trace_id` field — that's a
+follow-up Rust-side change.
+
+The Jaeger container is **required by the trace pipeline**, not optional:
+the collector's `traces` pipeline includes `otlp/jaeger` as an exporter,
+so starting the stack without `jaeger` will leave the collector logging
+`ConnectionRefused` on every batch. To run a Tempo-only stack, comment
+out the `otlp/jaeger` exporter (and remove it from
+`service.pipelines.traces.exporters`) in `otel-collector/config.yaml`
+and drop the `jaeger` service from `docker-compose.observability.yml`.
+
+## Startup ordering
+
+The compose file uses `depends_on: { condition: service_healthy }` plus
+per-service healthchecks (otel-collector `:13133`, Tempo `/ready`,
+Jaeger `/`, Loki `/ready`, Prometheus `/-/ready`, Grafana
+`/api/health`). This is a deliberate fix for a noisy boot-time race
+where the daemon's `BatchSpanProcessor` would log `ConnectionRefused`
+against `127.0.0.1:4317` for a few seconds while the collector was
+still starting. With healthchecks in place, dependents only start after
+their dependencies are actually accepting traffic — the race is gone.
 
 The Jaeger container is **required by the trace pipeline**, not optional:
 the collector's `traces` pipeline includes `otlp/jaeger` as an exporter,

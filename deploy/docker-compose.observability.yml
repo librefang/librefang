@@ -8,14 +8,28 @@ services:
       - "4317:4317"   # OTLP gRPC receiver (LibreFang's otlp_endpoint)
       - "4318:4318"   # OTLP HTTP receiver
       - "8889:8889"   # Prometheus scrape endpoint (OTLP metrics → Prometheus)
+      - "13133:13133" # health_check extension (used by docker healthcheck)
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - tempo
-      - jaeger
+      tempo:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      # The collector exposes a health_check extension on 13133; we wire
+      # the same port up internally and on the host so a `curl` from any
+      # network reflects readiness.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:13133/"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   jaeger:
@@ -28,6 +42,14 @@ services:
       - "16686:16686"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      # Jaeger all-in-one returns 200 on `/` once the collector and query
+      # services are both up.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:16686/"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   tempo:
@@ -43,6 +65,62 @@ services:
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3200/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      # Tempo needs longer to come up than the rest because it loads its
+      # WAL + block list before /ready returns 200.
+      start_period: 15s
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: librefang-loki
+    # 3100 is the Loki HTTP API — used by Alloy to push and Grafana to
+    # query. Exposed to the host so users can also `curl /ready` and
+    # `logcli` against it directly.
+    ports:
+      - "3100:3100"
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: librefang-alloy
+    # Alloy tails the daemon's log file and pushes lines to Loki. The
+    # daemon writes to ${HOME}/.librefang/logs/daemon.log on the host —
+    # mounted read-only at a fixed path inside the container so the
+    # config below doesn't need to know the operator's $HOME.
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ${HOME}/.librefang/logs:/var/log/librefang:ro
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "12345:12345" # Alloy debug UI (component graph, metrics)
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:12345/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   prometheus:
@@ -56,7 +134,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   grafana:
@@ -72,11 +157,22 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - prometheus
-      - tempo
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
 volumes:
   prometheus-data:
   tempo-data:
   grafana-data:
+  loki-data:

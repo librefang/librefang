@@ -1,215 +1,526 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
-    { "title": "LLM & Tokens", "url": "/d/librefang-llm", "type": "link", "icon": "bolt", "tooltip": "LLM & Token Usage" },
-    { "title": "HTTP & API", "url": "/d/librefang-http", "type": "link", "icon": "cloud", "tooltip": "HTTP & API Metrics" },
-    { "title": "Cost & Budget", "url": "/d/librefang-cost", "type": "link", "icon": "calculator-alt", "tooltip": "Cost & Budget" }
+    {
+      "title": "LLM & Tokens",
+      "url": "/d/librefang-llm",
+      "type": "link",
+      "icon": "bolt",
+      "tooltip": "LLM & Token Usage"
+    },
+    {
+      "title": "HTTP & API",
+      "url": "/d/librefang-http",
+      "type": "link",
+      "icon": "cloud",
+      "tooltip": "HTTP & API Metrics"
+    },
+    {
+      "title": "Cost & Budget",
+      "url": "/d/librefang-cost",
+      "type": "link",
+      "icon": "calculator-alt",
+      "tooltip": "Cost & Budget"
+    },
+    {
+      "title": "Search Traces (Tempo)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Tempo datasource, prefilled with service.name=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-tempo\",{\"queryType\":\"traceql\",\"query\":\"{ resource.service.name=\\\"librefang\\\" }\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Search Logs (Loki)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Loki datasource, prefilled with service=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-loki\",{\"expr\":\"{service=\\\"librefang\\\"}\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Jaeger UI",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open standalone Jaeger UI for waterfall / span-diff / service-deps views",
+      "url": "http://localhost:16686/search?service=librefang",
+      "targetBlank": true,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false
+    }
   ],
   "panels": [
     {
       "title": "Version",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "fixed", "fixedColor": "text" },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
           "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "none",
         "graphMode": "none",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "name"
       },
       "targets": [
-        { "expr": "librefang_info", "legendFormat": "{{version}}", "refId": "A", "instant": true }
+        {
+          "expr": "librefang_info",
+          "legendFormat": "{{version}}",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Uptime",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "dtdurations",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "none",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_uptime_seconds", "legendFormat": "Uptime", "refId": "A", "instant": true }
+        {
+          "expr": "librefang_uptime_seconds",
+          "legendFormat": "Uptime",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Active Agents",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 10 },
-            { "color": "red", "value": 50 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_agents_active", "legendFormat": "Active", "refId": "A" }
+        {
+          "expr": "librefang_agents_active",
+          "legendFormat": "Active",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Total Agents",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "none",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_agents_total", "legendFormat": "Total", "refId": "A", "instant": true }
+        {
+          "expr": "librefang_agents_total",
+          "legendFormat": "Total",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Active Sessions",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 5 },
-            { "color": "red", "value": 20 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_active_sessions", "legendFormat": "Sessions", "refId": "A" }
+        {
+          "expr": "librefang_active_sessions",
+          "legendFormat": "Sessions",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Cost Today (USD)",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 20, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
           "decimals": 4,
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 1 },
-            { "color": "red", "value": 10 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_cost_usd_today", "legendFormat": "Cost", "refId": "A" }
+        {
+          "expr": "librefang_cost_usd_today",
+          "legendFormat": "Cost",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Panics",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 3 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 3
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "orange", "value": 1 },
-            { "color": "red", "value": 100 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_panics_total", "legendFormat": "Panics", "refId": "A" }
+        {
+          "expr": "librefang_panics_total",
+          "legendFormat": "Panics",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Restarts",
       "type": "stat",
-      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 3 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 3
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "red", "value": 1 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_restarts_total", "legendFormat": "Restarts", "refId": "A" }
+        {
+          "expr": "librefang_restarts_total",
+          "legendFormat": "Restarts",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Panics & Restarts Over Time",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "drawStyle": "line",
@@ -218,32 +529,90 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" }
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
           },
           "unit": "short"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Panics" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "Restarts" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Panics"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Restarts"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "librefang_panics_total", "legendFormat": "Panics", "refId": "A" },
-        { "expr": "librefang_restarts_total", "legendFormat": "Restarts", "refId": "B" }
+        {
+          "expr": "librefang_panics_total",
+          "legendFormat": "Panics",
+          "refId": "A"
+        },
+        {
+          "expr": "librefang_restarts_total",
+          "legendFormat": "Restarts",
+          "refId": "B"
+        }
       ]
     },
     {
       "title": "Active vs Total Agents",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "drawStyle": "line",
@@ -252,29 +621,85 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" }
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
           },
           "unit": "short"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Active" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "Total" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Active"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "librefang_agents_active", "legendFormat": "Active", "refId": "A" },
-        { "expr": "librefang_agents_total", "legendFormat": "Total", "refId": "B" }
+        {
+          "expr": "librefang_agents_active",
+          "legendFormat": "Active",
+          "refId": "A"
+        },
+        {
+          "expr": "librefang_agents_total",
+          "legendFormat": "Total",
+          "refId": "B"
+        }
       ]
     }
   ],
   "schemaVersion": 39,
-  "tags": ["librefang", "overview"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "librefang",
+    "overview"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "LibreFang Overview",
