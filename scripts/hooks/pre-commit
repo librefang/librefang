@@ -22,10 +22,10 @@ fi
 # spec from signatures + attributes only, so body-only diffs are safe.
 #
 # Conservative bias: the regex is intentionally broad. False positives
-# (unnecessary codegen) only cost build time; false negatives (stale spec)
-# would ship — there is no CI drift check today, so this hook is the only
-# guardrail. If you suspect the heuristic missed your change, run
-# `cargo xtask codegen --openapi` manually before committing.
+# (unnecessary codegen) only cost build time; false negatives are caught
+# by the `openapi-drift` CI job which regenerates and diffs authoritatively.
+# If you suspect the heuristic missed your change and want immediate local
+# feedback, run `cargo xtask codegen --openapi` manually.
 ROUTES_CHANGED=$(git diff --cached --name-only | grep "crates/librefang-api/src/routes/" || true)
 if [ -n "$ROUTES_CHANGED" ]; then
     SPEC_RELEVANT=$(git diff --cached -U0 -- crates/librefang-api/src/routes/ \
