@@ -387,7 +387,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           }
         }
       })
-      .catch(() => { /* Session load failure — user will see empty chat */ })
+      .catch((error: unknown) => {
+        // Surface load failures to the user — most commonly a stale
+        // `?sessionId=` URL that no longer points at a session belonging to
+        // this agent (404 from the cross-agent guard) or a malformed UUID
+        // (400). Without this the chat just renders empty with no signal.
+        const message = error instanceof Error ? error.message : t("common.error");
+        onClearError?.(message);
+      })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
