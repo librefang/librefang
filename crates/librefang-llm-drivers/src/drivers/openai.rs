@@ -508,7 +508,7 @@ struct OaiPromptTokensDetails {
 fn strip_trailing_empty_assistant(messages: &mut Vec<OaiMessage>, model: &str) {
     let is_claude = model.contains("claude");
 
-    while messages.last().map_or(false, |m| {
+    while messages.last().is_some_and(|m| {
         m.role == "assistant"
             && m.tool_calls.is_none()
             && if is_claude {
