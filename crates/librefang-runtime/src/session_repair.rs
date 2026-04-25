@@ -223,6 +223,33 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     (merged, stats)
 }
 
+/// Ensure the message history starts with a user turn.
+///
+/// After context trimming the drain boundary may land on an assistant turn,
+/// leaving it at position 0. Providers (especially Gemini) require the first
+/// message to be from the user. This function drops leading assistant messages
+/// and re-validates to clean up newly-orphaned ToolResults.
+///
+/// The loop handles the edge case where the first user turn consisted entirely
+/// of ToolResult blocks that became orphaned (dropped by `validate_and_repair`),
+/// which would re-expose another leading assistant turn.
+pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
+    loop {
+        match messages.iter().position(|m| m.role == Role::User) {
+            Some(0) | None => break,
+            Some(i) => {
+                warn!(
+                    dropped = i,
+                    "Dropping leading assistant turn(s) to ensure history starts with user"
+                );
+                messages.drain(..i);
+                messages = validate_and_repair(&messages);
+            }
+        }
+    }
+    messages
+}
+
 /// Phase 2a: Rescue ToolResult blocks from assistant-role messages.
 ///
 /// After a crash, ToolResult blocks may end up inside an assistant-role message
@@ -2503,5 +2530,62 @@ mod tests {
             has_synthetic_result_for(after_assistant, "call_1"),
             "user message after assistant must contain synthetic ToolResult for call_1"
         );
+    }
+
+    #[test]
+    fn ensure_starts_with_user_drops_leading_assistant() {
+        // Trim left an assistant turn at position 0 — Gemini rejects this.
+        let messages = vec![
+            Message::assistant("orphaned reply"),
+            Message::user("first user turn"),
+            Message::assistant("response"),
+        ];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, Role::User);
+        assert_eq!(result[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_no_op_when_already_user() {
+        let messages = vec![Message::user("hi"), Message::assistant("hello")];
+        let result = ensure_starts_with_user(messages.clone());
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, Role::User);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_handles_no_user_at_all() {
+        // No user turns anywhere — function returns input unchanged
+        // (the caller's post-trim safety path will synthesize a user turn).
+        let messages = vec![Message::assistant("orphan")];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_recovers_after_orphan_tool_result() {
+        // First user turn consists solely of an orphaned ToolResult that
+        // validate_and_repair will drop, re-exposing another assistant turn.
+        // The loop must keep dropping until a real user turn surfaces.
+        let messages = vec![
+            Message::assistant("first orphan"),
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_block("missing", "x")]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::assistant("second orphan"),
+            Message::user("real user turn"),
+            Message::assistant("real reply"),
+        ];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result[0].role, Role::User);
+        match &result[0].content {
+            MessageContent::Text(t) => assert_eq!(t, "real user turn"),
+            other => panic!("expected text user turn, got {other:?}"),
+        }
     }
 }
