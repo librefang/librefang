@@ -1055,6 +1055,23 @@ pub struct AgentEntry {
     /// `None` until the first auto-reset occurs.
     #[serde(default)]
     pub reset_reason: Option<crate::config::SessionResetReason>,
+
+    /// Sticky flag: `true` once the agent has processed at least one real
+    /// inbound message, channel event, or autonomous tick.
+    ///
+    /// Used by the heartbeat monitor (`crate::heartbeat::check_agents`) to
+    /// distinguish agents that have genuinely been alive (and may now be
+    /// hanging) from agents that were spawned but never received any work
+    /// — the latter must not be flagged unresponsive, which would push them
+    /// into a crash-recover loop (openfang #844).
+    ///
+    /// Replaces the older time-window heuristic
+    /// (`last_active - created_at <= IDLE_GRACE_SECS`) which was fragile
+    /// because administrative `set_state` / metadata writes also bump
+    /// `last_active`. Bookkeeping bumps must NOT flip this flag — only
+    /// real message-dispatch paths.
+    #[serde(default)]
+    pub has_processed_message: bool,
 }
 
 impl Default for AgentEntry {
@@ -1080,6 +1097,7 @@ impl Default for AgentEntry {
             force_session_wipe: false,
             resume_pending: false,
             reset_reason: None,
+            has_processed_message: false,
         }
     }
 }
