@@ -9965,15 +9965,24 @@ system_prompt = "You are a helpful assistant."
             } else {
                 60
             };
+            let mut shutdown_rx = self.supervisor.subscribe();
             tokio::spawn(async move {
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
+                // Race the tick against the shutdown watch so daemon
+                // shutdown breaks immediately instead of blocking up to
+                // `probe_interval_secs` (60s by default) on the next tick.
                 loop {
-                    interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
-                        break;
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            probe_all_local_providers_once(&kernel, &relevant_providers).await;
+                        }
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
                     }
-                    probe_all_local_providers_once(&kernel, &relevant_providers).await;
                 }
             });
         }
