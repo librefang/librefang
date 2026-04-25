@@ -198,6 +198,7 @@ impl SetupWizard {
             auto_evolve: true,
             channel_overrides: None,
             max_history_messages: None,
+            cache_context: false,
         };
 
         let skills_to_install: Vec<String> = intent

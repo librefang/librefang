@@ -830,6 +830,12 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
+    /// If true, the agent's `context.md` is read once at session start and
+    /// reused. Default is `false`: the runtime re-reads `context.md` before
+    /// every turn so external writers (cron jobs, integrations) reach the LLM
+    /// on the next message.
+    #[serde(default)]
+    pub cache_context: bool,
 }
 
 /// Access mode for a named workspace.
@@ -906,6 +912,7 @@ impl Default for AgentManifest {
             auto_evolve: true,
             channel_overrides: None,
             max_history_messages: None,
+            cache_context: false,
         }
     }
 }

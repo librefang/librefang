@@ -177,6 +177,12 @@ pub struct PromptContext {
     /// Active goals (pending/in_progress) for the agent. Each entry is a
     /// (title, status, progress%) tuple.
     pub active_goals: Vec<(String, String, u8)>,
+    /// Current on-disk `context.md` content for the agent (see `agent_context`).
+    ///
+    /// Read per-turn by the kernel so external writers (cron jobs, integrations)
+    /// are reflected in the next LLM call. `None` when the file is absent or
+    /// the agent has no workspace.
+    pub context_md: Option<String>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -338,6 +344,22 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         if let Some(ref ws_ctx) = ctx.workspace_context {
             if !ws_ctx.trim().is_empty() {
                 sections.push(cap_str(ws_ctx, 1000));
+            }
+        }
+    }
+
+    // Section 15 — Live agent context (`context.md`). Re-read per turn so
+    // external writers (e.g. cron jobs refreshing live data) show up on the
+    // very next message. Subagents skip it: they get a fresh prompt anyway
+    // and the live data belongs to the parent agent's workspace.
+    if !ctx.is_subagent {
+        if let Some(ref live) = ctx.context_md {
+            let trimmed = live.trim();
+            if !trimmed.is_empty() {
+                sections.push(format!(
+                    "## Live Context\nThe following context is refreshed from `context.md` each turn and may change between messages.\n\n{}",
+                    cap_str(trimmed, 8000)
+                ));
             }
         }
     }
@@ -1663,6 +1685,28 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("## Workspace"));
         assert!(prompt.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn test_context_md_section_included() {
+        let mut ctx = basic_ctx();
+        ctx.context_md = Some("BTCUSD: 67000\nETHUSD: 3400".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Live Context"));
+        assert!(prompt.contains("BTCUSD: 67000"));
+        assert!(prompt.contains("ETHUSD: 3400"));
+    }
+
+    #[test]
+    fn test_context_md_section_omitted_when_empty_or_none() {
+        let mut ctx = basic_ctx();
+        ctx.context_md = None;
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Live Context"));
+
+        ctx.context_md = Some("   \n\n   ".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Live Context"));
     }
 
     #[test]
