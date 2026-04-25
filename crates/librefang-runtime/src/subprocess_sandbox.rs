@@ -210,6 +210,102 @@ fn extract_base_command(cmd: &str) -> &str {
         .unwrap_or(first_word)
 }
 
+/// Known shell wrappers that can execute inline scripts via flags.
+const SHELL_WRAPPERS: &[&str] = &["powershell", "pwsh", "cmd", "bash", "sh", "zsh"];
+
+/// Known flags that pass inline scripts to shell wrappers.
+/// Each entry is (wrapper_names, flag).
+const SHELL_INLINE_FLAGS: &[(&[&str], &str)] = &[
+    (&["powershell", "pwsh"], "-Command"),
+    (&["powershell", "pwsh"], "-command"),
+    (&["powershell", "pwsh"], "-c"),
+    (&["cmd"], "/c"),
+    (&["cmd"], "/C"),
+    (&["bash", "sh", "zsh"], "-c"),
+    (&["bash", "sh", "zsh"], "--command"),
+];
+
+/// If the base command is a known shell wrapper, extract any inline script
+/// passed via -Command / -c / /c flags and return the commands within it.
+///
+/// Returns the list of base command names found inside the inline script,
+/// or an empty vec if the command is not a shell wrapper or has no inline flag.
+fn extract_shell_wrapper_commands(command: &str) -> Vec<String> {
+    let trimmed = command.trim();
+    let base = extract_base_command(trimmed);
+
+    // Check if the base command is a known shell wrapper (case-insensitive)
+    let base_lower = base.to_lowercase();
+    // Also strip .exe suffix for Windows
+    let base_normalized = base_lower.strip_suffix(".exe").unwrap_or(&base_lower);
+    if !SHELL_WRAPPERS.iter().any(|w| *w == base_normalized) {
+        return Vec::new();
+    }
+
+    // Find the inline flag and extract everything after it
+    for (wrappers, flag) in SHELL_INLINE_FLAGS {
+        if !wrappers.iter().any(|w| *w == base_normalized) {
+            continue;
+        }
+        // Search for the flag in the command args (case-insensitive for PowerShell)
+        let rest = trimmed.split_whitespace().skip(1); // skip the base command
+        let args: Vec<&str> = rest.collect();
+        for (i, arg) in args.iter().enumerate() {
+            if arg.eq_ignore_ascii_case(flag) {
+                // Everything after this flag is the inline script
+                if i + 1 < args.len() {
+                    let script = args[i + 1..].join(" ");
+                    // Strip surrounding quotes if present
+                    let script = script.trim();
+                    let script = if (script.starts_with('"') && script.ends_with('"'))
+                        || (script.starts_with('\'') && script.ends_with('\''))
+                    {
+                        &script[1..script.len() - 1]
+                    } else {
+                        script
+                    };
+                    // Extract commands from the inline script
+                    // For PowerShell, commands can be separated by `;`
+                    // For POSIX shells, by `;`, `&&`, `||`, `|`
+                    return extract_inner_script_commands(script);
+                }
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Extract base command names from an inline script string.
+/// Splits on `;`, `&&`, `||`, `|` and returns the base command of each segment.
+fn extract_inner_script_commands(script: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut rest = script;
+    while !rest.is_empty() {
+        let separators: &[&str] = &["&&", "||", "|", ";"];
+        let mut earliest_pos = rest.len();
+        let mut earliest_len = 0;
+        for sep in separators {
+            if let Some(pos) = rest.find(sep) {
+                if pos < earliest_pos {
+                    earliest_pos = pos;
+                    earliest_len = sep.len();
+                }
+            }
+        }
+        let segment = &rest[..earliest_pos];
+        let base = extract_base_command(segment);
+        if !base.is_empty() {
+            commands.push(base.to_string());
+        }
+        if earliest_pos + earliest_len >= rest.len() {
+            break;
+        }
+        rest = &rest[earliest_pos + earliest_len..];
+    }
+    commands
+}
+
 /// Extract all commands from a shell command string.
 /// Handles pipes (`|`), semicolons (`;`), `&&`, and `||`.
 fn extract_all_commands(command: &str) -> Vec<&str> {
@@ -261,11 +357,22 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
         ExecSecurityMode::Allowlist => {
             // SECURITY: Check for shell metacharacters BEFORE base-command extraction.
             // These can smuggle commands inside arguments of allowed binaries.
-            if let Some(reason) = contains_shell_metacharacters(command) {
-                return Err(format!(
-                    "Command blocked: contains {reason}. Shell metacharacters are not allowed in Allowlist mode."
-                ));
+            //
+            // However, we must skip this check for commands wrapped in a known
+            // shell wrapper (e.g. `powershell -Command "..."`) because the
+            // inline script naturally contains metacharacters (quotes, semicolons).
+            // Those inner commands are validated separately below.
+            let inner_commands = extract_shell_wrapper_commands(command);
+            let is_shell_wrapper = !inner_commands.is_empty();
+
+            if !is_shell_wrapper {
+                if let Some(reason) = contains_shell_metacharacters(command) {
+                    return Err(format!(
+                        "Command blocked: contains {reason}. Shell metacharacters are not allowed in Allowlist mode."
+                    ));
+                }
             }
+
             let base_commands = extract_all_commands(command);
             for base in &base_commands {
                 // Check safe_bins first
@@ -281,6 +388,28 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
                     base
                 ));
             }
+
+            // SECURITY: If the outer command is a shell wrapper
+            // (powershell, cmd, bash, etc.), also validate all commands
+            // found inside the inline script. This prevents bypassing the
+            // allowlist by wrapping disallowed commands inside an allowed
+            // shell.
+            if is_shell_wrapper {
+                for inner_cmd in &inner_commands {
+                    if policy.safe_bins.iter().any(|sb| sb == inner_cmd) {
+                        continue;
+                    }
+                    if policy.allowed_commands.iter().any(|ac| ac == inner_cmd) {
+                        continue;
+                    }
+                    return Err(format!(
+                        "Command '{}' (inside shell wrapper) is not in the exec allowlist. \
+                         Add it to exec_policy.allowed_commands or exec_policy.safe_bins.",
+                        inner_cmd
+                    ));
+                }
+            }
+
             Ok(())
         }
     }
@@ -1042,5 +1171,123 @@ mod tests {
         let cmds = extract_all_commands(cmd);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0], "\u{4f60}\u{597d}");
+    }
+
+    // ── Shell wrapper bypass tests ────────────────────────────────────
+
+    #[test]
+    fn test_powershell_command_inline_blocked_when_inner_disallowed() {
+        // (a) `powershell -Command "ls; rm -rf /"` must be rejected
+        // because `rm` is not in the allowlist, even though `powershell`
+        // and `ls` are.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["powershell".to_string(), "ls".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(r#"powershell -Command "ls; rm -rf /""#, &policy);
+        assert!(
+            result.is_err(),
+            "rm inside powershell -Command must be blocked"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("rm"),
+            "Error should name the blocked inner command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_bash_c_inline_allowed_when_inner_in_safe_bins() {
+        // (b) `bash -c "echo hi"` should pass — `echo` is in default safe_bins.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["bash".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist(r#"bash -c "echo hi""#, &policy);
+        assert!(
+            result.is_ok(),
+            "echo inside bash -c should pass (echo is in safe_bins): {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cmd_c_inline_blocked_when_inner_disallowed() {
+        // (c) `cmd /c rmdir foo` must be rejected — `rmdir` not in allowlist.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["cmd".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result = validate_command_allowlist("cmd /c rmdir foo", &policy);
+        assert!(
+            result.is_err(),
+            "rmdir inside cmd /c must be blocked when not in allowlist"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("rmdir"),
+            "Error should name the blocked inner command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_shell_wrapper_recognises_case_and_exe_suffix() {
+        // (d) wrapper detection is case-insensitive and tolerates `.exe`.
+        // `PowerShell.EXE -COMMAND "Remove-Item C:\\foo"` should be
+        // recognised as a wrapper and the inner `Remove-Item` blocked.
+        let policy = ExecPolicy {
+            mode: ExecSecurityMode::Allowlist,
+            allowed_commands: vec!["powershell".to_string()],
+            ..ExecPolicy::default()
+        };
+        let result =
+            validate_command_allowlist(r#"PowerShell.EXE -COMMAND "Remove-Item C:\foo""#, &policy);
+        assert!(
+            result.is_err(),
+            "Remove-Item inside PowerShell.EXE -COMMAND must be blocked"
+        );
+
+        // Also confirm the extractor itself sees through the casing/suffix.
+        let cmds = extract_shell_wrapper_commands(r#"PowerShell.EXE -COMMAND "Get-Process""#);
+        assert_eq!(cmds, vec!["Get-Process".to_string()]);
+
+        let cmds = extract_shell_wrapper_commands(r#"BASH.exe -c "echo hi""#);
+        assert_eq!(cmds, vec!["echo".to_string()]);
+    }
+
+    #[test]
+    fn test_shell_wrapper_strips_surrounding_quotes() {
+        // (e) Inline scripts wrapped in either single or double quotes
+        // must have the quotes stripped before parsing inner commands.
+        let double = extract_shell_wrapper_commands(r#"bash -c "echo hi; ls""#);
+        assert_eq!(double, vec!["echo".to_string(), "ls".to_string()]);
+
+        let single = extract_shell_wrapper_commands(r#"bash -c 'echo hi; ls'"#);
+        assert_eq!(single, vec!["echo".to_string(), "ls".to_string()]);
+
+        // Without quotes, args are joined back with single spaces and parsed
+        // the same way.
+        let unquoted = extract_shell_wrapper_commands("bash -c echo hi");
+        assert_eq!(unquoted, vec!["echo".to_string()]);
+    }
+
+    #[test]
+    fn test_non_wrapper_commands_unaffected() {
+        // (f) Non-wrapper commands behave exactly like before — the
+        // wrapper extractor returns empty and ordinary allowlist rules
+        // apply, including the metacharacter pre-check.
+        assert!(extract_shell_wrapper_commands("ls -la").is_empty());
+        assert!(extract_shell_wrapper_commands("cargo build --release").is_empty());
+
+        let policy = ExecPolicy::default();
+        // `echo hello` is in safe_bins → still allowed.
+        assert!(validate_command_allowlist("echo hello", &policy).is_ok());
+        // `curl` not in allowlist → still blocked.
+        assert!(validate_command_allowlist("curl https://evil.com", &policy).is_err());
+        // Metacharacter pre-check still fires for non-wrapper commands.
+        assert!(validate_command_allowlist("echo $(whoami)", &policy).is_err());
     }
 }
