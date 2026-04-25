@@ -295,6 +295,12 @@ export function useCompleteExperiment() {
 // callers must thread back through the next /message or WS frame as
 // `attachments[]` — uploads not referenced by a message stay orphaned in
 // the registry until the daemon restarts.
+//
+// Intentionally does NOT call invalidateQueries: the upload only registers
+// a file_id server-side, and no React Query cache reads UPLOAD_REGISTRY
+// directly. The file becomes visible in the UI only after it's referenced
+// in a /message call, which goes through useSendAgentMessage and triggers
+// the appropriate session invalidation there.
 export function useUploadAgentFile() {
   return useMutation({
     mutationFn: ({ agentId, file }: { agentId: string; file: File }) =>

@@ -290,6 +290,11 @@ export interface AgentTool {
 export interface AgentSessionImage {
   file_id: string;
   filename?: string;
+  /** Optional — backend currently only emits image attachments here, so
+   *  the renderer treats a missing value as image. Threading the field
+   *  through keeps the chat transcript correct if the server starts
+   *  serializing non-image attachments (PDF/text) into history. */
+  content_type?: string;
 }
 
 /** Reference passed back to the agent's `/message` endpoint or WS frame

@@ -372,6 +372,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               images: msg.images?.map((img) => ({
                 file_id: img.file_id,
                 filename: img.filename,
+                content_type: img.content_type,
               })),
             }];
           });
@@ -1084,6 +1085,7 @@ function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachmen
         type="button"
         onClick={() => onRemove(attachment.localId)}
         title={t("chat.attachment_remove", { defaultValue: "Remove" })}
+        aria-label={t("chat.attachment_remove", { defaultValue: "Remove attachment" })}
         className="absolute right-1 top-1 h-5 w-5 rounded-md flex items-center justify-center text-text-dim/70 hover:text-text hover:bg-main"
       >
         <X className="h-3 w-3" />
@@ -1252,12 +1254,17 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
   }, [agentId, uploadMutation, t]);
 
   // Revoke any object URLs we created when the component unmounts so we
-  // don't leak memory in a long-lived chat session.
+  // don't leak memory in a long-lived chat session. We mirror `attachments`
+  // into a ref because the cleanup runs on unmount and would otherwise
+  // capture the empty initial state from first render.
+  const attachmentsRef = useRef<PendingAttachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
   useEffect(() => {
     return () => {
-      attachments.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+      attachmentsRef.current.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const removeAttachment = useCallback((localId: string) => {
@@ -1325,7 +1332,12 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
     e.preventDefault();
     if (effectiveDisabled || anyUploading) return;
     if (!message.trim() && !hasSendableAttachments) return;
-    const payload: ChatAttachment[] | undefined = hasSendableAttachments
+    // Slash commands bypass the LLM send path (they're handled in
+    // useChatMessages.sendMessage), so they cannot carry attachments.
+    // Preserve the chips through a slash so the user doesn't silently lose
+    // their uploads when they run e.g. `/info` with an image already queued.
+    const isSlashCommand = message.trim().startsWith("/");
+    const payload: ChatAttachment[] | undefined = (!isSlashCommand && hasSendableAttachments)
       ? readyAttachments.map(a => ({
           file_id: a.fileId!,
           filename: a.filename,
@@ -1334,11 +1346,13 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
       : undefined;
     onSend(message, payload);
     setMessage("");
-    // Revoke previews and clear the strip — the optimistic user bubble
-    // already references fileIds via /api/uploads/{id}, so we don't need
-    // the local blob URLs anymore.
-    attachments.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
-    setAttachments([]);
+    if (!isSlashCommand) {
+      // Revoke previews and clear the strip — the optimistic user bubble
+      // already references fileIds via /api/uploads/{id}, so we don't need
+      // the local blob URLs anymore.
+      attachments.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+      setAttachments([]);
+    }
   };
 
   useEffect(() => {
@@ -1484,6 +1498,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           onClick={() => fileInputRef.current?.click()}
           disabled={!agentId || textareaDisabled}
           title={t("chat.attachment_add", { defaultValue: "Attach file" })}
+          aria-label={t("chat.attachment_add", { defaultValue: "Attach file" })}
           className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3 sm:px-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed bg-surface text-text-dim border border-border-subtle hover:text-text hover:border-border hover:-translate-y-0.5"
         >
           <Paperclip className="h-4 w-4" />
