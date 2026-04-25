@@ -389,6 +389,26 @@ Export all memory entries for an agent as JSON.
 
 Import memory entries for an agent from JSON.
 
+### GET /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/trajectory
+
+Export a redacted trajectory (audit trail) for a single session. The response bundles the session messages plus minimal metadata (agent name, model, system-prompt fingerprint, librefang version) and runs every message through the privacy redactor before serialisation. Intended for support, audit, and compliance flows where you need to share a session without leaking secrets.
+
+**Query parameters:**
+
+- `format=json` (default): single JSON object, content-type `application/json`.
+- `format=jsonl`: NDJSON — first line is the metadata header, every subsequent line is one message; content-type `application/x-ndjson`. Useful for streaming into log pipelines or `jq` filters.
+
+**Response statuses:**
+
+- `200` — trajectory bundle.
+- `400` — agent or session id failed UUID parsing.
+- `404` — agent or session does not exist.
+
+```bash
+curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?format=jsonl' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY' > session.jsonl
+```
+
 ---
 
 ## Workflow Endpoints

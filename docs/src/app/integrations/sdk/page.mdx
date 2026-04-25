@@ -15,6 +15,25 @@ LibreFang provides official SDK support for multiple programming languages for e
 | Rust | ✅ Official | librefang crate |
 | Go | ✅ Available | Community contribution |
 
+### Auto-generated from `openapi.json`
+
+All four SDKs (`sdk/python/`, `sdk/javascript/`, `sdk/go/`, `sdk/rust/`) are mechanically generated from `openapi.json` by `scripts/codegen-sdks.py`. A pre-commit hook (`scripts/hooks/pre-commit`) re-runs the generator whenever the OpenAPI spec changes, so the SDKs never drift from the live API.
+
+To regenerate manually:
+
+```bash
+# Refresh openapi.json (the generator's source of truth)
+cargo run -p librefang-cli --quiet -- openapi > openapi.json
+
+# Rewrite all four SDKs in-place
+python3 scripts/codegen-sdks.py
+
+# Preview diffs without writing
+python3 scripts/codegen-sdks.py --dry-run
+```
+
+Endpoints tagged `openai` (the OpenAI-compat shim) and any non-`/api/` paths (well-known, A2A) are intentionally skipped — they're not part of the public SDK surface.
+
 ---
 
 ## JavaScript/TypeScript SDK

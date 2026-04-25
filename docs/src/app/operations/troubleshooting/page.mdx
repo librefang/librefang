@@ -34,6 +34,18 @@ This checks:
 - Port availability
 - Tool dependencies (Python, signal-cli, etc.)
 
+#### Audit checks
+
+`librefang doctor` additionally runs a registered set of `AuditCheck`s — opinionated lints for the misconfigurations that have caused the most issues in practice. Each check returns one of `pass` / `warn` / `fail`; `--json` emits a machine-readable bundle.
+
+| Check | What it asserts |
+|---|---|
+| `VaultKeyCheck` | `LIBREFANG_VAULT_KEY`, when set, base64-decodes to **exactly 32 bytes**. The classic 32-ASCII-character mistake produces a 32-character string that doesn't decode to a 32-byte key. |
+| `ApiListenAddrCheck` | `api_listen` is reachable from the configured `LIBREFANG_PORT`, and a non-loopback bind has `api_key` set so the daemon isn't accidentally exposed unauthenticated. |
+| `ConfigTomlSchemaCheck` | `config.toml` parses cleanly against the live `KernelConfig` schema; unknown keys, type mismatches, and ranges-out-of-bounds are flagged before the daemon starts. |
+
+Add new checks by implementing the `AuditCheck` trait in `crates/librefang-cli/src/doctor.rs` and registering them in `registered_checks()`.
+
 ### Check Daemon Status
 
 ```bash
