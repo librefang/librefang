@@ -1273,6 +1273,14 @@ impl McpConnection {
 /// other combination is treated as `mutating`. When `annotations` is absent,
 /// the schema is left untouched so existing heuristics still apply.
 ///
+/// `idempotentHint` and `openWorldHint` are intentionally ignored at this
+/// layer — the current `ToolApprovalClass` enum has no idempotent / open-world
+/// variants, so threading them through would just mean noise that the
+/// classifier discards. If the projection in
+/// `runtime/tool_classifier.rs::ParallelSafety` ever grows finer-grained
+/// classes (e.g. an idempotent_mutating tier for safer batch retries), wire
+/// the additional hints in here.
+///
 /// Inputs come from server-controlled `tools/list` payloads, so the helper
 /// must never panic on malformed shapes — it silently no-ops if `schema`
 /// is not an object or `annotations` is not an object.
@@ -2796,5 +2804,51 @@ mod tests {
         let ann = serde_json::json!("not-an-object");
         inject_annotation_class(&mut schema, Some(&ann));
         assert_eq!(schema, original);
+    }
+
+    /// Producer/consumer string contract: the literals `inject_annotation_class`
+    /// emits must round-trip through `ToolApprovalClass::from_snake_case` to
+    /// the corresponding variants. Without this, a typo or a future rename in
+    /// either crate would silently fall back to `Unknown` → `WriteShared` and
+    /// the whole MCP-tool parallelisation fix becomes a no-op.
+    #[test]
+    fn injected_class_strings_parse_into_approval_class() {
+        use librefang_types::tool_class::ToolApprovalClass;
+
+        // readOnly + non-destructive → "readonly_search" → ReadonlySearch
+        let mut schema_ro = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_ro,
+            Some(&serde_json::json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+            })),
+        );
+        let class_str = schema_ro["metadata"]["tool_class"]
+            .as_str()
+            .expect("readonly path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::ReadonlySearch),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
+
+        // destructive → "mutating" → Mutating
+        let mut schema_mut = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_mut,
+            Some(&serde_json::json!({
+                "readOnlyHint": false,
+                "destructiveHint": true,
+            })),
+        );
+        let class_str = schema_mut["metadata"]["tool_class"]
+            .as_str()
+            .expect("mutating path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::Mutating),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
     }
 }
