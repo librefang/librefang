@@ -267,11 +267,12 @@ fn safe_trim_messages(
     session_messages: &mut Vec<Message>,
     agent_name: &str,
     user_message: &str,
+    max_history: usize,
 ) {
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
-    if session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES {
-        let desired = session_messages.len() - DEFAULT_MAX_HISTORY_MESSAGES;
+    if session_messages.len() > max_history {
+        let desired = session_messages.len() - max_history;
         let trim_point = crate::session_repair::find_safe_trim_point(session_messages, desired)
             .filter(|&p| p > 0)
             .unwrap_or(desired);
@@ -286,11 +287,11 @@ fn safe_trim_messages(
         session_messages.drain(..trim_point);
     }
 
-    if messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES {
+    if messages.len() <= max_history {
         return;
     }
 
-    let desired_trim = messages.len() - DEFAULT_MAX_HISTORY_MESSAGES;
+    let desired_trim = messages.len() - max_history;
 
     // Find a trim point that does not split ToolUse/ToolResult pairs.
     // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
@@ -2144,6 +2145,7 @@ fn prepare_llm_messages(
     session: &mut Session,
     user_message: &str,
     memory_context_msg: Option<String>,
+    max_history: usize,
 ) -> PreparedMessages {
     let llm_messages: Vec<Message> = session
         .messages
@@ -2187,6 +2189,7 @@ fn prepare_llm_messages(
         &mut session.messages,
         &manifest.name,
         user_message,
+        max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
     strip_prior_image_data(&mut messages);
@@ -2881,6 +2884,7 @@ pub async fn run_agent_loop(
         sender_prefix.as_deref(),
     );
 
+    let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
@@ -2890,6 +2894,7 @@ pub async fn run_agent_loop(
         session,
         &effective_user_message,
         memory_context_msg,
+        max_history,
     );
     log_repair_stats(manifest, session, &repair_stats);
 
@@ -4229,6 +4234,7 @@ pub async fn run_agent_loop_streaming(
         sender_prefix.as_deref(),
     );
 
+    let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
@@ -4238,6 +4244,7 @@ pub async fn run_agent_loop_streaming(
         session,
         &effective_user_message,
         memory_context_msg,
+        max_history,
     );
     log_repair_stats(manifest, session, &repair_stats);
 
@@ -6807,6 +6814,7 @@ mod tests {
             &mut session_messages,
             "test-agent",
             "current turn",
+            DEFAULT_MAX_HISTORY_MESSAGES,
         );
 
         // The forward scan in find_safe_trim_point skipped past the tool-pair
@@ -6881,7 +6889,13 @@ mod tests {
         session.messages.push(Message::user("current turn"));
         let PreparedMessages {
             new_messages_start, ..
-        } = prepare_llm_messages(&manifest, &mut session, "current turn", None);
+        } = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "current turn",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
 
         assert!(prior_len > new_messages_start);
         let tail = &session.messages[new_messages_start..];
@@ -6951,6 +6965,7 @@ mod tests {
             &mut session,
             "current turn",
             Some("memory context".to_string()),
+            DEFAULT_MAX_HISTORY_MESSAGES,
         );
 
         assert!(messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES);
