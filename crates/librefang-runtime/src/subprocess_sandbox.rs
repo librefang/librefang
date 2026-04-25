@@ -307,7 +307,8 @@ fn inspect_shell_wrapper(command: &str) -> ShellWrapperInspection {
         for (i, arg) in args.iter().enumerate() {
             if is_powershell_command_flag(arg) {
                 if i + 1 < args.len() {
-                    let script = strip_outer_quotes(&args[i + 1..].join(" "));
+                    let joined = args[i + 1..].join(" ");
+                    let script = strip_outer_quotes(&joined);
                     return ShellWrapperInspection::WrapperInline(extract_inner_script_commands(
                         script,
                     ));
@@ -328,7 +329,8 @@ fn inspect_shell_wrapper(command: &str) -> ShellWrapperInspection {
         for (i, arg) in args.iter().enumerate() {
             if arg.eq_ignore_ascii_case(flag) {
                 if i + 1 < args.len() {
-                    let script = strip_outer_quotes(&args[i + 1..].join(" "));
+                    let joined = args[i + 1..].join(" ");
+                    let script = strip_outer_quotes(&joined);
                     return ShellWrapperInspection::WrapperInline(extract_inner_script_commands(
                         script,
                     ));
