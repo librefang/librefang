@@ -271,7 +271,11 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "ollama",
         aliases: &[],
-        base_url: "http://localhost:11434/v1",
+        // Use 127.0.0.1 instead of localhost: on dual-stack hosts (e.g. macOS)
+        // localhost resolves to both ::1 and 127.0.0.1, IPv6 is tried first,
+        // and these local servers usually bind IPv4 only, causing instant
+        // connection-refused errors that don't always fall back to IPv4.
+        base_url: "http://127.0.0.1:11434/v1",
         api_key_env: "OLLAMA_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -281,7 +285,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vllm",
         aliases: &[],
-        base_url: "http://localhost:8000/v1",
+        base_url: "http://127.0.0.1:8000/v1",
         api_key_env: "VLLM_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -291,7 +295,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lmstudio",
         aliases: &[],
-        base_url: "http://localhost:1234/v1",
+        base_url: "http://127.0.0.1:1234/v1",
         api_key_env: "LMSTUDIO_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -301,7 +305,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lemonade",
         aliases: &[],
-        base_url: "http://localhost:8888/api/v1",
+        base_url: "http://127.0.0.1:8888/api/v1",
         api_key_env: "LEMONADE_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
