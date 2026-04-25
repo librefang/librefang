@@ -3016,6 +3016,37 @@ impl LibreFangKernel {
                                                             cfg_for_settings,
                                                         );
                                                     }
+
+                                                    // Re-render `## Reference Knowledge` and
+                                                    // `## Your Team` tails for the same reason
+                                                    // we re-render the settings tail above:
+                                                    // the bare disk TOML never carries them, so
+                                                    // the swap-to-disk a few lines up silently
+                                                    // strips them on every restart unless we
+                                                    // re-materialize here. The role identity is
+                                                    // recovered from the `hand_role:<role>` tag
+                                                    // stamped at activation; without it we cannot
+                                                    // pick the per-role skill override or build
+                                                    // the team roster, so we skip both renders
+                                                    // and let activation eventually fix them.
+                                                    if let Some(role) = entry
+                                                        .manifest
+                                                        .tags
+                                                        .iter()
+                                                        .find_map(|t| t.strip_prefix("hand_role:"))
+                                                        .map(|s| s.to_string())
+                                                    {
+                                                        apply_reference_knowledge_to_manifest(
+                                                            &mut entry.manifest,
+                                                            resolve_skill_content_for_role(
+                                                                &def, &role,
+                                                            ),
+                                                        );
+                                                        apply_your_team_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &build_team_lines_for_role(&def, &role),
+                                                        );
+                                                    }
                                                 }
                                             }
 
@@ -8918,7 +8949,6 @@ system_prompt = "You are a helpful assistant."
         }
 
         let is_multi_agent = def.is_multi_agent();
-        let role_names: Vec<String> = def.agents.keys().cloned().collect();
         let coordinator_role = def.coordinator().map(|(role, _)| role.to_string());
 
         // Kill existing agents with matching hand tag (reactivation cleanup)
@@ -9129,43 +9159,20 @@ system_prompt = "You are a helpful assistant."
             }
 
             // Inject skill content: per-role override takes precedence over shared.
-            // SKILL-{role}.md filenames are lowercased during scan, so normalize
-            // the role name to match.
-            let role_lower = role.to_lowercase();
-            let effective_skill = def
-                .agent_skill_content
-                .get(&role_lower)
-                .or(def.skill_content.as_ref());
-            if let Some(skill_content) = effective_skill {
-                manifest.model.system_prompt = format!(
-                    "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                    manifest.model.system_prompt, skill_content
-                );
-            }
+            // Shared with the boot-time TOML drift loop in `new_with_config` so
+            // restarts can re-render the `## Reference Knowledge` tail without
+            // diverging from this path.
+            apply_reference_knowledge_to_manifest(
+                &mut manifest,
+                resolve_skill_content_for_role(&def, role),
+            );
 
-            // For multi-agent hands: inject peer info into system prompt
-            if is_multi_agent {
-                let mut peer_lines = Vec::new();
-                for peer_role in &role_names {
-                    if peer_role == role {
-                        continue;
-                    }
-                    if let Some(peer_agent) = def.agents.get(peer_role) {
-                        let hint = peer_agent
-                            .invoke_hint
-                            .as_deref()
-                            .unwrap_or(&peer_agent.manifest.description);
-                        peer_lines.push(format!(
-                            "- **{peer_role}**: {hint} (use agent_send to message)"
-                        ));
-                    }
-                }
-                if !peer_lines.is_empty() {
-                    let team_block = format!("\n\n## Your Team\n\n{}", peer_lines.join("\n"));
-                    manifest.model.system_prompt =
-                        format!("{}{team_block}", manifest.model.system_prompt);
-                }
-            }
+            // For multi-agent hands: inject peer info into system prompt.
+            // Same shared-helper rationale as Reference Knowledge above —
+            // `build_team_lines_for_role` returns an empty vec for
+            // single-agent hands, which `apply_your_team_to_manifest` handles
+            // as a no-op (and cleans any stale block).
+            apply_your_team_to_manifest(&mut manifest, &build_team_lines_for_role(&def, role));
 
             // Hand workspace: workspaces/<hand-id>/
             // Agent workspace nested under hand: workspaces/hands/<hand-id>/<role>/

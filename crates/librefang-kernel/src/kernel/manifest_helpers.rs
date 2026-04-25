@@ -333,16 +333,213 @@ pub(super) fn apply_settings_block_to_manifest(
     }
 
     // Strip any pre-existing settings tail so we replace rather than append.
-    if let Some(idx) = manifest.model.system_prompt.find(USER_CONFIG_TAIL_MARKER) {
-        manifest.model.system_prompt.truncate(idx);
+    // Uses `strip_tail_block` (bounded by the next known marker) instead of
+    // a blanket `truncate(idx)` so we don't accidentally clobber sibling
+    // tails (`## Reference Knowledge`, `## Your Team`) that the activation
+    // path appends after this one.
+    strip_tail_block(&mut manifest.model.system_prompt, USER_CONFIG_TAIL_MARKER);
+
+    // Append before any RK/Team blocks so the canonical order
+    // (settings → reference knowledge → your team) is preserved across
+    // re-renders. Find the earliest marker that follows the current prompt
+    // body and splice the new block in front of it.
+    let insert_at = ALL_TAIL_MARKERS
+        .iter()
+        .filter(|&&m| m != USER_CONFIG_TAIL_MARKER)
+        .filter_map(|m| manifest.model.system_prompt.find(m))
+        .min()
+        .unwrap_or(manifest.model.system_prompt.len());
+
+    let block = format!("\n\n---\n\n{}", resolved.prompt_block);
+    manifest.model.system_prompt.insert_str(insert_at, &block);
+
+    resolved.env_vars
+}
+
+/// Marker that introduces the rendered `## Reference Knowledge` block in the
+/// system prompt.
+///
+/// Mirrors the activation path which appends
+/// `"{prompt}\n\n---\n\n## Reference Knowledge\n\n{skill}"` (see
+/// `activate_hand_with_id` in `kernel/mod.rs`). Used to detect and replace an
+/// existing block rather than blindly appending a duplicate.
+const REFERENCE_KNOWLEDGE_TAIL_MARKER: &str = "\n\n---\n\n## Reference Knowledge";
+
+/// Marker that introduces the rendered `## Your Team` block in the system
+/// prompt.
+///
+/// The activation path uses `"\n\n## Your Team\n\n{lines}"` (note the
+/// double-newline preamble but no `---` separator — see
+/// `activate_hand_with_id`). Treating the marker as the canonical anchor lets
+/// us detect and replace an existing peer roster on idempotent re-applies.
+const YOUR_TEAM_TAIL_MARKER: &str = "\n\n## Your Team";
+
+/// All known runtime-materialized prompt-tail markers, in canonical activation
+/// order. Used by individual `apply_*_to_manifest` helpers to determine where
+/// "their" block ends — every helper must trim from its own marker up to
+/// (but not including) the next marker that follows it in this list (or to
+/// end-of-string when no later marker is present).
+///
+/// Keep this list in sync with the activation path in `activate_hand_with_id`
+/// — adding a new tail without registering it here will let stale data leak
+/// across the boot-time drift loop.
+const ALL_TAIL_MARKERS: &[&str] = &[
+    USER_CONFIG_TAIL_MARKER,
+    REFERENCE_KNOWLEDGE_TAIL_MARKER,
+    YOUR_TEAM_TAIL_MARKER,
+];
+
+/// Strip the block introduced by `marker` from `prompt`.
+///
+/// "Block" means: from the first occurrence of `marker` up to (but not
+/// including) the next marker in `ALL_TAIL_MARKERS` that appears after it,
+/// or to end-of-string when no later marker exists. Returns silently when
+/// the marker is absent.
+fn strip_tail_block(prompt: &mut String, marker: &str) {
+    let Some(start) = prompt.find(marker) else {
+        return;
+    };
+    let after = start + marker.len();
+    // Find the closest later marker (any of the known tails) after our block.
+    let next = ALL_TAIL_MARKERS
+        .iter()
+        .filter_map(|m| prompt[after..].find(m).map(|idx| after + idx))
+        .min();
+    match next {
+        Some(end) => {
+            prompt.replace_range(start..end, "");
+        }
+        None => {
+            prompt.truncate(start);
+        }
+    }
+}
+
+/// Append (or refresh) the rendered `## Reference Knowledge` block on a
+/// manifest's `model.system_prompt`.
+///
+/// This is the single source of truth for the "skill prompt_context →
+/// system prompt" materialization for hand-derived agents. Two call sites
+/// use it:
+///
+/// 1. Hand activation (`activate_hand_with_id`) — splices the agent's
+///    effective skill content into the prompt before `save_agent`.
+/// 2. Boot-time TOML drift detection (`new_with_config`) — when the disk
+///    manifest replaces the DB blob, the bare TOML doesn't carry the
+///    rendered tail (it's runtime-materialized), so without re-rendering
+///    here the agent silently loses its skill knowledge on every restart.
+///
+/// `skill_content` is the resolved per-agent skill body (per-role override
+/// when set, else the hand-shared content). When `None` or empty, any
+/// pre-existing block is stripped and no new block is appended — this keeps
+/// the helper safe to call on agents whose skill allowlist has shrunk to
+/// nothing without leaving stale rendered content behind.
+///
+/// Idempotency: an existing `## Reference Knowledge` block is detected via
+/// the marker constant and replaced rather than duplicated. Repeated calls
+/// produce identical prompts.
+pub(super) fn apply_reference_knowledge_to_manifest(
+    manifest: &mut AgentManifest,
+    skill_content: Option<&str>,
+) {
+    // Always strip a pre-existing block so shrinking-to-empty cleans up.
+    strip_tail_block(
+        &mut manifest.model.system_prompt,
+        REFERENCE_KNOWLEDGE_TAIL_MARKER,
+    );
+
+    let Some(content) = skill_content else {
+        return;
+    };
+    if content.is_empty() {
+        return;
+    }
+
+    // Insert before any tail that follows RK in canonical order (`## Your
+    // Team`) so re-renders stay sorted [settings → RK → team]. Append at
+    // end-of-prompt when no later marker is present.
+    let insert_at = manifest
+        .model
+        .system_prompt
+        .find(YOUR_TEAM_TAIL_MARKER)
+        .unwrap_or(manifest.model.system_prompt.len());
+
+    let block = format!("\n\n---\n\n## Reference Knowledge\n\n{content}");
+    manifest.model.system_prompt.insert_str(insert_at, &block);
+}
+
+/// Append (or refresh) the rendered `## Your Team` block on a manifest's
+/// `model.system_prompt` from a list of pre-rendered peer lines.
+///
+/// `peer_lines` is the exact content already formatted by the caller (e.g.
+/// `"- **role**: hint (use agent_send to message)"`). When empty, any
+/// pre-existing block is stripped and nothing is appended — covers the
+/// single-agent / no-peers case where the block must not appear.
+///
+/// Two call sites mirror the settings/reference-knowledge pattern:
+///
+/// 1. Hand activation — populates the team roster for multi-agent hands.
+/// 2. Boot-time drift detection — re-renders after the disk TOML overwrite
+///    so peer info survives restarts.
+///
+/// Idempotency: replaces any existing `## Your Team` block via the marker.
+pub(super) fn apply_your_team_to_manifest(manifest: &mut AgentManifest, peer_lines: &[String]) {
+    strip_tail_block(&mut manifest.model.system_prompt, YOUR_TEAM_TAIL_MARKER);
+
+    if peer_lines.is_empty() {
+        return;
     }
 
     manifest.model.system_prompt = format!(
-        "{}\n\n---\n\n{}",
-        manifest.model.system_prompt, resolved.prompt_block
+        "{}\n\n## Your Team\n\n{}",
+        manifest.model.system_prompt,
+        peer_lines.join("\n")
     );
+}
 
-    resolved.env_vars
+/// Build the team-roster lines for a given role within a hand definition.
+///
+/// Returns an empty vec for single-agent hands or when the role is the only
+/// agent. The line format mirrors `activate_hand_with_id` exactly so the
+/// drift-time render is byte-identical to the activation render.
+pub(super) fn build_team_lines_for_role(
+    def: &librefang_hands::HandDefinition,
+    role: &str,
+) -> Vec<String> {
+    if !def.is_multi_agent() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for (peer_role, peer_agent) in &def.agents {
+        if peer_role == role {
+            continue;
+        }
+        let hint = peer_agent
+            .invoke_hint
+            .as_deref()
+            .unwrap_or(&peer_agent.manifest.description);
+        lines.push(format!(
+            "- **{peer_role}**: {hint} (use agent_send to message)"
+        ));
+    }
+    lines
+}
+
+/// Resolve the effective skill-content body for a role within a hand
+/// definition: per-role override (`SKILL-{role}.md`) takes precedence over
+/// the shared `SKILL.md`. Returns `None` when neither exists.
+///
+/// Centralized here so the drift loop and the activation path can't drift
+/// apart on resolution semantics.
+pub(super) fn resolve_skill_content_for_role<'a>(
+    def: &'a librefang_hands::HandDefinition,
+    role: &str,
+) -> Option<&'a str> {
+    let role_lower = role.to_lowercase();
+    def.agent_skill_content
+        .get(&role_lower)
+        .or(def.skill_content.as_ref())
+        .map(|s| s.as_str())
 }
 
 pub fn shared_memory_agent_id() -> AgentId {
@@ -539,6 +736,276 @@ system_prompt = "p"
             &std::collections::HashMap::new(),
         );
         assert!(m.model.system_prompt.contains(USER_CONFIG_TAIL_MARKER));
+    }
+
+    // ── Reference Knowledge / Your Team helpers ─────────────────────────
+    //
+    // Regression guard for issue #3143: the boot-time TOML drift loop
+    // overwrites the DB manifest with the bare disk TOML, which never
+    // carries any of the runtime-rendered tails. Without idempotent
+    // helpers re-running in the drift block, hand-derived agents lose
+    // their skill knowledge and peer roster on every restart.
+
+    fn make_hand_def(
+        id: &str,
+        roles: &[(&str, &str, Option<&str>)], // (role, description, invoke_hint)
+        shared_skill: Option<&str>,
+        per_agent_skill: &[(&str, &str)],
+    ) -> librefang_hands::HandDefinition {
+        use librefang_hands::{HandAgentManifest, HandDefinition};
+        let mut agents = std::collections::BTreeMap::new();
+        for (role, desc, hint) in roles {
+            let m = AgentManifest {
+                name: format!("{id}-{role}"),
+                description: desc.to_string(),
+                ..AgentManifest::default()
+            };
+            agents.insert(
+                role.to_string(),
+                HandAgentManifest {
+                    coordinator: false,
+                    invoke_hint: hint.map(|s| s.to_string()),
+                    base: None,
+                    manifest: m,
+                },
+            );
+        }
+        let def = HandDefinition {
+            id: id.to_string(),
+            version: "0.0.0".to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            category: librefang_hands::HandCategory::Other,
+            icon: String::new(),
+            tools: Vec::new(),
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            allowed_plugins: Vec::new(),
+            requires: Vec::new(),
+            settings: Vec::new(),
+            agents,
+            dashboard: Default::default(),
+            routing: Default::default(),
+            skill_content: shared_skill.map(|s| s.to_string()),
+            agent_skill_content: per_agent_skill
+                .iter()
+                .map(|(r, s)| (r.to_lowercase(), s.to_string()))
+                .collect(),
+            metadata: None,
+            i18n: Default::default(),
+        };
+        // Touch fields the compiler needs touched (no-op for the test).
+        let _ = def.is_multi_agent();
+        def
+    }
+
+    #[test]
+    fn apply_reference_knowledge_idempotent() {
+        let mut m = manifest_with_prompt("BASE");
+        apply_reference_knowledge_to_manifest(&mut m, Some("DOC BODY"));
+        let after_first = m.model.system_prompt.clone();
+        apply_reference_knowledge_to_manifest(&mut m, Some("DOC BODY"));
+        assert_eq!(
+            m.model.system_prompt, after_first,
+            "second invocation must not duplicate the tail"
+        );
+        assert_eq!(
+            m.model
+                .system_prompt
+                .matches("## Reference Knowledge")
+                .count(),
+            1,
+            "exactly one reference-knowledge block must be present"
+        );
+        assert!(m.model.system_prompt.contains("DOC BODY"));
+    }
+
+    #[test]
+    fn apply_reference_knowledge_replaces_stale_block() {
+        let mut m = manifest_with_prompt("BASE");
+        apply_reference_knowledge_to_manifest(&mut m, Some("OLD CONTENT"));
+        apply_reference_knowledge_to_manifest(&mut m, Some("NEW CONTENT"));
+        assert!(
+            !m.model.system_prompt.contains("OLD CONTENT"),
+            "stale block must be replaced, not appended alongside"
+        );
+        assert!(m.model.system_prompt.contains("NEW CONTENT"));
+        assert_eq!(
+            m.model
+                .system_prompt
+                .matches("## Reference Knowledge")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn apply_reference_knowledge_no_skills_strips_block() {
+        let mut m = manifest_with_prompt("BASE");
+        apply_reference_knowledge_to_manifest(&mut m, Some("CONTENT"));
+        assert!(m.model.system_prompt.contains("## Reference Knowledge"));
+        // Hand re-rendered with no skill content (allowlist shrank to empty)
+        // — block must be removed, not left as a stale leftover.
+        apply_reference_knowledge_to_manifest(&mut m, None);
+        assert!(
+            !m.model.system_prompt.contains("## Reference Knowledge"),
+            "no skill content -> block must be stripped"
+        );
+        assert_eq!(m.model.system_prompt, "BASE");
+    }
+
+    #[test]
+    fn apply_your_team_idempotent() {
+        let mut m = manifest_with_prompt("BASE");
+        let lines = vec!["- **planner**: plans (use agent_send to message)".to_string()];
+        apply_your_team_to_manifest(&mut m, &lines);
+        let after_first = m.model.system_prompt.clone();
+        apply_your_team_to_manifest(&mut m, &lines);
+        assert_eq!(
+            m.model.system_prompt, after_first,
+            "second invocation must not duplicate the team block"
+        );
+        assert_eq!(
+            m.model.system_prompt.matches("## Your Team").count(),
+            1,
+            "exactly one team block must be present"
+        );
+    }
+
+    #[test]
+    fn apply_your_team_no_peers_strips_block() {
+        let mut m = manifest_with_prompt("BASE");
+        apply_your_team_to_manifest(
+            &mut m,
+            &["- **planner**: plans (use agent_send to message)".to_string()],
+        );
+        assert!(m.model.system_prompt.contains("## Your Team"));
+        apply_your_team_to_manifest(&mut m, &[]);
+        assert!(
+            !m.model.system_prompt.contains("## Your Team"),
+            "no peers -> block must be stripped"
+        );
+        assert_eq!(m.model.system_prompt, "BASE");
+    }
+
+    #[test]
+    fn build_team_lines_for_single_agent_returns_empty() {
+        let def = make_hand_def("solo", &[("main", "the only agent", None)], None, &[]);
+        assert!(
+            build_team_lines_for_role(&def, "main").is_empty(),
+            "single-agent hand must not produce a team roster"
+        );
+    }
+
+    #[test]
+    fn build_team_lines_excludes_self_and_uses_invoke_hint() {
+        let def = make_hand_def(
+            "research",
+            &[
+                ("lead", "team lead", Some("Use lead for routing")),
+                ("worker", "fallback description", None),
+            ],
+            None,
+            &[],
+        );
+        let lines = build_team_lines_for_role(&def, "lead");
+        assert_eq!(lines.len(), 1, "self must be excluded");
+        assert!(lines[0].contains("**worker**"));
+        // Worker has no invoke_hint -> falls back to manifest.description.
+        assert!(lines[0].contains("fallback description"));
+
+        let lines = build_team_lines_for_role(&def, "worker");
+        assert_eq!(lines.len(), 1);
+        // Lead has invoke_hint -> takes precedence over description.
+        assert!(lines[0].contains("Use lead for routing"));
+    }
+
+    #[test]
+    fn resolve_skill_content_prefers_per_role_override() {
+        let def = make_hand_def(
+            "research",
+            &[("lead", "d", None), ("worker", "d", None)],
+            Some("SHARED"),
+            &[("worker", "WORKER ONLY")],
+        );
+        assert_eq!(
+            resolve_skill_content_for_role(&def, "lead"),
+            Some("SHARED"),
+            "no override -> shared content"
+        );
+        assert_eq!(
+            resolve_skill_content_for_role(&def, "worker"),
+            Some("WORKER ONLY"),
+            "per-role override wins"
+        );
+        // Case-insensitive match (filenames are lowercased during scan).
+        assert_eq!(
+            resolve_skill_content_for_role(&def, "Worker"),
+            Some("WORKER ONLY")
+        );
+    }
+
+    #[test]
+    fn drift_simulation_preserves_settings_and_renders_rk_and_team() {
+        // End-to-end shape of the drift loop: simulate a manifest that already
+        // carries all three rendered tails (settings, RK, Team), then "swap"
+        // to a bare disk manifest (just the base prompt) and re-apply the
+        // three helpers in canonical order. The result must contain all
+        // three blocks again, in order, with the new content — not the stale
+        // pre-swap content.
+        let mut bare = manifest_with_prompt("BASE PROMPT");
+        let cfg = std::collections::HashMap::new();
+        apply_settings_block_to_manifest(&mut bare, &make_settings(), &cfg);
+        apply_reference_knowledge_to_manifest(&mut bare, Some("FRESH SKILL"));
+        apply_your_team_to_manifest(
+            &mut bare,
+            &["- **planner**: plans (use agent_send to message)".to_string()],
+        );
+
+        let prompt = &bare.model.system_prompt;
+        let pos_settings = prompt
+            .find("## User Configuration")
+            .expect("settings block");
+        let pos_rk = prompt
+            .find("## Reference Knowledge")
+            .expect("reference knowledge block");
+        let pos_team = prompt.find("## Your Team").expect("team block");
+        assert!(
+            pos_settings < pos_rk && pos_rk < pos_team,
+            "blocks must render in canonical order: settings -> reference knowledge -> your team"
+        );
+        assert!(prompt.contains("FRESH SKILL"));
+        assert!(prompt.contains("**planner**"));
+        assert!(prompt.starts_with("BASE PROMPT"));
+    }
+
+    #[test]
+    fn drift_simulation_replaces_stale_rk_and_team_blocks() {
+        // Simulate the full drift cycle: an entry manifest with stale tail
+        // content gets overwritten by a fresh disk manifest (without tails),
+        // then helpers re-render. Stale "OLD" content must be gone.
+        let mut m = manifest_with_prompt("BASE");
+        apply_reference_knowledge_to_manifest(&mut m, Some("OLD SKILL"));
+        apply_your_team_to_manifest(
+            &mut m,
+            &["- **stale**: gone (use agent_send to message)".to_string()],
+        );
+
+        // Drift swap: replace prompt with bare disk version (no tails).
+        m.model.system_prompt = "BASE".to_string();
+
+        // Re-apply with fresh content.
+        apply_reference_knowledge_to_manifest(&mut m, Some("FRESH SKILL"));
+        apply_your_team_to_manifest(
+            &mut m,
+            &["- **planner**: plans (use agent_send to message)".to_string()],
+        );
+
+        let prompt = &m.model.system_prompt;
+        assert!(prompt.contains("FRESH SKILL"));
+        assert!(prompt.contains("**planner**"));
+        assert!(!prompt.contains("OLD SKILL"));
+        assert!(!prompt.contains("**stale**"));
     }
 
     #[test]
