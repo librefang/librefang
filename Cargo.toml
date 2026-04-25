@@ -98,6 +98,9 @@ async-trait = "0.1"
 # Base64
 base64 = "0.22"
 
+# Bitflags
+bitflags = "2"
+
 # Bytes
 bytes = "1"
 

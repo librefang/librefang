@@ -150,6 +150,7 @@ channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
+bitflags = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
