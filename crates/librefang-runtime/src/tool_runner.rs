@@ -6929,6 +6929,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_patch_allows_rw_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("added.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+hello-from-patch\n*** End Patch\n",
+            target.to_str().unwrap()
+        );
+
+        let result = execute_tool(
+            "test-id",
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000006"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "hello-from-patch");
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_denies_readonly_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("added.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+should-not-write\n*** End Patch\n",
+            target.to_str().unwrap()
+        );
+
+        let result = execute_tool(
+            "test-id",
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000007"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error, "expected denial, got: {}", result.content);
+        assert!(!target.exists(), "file should not have been written");
+    }
+
+    #[tokio::test]
     async fn test_web_search() {
         let result = execute_tool(
             "test-id",

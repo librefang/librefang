@@ -126,10 +126,20 @@ pub fn resolve_sandbox_path_ext(
         .iter()
         .any(|root| canon_candidate.starts_with(root));
     if !inside_primary && !inside_additional {
+        let named_hint = if additional_roots.is_empty() {
+            "If the path lives in a shared location, declare it under \
+             [workspaces] in agent.toml (e.g. `foo = { path = \"shared/foo\", \
+             mode = \"rw\" }`) so it becomes accessible as a named workspace. "
+        } else {
+            "The agent has named workspaces declared, but this path is not \
+             inside any of them. Check the [workspaces] entries in agent.toml \
+             and the @-prefixed roots listed in TOOLS.md. "
+        };
         return Err(format!(
             "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
-             If you have an MCP filesystem server configured, use the \
-             mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
+             {named_hint}\
+             Alternatively, if you have an MCP filesystem server configured, \
+             use the mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
              mcp_filesystem_list_directory) to access files outside \
              the workspace.",
             user_path

@@ -15770,8 +15770,8 @@ impl KernelHandle for LibreFangKernel {
         entry
             .manifest
             .workspaces
-            .iter()
-            .filter_map(|(_, decl)| {
+            .values()
+            .filter_map(|decl| {
                 if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
                     return None;
                 }
