@@ -4243,6 +4243,13 @@ fn render_status_once(config: Option<PathBuf>, json: bool, verbose: bool, quiet:
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         render_status_daemon(config.as_deref(), &base, &daemon, json, verbose, quiet)
+    } else if read_daemon_info(&daemon.home_dir).is_some() {
+        // daemon.json exists but the health check did not succeed within the
+        // timeout — the daemon is either still starting, temporarily overloaded,
+        // or crashed with a stale info file.  NEVER open the embedded database
+        // here: the running daemon (or its stale lock) owns it exclusively and
+        // any attempt would fail with a RocksDB lock conflict.
+        render_status_unreachable(&daemon.home_dir, json, quiet)
     } else {
         render_status_inprocess(config, json, quiet)
     }
@@ -4805,11 +4812,17 @@ fn render_agents_table(agents: &[serde_json::Value]) {
 }
 
 fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
-    // Quiet mode short-circuits the kernel boot — we don't need to load 22
-    // workflow templates just to print "daemon down". Pull what we can from
-    // the config file alone.
+    // No daemon.json found — daemon is genuinely not running.
+    // Use config-only data; never boot the kernel here.  If any other process
+    // holds the embedded DB lock (stale crash, etc.) opening the kernel would
+    // deadlock / fail with a RocksDB lock error.
+    let cfg = load_config(config.as_deref());
+
+    // Count agents from disk (registry/agents/<name>/agent.toml) so we can
+    // display a useful count without touching the database.
+    let agent_count = count_agent_dirs(&cfg.home_dir);
+
     if quiet {
-        let cfg = load_config(config.as_deref());
         println!(
             "librefang down home={} default={}/{}",
             cfg.home_dir.display(),
@@ -4819,15 +4832,11 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
         return 1;
     }
 
-    let kernel = boot_kernel(config);
-    let agent_count = kernel.agent_registry().count();
-    let cfg = kernel.config_ref();
-
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": "in-process",
+                "status": "down",
                 "agent_count": agent_count,
                 "home": cfg.home_dir.display().to_string(),
                 "data_dir": cfg.data_dir.display().to_string(),
@@ -4844,7 +4853,9 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
 
     ui::section(&i18n::t("section-status-inprocess"));
     ui::blank();
-    ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
+    if let Some(n) = agent_count {
+        ui::kv(&i18n::t("label-agents"), &n.to_string());
+    }
     ui::kv(&i18n::t("label-provider"), &cfg.default_model.provider);
     ui::kv(&i18n::t("label-model"), &cfg.default_model.model);
     ui::kv(&i18n::t("label-home"), &cfg.home_dir.display().to_string());
@@ -4866,15 +4877,72 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     ui::blank();
     ui::hint(&i18n::t("hint-run-start"));
 
-    if agent_count > 0 {
-        ui::blank();
-        ui::section(&i18n::t("section-persisted-agents"));
-        for entry in kernel.agent_registry().list() {
-            println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
-        }
+    1
+}
+
+/// Called when `daemon.json` exists but the API health check did not succeed.
+/// Reports the situation without touching the embedded database.
+fn render_status_unreachable(home_dir: &std::path::Path, json: bool, quiet: bool) -> i32 {
+    let info = read_daemon_info(home_dir);
+    let pid = info.as_ref().map(|i| i.pid).unwrap_or(0);
+    let addr = info
+        .as_ref()
+        .map(|i| i.listen_addr.as_str())
+        .unwrap_or("unknown");
+    let started = info.as_ref().map(|i| i.started_at.as_str()).unwrap_or("-");
+
+    if quiet {
+        println!("librefang starting-or-unreachable pid={pid} addr={addr}");
+        return 2;
     }
 
-    1
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "starting_or_unreachable",
+                "pid": pid,
+                "listen_addr": addr,
+                "started_at": started,
+                "exit_code": 2,
+            }))
+            .unwrap_or_default()
+        );
+        return 2;
+    }
+
+    ui::section("Daemon Status");
+    ui::blank();
+    ui::kv("PID", &pid.to_string());
+    ui::kv("Address", addr);
+    ui::kv("Started", started);
+    ui::kv_warn(
+        "Health",
+        "daemon info file found but API is not responding — \
+         the daemon may still be starting up, be temporarily overloaded, or have crashed",
+    );
+    ui::blank();
+    ui::hint("Run `librefang status` again in a moment to check again.");
+    ui::hint("Run `librefang logs` to inspect the daemon log.");
+    ui::hint("Run `librefang stop` to clear a stale info file if the daemon crashed.");
+
+    2
+}
+
+/// Count agent definition directories under `<home>/registry/agents/`.
+/// Each entry is a subdirectory containing an `agent.toml`.
+/// Returns `None` if the directory cannot be read.
+fn count_agent_dirs(home_dir: &std::path::Path) -> Option<usize> {
+    let agents_dir = home_dir.join("registry").join("agents");
+    let entries = std::fs::read_dir(&agents_dir).ok()?;
+    let count = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && e.path().join("agent.toml").exists()
+        })
+        .count();
+    Some(count)
 }
 
 /// Fetch the public `/api/health` payload along with the round-trip time.
