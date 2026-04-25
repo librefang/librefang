@@ -964,3 +964,11 @@ Context compression is always active for all agents. There are no knobs to enabl
 
 ---
 
+### Cron Scheduler
+
+Per-agent scheduled jobs (interval, one-shot, or 5-field cron expressions) trigger agent turns, system events, or workflow runs. The scheduler supports multi-destination delivery with failure isolation, pre-scripts that inject data into the LLM prompt, and a silent marker for runtime delivery suppression.
+
+See [Cron Scheduler](/configuration/features/cron) for the full schema, fan-out target variants (channel / webhook / local file / email), SSRF protection on webhook URLs, the `<home_dir>/scripts/` path allowlist for pre-scripts, and the wake-gate vs pre-script trade-off.
+
+---
+
