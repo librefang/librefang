@@ -183,7 +183,8 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "model",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        // TUI uses /model for direct switch / picker; channels use it for show/switch.
+        scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Show or switch agent model",
         args_hint: "[name]",
         subcommands: &[],
@@ -264,7 +265,8 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "status",
         aliases: &[],
         category: Category::Info,
-        scope: Scope::CHANNEL,
+        // Channels show system status; TUI shows connection / agent info.
+        scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Show system status",
         args_hint: "",
         subcommands: &[],
@@ -417,11 +419,42 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "help",
         aliases: &[],
         category: Category::Misc,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::CLI),
         description: "Show this help",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+    },
+    // ---- TUI-only control commands (Scope::CLI) ----
+    CommandDef {
+        name: "clear",
+        aliases: &[],
+        category: Category::Misc,
+        scope: Scope::CLI,
+        description: "Clear chat history",
+        args_hint: "",
+        subcommands: &[],
+        telegram_menu: false,
+    },
+    CommandDef {
+        name: "kill",
+        aliases: &[],
+        category: Category::Misc,
+        scope: Scope::CLI,
+        description: "Kill the current agent and quit",
+        args_hint: "",
+        subcommands: &[],
+        telegram_menu: false,
+    },
+    CommandDef {
+        name: "exit",
+        aliases: &["quit"],
+        category: Category::Misc,
+        scope: Scope::CLI,
+        description: "End chat session",
+        args_hint: "",
+        subcommands: &[],
+        telegram_menu: false,
     },
 ];
 
@@ -524,6 +557,50 @@ pub fn channel_help_text(overrides: Option<&ChannelOverrides>) -> String {
         first_in_section = false;
     }
 
+    out
+}
+
+/// Render the CLI / TUI-facing `/help` text.
+///
+/// Lists every command visible to `Scope::CLI`. Output is a flat list aligned
+/// with em-dashes (matching the historical TUI `/help` style); category headers
+/// are not used because the CLI surface has only a handful of commands.
+pub fn cli_help_text() -> String {
+    // Build (display_lhs, description) pairs first so we can align em-dashes.
+    let mut rows: Vec<(String, &'static str)> = Vec::new();
+    for c in iter_for(Scope::CLI) {
+        if c.subcommands.is_empty() {
+            let lhs = if c.args_hint.is_empty() {
+                format!("/{}", c.name)
+            } else {
+                format!("/{} {}", c.name, c.args_hint)
+            };
+            rows.push((lhs, c.description));
+        } else {
+            for sub in c.subcommands {
+                rows.push((format!("/{} {}", c.name, sub.args), sub.description));
+            }
+        }
+    }
+
+    let width = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (i, (lhs, desc)) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let pad = width - lhs.chars().count();
+        out.push_str(lhs);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out.push_str(" \u{2014} ");
+        out.push_str(desc);
+    }
     out
 }
 
@@ -726,6 +803,55 @@ mod tests {
         assert!(!txt.contains("/agent <name>"));
         // Other commands still show up.
         assert!(txt.contains("/agents - List running agents"));
+    }
+
+    /// `cli_help_text()` must include all TUI-only commands and the
+    /// CLI-shared ones (status, model, help). Format uses em-dash separators.
+    #[test]
+    fn cli_help_text_lists_tui_commands() {
+        let txt = cli_help_text();
+        // TUI-only
+        assert!(txt.contains("/clear"), "missing /clear: {txt}");
+        assert!(txt.contains("/kill"), "missing /kill: {txt}");
+        assert!(txt.contains("/exit"), "missing /exit: {txt}");
+        // Shared with channels
+        assert!(txt.contains("/help"), "missing /help: {txt}");
+        assert!(txt.contains("/status"), "missing /status: {txt}");
+        assert!(txt.contains("/model"), "missing /model: {txt}");
+        // Em-dash separator (U+2014)
+        assert!(txt.contains(" \u{2014} "), "missing em-dash: {txt}");
+        // Should NOT include channel-only commands like /agents, /budget, /btw
+        assert!(!txt.contains("/agents"), "/agents leaked into CLI help");
+        assert!(!txt.contains("/budget"), "/budget leaked into CLI help");
+        assert!(!txt.contains("/btw"), "/btw leaked into CLI help");
+    }
+
+    /// `/quit` must resolve via the `/exit` alias.
+    #[test]
+    fn quit_resolves_via_exit_alias() {
+        assert_eq!(lookup("quit").map(|c| c.name), Some("exit"));
+        assert_eq!(lookup("/quit").map(|c| c.name), Some("exit"));
+        assert_eq!(lookup("exit").map(|c| c.name), Some("exit"));
+    }
+
+    /// Adding `Scope::CLI` to existing channel commands must not change the
+    /// channel-visible set (golden assertion guard).
+    #[test]
+    fn cli_scope_does_not_leak_into_channel_set() {
+        // Running this alongside `channel_command_names_match_historical_set`
+        // catches any future drift where someone adds a CLI-only command but
+        // accidentally tags it `Scope::CHANNEL`.
+        let cli_only: Vec<&str> = COMMAND_REGISTRY
+            .iter()
+            .filter(|c| c.scope == Scope::CLI)
+            .map(|c| c.name)
+            .collect();
+        for name in &cli_only {
+            assert!(
+                !is_channel_command(name),
+                "CLI-only command `{name}` must not appear as channel command"
+            );
+        }
     }
 
     #[test]

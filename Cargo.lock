@@ -4143,6 +4143,7 @@ dependencies = [
  "fluent",
  "libc",
  "librefang-api",
+ "librefang-channels",
  "librefang-extensions",
  "librefang-kernel",
  "librefang-migrate",
