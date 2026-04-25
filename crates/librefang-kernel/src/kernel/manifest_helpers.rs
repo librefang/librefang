@@ -840,6 +840,41 @@ system_prompt = "BASE-WORKER"
     }
 
     #[test]
+    fn apply_team_block_ignores_legacy_unfenced_tail() {
+        // Lock-down for the LEGACY_TEAM_TAIL_MARKER cleanup. The pre-fence
+        // form (`\n\n## Your Team`) is no longer recognised by the strip
+        // logic, so a prompt carrying it gets a fresh fenced block appended
+        // alongside (not replacing the legacy text). If a future change
+        // reintroduces unfenced detection it should fail this assertion
+        // first — that's a deliberate design choice, not a regression.
+        //
+        // The duplicate is harmless: drift loop never repopulates the
+        // unfenced form, and any operator-visible `## Your Team` heading is
+        // the fresh fenced one. The only path to this state is a
+        // cross-version DB copy from pre-#3164 directly into a
+        // post-cleanup binary, which is not a supported upgrade flow.
+        let def = parse_hand(MULTI_AGENT_HAND, "");
+        let mut m = manifest_with_prompt(
+            "BASE\n\n## Your Team\n\n- **worker**: stale (use agent_send to message)",
+        );
+        apply_team_block_to_manifest(&mut m, "lead", &def);
+        let prompt = &m.model.system_prompt;
+        assert!(
+            prompt.contains("stale"),
+            "legacy unfenced text must NOT be stripped after cleanup; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("\n\n---\n\n## Your Team\n\n"),
+            "fresh fenced block must still be appended; got: {prompt}"
+        );
+        assert_eq!(
+            prompt.matches("## Your Team").count(),
+            2,
+            "exactly two team headings: the leftover legacy one and the new fenced one; got: {prompt}"
+        );
+    }
+
+    #[test]
     fn apply_team_block_uses_invoke_hint_when_present() {
         let def = parse_hand(MULTI_AGENT_HAND, "");
         let mut m = manifest_with_prompt("BASE");
