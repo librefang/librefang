@@ -4075,6 +4075,7 @@ dependencies = [
 name = "librefang-cli"
 version = "2026.4.24-beta5"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "clap",
  "clap_complete",
@@ -4097,6 +4098,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "toml 1.1.2+spec-1.1.0",

@@ -8,6 +8,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod desktop_install;
+pub mod doctor;
 mod http_client;
 pub mod i18n;
 mod launcher;
@@ -5828,6 +5829,50 @@ fn cmd_doctor(json: bool, repair: bool) {
                 ui::check_warn("Node.js not found (needed for Node skill runtime)");
             }
             checks.push(serde_json::json!({"check": "node", "status": "warn"}));
+        }
+    }
+
+    // Framework-based audit checks (see crates/librefang-cli/src/doctor.rs).
+    // Each check is its own struct, registered in `doctor::registered_checks`.
+    // Migrating the legacy inline checks above into this framework can happen
+    // incrementally — adding a new check is one struct + one registry entry,
+    // no edits to this function.
+    {
+        let ctx = doctor::AuditContext {
+            librefang_home: cli_librefang_home(),
+        };
+        for result in doctor::run_all(&ctx) {
+            if !json {
+                match result.severity {
+                    doctor::Severity::Pass | doctor::Severity::Info => {
+                        ui::check_ok(&result.summary);
+                    }
+                    doctor::Severity::Warn => {
+                        ui::check_warn(&result.summary);
+                        if let Some(hint) = &result.hint {
+                            ui::hint(hint);
+                        }
+                    }
+                    doctor::Severity::Error => {
+                        ui::check_fail(&result.summary);
+                        if let Some(hint) = &result.hint {
+                            ui::hint(hint);
+                        }
+                    }
+                }
+            }
+            let mut entry = serde_json::json!({
+                "check": result.name,
+                "status": result.severity.as_str(),
+                "summary": result.summary,
+            });
+            if let Some(h) = &result.hint {
+                entry["hint"] = serde_json::Value::String(h.clone());
+            }
+            checks.push(entry);
+            if matches!(result.severity, doctor::Severity::Error) {
+                all_ok = false;
+            }
         }
     }
 
