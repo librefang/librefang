@@ -972,3 +972,43 @@ See [Cron Scheduler](/configuration/features/cron) for the full schema, fan-out 
 
 ---
 
+### Observability — Tempo + business spans
+
+LibreFang ships an opt-in observability stack you can bring up with one `docker compose` invocation. It captures HTTP requests **and** LibreFang's own work — agent turns, tool calls, channel sends, cron fires — as searchable Tempo traces.
+
+**Stack components** (all bundled in-binary; no external download required):
+
+- `librefang-otel-collector` — OTLP/gRPC collector on `:4317`. The daemon exports spans here.
+- `librefang-tempo` — single-binary Grafana Tempo with local-filesystem storage and 24 h retention. Receiver on internal `:4317`, query API on `:3200`.
+- `librefang-grafana` — pre-provisioned Grafana with the Tempo data source wired.
+
+**Bring it up:**
+
+```bash
+librefang observability up      # starts the bundled compose stack
+librefang observability status  # health-checks each container
+librefang observability down    # tears it down
+```
+
+**Configure the daemon to export there:**
+
+```toml
+[telemetry]
+otlp_endpoint = "http://localhost:4317"
+service_name = "librefang"
+sample_rate = 1.0           # 0.0–1.0; lower for high-volume prod
+prometheus_enabled = true   # also expose /api/metrics
+```
+
+**Trace search**: open Grafana at `http://localhost:3000`, switch Explore to the Tempo data source, and search by trace ID, span name, or attribute. Business-level spans include `agent.turn`, `tool.call`, `channel.send`, `cron.fire`, and `provider.request` — each carrying agent id, channel name, model, and outcome as searchable attributes.
+
+**`cache_hit_ratio` metric:** for every `agent.turn` span the runtime computes
+
+```
+cache_hit_ratio = cache_read / (cache_read + cache_creation)   # in [0.0, 1.0]
+```
+
+`Some(1.0)` is a perfect prefix-cache hit; `Some(0.0)` is a cold start where caching was active but nothing was hit; `None` means caching wasn't active at all for the run. Surfaces in trajectory exports (`metadata.cache_hit_ratio`) and on the Grafana per-agent panel.
+
+---
+

@@ -46,6 +46,16 @@ This checks:
 
 Add new checks by implementing the `AuditCheck` trait in `crates/librefang-cli/src/doctor.rs` and registering them in `registered_checks()`.
 
+#### Foreground daemon log files
+
+`librefang start --foreground` (the mode `just dev` and many supervisors use) now **tees stdout to both the terminal and a daily rotating file** at `~/.librefang/logs/daemon-YYYY-MM-DD.log`. Same-day restarts append to the existing file; a new day spawns a fresh one. Files older than 7 days are pruned on the next daemon start.
+
+Previously the foreground path wrote only to the terminal, so logs were lost the moment the supervisor scrolled them off-screen.
+
+```bash
+tail -f ~/.librefang/logs/daemon-$(date +%F).log
+```
+
 ### Check Daemon Status
 
 ```bash
