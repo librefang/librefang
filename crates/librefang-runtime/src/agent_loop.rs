@@ -2413,6 +2413,7 @@ fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<EndTurnRetry>
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finalize_end_turn_text(
     text: String,
     any_tools_executed: bool,
