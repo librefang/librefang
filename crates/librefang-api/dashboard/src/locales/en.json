@@ -814,6 +814,7 @@
     "schedule_name_placeholder": "e.g. Daily status check",
     "schedule_message_placeholder": "What should the hand do when this fires?",
     "schedule_created": "Schedule created",
+    "configure_delivery_targets": "Configure delivery targets →",
     "requirements": "Requirements",
     "tools": "Tools",
     "cat_content": "Content",
