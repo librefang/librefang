@@ -4837,6 +4837,24 @@ fn format_uptime(secs: u64) -> String {
 }
 
 fn cmd_doctor(json: bool, repair: bool) {
+    // BrokenPipe protection for the WHOLE command, not just the --json
+    // branch. `librefang doctor | head -5` and similar pipelines drop the
+    // reader after a few lines, which on the next stdout write turns into a
+    // panic — Rust ignores SIGPIPE by default and translates EPIPE into an
+    // io::Error that `println!` unwraps.
+    //
+    // The pre-existing `write_stdout_safe` helper only covered the
+    // `--json` final emission. Hundreds of `ui::*` and bare `println!`
+    // calls between the start of cmd_doctor and that emission were still
+    // unprotected. Restoring the default SIGPIPE handler for the duration
+    // of this command makes the kernel terminate the process cleanly on
+    // pipe close instead, covering every print path in this function and
+    // the `ui::*` helpers it calls.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
     let mut repaired = false;
