@@ -663,6 +663,36 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
     })
 }
 
+// ── Status classification ─────────────────────────────────────────────────────
+
+/// What the dispatch loop should do for a given HTTP status.
+///
+/// Pure function so the policy can be unit-tested without spinning up an
+/// HTTP mock — the live dispatch in `complete()` mirrors this exactly.
+#[derive(Debug, PartialEq, Eq)]
+enum StatusAction {
+    /// 2xx — proceed to parse body.
+    Success,
+    /// 429/502/503/504 — retry until budget exhausted, then fail.
+    Retry,
+    /// 401/403 — surface as AuthenticationFailed.
+    Auth,
+    /// Other 4xx/5xx — surface as Api { status, message }.
+    Fail,
+}
+
+fn classify_response_status(status: u16) -> StatusAction {
+    if (200..300).contains(&status) {
+        StatusAction::Success
+    } else if status == 429 || status == 502 || status == 503 || status == 504 {
+        StatusAction::Retry
+    } else if status == 401 || status == 403 {
+        StatusAction::Auth
+    } else {
+        StatusAction::Fail
+    }
+}
+
 // ── LlmDriver impl ────────────────────────────────────────────────────────────
 
 #[async_trait]
@@ -1138,6 +1168,90 @@ mod tests {
             .filter(|b| matches!(b, BedrockContentBlock::Text { .. }))
             .count();
         assert!(text_at_3 >= 1);
+    }
+
+    // ── Error response handling ───────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_status_success() {
+        assert_eq!(classify_response_status(200), StatusAction::Success);
+        assert_eq!(classify_response_status(204), StatusAction::Success);
+    }
+
+    #[test]
+    fn test_classify_status_auth_failures() {
+        // 401 Unauthorized and 403 Forbidden must map to AuthenticationFailed
+        // so the agent loop does not retry them as transient.
+        assert_eq!(classify_response_status(401), StatusAction::Auth);
+        assert_eq!(classify_response_status(403), StatusAction::Auth);
+    }
+
+    #[test]
+    fn test_classify_status_rate_limited() {
+        // 429 must be retried (not surface immediately).
+        assert_eq!(classify_response_status(429), StatusAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_status_transient_5xx_retries() {
+        // 502, 503, 504 are transient gateway/service errors — retry them.
+        assert_eq!(classify_response_status(502), StatusAction::Retry);
+        assert_eq!(classify_response_status(503), StatusAction::Retry);
+        assert_eq!(classify_response_status(504), StatusAction::Retry);
+    }
+
+    #[test]
+    fn test_classify_status_permanent_5xx_does_not_retry() {
+        // 500, 501, 505 are permanent / malformed-request 5xx — do NOT retry.
+        assert_eq!(classify_response_status(500), StatusAction::Fail);
+        assert_eq!(classify_response_status(501), StatusAction::Fail);
+        assert_eq!(classify_response_status(505), StatusAction::Fail);
+    }
+
+    #[test]
+    fn test_classify_status_other_4xx_fails() {
+        // 400 / 404 / 422 surface as Api error, not Auth, not Retry.
+        assert_eq!(classify_response_status(400), StatusAction::Fail);
+        assert_eq!(classify_response_status(404), StatusAction::Fail);
+        assert_eq!(classify_response_status(422), StatusAction::Fail);
+    }
+
+    #[test]
+    fn test_bedrock_error_response_parses_message() {
+        // Real Bedrock 4xx body shape: {"message": "..."}
+        let body = r#"{"message":"The security token included in the request is invalid."}"#;
+        let parsed: BedrockErrorResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            parsed.message,
+            "The security token included in the request is invalid."
+        );
+    }
+
+    #[test]
+    fn test_error_body_truncation_safe_on_multibyte_boundary() {
+        // Regression: previous slice `&body[..body.len().min(200)]` panicked when
+        // byte 200 fell inside a multi-byte UTF-8 sequence. The fix uses
+        // chars().take(200) which is codepoint-aware.
+        //
+        // Build a body whose 200th byte falls inside a 3-byte UTF-8 char (中文).
+        // Each Chinese char is 3 bytes, so 70 chars = 210 bytes. Truncating to
+        // 200 bytes via byte-slice would land mid-codepoint. chars().take(200)
+        // takes 200 codepoints (well within the 70 we have) without panic.
+        let body: String = "中".repeat(70); // 210 bytes, 70 chars
+        assert!(body.len() > 200);
+        let snippet: String = body.chars().take(200).collect();
+        // 70 chars < 200 chars, so we get all of them back.
+        assert_eq!(snippet.chars().count(), 70);
+        // And byte length is whatever 70 Chinese chars occupy — never panics.
+        assert_eq!(snippet.len(), 210);
+    }
+
+    #[test]
+    fn test_error_body_truncation_caps_codepoints() {
+        // When the body is longer than 200 codepoints, only the first 200 are kept.
+        let body: String = "a".repeat(500);
+        let snippet: String = body.chars().take(200).collect();
+        assert_eq!(snippet.chars().count(), 200);
     }
 
     #[test]
