@@ -785,6 +785,13 @@ pub struct AgentManifest {
     /// for this specific agent. Follows the same pattern as `exec_policy`.
     #[serde(default)]
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
+    /// Per-agent override for the message-history trim cap. When set,
+    /// takes precedence over `KernelConfig.max_history_messages` and the
+    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Values below 4
+    /// are silently clamped at runtime with a warning log.
+    #[serde(default)]
+    pub max_history_messages: Option<usize>,
 }
 
 /// Access mode for a named workspace.
@@ -860,6 +867,7 @@ impl Default for AgentManifest {
             show_progress: true,
             auto_evolve: true,
             channel_overrides: None,
+            max_history_messages: None,
         }
     }
 }
