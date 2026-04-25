@@ -30,6 +30,13 @@ waterfall, span diff, service deps). Tempo is the long-term store; Jaeger is
 ephemeral (in-memory, wiped on container restart) and is meant for live
 debugging.
 
+Both backends are auto-provisioned as Grafana datasources
+(`librefang-tempo`, `librefang-jaeger`), so Grafana's Explore page can
+query either side and dashboards can use derived fields to jump from a
+metric panel into the matching trace. Same `trace_id` flows through both
+exporters, so a trace opened in Grafana and the same `trace_id` pasted
+into the Jaeger UI return the identical span tree.
+
 The Jaeger container is **required by the trace pipeline**, not optional:
 the collector's `traces` pipeline includes `otlp/jaeger` as an exporter,
 so starting the stack without `jaeger` will leave the collector logging
