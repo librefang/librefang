@@ -1733,6 +1733,11 @@ impl LlmDriver for OpenAIDriver {
             }
 
             let stop_reason = match finish_reason.as_deref() {
+                // If the upstream said "tool_calls" but we filtered them all
+                // out (e.g. Copilot proxy dropped function-name chunks),
+                // downgrade to EndTurn so the agent loop doesn't stage an
+                // empty tool-use turn that nothing can execute.
+                Some("tool_calls") if tool_calls.is_empty() => StopReason::EndTurn,
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
