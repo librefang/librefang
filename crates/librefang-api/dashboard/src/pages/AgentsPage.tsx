@@ -102,12 +102,20 @@ function SystemPromptSection({ prompt }: { prompt: string }) {
           </button>
         )}
       </div>
-      <div
-        className={`rounded-lg bg-main border border-border-subtle p-4 text-sm text-text leading-relaxed whitespace-pre-wrap ${
-          isLong && !expanded ? "max-h-72 overflow-y-auto" : ""
-        }`}
-      >
-        {prompt}
+      <div className="relative">
+        <div
+          className={`rounded-lg bg-main border border-border-subtle p-4 text-sm text-text leading-relaxed whitespace-pre-wrap ${
+            isLong && !expanded ? "max-h-40 overflow-hidden" : ""
+          }`}
+        >
+          {prompt}
+        </div>
+        {isLong && !expanded && (
+          // Fade-out at the bottom so the cut feels intentional rather than
+          // a clip, without introducing an inner scroll. The modal's outer
+          // scroll is the single source of truth — no nested scrolling.
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-lg bg-linear-to-t from-main to-transparent" />
+        )}
       </div>
     </section>
   );
@@ -735,9 +743,12 @@ export function AgentsPage() {
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
-      {/* Agent Detail / Edit Modal. Sticky header for identity + status,
-          scrolling body for inspectable sections, sticky footer for
-          actions so primary controls stay reachable on long agent specs. */}
+      {/* Agent Detail Drawer. Right-side inspector pattern (Linear / Figma):
+          the agents list stays interactive while the drawer is open, so
+          clicking another agent in the list updates the drawer's content
+          in place — no close-then-reopen needed. Sticky header / footer
+          keep identity and primary actions pinned while the inspectable
+          sections scroll in the middle. */}
       {detailAgent && (() => {
         const detailState = ((detailAgent as any).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
@@ -765,7 +776,8 @@ export function AgentsPage() {
         <Modal
           isOpen
           onClose={closeDetailModal}
-          size="4xl"
+          variant="drawer-right"
+          size="xl"
           hideCloseButton
           disableBackdropClose={lockBackdropDismiss}
         >

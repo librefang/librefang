@@ -17,6 +17,11 @@ interface ModalProps {
   zIndex?: number;
   /** Allow content to overflow the modal container (e.g. for cmdk dropdowns). Defaults to false. */
   overflowVisible?: boolean;
+  /** Container shape. `modal` (default) is centered with max-h-[90vh].
+   *  `drawer-right` docks to the right edge at full viewport height — used
+   *  for inspector workflows where the underlying list should stay visible
+   *  for quick context-switching (Linear / Figma right panel pattern). */
+  variant?: "modal" | "drawer-right";
   children: ReactNode;
 }
 
@@ -52,13 +57,19 @@ export const Modal = memo(function Modal({
   disableBackdropClose,
   zIndex = 50,
   overflowVisible = false,
+  variant = "modal",
   children,
 }: ModalProps) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
-  useFocusTrap(isOpen, dialogRef, true);
+  const isDrawer = variant === "drawer-right";
+  // Modal traps Tab inside the dialog (no escape from the focus loop).
+  // Drawer leaves Tab free so keyboard users can hop back into the
+  // underlying list (which is still interactive — see container's
+  // pointer-events-none) without first hitting Esc.
+  useFocusTrap(isOpen, dialogRef, true, !isDrawer);
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -88,18 +99,37 @@ export const Modal = memo(function Modal({
     onClose();
   };
 
+  // Drawer vs Modal differ in three ways:
+  //   1. Position: drawer hugs the right edge full-height; modal centres.
+  //   2. Dim: modal dims the page (focus on dialog); drawer leaves the
+  //      page un-dimmed because the surrounding context — typically a
+  //      list — should stay legible while the drawer inspects one item.
+  //   3. Click-through: clicks outside the drawer panel pass through to
+  //      the underlying page so users can pick another row in the list
+  //      and the drawer updates in place (Linear / Figma inspector).
+  //      The Modal still closes on backdrop click — that's its contract.
+  const containerClass = isDrawer
+    ? "fixed inset-0 flex items-stretch justify-end pointer-events-none"
+    : "fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4";
+  const dialogClass = isDrawer
+    ? `pointer-events-auto relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl animate-slide-in-right ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
+    : `relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`;
+
   return (
     <div
-      className="fixed inset-0 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-0 sm:p-4"
+      className={containerClass}
       style={{ zIndex }}
-      onClick={disableBackdropClose ? undefined : handleBackdropClick}
+      // Backdrop dismissal is a modal contract; the drawer relies on Esc
+      // and its explicit close button instead, since "click outside to
+      // close" would race with the list-click-to-switch interaction.
+      onClick={isDrawer || disableBackdropClose ? undefined : handleBackdropClick}
     >
       <div
         ref={dialogRef}
         role="dialog"
-        aria-modal="true"
+        aria-modal={isDrawer ? "false" : "true"}
         aria-labelledby={titleId}
-        className={`relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`}
+        className={dialogClass}
         onClick={(e) => e.stopPropagation()}
       >
         {(title || !hideCloseButton) && (
