@@ -143,11 +143,15 @@ pub struct ModelCatalogEntry {
     /// Model modality. Defaults to `Text` when absent in the catalog TOML.
     #[serde(default)]
     pub modality: Modality,
-    /// Context window size in tokens. `0` or absent means "not applicable"
-    /// (image/audio models may omit this field in the registry).
+    /// Context window size in tokens. `0` or absent means "unknown / not
+    /// applicable" — image and audio models in the registry omit this field.
+    /// Consumers MUST treat `0` as unknown and supply their own default;
+    /// never propagate `0` into compaction thresholds or budget math.
     #[serde(default)]
     pub context_window: u64,
-    /// Maximum output tokens. `0` or absent means "not applicable".
+    /// Maximum output tokens. `0` or absent means "unknown / not applicable".
+    /// Same handling rule as `context_window`: do not feed `0` into
+    /// downstream calculations.
     #[serde(default)]
     pub max_output_tokens: u64,
     /// Cost per million input tokens (USD) — text tokens for image/audio models.

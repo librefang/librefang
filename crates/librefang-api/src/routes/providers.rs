@@ -743,11 +743,18 @@ pub async fn add_custom_model(
         .unwrap_or(&id)
         .to_string();
 
+    let modality = match body.get("modality").and_then(|v| v.as_str()) {
+        Some("image") => librefang_types::model_catalog::Modality::Image,
+        Some("audio") => librefang_types::model_catalog::Modality::Audio,
+        _ => librefang_types::model_catalog::Modality::Text,
+    };
+
     let entry = librefang_types::model_catalog::ModelCatalogEntry {
         id: id.clone(),
         display_name: display,
         provider: provider.clone(),
         tier: librefang_types::model_catalog::ModelTier::Custom,
+        modality,
         context_window,
         max_output_tokens: max_output,
         input_cost_per_m: body
@@ -758,6 +765,8 @@ pub async fn add_custom_model(
             .get("output_cost_per_m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
+        image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
         supports_tools: body
             .get("supports_tools")
             .and_then(|v| v.as_bool())
@@ -775,7 +784,6 @@ pub async fn add_custom_model(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         aliases: vec![],
-        ..Default::default()
     };
 
     let mut catalog = state
