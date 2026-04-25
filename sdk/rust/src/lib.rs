@@ -372,6 +372,10 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/sessions/{}/export", id, session_id), None, &[]).await
     }
 
+    pub fn attach_session_stream(&self, id: &str, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        do_stream(self.client.clone(), self.base_url.clone(), format!("/api/agents/{}/sessions/{}/stream", id, session_id), reqwest::Method::GET, None, Vec::new())
+    }
+
     pub async fn switch_agent_session(&self, id: &str, session_id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/sessions/{}/switch", id, session_id), None, &[]).await
     }

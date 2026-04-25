@@ -141,6 +141,10 @@ async fn start_test_server_with_provider(
             axum::routing::get(routes::export_session_trajectory),
         )
         .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
+        )
+        .route(
             "/api/agents/{id}/metrics",
             axum::routing::get(routes::agent_metrics),
         )
@@ -1529,6 +1533,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             axum::routing::get(routes::export_session_trajectory),
         )
         .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
+        )
+        .route(
             "/api/agents/{id}/metrics",
             axum::routing::get(routes::agent_metrics),
         )
@@ -2062,5 +2070,118 @@ async fn test_mcp_http_enforces_agent_tool_allowlist() {
     assert!(
         content.contains("Permission denied") || content.contains("capability"),
         "denial must mention permission/capability; got: {content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-client session attach (GET /api/agents/{id}/sessions/{sid}/stream)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_404_for_unknown_agent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let bogus_agent = uuid::Uuid::new_v4();
+    let bogus_session = uuid::Uuid::new_v4();
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/stream",
+            server.base_url, bogus_agent, bogus_session
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_fans_out_to_multiple_clients() {
+    use futures::StreamExt as _;
+    use librefang_runtime::llm_driver::StreamEvent;
+    use std::time::Duration;
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent (ollama, no LLM call needed).
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id_str = body["agent_id"].as_str().unwrap().to_string();
+    let agent_id: librefang_types::agent::AgentId = agent_id_str.parse().unwrap();
+
+    // Pull the agent's canonical session id from the registry — the attach
+    // route validates the session belongs to the agent.
+    let session_id = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .unwrap()
+        .session_id;
+
+    let url = format!(
+        "{}/api/agents/{}/sessions/{}/stream",
+        server.base_url, agent_id_str, session_id
+    );
+
+    // Helper that opens an SSE attach connection and reads until it sees a
+    // complete SSE frame (one `\n\n` boundary) or the timeout elapses. Returns
+    // the bytes accumulated so the test can assert on the published payload.
+    async fn read_first_frame(client: reqwest::Client, url: String) -> String {
+        let resp = client.get(url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(chunk)) = stream.next().await {
+                buf.extend_from_slice(&chunk);
+                if buf.windows(2).any(|w| w == b"\n\n") {
+                    return;
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    let attacher_a = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+    let attacher_b = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+
+    // Wait briefly so both attachers have completed `subscribe()` inside the
+    // handler before we publish — broadcast is fire-and-forget for events
+    // that arrive with zero subscribers.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let hub = server.state.kernel.session_stream_hub();
+    let sender = hub.sender(session_id);
+    let receiver_count = sender
+        .send(StreamEvent::TextDelta {
+            text: "hello-multiattach".to_string(),
+        })
+        .expect("at least one receiver should be attached");
+    assert!(
+        receiver_count >= 2,
+        "expected both attachers to be subscribed before publish; got {receiver_count}"
+    );
+
+    let body_a = attacher_a.await.unwrap();
+    let body_b = attacher_b.await.unwrap();
+
+    assert!(
+        body_a.contains("hello-multiattach"),
+        "client A body should contain published event: {body_a}"
+    );
+    assert!(
+        body_b.contains("hello-multiattach"),
+        "client B body should contain published event: {body_b}"
     );
 }

@@ -27,6 +27,7 @@ pub use librefang_kernel_router as router;
 pub mod scheduler;
 pub mod session_lifecycle;
 pub mod session_policy;
+pub mod session_stream_hub;
 pub mod supervisor;
 pub mod trajectory;
 pub mod triggers;

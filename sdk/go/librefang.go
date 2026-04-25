@@ -396,6 +396,10 @@ func (r *AgentsResource) ExportSession(id string, session_id string) (interface{
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil, nil)
 }
 
+func (r *AgentsResource) AttachSessionStream(id string, session_id string) <-chan map[string]interface{} {
+	return r.client.stream("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/stream", id, session_id), nil, nil)
+}
+
 func (r *AgentsResource) SwitchAgentSession(id string, session_id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/switch", id, session_id), nil, nil)
 }

@@ -264,6 +264,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/sessions/${session_id}/export`);
   }
 
+  async *attachSessionStream(id, session_id) {
+    yield* this._c._stream("GET", `/api/agents/${id}/sessions/${session_id}/stream`);
+  }
+
   async switchAgentSession(id, session_id) {
     return this._c._request("POST", `/api/agents/${id}/sessions/${session_id}/switch`);
   }

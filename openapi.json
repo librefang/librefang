@@ -1537,6 +1537,47 @@
         }
       }
     },
+    "/api/agents/{id}/sessions/{session_id}/stream": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE).",
+        "description": "Any client can subscribe to the events emitted by an active turn on this\nsession: the originating client (CLI, Tauri desktop, web) plus any number\nof additional clients. Late attachers begin receiving events from the\nmoment they subscribe — partial-turn snapshots are not replayed.\n\nReturns 404 if the session does not exist or belongs to a different agent.",
+        "operationId": "attach_session_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID to attach to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent events stream of session events"
+          },
+          "400": {
+            "description": "Invalid agent or session ID"
+          },
+          "404": {
+            "description": "Agent or session not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/sessions/{session_id}/switch": {
       "post": {
         "tags": [

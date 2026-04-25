@@ -240,6 +240,9 @@ class _AgentsResource(_Resource):
     def export_session(self, id: str, session_id: str):
         return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/export")
 
+    def attach_session_stream(self, id: str, session_id: str) -> Generator[Dict, None, None]:
+        return self._c._stream("GET", f"/api/agents/{id}/sessions/{session_id}/stream")
+
     def switch_agent_session(self, id: str, session_id: str):
         return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/switch")
 

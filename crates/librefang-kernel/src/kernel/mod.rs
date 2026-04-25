@@ -307,6 +307,8 @@ pub struct LibreFangKernel {
     pub(crate) event_bus: EventBus,
     /// Session lifecycle event bus (push-based pub/sub for session-scoped events).
     pub(crate) session_lifecycle_bus: Arc<crate::session_lifecycle::SessionLifecycleBus>,
+    /// Per-session stream-event hub for multi-client SSE attach.
+    pub(crate) session_stream_hub: Arc<crate::session_stream_hub::SessionStreamHub>,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
@@ -1635,6 +1637,15 @@ impl LibreFangKernel {
 }
 
 impl LibreFangKernel {
+    /// Per-session stream-event hub (multi-client SSE attach).
+    ///
+    /// API handlers use this to subscribe attaching clients to a session's
+    /// in-flight `StreamEvent` flow. Returns the shared `Arc` so subscribers
+    /// outlive any individual turn.
+    pub fn session_stream_hub(&self) -> Arc<crate::session_stream_hub::SessionStreamHub> {
+        Arc::clone(&self.session_stream_hub)
+    }
+
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
         let config = load_config(config_path);
@@ -2643,6 +2654,7 @@ impl LibreFangKernel {
             session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
                 256,
             )),
+            session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
@@ -4961,7 +4973,12 @@ system_prompt = "You are a helpful assistant."
 
         // Non-LLM modules: execute non-streaming and emit results as stream events
         if is_wasm || is_python {
-            let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+            // Fan out to the session hub so attached clients see the
+            // synthesized text delta + complete event for non-LLM agents too.
+            let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
+                &self.session_stream_hub,
+                entry.session_id,
+            );
             let kernel_clone = Arc::clone(self);
             let message_owned = message.to_string();
             let entry_clone = entry.clone();
@@ -5128,7 +5145,10 @@ system_prompt = "You are a helpful assistant."
                 .filter(|w| *w > 0)
         });
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
+            &self.session_stream_hub,
+            effective_session_id,
+        );
         let mut manifest = entry.manifest.clone();
 
         // Inject model_supports_tools for auto web search augmentation

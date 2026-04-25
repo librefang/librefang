@@ -264,6 +264,44 @@ impl SessionId {
             name.as_bytes(),
         ))
     }
+
+    /// Derive a session ID from a structured (channel, account, conversation) key.
+    ///
+    /// Backward compatible with `for_channel`: when `account` is empty, the
+    /// resulting id is identical to `for_channel(agent, channel)` if
+    /// `conversation` is also empty, or to `for_channel(agent, format!("{channel}:{conversation}"))`
+    /// when only `conversation` is set. This preserves existing session ids for
+    /// channels that never carried an account dimension.
+    ///
+    /// When `account` is non-empty, a `v2:` byte prefix is mixed in so the
+    /// hash space is disjoint from the legacy format — avoids collisions even
+    /// if a real channel/account ever lines up textually with a legacy scope.
+    pub fn from_route_key(
+        agent_id: AgentId,
+        channel: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Self {
+        if account.is_empty() {
+            let scope = if conversation.is_empty() {
+                channel.to_string()
+            } else {
+                format!("{channel}:{conversation}")
+            };
+            return Self::for_channel(agent_id, &scope);
+        }
+        let name = format!(
+            "v2:{}:{}:{}:{}",
+            agent_id.0,
+            channel.to_lowercase(),
+            account.to_lowercase(),
+            conversation.to_lowercase()
+        );
+        Self(uuid::Uuid::new_v5(
+            &CHANNEL_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
 }
 
 impl std::str::FromStr for SessionId {
@@ -2046,5 +2084,55 @@ model = "llama-3.3-70b-versatile"
         let persistent = SessionId::for_channel(agent, "cron");
         let isolated = SessionId::for_cron_run(agent, "cron");
         assert_ne!(persistent, isolated);
+    }
+
+    #[test]
+    fn from_route_key_empty_account_matches_for_channel() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        // Plain channel, no conversation: must equal for_channel(agent, channel).
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", ""),
+            SessionId::for_channel(agent, "telegram"),
+        );
+        // Channel + conversation, empty account: must equal for_channel(agent, "channel:conv")
+        // — preserves legacy `format!("{channel}:{chat_id}")` scope.
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", "12345"),
+            SessionId::for_channel(agent, "telegram:12345"),
+        );
+    }
+
+    #[test]
+    fn from_route_key_separates_accounts() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let alice = SessionId::from_route_key(agent, "telegram", "alice", "12345");
+        let bob = SessionId::from_route_key(agent, "telegram", "bob", "12345");
+        assert_ne!(
+            alice, bob,
+            "Different accounts on same channel+conversation must yield different sessions"
+        );
+        // And neither should collide with the legacy account-less id.
+        let legacy = SessionId::from_route_key(agent, "telegram", "", "12345");
+        assert_ne!(alice, legacy);
+        assert_ne!(bob, legacy);
+    }
+
+    #[test]
+    fn from_route_key_normalizes_case() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let mixed = SessionId::from_route_key(agent, "Telegram", "Alice", "ABC");
+        let lower = SessionId::from_route_key(agent, "telegram", "alice", "abc");
+        assert_eq!(
+            mixed, lower,
+            "channel/account/conversation must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn from_route_key_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let a = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        let b = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        assert_eq!(a, b);
     }
 }
