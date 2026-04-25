@@ -4773,6 +4773,32 @@ pub async fn run_agent_loop_streaming(
                 // streaming sink already forwards the deltas to the channel,
                 // but the in-memory accumulator is what feeds the empty-text
                 // fallback in finalize_end_turn_text. Mirrors the sync path.
+                //
+                // IMPORTANT (streaming-already-emitted semantics): every byte
+                // pushed into `accumulated_text` here has *already been
+                // delivered to the client* via the streaming sink. The
+                // accumulator is a **post-stream** fallback, not a re-emit:
+                //   * On final EndTurn with non-empty text the live deltas
+                //     drove the UI, and `final_response` is only used for
+                //     session persistence + memory extraction.
+                //   * On final EndTurn with empty text, finalize_end_turn_text
+                //     returns `accumulated_text` as `final_response`, but the
+                //     stream has already drained — no re-push to `stream_tx`
+                //     happens (see signal_response_complete is fire-only).
+                //   * The bridge.rs streaming success path
+                //     (channel_bridge.rs ~3032 `Ok(())` arm) calls only
+                //     `record_delivery` + lifecycle reaction; it never invokes
+                //     `send_response` with the buffered text. Fallback to
+                //     `send_response(buffered_text)` only fires on the
+                //     `Err(stream_error)` adapter-failure arm — that is the
+                //     intended recovery path, not a duplicate display.
+                //
+                // So the surface-level concern of "double display" does not
+                // manifest with the current bridge wiring. Any future
+                // refactor that has the streaming success arm also
+                // re-emit `final_response` MUST either drop the
+                // accumulated_text fallback in finalize_end_turn_text or
+                // gate it on a `streaming_already_emitted: bool` flag.
                 let intermediate_text = response.text();
                 if !intermediate_text.trim().is_empty() {
                     if !accumulated_text.is_empty() {
