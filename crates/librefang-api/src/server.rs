@@ -889,12 +889,43 @@ pub async fn build_router(
              to restore the legacy public reads allowlist."
         );
     }
+    // Read LIBREFANG_ALLOW_NO_AUTH once at boot — operators flip this to
+    // run intentionally open on a non-loopback bind. Without it, an empty
+    // api_key on a LAN/public bind fails closed for non-loopback origins.
+    let allow_no_auth = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+
+    // Loud startup warning when the server is bound to a non-loopback
+    // address with no authentication configured. The middleware enforces
+    // fail-closed for non-loopback traffic; this warning makes the
+    // operator-facing posture explicit at boot.
+    let bind_is_loopback = listen_addr.ip().is_loopback();
+    if !any_auth && !bind_is_loopback {
+        if allow_no_auth {
+            tracing::warn!(
+                "LIBREFANG_ALLOW_NO_AUTH=1 is set. Running WITHOUT authentication on {}. \
+                 Anyone reachable at this address can read/write agents, channels, and keys.",
+                listen_addr
+            );
+        } else {
+            tracing::warn!(
+                "No api_key configured and server is bound to {} (non-loopback). \
+                 Non-loopback requests will be rejected with 401. \
+                 Set api_key in config.toml, bind to 127.0.0.1, \
+                 or set LIBREFANG_ALLOW_NO_AUTH=1 to explicitly run open.",
+                listen_addr
+            );
+        }
+    }
+
     let auth_state = middleware::AuthState {
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
         dashboard_auth_enabled,
         user_api_keys: Arc::new(user_api_keys_vec),
         require_auth_for_reads,
+        allow_no_auth,
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

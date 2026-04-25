@@ -308,11 +308,30 @@ pub async fn agent_ws(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
-    // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
+    // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+
+    // Mirror middleware: when no auth is configured, only allow loopback
+    // unless the operator opted in via LIBREFANG_ALLOW_NO_AUTH=1.
+    // SECURITY: Closes openfang #1034 B2 — empty api_key used to permit
+    // unauthenticated WS upgrades from any origin.
+    if !auth_required {
+        let is_loopback = addr.ip().is_loopback();
+        let allow_no_auth = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        if !is_loopback && !allow_no_auth {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: no api_key configured and origin is not loopback"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
     if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {

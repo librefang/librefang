@@ -1622,6 +1622,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         dashboard_auth_enabled: false,
         user_api_keys: Arc::new(Vec::new()),
         require_auth_for_reads: false,
+        // Tests synthesize requests without ConnectInfo, so opt in to the
+        // open-server path to keep them green.
+        allow_no_auth: true,
     };
 
     let app = Router::new()
