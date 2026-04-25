@@ -236,6 +236,8 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   <option value="">{t("memory.auto_detect", { defaultValue: "Auto-detect" })}</option>
                   <option value="openai">{t("memory.provider_openai", { defaultValue: "OpenAI" })}</option>
                   <option value="ollama">{t("memory.provider_ollama", { defaultValue: "Ollama" })}</option>
+                  <option value="vllm">{t("memory.provider_vllm", { defaultValue: "vLLM" })}</option>
+                  <option value="lmstudio">{t("memory.provider_lmstudio", { defaultValue: "LM Studio" })}</option>
                   <option value="gemini">{t("memory.provider_gemini", { defaultValue: "Gemini" })}</option>
                   <option value="minimax">{t("memory.provider_minimax", { defaultValue: "MiniMax" })}</option>
                 </select>
@@ -250,6 +252,11 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
               <span className={labelCls}>{t("memory.api_key_env", { defaultValue: "API Key Env" })}</span>
               <input value={form.embedding_api_key_env ?? ""} onChange={e => setForm({ ...form, embedding_api_key_env: e.target.value })}
                 placeholder="OPENAI_API_KEY" className={inputCls} />
+              <p className="text-xs text-text-dim mt-1">
+                {t("memory.api_key_env_hint", {
+                  defaultValue: "Local providers (Ollama / vLLM / LM Studio) typically don't need a key — leave blank.",
+                })}
+              </p>
             </div>
           </div>
 
