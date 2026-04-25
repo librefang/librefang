@@ -10,14 +10,15 @@
 //!
 //! `SessionStreamHub` is a side-channel keyed by `SessionId`: a
 //! `tokio::sync::broadcast` sender per active session. The kernel installs a
-//! short forwarder task that drains the producer mpsc, fans each event out to
-//! both the original caller and the broadcast channel, so any number of late
-//! attachers can `subscribe()` and start receiving events from the moment
-//! they connect.
+//! short forwarder task that drains the producer mpsc, fans each event out
+//! to both the original caller (via a non-blocking `try_send`) and the
+//! broadcast channel. Any number of late attachers can `subscribe()` and
+//! start receiving events from the moment they connect.
 //!
-//! Hub entries are created lazily on first send and pruned when no senders
-//! and no live receivers remain (`gc_idle`). Lossiness is intentional: a slow
-//! attacher lags rather than backpressuring the producer.
+//! Hub entries are created lazily on first publish or first subscribe and
+//! pruned when no live receivers remain (`gc_idle`). Lossiness is intentional:
+//! a slow attacher (including the originating caller) lags rather than
+//! backpressuring the producer or starving other attachers.
 
 use dashmap::DashMap;
 use librefang_llm_driver::StreamEvent;
@@ -100,18 +101,23 @@ impl Default for SessionStreamHub {
 }
 
 /// Wire a producer mpsc through the hub: every event is broadcast to all
-/// session subscribers AND forwarded to the original caller.
+/// session subscribers AND queued non-blocking to the originating caller.
 ///
 /// Returns the producer sender (hand this to the agent loop) and the caller
 /// receiver (hand this back to the original HTTP/SSE handler). Spawns one
-/// short-lived forwarder task that exits when the producer side is dropped.
+/// short-lived forwarder task that exits when the producer side is dropped,
+/// which in turn drops the caller sender so the SSE handler's stream ends
+/// naturally.
 ///
 /// Backpressure semantics:
-/// - producer → forwarder mpsc(64): same as today, backpressures the loop.
-/// - forwarder → caller mpsc(64): same bound; if caller closes its receiver,
-///   send returns Err and the forwarder skips it (turn keeps running).
-/// - forwarder → broadcast: best-effort, drops on no-subscribers (Err) or on
-///   slow subscribers (handled inside broadcast). Never blocks the forwarder.
+/// - producer → forwarder mpsc(64): same as before; backpressures the agent
+///   loop only if the forwarder itself stalls (it never does).
+/// - forwarder → caller mpsc(SESSION_BROADCAST_CAPACITY): try_send only —
+///   a slow CLI/desktop falls behind by at worst the buffer size before
+///   drops begin. Crucially, the forwarder never awaits on the caller, so
+///   one slow client cannot choke broadcast subscribers or the agent loop.
+/// - forwarder → broadcast: synchronous, never blocks. Broadcast handles
+///   slow attachers internally with `Lagged`.
 pub fn install_stream_fanout(
     hub: &Arc<SessionStreamHub>,
     session_id: SessionId,
@@ -119,8 +125,11 @@ pub fn install_stream_fanout(
     tokio::sync::mpsc::Sender<StreamEvent>,
     tokio::sync::mpsc::Receiver<StreamEvent>,
 ) {
+    use tokio::sync::mpsc::error::TrySendError;
+
     let (producer_tx, mut producer_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
-    let (caller_tx, caller_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+    let (caller_tx, caller_rx) =
+        tokio::sync::mpsc::channel::<StreamEvent>(SESSION_BROADCAST_CAPACITY);
     let broadcast_tx = hub.sender(session_id);
 
     tokio::spawn(async move {
@@ -129,10 +138,18 @@ pub fn install_stream_fanout(
             // returns Err only when there are zero receivers — fine, just
             // means nobody is attached right now.
             let _ = broadcast_tx.send(event.clone());
-            // Forward to the originating caller. If the caller dropped its
-            // receiver we keep draining the producer so the agent loop is
-            // never backpressured by an absent listener.
-            let _ = caller_tx.send(event).await;
+            // Non-blocking forward to the originating caller. If the caller
+            // dropped its receiver or fell behind by the full buffer, drop
+            // the event rather than awaiting — keeps the forwarder loop and
+            // hence the agent loop unblocked.
+            match caller_tx.try_send(event) {
+                Ok(()) | Err(TrySendError::Closed(_)) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::debug!(
+                        "originating caller queue full; dropping event from originating client (broadcast subscribers unaffected)"
+                    );
+                }
+            }
         }
     });
 

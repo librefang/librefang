@@ -2156,13 +2156,27 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
     let attacher_a = tokio::spawn(read_first_frame(client.clone(), url.clone()));
     let attacher_b = tokio::spawn(read_first_frame(client.clone(), url.clone()));
 
-    // Wait briefly so both attachers have completed `subscribe()` inside the
-    // handler before we publish — broadcast is fire-and-forget for events
-    // that arrive with zero subscribers.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
+    // Wait until both attachers have completed `subscribe()` inside the
+    // handler before publishing — broadcast is fire-and-forget for events
+    // that arrive with zero subscribers, so a sleep-based wait would be
+    // racy on slow CI. Poll receiver_count until it reaches 2.
     let hub = server.state.kernel.session_stream_hub();
     let sender = hub.sender(session_id);
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if sender.receiver_count() >= 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "both attachers should subscribe within 5s; receiver_count={}",
+        sender.receiver_count()
+    );
+
     let receiver_count = sender
         .send(StreamEvent::TextDelta {
             text: "hello-multiattach".to_string(),
