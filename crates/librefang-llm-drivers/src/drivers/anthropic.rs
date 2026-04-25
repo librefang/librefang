@@ -903,34 +903,49 @@ fn apply_cache_markers_system_and_3(
 ) {
     let used_outside = 1usize + if has_tools { 1 } else { 0 }; // system [+ tools]
     let remaining = 4usize.saturating_sub(used_outside); // 2 or 3
-    let n = api_messages.len();
-    let take = remaining.min(n);
-    if take == 0 {
+    if remaining == 0 || api_messages.is_empty() {
         return;
     }
     let marker = ttl.to_marker();
-    for msg in api_messages.iter_mut().skip(n - take) {
-        stamp_block_with_marker(msg, &marker);
+    let mut stamped = 0usize;
+    // Walk tail → head and only count messages where a marker actually
+    // landed. Empty `Blocks` (e.g. messages whose only content was a
+    // Thinking block, filtered by `convert_message`) are skipped without
+    // consuming the budget — otherwise the rolling window silently
+    // shrinks below its 2-3 message target and the promised cache reuse
+    // is not realised.
+    for msg in api_messages.iter_mut().rev() {
+        if stamped >= remaining {
+            break;
+        }
+        if try_stamp_block_with_marker(msg, &marker) {
+            stamped += 1;
+        }
     }
 }
 
-/// Stamp `marker` on the last content block of this message. If the
-/// message uses the plain-string `ApiContent::Text` form, upgrade it to
-/// a single-element `Blocks` payload first — Anthropic only accepts
-/// `cache_control` on structured content blocks, not on shorthand
-/// strings. This upgrade is a lossless wire-format change.
-fn stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value) {
+/// Attempt to stamp `marker` on the last content block of this message.
+/// Returns `true` iff a marker actually landed (i.e. either the
+/// plain-string `Text` form was upgraded into a single-element block
+/// list, or the existing `Blocks` payload had a last block that could
+/// carry `cache_control`). Returns `false` for empty `Blocks` payloads
+/// — in that case the caller should not consume a breakpoint slot, so
+/// the rolling window can keep walking backwards.
+///
+/// If the message uses the plain-string `ApiContent::Text` form it is
+/// upgraded to a single-element `Blocks` payload first — Anthropic only
+/// accepts `cache_control` on structured content blocks, not on
+/// shorthand strings. This upgrade is a lossless wire-format change.
+fn try_stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value) -> bool {
     if let ApiContent::Text(text) = &msg.content {
         let text = text.clone();
         msg.content = ApiContent::Blocks(vec![ApiContentBlock::Text {
             text,
             cache_control: Some(marker.clone()),
         }]);
-        return;
+        return true;
     }
     if let ApiContent::Blocks(blocks) = &mut msg.content {
-        // Empty `Blocks` → nothing to mark; downstream already handles
-        // zero-block messages and the marker would have nowhere to live.
         // Thinking blocks were already filtered out by `convert_message`,
         // so any block reachable here can safely carry `cache_control`.
         if let Some(last) = blocks.last_mut() {
@@ -940,10 +955,12 @@ fn stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value) {
                 | ApiContentBlock::ToolUse { cache_control, .. }
                 | ApiContentBlock::ToolResult { cache_control, .. } => {
                     *cache_control = Some(marker.clone());
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Render the system field. When caching is disabled (`ttl: None`) the
@@ -1647,6 +1664,171 @@ mod tests {
         match &last.content {
             ApiContent::Text(_) => { /* expected */ }
             ApiContent::Blocks(_) => panic!("expected Text form when caching off"),
+        }
+    }
+
+    /// Regression: a message whose `convert_message` output is an empty
+    /// `Blocks` payload (e.g. only a Thinking block, which gets filtered)
+    /// must NOT consume a rolling-window slot. Otherwise the budget is
+    /// burnt on a no-op stamp and the trailing window silently shrinks
+    /// below its 2-3 message target — defeating the cache reuse this PR
+    /// promised.
+    #[test]
+    fn empty_blocks_message_does_not_consume_breakpoint() {
+        // 5 ApiMessages, no tools → remaining budget = 3.
+        // Index 3 is an empty-Blocks message (synthetic stand-in for a
+        // post-filter Thinking-only turn). Expected: indices [4, 2, 1]
+        // get stamped (3 stamps walking tail → head, skipping idx 3),
+        // index 0 stays clean. Old algorithm would have stamped only
+        // [4, 2] and burnt the third slot on the empty message at idx 3.
+        let mut api_messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u1".to_string()),
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: ApiContent::Text("a1".to_string()),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u2".to_string()),
+            },
+            // Empty Blocks — what convert_message produces when an
+            // assistant turn carried only a Thinking block.
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: ApiContent::Blocks(vec![]),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u3".to_string()),
+            },
+        ];
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
+
+        // Index 4 (newest) — stamped.
+        assert!(
+            last_block_cache_control(&api_messages[4]).is_some(),
+            "tail message must be stamped",
+        );
+        // Index 3 — empty Blocks, untouched (no slot consumed).
+        match &api_messages[3].content {
+            ApiContent::Blocks(b) => assert!(b.is_empty(), "empty Blocks must stay empty"),
+            ApiContent::Text(_) => panic!("empty Blocks must not be re-shaped to Text"),
+        }
+        // Index 2 — stamped (would NOT be stamped under the old `take`
+        // algorithm, which is exactly the regression this test guards).
+        assert!(
+            last_block_cache_control(&api_messages[2]).is_some(),
+            "third-from-tail must be stamped after skipping empty Blocks",
+        );
+        // Index 1 — stamped (3rd successful stamp).
+        assert!(
+            last_block_cache_control(&api_messages[1]).is_some(),
+            "second-from-head must be stamped to fill the 3-slot budget",
+        );
+        // Index 0 — clean, budget exhausted.
+        assert!(
+            last_block_cache_control(&api_messages[0]).is_none(),
+            "head must stay unmarked once budget is exhausted",
+        );
+    }
+
+    /// Invariant: across the whole `ApiRequest` the total number of
+    /// `cache_control` markers MUST never exceed Anthropic's per-request
+    /// cap of 4 — system block + tools-last + at most 2 message blocks
+    /// in this configuration. Counts every `cache_control: Some(_)`
+    /// occurrence in system, tools and every message block.
+    #[test]
+    fn total_cache_control_breakpoints_at_most_4_invariant() {
+        let tool = ToolDefinition {
+            name: "alpha".to_string(),
+            description: "x".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![
+                Message::user("u1"),
+                Message::assistant("a1"),
+                Message::user("u2"),
+                Message::assistant("a2"),
+                Message::user("u3 (last)"),
+            ],
+            tools: vec![tool],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let api_request = build_anthropic_request(&request);
+        let mut total = 0usize;
+
+        // System: array form → count entries with cache_control set.
+        if let Some(arr) = api_request.system.as_ref().and_then(|v| v.as_array()) {
+            total += arr
+                .iter()
+                .filter(|b| b.get("cache_control").is_some())
+                .count();
+        }
+
+        // Tools: count tools whose cache_control is Some.
+        total += api_request
+            .tools
+            .iter()
+            .filter(|t| t.cache_control.is_some())
+            .count();
+
+        // Messages: walk every block of every message.
+        for msg in &api_request.messages {
+            if let ApiContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    let cc = match block {
+                        ApiContentBlock::Text { cache_control, .. }
+                        | ApiContentBlock::Image { cache_control, .. }
+                        | ApiContentBlock::ToolUse { cache_control, .. }
+                        | ApiContentBlock::ToolResult { cache_control, .. } => cache_control,
+                    };
+                    if cc.is_some() {
+                        total += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            total <= 4,
+            "total cache_control markers must be <= 4, got {total}",
+        );
+    }
+
+    /// Pathological: every message in the conversation is empty Blocks
+    /// (every assistant turn was Thinking-only). The function must
+    /// gracefully no-op — no panic, no out-of-bounds, and no stamps —
+    /// rather than spinning forever or splattering markers onto blocks
+    /// that don't exist.
+    #[test]
+    fn rolling_window_when_all_messages_have_thinking_only_falls_back_gracefully() {
+        let mut api_messages: Vec<ApiMessage> = (0..5)
+            .map(|i| ApiMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: ApiContent::Blocks(vec![]),
+            })
+            .collect();
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
+
+        for (i, msg) in api_messages.iter().enumerate() {
+            assert!(
+                last_block_cache_control(msg).is_none(),
+                "message[{i}] must remain unmarked when no block exists to carry the marker",
+            );
         }
     }
 
