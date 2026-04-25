@@ -2388,10 +2388,7 @@ async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
 /// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
 /// extension and the fail-closed branch returns 401 for non-public paths.
 fn loopback_get(uri: &str) -> Request<Body> {
-    let mut request = Request::builder()
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap();
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
     request
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
