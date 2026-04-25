@@ -1435,7 +1435,7 @@ pub async fn set_provider_url(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Accept any provider name — custom providers are supported via OpenAI-compatible format.
-    let base_url = match body["base_url"].as_str() {
+    let base_url_raw = match body["base_url"].as_str() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
             return ApiErrorResponse::bad_request("Missing or empty 'base_url' field")
@@ -1444,10 +1444,19 @@ pub async fn set_provider_url(
     };
 
     // Validate URL scheme
-    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+    if !base_url_raw.starts_with("http://") && !base_url_raw.starts_with("https://") {
         return ApiErrorResponse::bad_request("base_url must start with http:// or https://")
             .into_json_tuple();
     }
+
+    // Normalize for the common Ollama / vLLM / LM Studio mistake: users
+    // paste `http://host:port` (no path) and the OpenAI driver then hits
+    // `/chat/completions` instead of `/v1/chat/completions`, getting a 404.
+    // If the user gave us a host-only URL (path is empty or just "/"),
+    // append `/v1` so OpenAI-compatible endpoints work out of the box.
+    // Custom paths (`/api/openai`, `/openai/v1`, etc.) are left alone.
+    // Issue #3138.
+    let base_url = normalize_base_url(&base_url_raw);
 
     // Optional proxy_url in same request
     let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
@@ -1703,6 +1712,79 @@ fn persist_default_model(
     root.insert("default_model".to_string(), toml::Value::Table(dm_table));
     std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
     Ok(())
+}
+
+/// Normalize a user-supplied provider base URL.
+///
+/// `http://host:port` (no path) and `http://host:port/` are rewritten to
+/// `http://host:port/v1` because every OpenAI-compatible local server we
+/// support (Ollama, vLLM, LM Studio, LlamaSwap, llama-server, etc.) serves
+/// its chat-completions endpoint at `/v1/chat/completions`. Without the
+/// normalisation the OpenAI driver produces `/chat/completions` and the
+/// server returns HTTP 404 — see issue #3138.
+///
+/// Custom paths (`/api/openai`, `/openai/v1`, `/router/some/path`) are left
+/// untouched: if a user explicitly typed a path we trust it.
+fn normalize_base_url(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/').to_string();
+    // After scheme there must be host[:port][/path…]. Find the first '/'
+    // after the scheme separator to know whether a path was supplied.
+    let after_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    let has_path = after_scheme.find('/').is_some();
+    if has_path {
+        // User supplied an explicit path — respect it.
+        trimmed
+    } else {
+        // Bare host[:port] — assume OpenAI-compatible default.
+        format!("{trimmed}/v1")
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_appends_v1_for_bare_host() {
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://localhost:8000"),
+        "http://localhost:8000/v1"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_preserves_explicit_path() {
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/v1"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("http://192.168.1.10:11434/v1/"),
+        "http://192.168.1.10:11434/v1"
+    );
+    assert_eq!(
+        normalize_base_url("https://api.openai.com/v1"),
+        "https://api.openai.com/v1"
+    );
+    assert_eq!(
+        normalize_base_url("https://example.com/api/openai"),
+        "https://example.com/api/openai"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn normalize_base_url_trims_whitespace() {
+    assert_eq!(
+        normalize_base_url("  http://localhost:11434  "),
+        "http://localhost:11434/v1"
+    );
 }
 
 /// Upsert a provider URL in the `[provider_urls]` section of config.toml.
