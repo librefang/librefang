@@ -1097,4 +1097,4 @@ Type `/help` inside a chat session to render the list scoped to the CLI:
 | `/kill` | Terminate the current agent and exit chat. |
 | `/exit` | End the chat session. `quit` is accepted as an alias. |
 
-Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Unknown command names fall through to a single "unknown command" error rather than being passed to the model.
+Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Note that **`/new` forks into a fresh session rather than wiping the current one** — the previous session stays accessible from the channel and can be resumed. Unknown command names fall through to a single "unknown command" error rather than being passed to the model.

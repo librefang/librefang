@@ -1097,4 +1097,4 @@ librefang service status
 | `/kill` | 终止当前 agent 并退出聊天。 |
 | `/exit` | 结束聊天会话。`quit` 是别名。 |
 
-channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、`/budget` 等）见 [Provider 管理 — Channel 命令](/zh/configuration/providers/management)。未知命令名只会得到一个 "unknown command" 错误，不会被传给模型。
+channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、`/budget` 等）见 [Provider 管理 — Channel 命令](/zh/configuration/providers/management)。注意 **`/new` 是分叉出新会话，不是清空当前会话** — 旧会话保留在通道里仍可恢复。未知命令名只会得到一个 "unknown command" 错误，不会被传给模型。
