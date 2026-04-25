@@ -9,16 +9,9 @@ description = "Test infrastructure: mock kernel, mock LLM driver and API route t
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-runtime = { path = "../librefang-runtime" }
-librefang-memory = { path = "../librefang-memory" }
 librefang-api = { path = "../librefang-api", default-features = false, features = ["telemetry"] }
-librefang-wire = { path = "../librefang-wire" }
-librefang-channels = { path = "../librefang-channels" }
-librefang-skills = { path = "../librefang-skills" }
-librefang-hands = { path = "../librefang-hands" }
-librefang-extensions = { path = "../librefang-extensions" }
 
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -27,6 +20,3 @@ dashmap = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
-
-[dev-dependencies]
-tokio-test = { workspace = true }
