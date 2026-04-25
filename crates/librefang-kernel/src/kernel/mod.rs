@@ -8852,7 +8852,7 @@ system_prompt = "You are a helpful assistant."
     pub fn activate_hand_with_id(
         &self,
         hand_id: &str,
-        config: std::collections::HashMap<String, serde_json::Value>,
+        mut config: std::collections::HashMap<String, serde_json::Value>,
         instance_id: Option<uuid::Uuid>,
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
@@ -8887,13 +8887,10 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Seed missing keys from the schema defaults so the persisted state
-        // matches what the renderer (`resolve_settings`) will actually show.
-        // The user's explicit overrides (already in `config`) take precedence
-        // — only fill keys the user hasn't touched. This makes "no value set"
-        // and "value matches default" distinguishable on disk and lets schema
-        // default changes require an explicit operator action to propagate.
-        let mut config = config;
+        // Seed schema defaults so persisted state matches what
+        // `resolve_settings` shows. Lets schema default changes require an
+        // explicit operator action and disambiguates "accepted default" from
+        // "never reviewed" on disk.
         for setting in &def.settings {
             config
                 .entry(setting.key.clone())

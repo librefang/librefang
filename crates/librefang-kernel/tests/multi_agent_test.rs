@@ -485,8 +485,7 @@ fn test_activation_seeds_schema_defaults_into_config() {
 
 #[test]
 fn test_activation_preserves_user_overrides_over_defaults() {
-    let kernel =
-        LibreFangKernel::boot_with_config(test_config("seed-defaults-override")).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(test_config("seed-defaults-override")).unwrap();
     install_hand(&kernel, HAND_WITH_SETTINGS);
 
     // User overrides one key; the other should still get the default.
@@ -496,9 +495,7 @@ fn test_activation_preserves_user_overrides_over_defaults() {
         serde_json::Value::String("quiet".to_string()),
     );
 
-    let instance = kernel
-        .activate_hand("test-settings", user_config)
-        .unwrap();
+    let instance = kernel.activate_hand("test-settings", user_config).unwrap();
 
     assert_eq!(
         instance.config.get("verbosity").and_then(|v| v.as_str()),
@@ -512,6 +509,44 @@ fn test_activation_preserves_user_overrides_over_defaults() {
             .and_then(|v| v.as_str()),
         Some("5"),
         "untouched key should still receive its schema default"
+    );
+
+    kernel.shutdown();
+}
+
+/// Schema-evolution backfill: when the persisted config is missing a key
+/// that the current schema declares (e.g. the hand was first activated
+/// against an older HAND.toml that didn't have the key, or the hand_state.json
+/// pre-dates this PR), re-activation must fill the missing key from the
+/// schema default while leaving every other previously-accepted value alone.
+#[test]
+fn test_reactivation_backfills_missing_schema_keys() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("seed-backfill")).unwrap();
+    install_hand(&kernel, HAND_WITH_SETTINGS);
+
+    // Mimic restart-recovery: hand_state.json carries a partial config —
+    // `max_concurrency` was accepted by the operator at "12", but `verbosity`
+    // is missing entirely (older state file, or schema added the key later).
+    let mut prior_config = HashMap::new();
+    prior_config.insert(
+        "max_concurrency".to_string(),
+        serde_json::Value::String("12".to_string()),
+    );
+
+    let instance = kernel.activate_hand("test-settings", prior_config).unwrap();
+
+    assert_eq!(
+        instance
+            .config
+            .get("max_concurrency")
+            .and_then(|v| v.as_str()),
+        Some("12"),
+        "previously-accepted user value must survive backfill"
+    );
+    assert_eq!(
+        instance.config.get("verbosity").and_then(|v| v.as_str()),
+        Some("normal"),
+        "key absent from prior config must be backfilled with its schema default"
     );
 
     kernel.shutdown();
