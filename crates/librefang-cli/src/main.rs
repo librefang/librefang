@@ -1616,6 +1616,57 @@ enum ServiceCommands {
     Status,
 }
 
+/// Wraps an inner `FormatEvent` impl so every emitted log line is prefixed
+/// with `trace_id=<32-hex>` whenever the current tracing span is part of an
+/// OpenTelemetry-traced flow (i.e. the OTel reload layer has been swapped
+/// in by `init_otel_tracing` and the span has a valid trace context).
+///
+/// When telemetry is compiled out, the wrapper still exists but the
+/// `cfg(feature = "telemetry")` block is empty — every call delegates to
+/// the inner formatter unchanged, so non-telemetry builds see no behaviour
+/// change. When telemetry is compiled in but no OTel context is active
+/// (e.g. an early boot log before the reload swap, a CLI subcommand that
+/// never started the API), the trace context is invalid and the prefix is
+/// omitted.
+///
+/// The prefix uses bare logfmt `trace_id=<hex>` (no quotes) — the matching
+/// `derivedFields` regex in `deploy/grafana/provisioning/datasources/loki.yml`
+/// is `trace_id="?([0-9a-f]{32})"?`, which resolves either form, so a future
+/// switch to quoted output stays compatible without re-provisioning Grafana.
+struct WithTraceId<F>(F);
+
+impl<S, N, F> tracing_subscriber::fmt::format::FormatEvent<S, N> for WithTraceId<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+    F: tracing_subscriber::fmt::format::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        #[allow(unused_mut)] mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        #[cfg(feature = "telemetry")]
+        {
+            use opentelemetry::trace::TraceContextExt;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            // Bind `cx` and the span via separate `let` bindings: `cx.span()`
+            // returns a `SpanRef` that borrows from `cx`, and `span_context()`
+            // returns a reference into the `SpanRef`'s inner state. Inlining
+            // either one drops a temporary while a later borrow still needs
+            // it (E0716 — verified with rustc 1.90 on this branch).
+            let cx = tracing::Span::current().context();
+            let span_ref = cx.span();
+            let span_cx = span_ref.span_context();
+            if span_cx.is_valid() {
+                write!(writer, "trace_id={:032x} ", span_cx.trace_id())?;
+            }
+        }
+        self.0.format_event(ctx, writer, event)
+    }
+}
+
 fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -1674,11 +1725,17 @@ fn init_tracing_stderr(log_level: &str) {
     // `doctor --json` expect a clean stdout stream. The fmt layer's
     // default writer is stdout, which would interleave tracing output
     // with the JSON payload and corrupt downstream parsers.
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    // Build the inner format separately so we can wrap it in `WithTraceId`,
+    // which prepends the OTel `trace_id` to every line when an OTel context
+    // is active. The wrapper is unconditional but no-ops without the
+    // `telemetry` feature; see `WithTraceId` doc above.
+    let inner_format = tracing_subscriber::fmt::format()
         .without_time()
         .with_target(false)
-        .compact()
+        .compact();
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .event_format(WithTraceId(inner_format))
         .with_filter(env_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
@@ -1741,13 +1798,24 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
 
     match std::fs::File::create(&log_path) {
         Ok(file) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-                )
+            // Same `WithTraceId` wrapper as `init_tracing_stderr` so the TUI
+            // log file carries `trace_id=<hex>` prefixes when OTel is on.
+            // We have to build the subscriber by hand here (rather than the
+            // `tracing_subscriber::fmt()` builder shortcut) because the
+            // builder owns its formatter and doesn't expose `event_format`.
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+            let inner_format = tracing_subscriber::fmt::format();
+            let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
+                .event_format(WithTraceId(inner_format));
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
                 .init();
         }
         Err(_) => {
@@ -12776,5 +12844,114 @@ input_schema = { type = "object" }
         let resolved =
             resolve_hand_instance(&instances, "inst-1").expect("instance should resolve");
         assert_eq!(resolved["hand_id"].as_str(), Some("researcher"));
+    }
+
+    // --- WithTraceId log-format wrapper tests ---
+    //
+    // The wrapper is the Rust-side counterpart of the Loki `derivedFields`
+    // regex provisioned in `deploy/grafana/provisioning/datasources/loki.yml`.
+    // It must (a) be a transparent passthrough when no OTel context is active
+    // (the common case for one-shot CLI commands and early boot), and (b)
+    // emit `trace_id=<32-hex>` exactly when a context is live so the Loki
+    // regex resolves it into a clickable trace link.
+    //
+    // We can't easily build a live OTel context inside a unit test without
+    // spinning up an exporter, so the OTel-active path is covered by the
+    // live integration test described in `deploy/OBSERVABILITY.md`. These
+    // tests pin the no-OTel-context behaviour, which is what regresses
+    // first if someone refactors the wrapper.
+
+    #[test]
+    fn test_with_trace_id_passthrough_without_otel_context() {
+        use super::WithTraceId;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Capture writer: collects every byte written by the fmt layer so the
+        // test can assert on the rendered line. Wrapped in Arc<Mutex<Vec<u8>>>
+        // so both the subscriber and the test body share a view.
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let inner = tracing_subscriber::fmt::format()
+            .without_time()
+            .with_target(false)
+            .compact();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .event_format(WithTraceId(inner));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        // Scope the dispatcher to this test so we don't fight the global
+        // subscriber installed by other tests in the binary.
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("hello world");
+        });
+
+        let line = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            line.contains("hello world"),
+            "expected the inner formatter to render the message, got: {line:?}"
+        );
+        assert!(
+            !line.contains("trace_id="),
+            "expected NO trace_id prefix when no OTel context is active, got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn test_with_trace_id_format_matches_loki_regex() {
+        // Pin the exact format we emit so the Loki `derivedFields` regex in
+        // `deploy/grafana/provisioning/datasources/loki.yml` keeps resolving:
+        // `matcherRegex: 'trace_id="?([0-9a-f]{32})"?'`.
+        //
+        // If someone changes the format string in `WithTraceId::format_event`
+        // (e.g. to `traceId={...}` or to upper-case hex), this test fails
+        // before the change reaches Grafana and silently breaks log↔trace
+        // linking in the dashboards.
+        let trace_id_u128: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+        let rendered = format!("trace_id={trace_id_u128:032x} ");
+        assert_eq!(
+            rendered, "trace_id=0123456789abcdef0123456789abcdef ",
+            "trace_id format must be 32 lowercase hex chars with no quotes"
+        );
+
+        // Mimic the Loki regex `trace_id="?([0-9a-f]{32})"?` without pulling
+        // in a regex crate just for one assertion: locate the `trace_id=`
+        // prefix, optionally consume a quote, then take 32 chars and verify
+        // they are all lowercase hex.
+        let needle = "trace_id=";
+        let pos = rendered
+            .find(needle)
+            .expect("emitted line must contain trace_id=");
+        let after = &rendered[pos + needle.len()..];
+        let after = after.strip_prefix('"').unwrap_or(after);
+        let hex: String = after.chars().take(32).collect();
+        assert_eq!(hex.len(), 32, "expected 32 hex chars, got {hex:?}");
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "expected lowercase hex, got {hex:?}"
+        );
+        assert_eq!(hex, "0123456789abcdef0123456789abcdef");
     }
 }

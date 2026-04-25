@@ -4151,6 +4151,7 @@ dependencies = [
  "librefang-skills",
  "librefang-types",
  "open",
+ "opentelemetry",
  "opentelemetry_sdk",
  "ratatui",
  "reqwest 0.13.2",
