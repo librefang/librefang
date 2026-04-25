@@ -341,3 +341,84 @@ timeout_secs = 10
 | `timeout_secs` | u64 | `10` | Per-link fetch timeout in seconds. |
 
 ---
+
+### `[parallel_tools]`
+
+Controls the agent loop's batch tool dispatcher — when a single assistant turn emits multiple tool calls, the dispatcher classifies each by parallel-safety and decides which can run concurrently and which must serialise.
+
+```toml
+[parallel_tools]
+enabled = false
+max_concurrent = 4
+mcp_default_safety = "write_shared"
+mcp_readonly_allowlist = ["mcp__github__list_issues", "mcp__notion__query_database"]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch. When `false`, every tool call in a batch runs strictly sequentially. Turn this on to opt into parallel dispatch. |
+| `max_concurrent` | u32 | `4` | Cap on concurrent tool calls within a single bucket. `0` = uncapped (use the bucket size). |
+| `mcp_default_safety` | string | `"write_shared"` | Default `ParallelSafety` class assigned to MCP tools whose servers don't carry `readOnlyHint` annotations. Accepted values: `"read_only"` or `"write_shared"`. The conservative `"write_shared"` default keeps unannotated MCP tools serialised one-per-bucket rather than optimistically parallelising them. |
+| `mcp_readonly_allowlist` | list of strings | `[]` | Explicit allowlist of MCP tool names to treat as `ReadOnly` regardless of `mcp_default_safety`. Names match the fully-namespaced form `mcp__<server>__<tool>`. |
+
+**ParallelSafety classes.** Every tool call is classified into one of four classes (computed from built-in heuristics, the tool's input-schema annotations, or the MCP knobs above):
+
+| Class | Behaviour |
+|-------|-----------|
+| `read_only` | No observable side effects on shared state. Safe to run alongside any peer in the same batch. |
+| `write_scoped` | Mutates shared state but the mutation is scoped to a path or namespace projectable from the call's input (e.g. `file_write`, `apply_patch`). Safe to run with peers whose scope does not overlap; the dispatcher checks. |
+| `write_shared` | Mutates shared state with no clean scope projection (e.g. `shell_exec`). Must run as the only call in its bucket — peers run before or after, never concurrently with it. |
+| `exclusive` | Requires user interaction or has cross-cutting effects (approval flows, control-plane mutations). Forces the entire batch to serialise. |
+
+**Tool authors can pin a class** by adding `"x-parallel-safety": "<snake_case>"` at the top level of a tool's input schema, or `"metadata": { "parallel_safety": "<snake_case>" }`. Unknown values fall through to the heuristic, so a typo never poisons the result.
+
+**When to tune which knob.**
+
+- **Leave `enabled = false`** if you want behaviour identical to historical sequential dispatch — useful while validating a new fleet of agents or while debugging tool-ordering issues.
+- **Lower `max_concurrent`** if your environment is rate-limit-sensitive (small MCP servers, low API quotas). `4` is a balanced default; raise it for read-heavy workloads against fast back-ends.
+- **Promote `mcp_default_safety` to `"read_only"`** only if every MCP server you connect is genuinely read-only or carries proper annotations. The default `"write_shared"` is the safe choice — unannotated MCP servers that quietly mutate state will not race.
+- **Use `mcp_readonly_allowlist`** to whitelist specific safe tools from a server whose other tools mutate state. This is the surgical alternative to flipping `mcp_default_safety`.
+- **Disable batch dispatch** (`enabled = false`) if you observe race-condition symptoms in a custom MCP server — wrong cache hits, conflicting writes, partial-state reads. File a fix or add the offending tool to a tighter classification, then re-enable.
+
+---
+
+### `max_history_messages`
+
+LibreFang trims an agent's stored conversation history at every turn so it does not grow without bound. The cap controls how many messages survive each trim. The mechanism cuts only at safe turn boundaries (never inside a `tool_use`/`tool_result` pair), so the surviving slice is always well-formed for strict providers like Gemini.
+
+The cap is configurable at two levels — a top-level field in `config.toml` (operator-wide override) and a top-level field in `agent.toml` (per-agent override). Both are optional.
+
+**Resolution order** (first match wins):
+
+1. **Per-agent override** — `max_history_messages` in `agent.toml` (top-level, not inside any section).
+2. **Global override** — `max_history_messages` at the top of `config.toml`.
+3. **Compiled-in default** — `DEFAULT_MAX_HISTORY_MESSAGES = 40`.
+
+Values below `MIN_HISTORY_MESSAGES = 4` are silently clamped up to `4` at runtime with a `warn!` log carrying `agent`, `requested`, and `applied`. Justification: a single tool-use round trip is 4 messages (user → assistant `tool_use` → `tool_result` → assistant text); caps below 4 defeat the safe-trim heuristic.
+
+**Global override** in `~/.librefang/config.toml`:
+
+```toml
+# Lower the default for every agent that does not override it itself.
+max_history_messages = 20
+```
+
+**Per-agent override** in any `agent.toml` (top-level field — sits next to `name`, `module`, etc., NOT inside `[model]` or `[autonomous]`):
+
+```toml
+name = "fast-loop"
+module = "builtin:chat"
+max_history_messages = 12
+```
+
+**When to tune.**
+
+- **Lower the cap** (e.g. `20` or `12`) for chatty agents driven by cron pings or short-message channels — each turn ships less history, so per-turn token cost drops.
+- **Raise the cap** (e.g. `80` or `120`) for long-horizon autonomous agents on long-context models, where richer history improves grounding.
+- **Leave it unset** (`null` / omitted) on most agents — the `40` default is tuned for typical chat workloads.
+
+**Interaction with the token-count cap.** This is a *message-count* cap. There is also an independent *token-count* cap (`DEFAULT_CONTEXT_WINDOW = 200000`) — whichever fires first wins. Many short messages → the message-count cap fires first; few long messages (large tool outputs) → the token cap fires first.
+
+For deeper detail (what gets trimmed, the safe-trim algorithm, where the value flows through the runtime), see the architecture note at `docs/architecture/message-history-trimming.md`.
+
+---
