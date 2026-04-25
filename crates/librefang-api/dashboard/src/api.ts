@@ -997,8 +997,12 @@ export async function resetAgentSession(agentId: string): Promise<ApiActionRespo
   return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
 }
 
-export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
-  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session`);
+export async function loadAgentSession(
+  agentId: string,
+  sessionId?: string | null,
+): Promise<AgentSessionResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
 export async function sendAgentMessage(

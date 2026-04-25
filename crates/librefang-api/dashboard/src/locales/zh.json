@@ -1904,7 +1904,7 @@
     "cmd_clear": "清除聊天记录",
     "cmd_agents": "列出可用 Agent",
     "cmd_info": "显示当前 Agent 信息",
-    "cmd_new": "重置会话（清除历史）",
+    "cmd_new": "新建会话（生成新会话 ID）",
     "cmd_compact": "压缩上下文以节省空间",
     "cmd_reset": "重置会话（清除历史）",
     "cmd_reboot": "重启会话（清除上下文）",

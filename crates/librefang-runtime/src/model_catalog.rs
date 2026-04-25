@@ -1799,7 +1799,7 @@ id = "acme"
     fn test_set_provider_url() {
         let mut catalog = test_catalog();
         let old_url = catalog.get_provider("ollama").unwrap().base_url.clone();
-        assert_eq!(old_url, "http://localhost:11434/v1");
+        assert_eq!(old_url, "http://127.0.0.1:11434/v1");
 
         let updated = catalog.set_provider_url("ollama", "http://192.168.1.100:11434/v1");
         assert!(updated);
@@ -1844,7 +1844,7 @@ id = "acme"
         // lmstudio should be unchanged
         assert_eq!(
             catalog.get_provider("lmstudio").unwrap().base_url,
-            "http://localhost:1234/v1"
+            "http://127.0.0.1:1234/v1"
         );
     }
 

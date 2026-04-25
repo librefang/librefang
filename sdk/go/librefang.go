@@ -364,8 +364,8 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
-func (r *AgentsResource) GetAgentSession(id string) (interface{}, error) {
-	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, nil)
+func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
 }
 
 func (r *AgentsResource) CompactSession(id string) (interface{}, error) {

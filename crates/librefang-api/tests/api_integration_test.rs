@@ -702,6 +702,121 @@ async fn test_agent_session_empty() {
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
 }
 
+/// Regression test for the cross-agent session-read guard added in PR #3071.
+///
+/// `GET /api/agents/{A}/session?session_id={B's session}` MUST NOT return
+/// agent B's history under agent A's id — otherwise one agent id can read
+/// another agent's conversation by guessing a session UUID.
+///
+/// Also verifies the malformed-uuid case returns 400 (typed query param
+/// validation) and that passing the agent's own session_id round-trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_session_rejects_cross_agent_session_id() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent A.
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_a: serde_json::Value = resp.json().await.unwrap();
+    let agent_a = body_a["agent_id"].as_str().unwrap().to_string();
+
+    // Spawn agent B (distinct name so the manifest validates).
+    const TEST_MANIFEST_B: &str = r#"
+name = "test-agent-b"
+version = "0.1.0"
+description = "Integration test agent B"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST_B}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_b: serde_json::Value = resp.json().await.unwrap();
+    let agent_b = body_b["agent_id"].as_str().unwrap().to_string();
+
+    // Discover B's session id (canonical-active).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_b
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let b_session: serde_json::Value = resp.json().await.unwrap();
+    let b_session_id = b_session["session_id"].as_str().unwrap().to_string();
+
+    // Cross-agent read: A's id with B's session_id → 404 (the guard).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, b_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-agent session read must be rejected"
+    );
+
+    // Malformed UUID → 400 (typed serde validation).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id=not-a-uuid",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Same-agent round-trip: A's id with A's own session_id → 200.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    let a_session: serde_json::Value = resp.json().await.unwrap();
+    let a_session_id = a_session["session_id"].as_str().unwrap().to_string();
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, a_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"].as_str().unwrap(), a_session_id);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agent_session_trajectory_export_empty() {
     let server = start_test_server().await;
