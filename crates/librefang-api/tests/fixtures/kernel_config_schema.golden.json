@@ -11339,6 +11339,11 @@
     "TelemetryConfig": {
       "description": "Telemetry / observability configuration.\n\n```toml [telemetry] enabled = true                              # OpenTelemetry OTLP tracing otlp_endpoint = \"http://localhost:4317\" service_name = \"librefang\" sample_rate = 1.0 prometheus_enabled = true                   # Prometheus metrics at /api/metrics ```",
       "properties": {
+        "auto_start_observability_stack": {
+          "default": false,
+          "description": "Auto-start the bundled observability Docker stack (Grafana, Prometheus, Tempo, OTel collector) on daemon boot. Default: `false`.\n\nOff by default because spinning up four containers on every `librefang start` is a strong implicit side-effect — operators usually prefer `librefang start` to leave the host untouched. Existing dashboards / custom OTel collectors keep working as long as `otlp_endpoint` points at them; the stack is only useful for the bundled local view.\n\nIssue #3136.",
+          "type": "boolean"
+        },
         "enabled": {
           "default": true,
           "description": "Enable OpenTelemetry OTLP tracing export.",
@@ -14224,6 +14229,7 @@
         }
       ],
       "default": {
+        "auto_start_observability_stack": false,
         "enabled": true,
         "otlp_endpoint": "http://localhost:4317",
         "prometheus_enabled": true,
