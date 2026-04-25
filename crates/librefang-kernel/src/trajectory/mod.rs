@@ -322,6 +322,41 @@ impl TrajectoryExporter {
         })
     }
 
+    /// Build an empty bundle without consulting the memory substrate.
+    ///
+    /// Sessions are persisted lazily — a freshly spawned agent has a
+    /// `session_id` but no DB row until the first message is written.
+    /// Callers that have already verified ownership via the agent registry
+    /// (e.g. `agent_entry.session_id == session_id`) can use this to emit
+    /// an empty bundle for that "not yet persisted" case.
+    pub fn empty_bundle(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        agent: AgentContext,
+    ) -> TrajectoryBundle {
+        let metadata = TrajectoryMetadata {
+            agent_id: agent_id.0.to_string(),
+            agent_name: agent.name,
+            session_id: session_id.0.to_string(),
+            session_label: None,
+            model: agent.model,
+            provider: agent.provider,
+            system_prompt_sha256: sha256_hex(agent.system_prompt.as_bytes()),
+            message_count: 0,
+            context_window_tokens: 0,
+            exported_at: Utc::now().to_rfc3339(),
+            librefang_version: env!("CARGO_PKG_VERSION").to_string(),
+            redaction_credentials: self.policy.mask_credentials,
+            redaction_workspace_paths: self.policy.workspace_root.is_some(),
+        };
+        TrajectoryBundle {
+            schema_version: 1,
+            metadata,
+            messages: Vec::new(),
+        }
+    }
+
     fn redact_message(&self, m: &Message) -> RedactedMessage {
         let role = match m.role {
             Role::System => "system",

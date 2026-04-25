@@ -2258,24 +2258,44 @@ pub async fn export_session_trajectory(
         system_prompt: agent_entry.manifest.model.system_prompt.clone(),
     };
 
-    let bundle = match exporter.export_session(agent_id, session_id, agent_ctx) {
-        Ok(b) => b,
-        Err(librefang_types::error::LibreFangError::Memory(msg)) if msg.contains("not found") => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_session_not_found})),
-            )
-                .into_response();
+    // Sessions are persisted lazily on first message. If the row is missing
+    // but the requested session_id matches the agent's currently-registered
+    // session (authoritative ownership signal from the registry), treat it
+    // as an empty session rather than 404.
+    let bundle = match state.kernel.memory_substrate().get_session(session_id) {
+        Ok(None) if session_id == agent_entry.session_id => {
+            exporter.empty_bundle(agent_id, session_id, agent_ctx)
         }
-        Err(librefang_types::error::LibreFangError::Memory(msg))
-            if msg.contains("does not belong") =>
-        {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": err_session_not_found})),
-            )
-                .into_response();
-        }
+        Ok(_) => match exporter.export_session(agent_id, session_id, agent_ctx) {
+            Ok(b) => b,
+            Err(librefang_types::error::LibreFangError::Memory(msg))
+                if msg.contains("not found") =>
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_session_not_found})),
+                )
+                    .into_response();
+            }
+            Err(librefang_types::error::LibreFangError::Memory(msg))
+                if msg.contains("does not belong") =>
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": err_session_not_found})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
+        },
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
