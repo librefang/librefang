@@ -186,11 +186,12 @@ timeout_secs = 15
 
 | 值 | 说明 |
 |----|------|
-| `auto` | 级联回退：根据可用的 API Key，依次尝试 Tavily、Brave、Jina、Perplexity、DuckDuckGo。 |
+| `auto` | 级联回退：根据可用的 API Key 或配置，依次尝试 Tavily、Brave、Jina、Perplexity、SearXNG、DuckDuckGo。 |
 | `brave` | Brave Search API。需要 `BRAVE_API_KEY`。 |
 | `jina` | Jina AI 搜索与信息定位。需要 `JINA_API_KEY`。 |
 | `tavily` | Tavily AI 原生搜索。需要 `TAVILY_API_KEY`。 |
 | `perplexity` | Perplexity AI 搜索。需要 `PERPLEXITY_API_KEY`。 |
+| `searxng` | 自托管 SearXNG 实例。需要 `[web.searxng].url`，无需 API Key。 |
 | `duckduckgo` | DuckDuckGo HTML 抓取。无需 API Key。 |
 
 #### `[web.brave]`
@@ -255,6 +256,24 @@ model = "sonar"
 | `api_key_env` | string | `"PERPLEXITY_API_KEY"` | 存放 Perplexity API Key 的环境变量名称。 |
 | `model` | string | `"sonar"` | 用于搜索查询的 Perplexity 模型。 |
 
+#### `[web.searxng]`
+
+```toml
+[web.searxng]
+url = "https://searxng.example.com"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `url` | string | `""` | 自托管 SearXNG 实例的根 URL。空字符串表示禁用此提供商；`auto` cascade 会跳过它。无需 API Key — SearXNG 完全在你自己的基础设施里跑。 |
+
+**运行时行为：**
+
+- LibreFang 启动时拉取 `/config` 一次，缓存可用的 categories；查询时如果传了未知 category 会返回 400 而不是把无效请求发到上游。
+- 分页是 1 起算的；`pageno=0` 在客户端被拒。
+- 单次查询返回的结果按 `[web].max_results` 裁剪。客户端裁剪后会标注 truncation，agent 看到的就是这截短的列表。
+- 输出过滤继承 `[web]` 的全局规则（content size cap、blocked domain 等）。
+
 #### `[web.fetch]`
 
 ```toml
@@ -317,6 +336,87 @@ timeout_secs = 10
 | `max_links` | usize | `3` | 每条消息处理的最大链接数。多余的链接会被忽略。 |
 | `max_content_bytes` | usize | `102400`（100 KB） | 每个链接抓取的最大内容大小（字节）。超出部分将被截断。 |
 | `timeout_secs` | u64 | `10` | 每个链接的抓取超时时间（秒）。 |
+
+---
+
+### `[parallel_tools]`
+
+控制 agent loop 的批量工具分派器：当一次 assistant 回合发出多个 tool call 时，分派器按 parallel-safety 分类，决定哪些可以并发哪些必须串行。
+
+```toml
+[parallel_tools]
+enabled = false
+max_concurrent = 4
+mcp_default_safety = "write_shared"
+mcp_readonly_allowlist = ["mcp__github__list_issues", "mcp__notion__query_database"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 总开关。`false` 时一批 tool call 严格串行执行。开启后才进入并行分派。 |
+| `max_concurrent` | u32 | `4` | 单个 bucket 内的并发上限。`0` = 不限制（用 bucket 大小）。 |
+| `mcp_default_safety` | string | `"write_shared"` | 给那些没有 `readOnlyHint` 注解的 MCP 工具分配的默认 `ParallelSafety` class。可选值：`"read_only"` / `"write_shared"`。保守的 `"write_shared"` 默认让未标注的 MCP 工具一桶一个串行跑，而不是乐观地并行。 |
+| `mcp_readonly_allowlist` | string list | `[]` | 显式 allowlist：无论 `mcp_default_safety` 是什么，列在这里的 MCP tool 名都按 `ReadOnly` 处理。命名格式 `mcp__<server>__<tool>`。 |
+
+**ParallelSafety 类。** 每个 tool call 被归到其中一类（来自内置启发式、tool 输入 schema 注解，或上面那两个 MCP 旋钮）：
+
+| Class | 行为 |
+|-------|------|
+| `read_only` | 对共享状态没有可观测副作用。同 batch 内可以跟任何同伴并发跑。 |
+| `write_scoped` | 修改共享状态，但修改范围可以从输入投影出来（比如 `file_write`、`apply_patch`）。同 batch 同伴范围不重叠时可以一起跑，分派器会检查。 |
+| `write_shared` | 修改共享状态但没有干净的范围投影（比如 `shell_exec`）。在它的 bucket 里必须独占运行——同伴只能在它之前或之后，不能同时。 |
+| `exclusive` | 需要用户交互或有横切性影响（审批流、控制平面变更）。强制整个 batch 串行。 |
+
+**Tool 作者可以钉死分类**：在 tool 输入 schema 顶层加 `"x-parallel-safety": "<snake_case>"`，或者 `"metadata": { "parallel_safety": "<snake_case>" }`。无效值 fall through 到启发式，所以拼错字不会污染结果。
+
+**什么时候调哪个旋钮：**
+
+- **保持 `enabled = false`** 如果想要跟历史顺序分派完全一致的行为——验证新 agent 队列时或调试 tool 顺序问题时有用。
+- **降低 `max_concurrent`** 如果你的环境对 rate limit 敏感（小型 MCP server、低 API 配额）。`4` 是均衡默认值；读多的工作负载对接快后端可以加大。
+- **把 `mcp_default_safety` 提到 `"read_only"`** 仅当你接的每个 MCP server 都确实是只读的或带正确注解。默认 `"write_shared"` 是安全选择——未标注却悄悄改状态的 MCP server 不会被并发触发。
+- **用 `mcp_readonly_allowlist`** 来 whitelist 某 server 中安全的特定 tool，而该 server 其他 tool 会修改状态。这是比翻 `mcp_default_safety` 更精准的手术刀做法。
+- **关掉批量分派**（`enabled = false`）如果你在某个自定义 MCP server 上看到 race condition 症状——错误的缓存命中、写冲突、读到部分状态。先发个补丁或把 offending tool 调到更严的分类，再重新打开。
+
+---
+
+### `max_history_messages`
+
+LibreFang 在每个回合都会修剪 agent 的历史消息，防止无限增长。这个上限控制每次修剪后保留多少条消息。机制只在安全的回合边界裁切（绝不会切在 `tool_use`/`tool_result` 配对中间），所以保留下来的切片对 Gemini 等严格 provider 也是良构的。
+
+上限可以在两个层级配置——`config.toml` 顶层字段（运维级全局覆盖）+ `agent.toml` 顶层字段（按 agent 覆盖）。两者都是可选的。
+
+**解析顺序**（先匹配先生效）：
+
+1. **per-agent 覆盖** — `agent.toml` 顶层的 `max_history_messages`（不在任何 section 里）。
+2. **全局覆盖** — `config.toml` 顶层的 `max_history_messages`。
+3. **编译时默认** — `DEFAULT_MAX_HISTORY_MESSAGES = 40`。
+
+低于 `MIN_HISTORY_MESSAGES = 4` 的值会在运行时静默上调到 `4`，并打 `warn!` 日志带 `agent` / `requested` / `applied` 字段。理由：一次 tool-use round trip 是 4 条消息（user → assistant `tool_use` → `tool_result` → assistant text）；上限低于 4 会破坏安全裁切启发式。
+
+**全局覆盖** 写在 `~/.librefang/config.toml`：
+
+```toml
+# 给所有没自己覆盖的 agent 降低默认值。
+max_history_messages = 20
+```
+
+**per-agent 覆盖** 写在任意 `agent.toml`（顶层字段——跟 `name`、`module` 等同级，**不**在 `[model]` 或 `[autonomous]` 里）：
+
+```toml
+name = "fast-loop"
+module = "builtin:chat"
+max_history_messages = 12
+```
+
+**什么时候调：**
+
+- **降低上限**（如 `20` 或 `12`）：cron ping 驱动或短消息 channel 的话痨 agent——每个回合带的历史更少，token 成本下降。
+- **抬高上限**（如 `80` 或 `120`）：跑长上下文模型的长视野自主 agent，更多历史能改善 grounding。
+- **保持不设**（`null` / 省略）：大多数 agent 用默认 `40` 即可，针对典型 chat 工作负载调过。
+
+**与 token 上限的相互作用。** 这是*消息数*上限。还有一个独立的*token 数*上限（`DEFAULT_CONTEXT_WINDOW = 200000`）——哪个先触发哪个生效。短消息多 → 消息数上限先触发；长消息少（大 tool 输出）→ token 上限先触发。
+
+更深入的细节（被裁切的具体内容、安全裁切算法、值如何在运行时流转），见架构笔记 `docs/architecture/message-history-trimming.md`。
 
 ---
 
