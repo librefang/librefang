@@ -148,7 +148,13 @@ export const Modal = memo(function Modal({
             )}
           </div>
         )}
-        <div className="flex-1 overflow-y-auto scrollbar-thin">{children}</div>
+        {/* `overscroll-contain` stops wheel events from chaining into the
+            page once the dialog hits its top/bottom — the bug surfaces
+            in the drawer variant (page is interactive behind the panel)
+            but the centred modal benefits too: a long modal pinned over
+            a long page used to scroll the page after the modal bottomed
+            out, which feels like the modal "leaks" the gesture. */}
+        <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin">{children}</div>
       </div>
     </div>
   );
