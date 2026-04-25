@@ -2046,6 +2046,15 @@ pub struct KernelConfig {
     /// autonomous agents. `None` means "use the compiled-in default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_max_iterations: Option<u32>,
+    /// Operator override for the agent message-history trim cap. When set,
+    /// any agent without its own `max_history_messages` uses this value
+    /// instead of the compiled-in default
+    /// (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound
+    /// per-turn token cost; raise it for long-context models. `None` means
+    /// "use the compiled-in default". Values below 4 are silently clamped
+    /// at runtime with a warning log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_history_messages: Option<usize>,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -3970,6 +3979,7 @@ impl Default for KernelConfig {
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
             agent_max_iterations: None,
+            max_history_messages: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
