@@ -107,3 +107,81 @@ pub fn template_display_hint(t: &AgentTemplate) -> String {
         t.description.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use librefang_types::agent::AgentManifest;
+    use librefang_types::config::DefaultModelConfig;
+
+    /// Mirror the kernel's spawn-time + execute-time default_model overlay so
+    /// we can verify a manifest with empty/"default" provider+model resolves
+    /// to the configured default_model — not to any hardcoded vendor value.
+    fn resolve_effective_model(
+        manifest: &AgentManifest,
+        default_model: &DefaultModelConfig,
+    ) -> (String, String) {
+        let provider_is_default =
+            manifest.model.provider.is_empty() || manifest.model.provider == "default";
+        let model_is_default = manifest.model.model.is_empty() || manifest.model.model == "default";
+        let effective_provider = if provider_is_default {
+            default_model.provider.clone()
+        } else {
+            manifest.model.provider.clone()
+        };
+        let effective_model = if model_is_default {
+            default_model.model.clone()
+        } else {
+            manifest.model.model.clone()
+        };
+        (effective_provider, effective_model)
+    }
+
+    /// Bundled example template must not hardcode a provider; it should defer
+    /// to the user's configured default_model (regression: openfang #967).
+    #[test]
+    fn example_custom_agent_template_does_not_hardcode_provider() {
+        let toml_str = include_str!("../../../examples/custom-agent/agent.toml");
+        let manifest: AgentManifest =
+            toml::from_str(toml_str).expect("example agent.toml must parse");
+
+        // Must not pin any specific vendor — otherwise switching default_model
+        // in config.toml would have no effect on agents spawned from this template.
+        assert_ne!(manifest.model.provider, "groq");
+        assert_ne!(manifest.model.model, "llama-3.3-70b-versatile");
+
+        // Must be either empty or the explicit "default" sentinel so the
+        // kernel's default_model overlay applies.
+        let provider_defers =
+            manifest.model.provider.is_empty() || manifest.model.provider == "default";
+        let model_defers = manifest.model.model.is_empty() || manifest.model.model == "default";
+        assert!(
+            provider_defers && model_defers,
+            "example template must defer to default_model, got provider={:?} model={:?}",
+            manifest.model.provider,
+            manifest.model.model
+        );
+    }
+
+    /// End-to-end: a manifest deferring to default_model resolves to whatever
+    /// the user has configured — not to the legacy groq fallback.
+    #[test]
+    fn manifest_with_default_provider_resolves_to_configured_default_model() {
+        let toml_str = include_str!("../../../examples/custom-agent/agent.toml");
+        let manifest: AgentManifest =
+            toml::from_str(toml_str).expect("example agent.toml must parse");
+
+        // Simulate a user who switched their default to OpenAI.
+        let user_default = DefaultModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            ..Default::default()
+        };
+
+        let (provider, model) = resolve_effective_model(&manifest, &user_default);
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "gpt-4o");
+        assert_ne!(provider, "groq");
+        assert_ne!(model, "llama-3.3-70b-versatile");
+    }
+}

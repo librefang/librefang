@@ -13,8 +13,10 @@ module = "builtin:chat"
 tags = ["assistant", "example"]
 
 [model]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
+# Use the configured default_model from ~/.librefang/config.toml.
+# Set to a concrete provider/model (e.g. "openai" / "gpt-4o") to pin this agent.
+provider = "default"
+model = "default"
 system_prompt = """
 You are a helpful assistant. You are friendly, concise, and always try to provide actionable answers.
 When you don't know something, you say so honestly.
