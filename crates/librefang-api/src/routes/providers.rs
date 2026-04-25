@@ -1967,7 +1967,10 @@ pub async fn detect_ollama() -> impl IntoResponse {
         }
     };
 
-    match client.get("http://localhost:11434/api/tags").send().await {
+    // Use 127.0.0.1 instead of localhost: on dual-stack hosts (macOS)
+    // localhost resolves to ::1 first and Ollama binds IPv4 only, causing
+    // probes to fail without reliable IPv4 fallback.
+    match client.get("http://127.0.0.1:11434/api/tags").send().await {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
                 tracing::warn!("Ollama responded but JSON parse failed: {e}");

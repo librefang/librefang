@@ -1799,9 +1799,13 @@ impl LibreFangKernel {
                 config.default_model.model = model;
                 config.default_model.api_key_env = String::new();
                 if !config.provider_urls.contains_key("ollama") {
+                    // Use 127.0.0.1: on macOS `localhost` resolves to ::1 first
+                    // and Ollama only binds IPv4, so the IPv6 attempt fails
+                    // without reliable fallback. See PROVIDER_REGISTRY in
+                    // librefang-llm-drivers for the same reasoning.
                     config.provider_urls.insert(
                         "ollama".to_string(),
-                        "http://localhost:11434/v1".to_string(),
+                        "http://127.0.0.1:11434/v1".to_string(),
                     );
                 }
             } else {

@@ -860,11 +860,14 @@ pub fn create_embedding_driver(
         })
         .map(Ok)
         .unwrap_or_else(|| match provider {
-            // Local providers keep hardcoded defaults: their localhost URLs
-            // aren't registry-tracked and the ports are stable by convention.
-            "ollama" => Ok("http://localhost:11434/v1".to_string()),
-            "vllm" => Ok("http://localhost:8000/v1".to_string()),
-            "lmstudio" => Ok("http://localhost:1234/v1".to_string()),
+            // Local providers keep hardcoded defaults: the ports are stable by
+            // convention. Use 127.0.0.1 instead of `localhost` because on
+            // dual-stack hosts (macOS) `localhost` resolves to ::1 first, but
+            // these servers usually bind IPv4 only — and connection-refused
+            // doesn't always trigger Happy Eyeballs fallback to IPv4.
+            "ollama" => Ok("http://127.0.0.1:11434/v1".to_string()),
+            "vllm" => Ok("http://127.0.0.1:8000/v1".to_string()),
+            "lmstudio" => Ok("http://127.0.0.1:1234/v1".to_string()),
             // Cloud providers MUST come from the model catalog or an explicit
             // override. A hardcoded fallback is exactly the bug class this
             // plumbing is trying to eliminate (stale baked-in URL silently
