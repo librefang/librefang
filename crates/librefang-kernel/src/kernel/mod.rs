@@ -15807,7 +15807,28 @@ pub async fn probe_and_update_local_provider(
     base_url: &str,
     log_offline_as_warn: bool,
 ) -> librefang_runtime::provider_health::ProbeResult {
-    let result = librefang_runtime::provider_health::probe_provider(provider_id, base_url).await;
+    // Forward the provider's api_key (when configured) so reverse-proxy
+    // frontends like Open WebUI accept the listing request. Without this,
+    // the probe always 401s and the catalog flips to LocalOffline even
+    // when the underlying ollama is healthy.
+    let api_key = {
+        let catalog = kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let env_var = catalog
+            .get_provider(provider_id)
+            .map(|p| p.api_key_env.clone())
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_")));
+        std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
+    };
+    let result = librefang_runtime::provider_health::probe_provider(
+        provider_id,
+        base_url,
+        api_key.as_deref(),
+    )
+    .await;
     if result.reachable {
         info!(
             provider = %provider_id,
