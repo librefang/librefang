@@ -2674,6 +2674,7 @@ export function ChatPage() {
                 try {
                   await patchAgentConfigMutation.mutateAsync({
                     agentId: selectedAgentId,
+                    isHand: selectedAgent?.is_hand,
                     config: { web_search_augmentation: mode },
                   });
                   await agentsQuery.refetch();
@@ -2752,4 +2753,3 @@ export function ChatPage() {
     </div>
   );
 }
-

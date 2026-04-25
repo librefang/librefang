@@ -1,8 +1,8 @@
 //! Hand registry — manages hand definitions and active instances.
 
 use crate::{
-    HandDefinition, HandError, HandInstance, HandRequirement, HandResult, HandSettingType,
-    HandStatus, RequirementType,
+    HandAgentRuntimeOverride, HandDefinition, HandError, HandInstance, HandRequirement, HandResult,
+    HandSettingType, HandStatus, RequirementType,
 };
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Current version of the persisted hand state format.
-const PERSIST_VERSION: u32 = 4;
+const PERSIST_VERSION: u32 = 5;
 
 /// Typed representation of persisted hand state.
 #[derive(Serialize, Deserialize)]
@@ -30,6 +30,8 @@ struct PersistedInstance {
     hand_id: String,
     instance_id: Uuid,
     config: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    agent_runtime_overrides: BTreeMap<String, HandAgentRuntimeOverride>,
     agent_ids: BTreeMap<String, AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coordinator_role: Option<String>,
@@ -213,6 +215,7 @@ fn scan_hands_dir(home_dir: &Path) -> Vec<(String, String, String, HashMap<Strin
 pub struct HandStateEntry {
     pub hand_id: String,
     pub config: HashMap<String, serde_json::Value>,
+    pub agent_runtime_overrides: BTreeMap<String, HandAgentRuntimeOverride>,
     pub old_agent_ids: BTreeMap<String, AgentId>,
     pub coordinator_role: Option<String>,
     pub status: HandStatus,
@@ -223,6 +226,44 @@ pub struct HandStateEntry {
     pub activated_at: Option<DateTime<Utc>>,
     /// Last status change before persist. `None` for legacy v1/v2/v3 state files.
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn legacy_agent_runtime_overrides(
+    config: &HashMap<String, serde_json::Value>,
+) -> BTreeMap<String, HandAgentRuntimeOverride> {
+    let mut out = BTreeMap::new();
+    let Some(raw) = config.get("__model_overrides__") else {
+        return out;
+    };
+    let Some(map) = raw.as_object() else {
+        return out;
+    };
+    for (role, value) in map {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let mut cfg = HandAgentRuntimeOverride::default();
+        cfg.model = obj
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        cfg.provider = obj
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        cfg.max_tokens = obj
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+        cfg.temperature = obj
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+        if cfg != HandAgentRuntimeOverride::default() {
+            out.insert(role.clone(), cfg);
+        }
+    }
+    out
 }
 
 // ─── Settings availability types ────────────────────────────────────────────
@@ -307,6 +348,7 @@ impl HandRegistry {
                 hand_id: e.hand_id.clone(),
                 instance_id: e.instance_id,
                 config: e.config.clone(),
+                agent_runtime_overrides: e.agent_runtime_overrides.clone(),
                 agent_ids: e.agent_ids.clone(),
                 coordinator_role: e.coordinator_role.clone(),
                 status: e.status.clone(),
@@ -363,9 +405,15 @@ impl HandRegistry {
                         inst.coordinator_role.as_deref(),
                     );
 
+                    let mut agent_runtime_overrides = inst.agent_runtime_overrides;
+                    for (role, legacy) in legacy_agent_runtime_overrides(&inst.config) {
+                        agent_runtime_overrides.entry(role).or_insert(legacy);
+                    }
+
                     Some(HandStateEntry {
                         hand_id: inst.hand_id,
                         config: inst.config,
+                        agent_runtime_overrides,
                         old_agent_ids: inst.agent_ids,
                         coordinator_role,
                         status,
@@ -455,6 +503,7 @@ impl HandRegistry {
                 Some(HandStateEntry {
                     hand_id,
                     config,
+                    agent_runtime_overrides: BTreeMap::new(),
                     old_agent_ids,
                     coordinator_role,
                     status,
@@ -701,7 +750,7 @@ impl HandRegistry {
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
     ) -> HandResult<HandInstance> {
-        self.activate_with_id(hand_id, config, None, None)
+        self.activate_with_id(hand_id, config, BTreeMap::new(), None, None)
     }
 
     /// Like [`activate`](Self::activate) but allows specifying an existing instance UUID
@@ -710,6 +759,7 @@ impl HandRegistry {
         &self,
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
+        agent_runtime_overrides: BTreeMap<String, HandAgentRuntimeOverride>,
         instance_id: Option<Uuid>,
         timestamps: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> HandResult<HandInstance> {
@@ -734,7 +784,7 @@ impl HandRegistry {
             }
         }
 
-        let mut instance = HandInstance::new(hand_id, config, instance_id);
+        let mut instance = HandInstance::new(hand_id, config, agent_runtime_overrides, instance_id);
         // Restore original timestamps when recovering from persisted state.
         if let Some((activated, updated)) = timestamps {
             instance.activated_at = activated;
@@ -848,6 +898,23 @@ impl HandRegistry {
         for aid in entry.agent_ids.values() {
             self.agent_index.insert(aid.to_string(), instance_id);
         }
+        Ok(())
+    }
+
+    pub fn update_agent_runtime_override(
+        &self,
+        instance_id: Uuid,
+        role: &str,
+        override_config: HandAgentRuntimeOverride,
+    ) -> HandResult<()> {
+        let mut entry = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(HandError::InstanceNotFound(instance_id))?;
+        entry
+            .agent_runtime_overrides
+            .insert(role.to_string(), override_config);
+        entry.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -1477,6 +1544,61 @@ system_prompt = "Test"
     }
 
     #[test]
+    fn persist_and_load_agent_runtime_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = HandRegistry::new();
+        let hand_dir = tmp.path().join("registry").join("hands").join("clip");
+        std::fs::create_dir_all(&hand_dir).unwrap();
+        std::fs::write(
+            hand_dir.join("HAND.toml"),
+            r#"
+id = "clip"
+name = "Clip"
+description = "Clip hand"
+category = "content"
+
+[agent]
+name = "clip-agent"
+description = "Clip"
+system_prompt = "Prompt"
+"#,
+        )
+        .unwrap();
+        reg.reload_from_disk(tmp.path());
+
+        let inst = reg.activate("clip", HashMap::new()).unwrap();
+        reg.update_agent_runtime_override(
+            inst.instance_id,
+            "main",
+            HandAgentRuntimeOverride {
+                model: Some("restart-model".to_string()),
+                provider: Some("restart-provider".to_string()),
+                max_tokens: Some(7777),
+                temperature: Some(0.4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+        let saved = HandRegistry::load_state(&state_path);
+        let restored = saved
+            .into_iter()
+            .find(|entry| entry.hand_id == "clip")
+            .unwrap();
+
+        let override_config = restored.agent_runtime_overrides.get("main").unwrap();
+        assert_eq!(override_config.model.as_deref(), Some("restart-model"));
+        assert_eq!(
+            override_config.provider.as_deref(),
+            Some("restart-provider")
+        );
+        assert_eq!(override_config.max_tokens, Some(7777));
+        assert_eq!(override_config.temperature, Some(0.4));
+    }
+
+    #[test]
     fn set_agent() {
         let reg = HandRegistry::new();
         reg.reload_from_disk(&ensure_test_home());
@@ -1835,13 +1957,25 @@ metrics = []
 
         let custom_id = Uuid::new_v4();
         let instance = reg
-            .activate_with_id("clip", HashMap::new(), Some(custom_id), None)
+            .activate_with_id(
+                "clip",
+                HashMap::new(),
+                BTreeMap::new(),
+                Some(custom_id),
+                None,
+            )
             .unwrap();
         assert_eq!(instance.instance_id, custom_id);
         assert_eq!(instance.hand_id, "clip");
 
         // Re-activate with same UUID should fail
-        let dup = reg.activate_with_id("clip", HashMap::new(), Some(custom_id), None);
+        let dup = reg.activate_with_id(
+            "clip",
+            HashMap::new(),
+            BTreeMap::new(),
+            Some(custom_id),
+            None,
+        );
         assert!(dup.is_err());
 
         reg.deactivate(custom_id).unwrap();
@@ -1900,7 +2034,13 @@ metrics = []
 
         let custom_id = Uuid::new_v4();
         let _instance = reg
-            .activate_with_id("clip", HashMap::new(), Some(custom_id), None)
+            .activate_with_id(
+                "clip",
+                HashMap::new(),
+                BTreeMap::new(),
+                Some(custom_id),
+                None,
+            )
             .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();

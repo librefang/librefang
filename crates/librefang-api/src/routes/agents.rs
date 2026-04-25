@@ -123,6 +123,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::patch(patch_agent_config),
         )
         .route(
+            "/agents/{id}/hand-runtime-config",
+            axum::routing::patch(patch_hand_agent_runtime_config),
+        )
+        .route(
             "/agents/{id}/clone",
             axum::routing::post(clone_agent),
         )
@@ -4149,6 +4153,63 @@ pub async fn patch_agent_config(
         StatusCode::OK,
         Json(serde_json::json!({"status": "ok", "agent_id": id})),
     )
+}
+
+/// PATCH /api/agents/{id}/hand-runtime-config — Runtime-only config override for hand agents.
+pub async fn patch_hand_agent_runtime_config(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PatchAgentConfigRequest>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid agent id"})),
+            );
+        }
+    };
+
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => entry,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "agent not found"})),
+            );
+        }
+    };
+    if !entry.is_hand {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent is not managed by a hand"})),
+        );
+    }
+
+    let override_config = librefang_hands::HandAgentRuntimeOverride {
+        model: req.model.filter(|v| !v.is_empty()),
+        provider: req.provider.filter(|v| !v.is_empty()),
+        api_key_env: None,
+        base_url: None,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        web_search_augmentation: req.web_search_augmentation,
+    };
+
+    match state
+        .kernel
+        .update_hand_agent_runtime_override(agent_id, override_config)
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "agent_id": id})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

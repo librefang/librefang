@@ -861,6 +861,20 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     let first_manifest = first_entry.manifest.clone();
 
     kernel
+        .update_hand_agent_runtime_override(
+            first_agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                model: Some("override-model".to_string()),
+                provider: Some("override-provider".to_string()),
+                max_tokens: Some(12345),
+                temperature: Some(0.2),
+                web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+                ..Default::default()
+            },
+        )
+        .expect("hand runtime override should update");
+
+    kernel
         .deactivate_hand(first_instance.instance_id)
         .expect("apitester hand should deactivate cleanly");
 
@@ -901,6 +915,27 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     assert_eq!(
         second_manifest.mcp_servers, first_manifest.mcp_servers,
         "reactivation should preserve MCP server assignments"
+    );
+    assert_ne!(
+        second_manifest.model.model, "override-model",
+        "deactivate/reactivate should rebuild from hand definition, not runtime override"
+    );
+    assert_ne!(
+        second_manifest.model.provider, "override-provider",
+        "provider override should not survive a new hand activation"
+    );
+    assert_ne!(
+        second_manifest.model.max_tokens, 12345,
+        "max_tokens override should be cleared on fresh activation"
+    );
+    assert_ne!(
+        second_manifest.model.temperature, 0.2,
+        "temperature override should be cleared on fresh activation"
+    );
+    assert_ne!(
+        second_manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always,
+        "web search override should be cleared on fresh activation"
     );
 
     kernel.shutdown();

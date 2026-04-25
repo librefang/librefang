@@ -376,7 +376,7 @@ export function AgentsPage() {
     }
 
     patchAgentConfigMutation.mutate(
-      { agentId: detailAgent.id, config: patch },
+      { agentId: detailAgent.id, isHand: detailAgent.is_hand, config: patch },
       {
         onSuccess: async () => {
           setEditingModel(false);
@@ -1006,7 +1006,7 @@ export function AgentsPage() {
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
                         patchAgentConfigMutation.mutate(
-                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                          { agentId: detailAgent.id, isHand: detailAgent.is_hand, config: { web_search_augmentation: mode } },
                           {
                             onSuccess: async () => {
                               await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);

@@ -2882,6 +2882,9 @@ impl LibreFangKernel {
             Ok(agents) => {
                 let count = agents.len();
                 for entry in agents {
+                    if entry.is_hand {
+                        continue;
+                    }
                     let agent_id = entry.id;
                     let name = entry.name.clone();
 
@@ -8915,7 +8918,13 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
     ) -> KernelResult<librefang_hands::HandInstance> {
-        self.activate_hand_with_id(hand_id, config, None, None)
+        self.activate_hand_with_id(
+            hand_id,
+            config,
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
     }
 
     /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
@@ -8924,6 +8933,10 @@ system_prompt = "You are a helpful assistant."
         &self,
         hand_id: &str,
         mut config: std::collections::HashMap<String, serde_json::Value>,
+        agent_runtime_overrides: std::collections::BTreeMap<
+            String,
+            librefang_hands::HandAgentRuntimeOverride,
+        >,
         instance_id: Option<uuid::Uuid>,
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
@@ -8971,7 +8984,13 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate_with_id(hand_id, config, instance_id, timestamps)
+            .activate_with_id(
+                hand_id,
+                config,
+                agent_runtime_overrides,
+                instance_id,
+                timestamps,
+            )
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -9070,6 +9089,7 @@ system_prompt = "You are a helpful assistant."
 
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
+            let runtime_override = instance.agent_runtime_overrides.get(role).cloned();
 
             // Prefix hand agent name with hand_id to avoid colliding with
             // standalone specialist agents spawned by routing.
@@ -9199,6 +9219,30 @@ system_prompt = "You are a helpful assistant."
             // the prompt on every restart.
             let _ =
                 apply_settings_block_to_manifest(&mut manifest, &def.settings, &instance.config);
+
+            if let Some(runtime_override) = runtime_override {
+                if let Some(provider) = runtime_override.provider {
+                    manifest.model.provider = provider;
+                }
+                if let Some(model) = runtime_override.model {
+                    manifest.model.model = model;
+                }
+                if let Some(api_key_env) = runtime_override.api_key_env {
+                    manifest.model.api_key_env = api_key_env;
+                }
+                if let Some(base_url) = runtime_override.base_url {
+                    manifest.model.base_url = base_url;
+                }
+                if let Some(max_tokens) = runtime_override.max_tokens {
+                    manifest.model.max_tokens = max_tokens;
+                }
+                if let Some(temperature) = runtime_override.temperature {
+                    manifest.model.temperature = temperature;
+                }
+                if let Some(mode) = runtime_override.web_search_augmentation {
+                    manifest.web_search_augmentation = mode;
+                }
+            }
 
             // Inject allowed env vars
             if !allowed_env.is_empty() {
@@ -9434,6 +9478,75 @@ system_prompt = "You are a helpful assistant."
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
+    }
+
+    pub fn update_hand_agent_runtime_override(
+        &self,
+        agent_id: AgentId,
+        override_config: librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()> {
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let role = instance
+            .agent_ids
+            .iter()
+            .find_map(|(role, id)| (*id == agent_id).then(|| role.clone()))
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand role not found for agent {agent_id}"
+                )))
+            })?;
+
+        let previous = instance
+            .agent_runtime_overrides
+            .get(&role)
+            .cloned()
+            .unwrap_or_default();
+        let merged = librefang_hands::HandAgentRuntimeOverride {
+            model: override_config.model.or(previous.model),
+            provider: override_config.provider.or(previous.provider),
+            api_key_env: override_config.api_key_env.or(previous.api_key_env),
+            base_url: override_config.base_url.or(previous.base_url),
+            max_tokens: override_config.max_tokens.or(previous.max_tokens),
+            temperature: override_config.temperature.or(previous.temperature),
+            web_search_augmentation: override_config
+                .web_search_augmentation
+                .or(previous.web_search_augmentation),
+        };
+
+        if let (Some(model), Some(provider)) = (merged.model.clone(), merged.provider.clone()) {
+            self.registry
+                .update_model_provider_config(
+                    agent_id,
+                    model,
+                    provider,
+                    merged.api_key_env.clone().flatten(),
+                    merged.base_url.clone().flatten(),
+                )
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(max_tokens) = merged.max_tokens {
+            self.registry
+                .update_max_tokens(agent_id, max_tokens)
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(temperature) = merged.temperature {
+            self.registry
+                .update_temperature(agent_id, temperature)
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(mode) = merged.web_search_augmentation {
+            self.registry
+                .update_web_search_augmentation(agent_id, mode)
+                .map_err(KernelError::LibreFang)?;
+        }
+
+        self.hand_registry
+            .update_agent_runtime_override(instance.instance_id, &role, merged)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Pause a hand (marks it paused and suspends background loop ticks).
@@ -10157,6 +10270,7 @@ system_prompt = "You are a helpful assistant."
             for saved_hand in saved_hands {
                 let hand_id = saved_hand.hand_id;
                 let config = saved_hand.config;
+                let agent_runtime_overrides = saved_hand.agent_runtime_overrides;
                 let old_agent_id = saved_hand.old_agent_ids;
                 let status = saved_hand.status;
                 let persisted_instance_id = saved_hand.instance_id;
@@ -10183,6 +10297,7 @@ system_prompt = "You are a helpful assistant."
                 match self.activate_hand_with_id(
                     &hand_id,
                     config,
+                    agent_runtime_overrides.clone(),
                     persisted_instance_id,
                     timestamps,
                 ) {

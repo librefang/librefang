@@ -1004,6 +1004,10 @@ export async function patchAgentConfig(agentId: string, config: { max_tokens?: n
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
 }
 
+export async function patchHandAgentRuntimeConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" }): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`, config);
+}
+
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
  * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */

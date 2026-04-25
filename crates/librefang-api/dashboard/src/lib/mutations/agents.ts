@@ -6,8 +6,9 @@ import {
   suspendAgent,
   resumeAgent,
   deleteAgent,
-  patchAgent,
-  patchAgentConfig,
+    patchAgent,
+    patchAgentConfig,
+    patchHandAgentRuntimeConfig,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -123,9 +124,11 @@ export function usePatchAgentConfig() {
   return useMutation({
     mutationFn: ({
       agentId,
+      isHand,
       config,
     }: {
       agentId: string;
+      isHand?: boolean;
       config: {
         max_tokens?: number;
         model?: string;
@@ -133,7 +136,7 @@ export function usePatchAgentConfig() {
         temperature?: number;
         web_search_augmentation?: "off" | "auto" | "always";
       };
-    }) => patchAgentConfig(agentId, config),
+    }) => isHand ? patchHandAgentRuntimeConfig(agentId, config) : patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
