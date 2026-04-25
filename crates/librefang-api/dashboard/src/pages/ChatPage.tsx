@@ -2665,7 +2665,7 @@ export function ChatPage() {
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
               onModelChange={() => void agentsQuery.refetch()}
-              onOpenConfig={() => navigate({ to: "/config" })}
+              onOpenConfig={() => navigate({ to: "/config/tools" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
               attached={attachEnabled && sessionStream.isAttached}

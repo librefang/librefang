@@ -2854,6 +2854,29 @@ impl LibreFangKernel {
         // Initialize prompt store
         let _ = kernel.prompt_store.set(prompt_store);
 
+        // Pre-load persisted hand instance configs so the per-agent drift
+        // detection below can re-render the `## User Configuration` settings
+        // tail after overwriting the DB manifest with the bare disk TOML.
+        // Without this, every restart strips configured settings from the
+        // system prompt of any hand-spawned agent until somebody manually
+        // re-runs `hand activate` (issue: settings drift on restart).
+        //
+        // Hand instances themselves aren't restored into `hand_registry` yet
+        // — that happens later in `start_background_agents` via
+        // `activate_hand_with_id`. Reading `hand_state.json` directly is the
+        // cheapest way to recover the user-chosen config at this point in
+        // boot.
+        let persisted_hand_configs: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, serde_json::Value>,
+        > = {
+            let state_path = cfg.home_dir.join("data").join("hand_state.json");
+            librefang_hands::registry::HandRegistry::load_state(&state_path)
+                .into_iter()
+                .map(|e| (e.hand_id, e.config))
+                .collect()
+        };
+
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
             Ok(agents) => {
@@ -2954,6 +2977,48 @@ impl LibreFangKernel {
                                             // this file.
                                             disk_manifest.name = entry.manifest.name.clone();
                                             entry.manifest = disk_manifest;
+
+                                            // Re-render the `## User Configuration` tail that the
+                                            // bare disk TOML never carries. Without this, a hand
+                                            // with `[[settings]]` silently loses its configured
+                                            // values from the system prompt on every restart, and
+                                            // the agent improvises (or fails) until somebody
+                                            // re-activates the hand by hand. Mirrors the activation
+                                            // path in `activate_hand_with_id`.
+                                            // The AgentEntry.tags field is not persisted to SQLite
+                                            // (see librefang-memory/src/structured.rs::load_agent
+                                            // which always returns tags = vec![]); the actual
+                                            // hand membership tag lives on manifest.tags. Read
+                                            // there to identify the owning hand. We use the DB
+                                            // (entry.manifest before the swap to disk_manifest)
+                                            // because the disk TOML manifest typically doesn't
+                                            // carry the runtime-stamped `hand:<id>` tag either.
+                                            if let Some(hand_id) = entry
+                                                .manifest
+                                                .tags
+                                                .iter()
+                                                .find_map(|t| t.strip_prefix("hand:"))
+                                                .map(|s| s.to_string())
+                                            {
+                                                if let Some(def) =
+                                                    kernel.hand_registry.get_definition(&hand_id)
+                                                {
+                                                    if !def.settings.is_empty() {
+                                                        let empty =
+                                                            std::collections::HashMap::new();
+                                                        let cfg_for_settings =
+                                                            persisted_hand_configs
+                                                                .get(&hand_id)
+                                                                .unwrap_or(&empty);
+                                                        let _ = apply_settings_block_to_manifest(
+                                                            &mut entry.manifest,
+                                                            &def.settings,
+                                                            cfg_for_settings,
+                                                        );
+                                                    }
+                                                }
+                                            }
+
                                             // Persist the update back to DB
                                             if let Err(e) = kernel.memory.save_agent(&entry) {
                                                 warn!(
@@ -8833,9 +8898,13 @@ system_prompt = "You are a helpful assistant."
                 other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
             })?;
 
-        // Pre-compute shared overrides from hand definition
-        let resolved = librefang_hands::resolve_settings(&def.settings, &instance.config);
-        let mut allowed_env = resolved.env_vars;
+        // Pre-compute shared overrides from hand definition. The system-prompt
+        // tail is materialized later (after per-role manifest cloning) via
+        // `apply_settings_block_to_manifest` — keep this block aligned with the
+        // env-var allowlist only.
+        let resolved_settings_env: Vec<String> =
+            librefang_hands::resolve_settings(&def.settings, &instance.config).env_vars;
+        let mut allowed_env = resolved_settings_env;
         for req in &def.requires {
             match req.requirement_type {
                 librefang_hands::RequirementType::ApiKey
@@ -9042,13 +9111,14 @@ system_prompt = "You are a helpful assistant."
                 manifest.profile = Some(ToolProfile::Custom);
             }
 
-            // Inject settings into system prompt
-            if !resolved.prompt_block.is_empty() {
-                manifest.model.system_prompt = format!(
-                    "{}\n\n---\n\n{}",
-                    manifest.model.system_prompt, resolved.prompt_block
-                );
-            }
+            // Inject settings into system prompt. Shared with the boot-time
+            // TOML drift loop in `new_with_config` so both paths render the
+            // tail identically — the drift loop overwrites the DB blob with
+            // the bare disk TOML, which never carries the runtime-materialized
+            // tail, and would otherwise silently strip configured values from
+            // the prompt on every restart.
+            let _ =
+                apply_settings_block_to_manifest(&mut manifest, &def.settings, &instance.config);
 
             // Inject allowed env vars
             if !allowed_env.is_empty() {
