@@ -212,22 +212,30 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
                 .and_then(|n| n.to_str())
                 .unwrap_or_default()
                 .to_string();
-            if !seen.insert(name) {
+            if !seen.insert(name.clone()) {
                 continue;
             }
             let hand_toml = hand_dir.join("HAND.toml");
             let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
                 continue;
             };
-            let Ok(def) = librefang_hands::registry::parse_hand_toml_with_agents_dir(
+            // Surface parse failures at WARN — the previous `let Ok else
+            // continue` swallowed the error and the hand was silently
+            // dropped from routing, hiding misconfigured HAND.toml files
+            // (such as the `base = "<template>"` issue this PR fixes).
+            match librefang_hands::registry::parse_hand_toml_with_agents_dir(
                 &toml_content,
                 "",
                 std::collections::HashMap::new(),
                 agents_dir_arg,
-            ) else {
-                continue;
-            };
-            candidates.push(hand_route_candidate_from_definition(def));
+            ) {
+                Ok(def) => candidates.push(hand_route_candidate_from_definition(def)),
+                Err(e) => tracing::warn!(
+                    hand = %name,
+                    error = %e,
+                    "Failed to parse HAND.toml for routing — hand will be unreachable",
+                ),
+            }
         }
     }
 
