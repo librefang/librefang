@@ -479,6 +479,8 @@ pub struct LibreFangKernel {
     approval_sweep_started: AtomicBool,
     /// Idempotency guard for the task-board stuck-task sweeper (issue #2923).
     task_board_sweep_started: AtomicBool,
+    /// Idempotency guard for the session-stream-hub idle GC task.
+    session_stream_hub_gc_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -1114,6 +1116,54 @@ impl LibreFangKernel {
                 .task_board_sweep_started
                 .store(false, Ordering::Release);
             tracing::debug!("Task board sweep task stopped");
+        });
+    }
+
+    /// Spawn the session-stream-hub idle GC loop.
+    ///
+    /// `SessionStreamHub` lazily creates a broadcast sender per session on
+    /// first publish or first attach. Without periodic pruning, the senders
+    /// map grows unbounded under churn (many short-lived sessions, many
+    /// reconnects). This task calls `gc_idle()` every 60s to drop entries
+    /// with zero live receivers.
+    ///
+    /// Idempotent: re-calling while already running is a no-op.
+    pub fn spawn_session_stream_hub_gc_task(self: Arc<Self>) {
+        let handle = tokio::runtime::Handle::current();
+        if self
+            .session_stream_hub_gc_started
+            .swap(true, Ordering::AcqRel)
+        {
+            debug!("Session stream hub GC task already running");
+            return;
+        }
+
+        let kernel = Arc::clone(&self);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the immediate first tick — nothing to GC at boot.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let pruned = kernel.session_stream_hub.gc_idle();
+                        if pruned > 0 {
+                            tracing::debug!(pruned, "Session stream hub GC pruned idle sessions");
+                        }
+                    }
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            kernel
+                .session_stream_hub_gc_started
+                .store(false, Ordering::Release);
+            tracing::debug!("Session stream hub GC task stopped");
         });
     }
 
@@ -2737,6 +2787,7 @@ impl LibreFangKernel {
             budget_config: std::sync::RwLock::new(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             task_board_sweep_started: AtomicBool::new(false),
+            session_stream_hub_gc_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir

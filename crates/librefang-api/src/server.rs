@@ -1084,6 +1084,11 @@ pub async fn run_daemon(
     // `task_board.sweep_interval_secs` (default 30s).
     kernel.clone().spawn_task_board_sweep_task();
 
+    // Session stream hub idle GC — drops broadcast entries with no live
+    // receivers so the per-session sender map does not grow unbounded under
+    // churn (multi-client SSE attach, PR #3078).
+    kernel.clone().spawn_session_stream_hub_gc_task();
+
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
     {
