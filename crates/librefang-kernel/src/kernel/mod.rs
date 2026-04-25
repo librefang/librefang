@@ -8580,6 +8580,17 @@ system_prompt = "You are a helpful assistant."
         // Kill existing agents with matching hand tag (reactivation cleanup)
         let hand_tag = format!("hand:{hand_id}");
         let mut saved_triggers = std::collections::BTreeMap::new();
+        // Snapshot cron jobs per-role BEFORE kill_agent destroys them.
+        // kill_agent calls remove_agent_jobs() which deletes the jobs from
+        // memory and persists an empty cron_jobs.json to disk. The
+        // reassign_agent_jobs() call below would always be a no-op without
+        // this snapshot — same pattern as saved_triggers above. Fixes the
+        // silent loss of cron jobs across every daemon restart for
+        // hand-style agents.
+        let mut saved_crons: std::collections::BTreeMap<
+            String,
+            Vec<librefang_types::scheduler::CronJob>,
+        > = std::collections::BTreeMap::new();
         for entry in self.registry.list() {
             if entry.tags.contains(&hand_tag) {
                 let old_id = entry.id;
@@ -8597,13 +8608,22 @@ system_prompt = "You are a helpful assistant."
                         .or_insert_with(Vec::new)
                         .extend(taken_triggers);
                 }
+                let taken_crons = self.cron_scheduler.list_jobs(old_id);
+                if !taken_crons.is_empty() {
+                    saved_crons
+                        .entry(old_role.clone())
+                        .or_insert_with(Vec::new)
+                        .extend(taken_crons);
+                }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
-                // Migrate cron jobs to the same role in the new hand.
-                // Pass `instance_id` (the caller's parameter) so that
-                // `activate_hand()` (None) preserves legacy IDs while
-                // `activate_hand_with_id(_, _, Some(uuid))` uses the new format.
+                // Belt-and-braces: also reassign any jobs that somehow still
+                // reference the old UUID. After kill_agent's remove_agent_jobs
+                // wipes everything, this is a no-op in practice — the snapshot
+                // above is the primary mechanism. Kept as a safety net for
+                // edge cases like out-of-band cron creation between kill and
+                // respawn.
                 let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
                 let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
@@ -8881,6 +8901,47 @@ system_prompt = "You are a helpful assistant."
             }
             if let Err(e) = self.triggers.persist() {
                 warn!("Failed to persist trigger jobs after hand reactivation: {e}");
+            }
+        }
+
+        // Restore cron jobs that were snapshotted before kill_agent. They're
+        // re-added under the new agent_id for the same role. Runtime state
+        // (next_run, last_run) is reset so jobs get a fresh start.
+        if !saved_crons.is_empty() {
+            let mut total_restored = 0usize;
+            for (role, jobs) in saved_crons {
+                if let Some(&new_id) = agent_ids_map.get(&role) {
+                    let mut restored = 0usize;
+                    for mut job in jobs {
+                        job.agent_id = new_id;
+                        job.next_run = None;
+                        job.last_run = None;
+                        if self.cron_scheduler.add_job(job, false).is_ok() {
+                            restored += 1;
+                        }
+                    }
+                    if restored > 0 {
+                        info!(
+                            hand = %hand_id,
+                            role = %role,
+                            agent = %new_id,
+                            restored,
+                            "Restored cron jobs after hand reactivation"
+                        );
+                    }
+                    total_restored += restored;
+                } else {
+                    warn!(
+                        hand = %hand_id,
+                        role = %role,
+                        "Dropping saved cron jobs for removed hand role during reactivation"
+                    );
+                }
+            }
+            if total_restored > 0 {
+                if let Err(e) = self.cron_scheduler.persist() {
+                    warn!("Failed to persist cron jobs after restoration: {e}");
+                }
             }
         }
 
