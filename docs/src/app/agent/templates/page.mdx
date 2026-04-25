@@ -264,6 +264,25 @@ The kernel creates the directories on spawn and injects their resolved paths int
 
 **Modes**: `rw` (read-write, default) or `r` (read-only). Paths are relative to `workspaces_dir` and must not be absolute or contain `..`.
 
+### Live Context (`context.md`)
+
+If a `context.md` file is present in the agent's workspace, it is re-read **on every agent turn** and injected into the system prompt as a `## Live Context` section. This lets external tools (cron jobs, scripts, dashboards) push fresh data — market prices, project state, on-call rosters — into an agent without restarting it.
+
+**Path resolution**: `{workspace}/.identity/context.md` is preferred; `{workspace}/context.md` is used as a fallback for unmigrated workspaces.
+
+**Behavior**:
+- The file is read once per turn, right before the prompt is assembled.
+- Reads are capped at 32 KB; oversized files are truncated with a warning.
+- When a previously-successful read fails (e.g. the file is briefly replaced by an external writer), the most recent cached content is reused so the agent does not lose context mid-conversation.
+- If the file does not exist, no `## Live Context` section is added.
+
+**Opting out**: set `cache_context = true` in `agent.toml` to restore the pre-Apr-2026 behavior, where `context.md` is read once at session start and cached for the lifetime of the session.
+
+```toml
+# agent.toml
+cache_context = true   # default: false (re-read every turn)
+```
+
 ---
 
 ## Spawning Agents

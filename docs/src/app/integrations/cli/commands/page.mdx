@@ -1070,3 +1070,31 @@ librefang service status
 #   Enabled: enabled
 #   Active: active
 ```
+
+---
+
+## Slash Commands in Chat
+
+The interactive chat (`librefang chat`, `librefang agent chat`, and the TUI chat panel) accepts slash commands. All commands are sourced from a single registry shared with channel adapters (Telegram, Slack, etc.) and the dashboard, so a command name means the same thing on every surface.
+
+Type `/help` inside a chat session to render the list scoped to the CLI:
+
+```
+/model [name] — Show or switch agent model
+/status       — Show system status
+/help         — Show this help
+/clear        — Clear chat history
+/kill         — Kill the current agent and quit
+/exit         — End chat session
+```
+
+| Command | Description |
+|---|---|
+| `/model [name]` | Show the current model, or switch to `<name>` (provider-prefixed, e.g. `groq/llama-3.3-70b-versatile`). |
+| `/status` | Print connection and agent status. |
+| `/help` | Print the CLI command list. |
+| `/clear` | Clear the visible chat history without resetting the session. |
+| `/kill` | Terminate the current agent and exit chat. |
+| `/exit` | End the chat session. `quit` is accepted as an alias. |
+
+Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Unknown command names fall through to a single "unknown command" error rather than being passed to the model.

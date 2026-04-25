@@ -357,6 +357,26 @@ Upload a file to an agent's workspace (multipart form data).
 
 Retrieve a previously uploaded file by its upload ID.
 
+### Supported Attachment Types
+
+When attachments are referenced from a `POST /api/agents/{id}/message` (or the streaming variant) body, the backend resolves each `file_id` to a content block before invoking the LLM. Three content classes are recognized:
+
+| Class | Detection | Block produced |
+|---|---|---|
+| **Image** | `Content-Type: image/*` (`png`, `jpeg`, `webp`, `gif`) | Inline base64 image block |
+| **PDF** | `Content-Type: application/pdf` | Text block prefixed with `[Attached PDF: <filename>]` containing extracted plain text |
+| **Text / code** | Any `text/*` MIME, the listed `application/*` JSON/XML/YAML/TOML/JS/TS/SQL/GraphQL types, **or** a recognized file extension when the browser left the MIME blank | Text block prefixed with `[Attached file: <filename>]` containing the UTF-8 contents |
+
+Recognized text/code extensions include `.txt`, `.md`, `.markdown`, `.rst`, `.csv`, `.tsv`, `.log`, `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.conf`, `.cfg`, `.env`, `.html`, `.css`, `.js`, `.ts`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.py`, `.rs`, `.go`, `.java`, `.kt`, `.swift`, `.scala`, `.c`, `.cpp`, `.h`, `.rb`, `.php`, `.lua`, `.r`, `.sh`, `.bash`, `.sql`, `.graphql`, `.proto`, `.ipynb`, `Dockerfile`, `Makefile`, and others.
+
+**Limits:**
+
+- PDF text extraction and text-file reads are both truncated at 200,000 characters.
+- Scanned/image-only PDFs surface as a short note explaining that no text was extractable, so the model still sees the attachment exists.
+- Files that match none of the three classes are skipped with a warn log; the LLM call proceeds with the remaining attachments.
+
+**Note for local models:** when a user message contains multiple text segments (e.g. attachment header + user prompt), the runtime coalesces adjacent same-role text blocks at the session-repair layer. This normalization happens before any driver call, so small chat-tuned models served via Ollama / vLLM / LM Studio see a single user text run plus images and continue to attend to the attachment correctly.
+
 ### GET /api/agents/&lbrace;id&rbrace;/ws
 
 WebSocket connection for real-time bidirectional chat (see [WebSocket Protocol](#websocket-protocol)).
