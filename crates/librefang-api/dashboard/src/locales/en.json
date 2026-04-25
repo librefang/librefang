@@ -135,7 +135,9 @@
     "sort_last_active": "Last active",
     "sort_name": "Name",
     "viewAll": "View All",
-    "on": "ON"
+    "on": "ON",
+    "expand": "Expand",
+    "collapse": "Collapse"
   },
   "status": {
     "running": "Running",

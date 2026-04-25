@@ -134,7 +134,9 @@
     "sort_created": "创建时间",
     "sort_last_active": "最近活跃",
     "sort_name": "名称",
-    "viewAll": "查看全部"
+    "viewAll": "查看全部",
+    "expand": "展开",
+    "collapse": "收起"
   },
   "status": {
     "running": "运行中",
