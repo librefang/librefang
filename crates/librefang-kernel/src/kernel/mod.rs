@@ -8976,7 +8976,9 @@ system_prompt = "You are a helpful assistant."
 
         // Restore cron jobs that were snapshotted before kill_agent. They're
         // re-added under the new agent_id for the same role. Runtime state
-        // (next_run, last_run) is reset so jobs get a fresh start.
+        // (last_run) is reset and `next_run` is recomputed from the schedule
+        // so jobs resume on a clean future tick instead of immediately on
+        // the next scheduler poll.
         if !saved_crons.is_empty() {
             let mut total_restored = 0usize;
             for (role, jobs) in saved_crons {
@@ -8984,7 +8986,13 @@ system_prompt = "You are a helpful assistant."
                     let mut restored = 0usize;
                     for mut job in jobs {
                         job.agent_id = new_id;
-                        job.next_run = None;
+                        // Compute the next future fire time from the
+                        // schedule explicitly. `add_job` will overwrite this
+                        // with `compute_next_run` too, but writing it here
+                        // makes the intent ("don't refire immediately just
+                        // because we restored") obvious to readers and
+                        // resilient to future changes in `add_job`.
+                        job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
                         if self.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
