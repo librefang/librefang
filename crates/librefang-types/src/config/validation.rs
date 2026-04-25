@@ -609,6 +609,13 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Searxng => {
+                if self.web.searxng.url.is_empty() {
+                    warnings.push(
+                        "Searxng search selected but searxng.url is not configured".to_string(),
+                    );
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 

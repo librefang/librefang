@@ -342,7 +342,10 @@ pub enum SearchProvider {
     Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
+    /// SearXNG self-hosted search (no API key needed).
+    Searxng,
+    /// Auto-select based on available API keys
+    /// (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -367,6 +370,8 @@ pub struct WebConfig {
     pub perplexity: PerplexitySearchConfig,
     /// Jina Search configuration.
     pub jina: JinaSearchConfig,
+    /// SearXNG self-hosted search configuration.
+    pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -385,6 +390,7 @@ impl Default for WebConfig {
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
             jina: JinaSearchConfig::default(),
+            searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -491,6 +497,19 @@ impl Default for JinaSearchConfig {
             no_cache: false,
         }
     }
+}
+
+/// SearXNG self-hosted search configuration.
+///
+/// Requires only a `url`; SearXNG public instances reject `limit` and the
+/// LLM-facing `max_results` is taken from the per-call `tool_args` (the
+/// runtime truncates client-side after fetching).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SearxngSearchConfig {
+    /// Base URL of the SearXNG instance (e.g., "https://search.example.com").
+    /// Empty means the provider is disabled.
+    pub url: String,
 }
 
 /// Web fetch configuration.
