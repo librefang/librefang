@@ -890,6 +890,63 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_array_without_items_fallback_is_string_for_all_strict_providers() {
+        // The string fallback is NOT Gemini-specific — every strict-validator
+        // provider goes through the same worker. Lock that contract in: the
+        // same input must yield the same fallback for gemini, openai, groq.
+        // (anthropic short-circuits and keeps the schema as-is — also covered.)
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array" }
+            }
+        });
+
+        for provider in ["gemini", "openai", "groq"] {
+            let result = normalize_schema_for_provider(&schema, provider);
+            assert_eq!(
+                result["properties"]["tags"]["items"]["type"],
+                "string",
+                "provider={provider} must inject string items fallback"
+            );
+        }
+
+        // Anthropic short-circuits — schema is preserved verbatim, no items
+        // injected (Anthropic does not require items for array params).
+        let anthropic_result = normalize_schema_for_provider(&schema, "anthropic");
+        assert!(
+            anthropic_result["properties"]["tags"].get("items").is_none(),
+            "anthropic must NOT inject items — schema is passed through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_normalize_array_fallback_warns_caller_via_log() {
+        // The fallback is intentionally lossy when the array's true element
+        // type is not `string` — e.g. an array of integers normalized for
+        // Gemini will be told to emit string elements. We document this here
+        // so future readers cannot mistake the fallback for type inference.
+        //
+        // The accompanying production code emits a `tracing::warn!` on every
+        // fallback so the gap surfaces in logs. We don't capture the log here
+        // (would require an extra dev-dep) — this test exists to:
+        //   1. Pin the fallback type as `string` (regression).
+        //   2. Carry the rationale in code so it's discoverable from a search
+        //      for `array_without_items` or `string_default`.
+        let int_array_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": { "type": "array", "description": "list of numeric ids" }
+            }
+        });
+        let result = normalize_schema_for_provider(&int_array_schema, "gemini");
+        // The fallback is `string`, even though the description hints at numbers.
+        // This is the "better than missing items" trade-off — callers should
+        // declare `items` explicitly to get correct typing.
+        assert_eq!(result["properties"]["ids"]["items"]["type"], "string");
+    }
+
+    #[test]
     fn test_normalize_preserves_existing_items() {
         // If `items` already exists, it must not be overwritten
         let schema = serde_json::json!({
