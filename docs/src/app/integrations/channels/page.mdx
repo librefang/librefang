@@ -93,9 +93,23 @@ Env vars for each channel are listed in their respective setup sections below.
 
 ## Channel Overrides
 
-Every channel adapter supports `ChannelOverrides`, which let you customize behavior per channel without modifying the agent manifest. Add an `[channels.<name>.overrides]` section in `config.toml`:
+Every channel adapter supports `ChannelOverrides`, which let you customize per-channel behaviour at two levels:
+
+- **Channel-level** in `config.toml` — applies to every agent that uses that channel. Add a `[channels.<name>.overrides]` section.
+- **Agent-level** in `agent.toml` — applies only to that specific agent on every channel. Add a top-level `[channel_overrides]` section.
+
+**Resolution order**: agent-level → channel-level → built-in default. Whichever sets the field wins; missing fields fall through to the next layer (same pattern as `exec_policy`).
 
 ```toml
+# agent.toml — per-agent override (e.g. "this agent answers every DM")
+[channel_overrides]
+dm_policy = "always"
+group_policy = "trigger_only"
+group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
+```
+
+```toml
+# config.toml — channel-level default for every agent on that channel
 [channels.telegram.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Telegram assistant. Keep replies under 200 words."
@@ -174,3 +188,85 @@ The `AgentRouter` determines which agent receives an incoming message. The routi
 4. **Fallback**: If no routing applies, messages go to the first available agent.
 
 When a channel has `default_agent` configured, messages from that channel bypass semantic and keyword routing and go directly to the specified agent. Users can still switch agents manually via the `/agent` command.
+
+---
+
+## Outbound Tagging
+
+Set `prefix_agent_name` in `ChannelOverrides` to prepend the agent's name to every outbound message. Useful when several agents share one channel — readers can tell at a glance which agent replied.
+
+| Style | Wraps reply as |
+|---|---|
+| `Off` (default) | unchanged — byte-identical to the agent's text |
+| `Bracket` | `[agent-name] reply text` |
+| `BoldBracket` | `**[agent-name]** reply text` (bold rendering depends on the channel's output format) |
+
+```toml
+[channels.telegram.overrides]
+prefix_agent_name = "BoldBracket"
+```
+
+The wrap is applied once on every non-streaming success path (`auto_reply`, kernel-streaming-with-status accumulated, streaming-fallback `buffered_text`, non-streaming fallback, retry after re-resolution, `dispatch_with_blocks`). Streaming tee (where each chunk is forwarded as it arrives) does **not** wrap — the prefix would interleave with chunk boundaries.
+
+## Signal Plain-Text Default
+
+The Signal adapter defaults to `OutputFormat::PlainText`. `signal-cli` renders Markdown asterisks and underscores literally, so leaving them in produced visible noise. To re-enable Markdown, override the format on the agent or channel:
+
+```toml
+[channels.signal.overrides]
+output_format = "markdown_v2"
+```
+
+Other channels keep their previous formatter defaults — only Signal flipped.
+
+## Reactions and Processing State
+
+Several adapters can show "I'm working on it" feedback by attaching a reaction to the user's message and removing it once the reply is sent. This is per-channel:
+
+- **Slack** — `reactions_enabled` toggle (env var `SLACK_REACTIONS`, default `true`). Adds 👀 on receive, replaces with ✅ on reply. `already_reacted` / `no_reaction` errors are silently ignored (fail-open).
+- **Feishu** — adds a `Typing` reaction on receive, removes it on reply send. Both calls are fire-and-forget; API failures `warn!` but never block message processing.
+
+Add the same on a custom adapter by spawning the reaction call as a `tokio::spawn` task and storing `(reaction_id, message_id)` in a per-chat map keyed off the chat id.
+
+## Feishu @Mention Preservation
+
+Feishu used to silently drop `@_user_N` placeholders from incoming text. The Feishu adapter now substitutes each placeholder with `@<display-name>` resolved from the mention payload (falling back to `open_id` when name is absent), and rewrites `@_all` to `@all`. Agents see the original conversational tone — "@alice can you check this?" — instead of bare punctuation.
+
+## Signal Media Attachments
+
+The Signal adapter now delivers `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks. Media URLs are downloaded and base64-encoded into `base64_attachments` on `/v2/send`. `MediaGroup` recurses into one `send()` per item. Unsupported types (`Poll`, `Sticker`, …) `warn!` and degrade gracefully — text-only fallback or skip — rather than fail the whole reply.
+
+## WhatsApp Voice + DM/Group Policies
+
+The WhatsApp adapter exposes:
+
+- `send_voice(to, audio, mime_type)` — Cloud API mode uploads via `/{phone_number_id}/media` then sends an `audio` message with the returned `media_id`; gateway mode base64-encodes and POSTs to `/message/send-voice`.
+- `dm_policy: DmPolicy` (default `Respond`) and `group_policy: GroupPolicy` (default `MentionOnly`) on the adapter — the same shape as Telegram. Builder methods: `with_dm_policy()`, `with_group_policy()`, `with_bot_phone()`, `with_bot_name()`.
+- `WhatsAppAdapter::should_handle_message(is_group, text) -> bool` for bridge / webhook entry-point filtering.
+
+`MentionOnly` checks whether the message text contains the bot phone or bot name; `TriggerOnly` checks `group_trigger_patterns`; `Always` and `Never` short-circuit.
+
+## Webhook `deliver_only` Mode
+
+The webhook channel can run as a pass-through: incoming payloads bypass the LLM entirely (no sanitizer, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
+
+```toml
+[channels.webhook]
+enabled = true
+deliver_only = true
+deliver = "telegram:123456789"     # required when deliver_only is true
+```
+
+When `deliver_only = true` but `deliver` is unset, librefang emits a startup warn and the webhook stays inactive. The fan-out is signalled internally via `__deliver_only__` / `__deliver_target__` metadata so adapter trait signatures stay unchanged.
+
+## Channel File Downloads
+
+Files attached on Telegram (and other channels) come through as **temporary authenticated URLs that the LLM cannot access directly**. The bridge now downloads them to a configurable directory and rewrites the message into local-path content blocks — non-image files become a `ContentBlock::Text` with the saved path (the agent calls `file_read`), images become `ContentBlock::ImageFile`.
+
+```toml
+[channels]
+file_download_dir = "/var/lib/librefang/channel-files"   # default: ~/.librefang/data/channel-files
+file_download_max_bytes = 33554432                       # default: 32 MiB
+```
+
+A startup sweep removes stale files older than 24 h; an additional probabilistic 1-in-256 sweep runs during downloads so a long-running daemon doesn't accumulate orphaned attachments.
