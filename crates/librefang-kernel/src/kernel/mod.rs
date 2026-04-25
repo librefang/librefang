@@ -8672,10 +8672,18 @@ system_prompt = "You are a helpful assistant."
                 }
                 let taken_crons = self.cron_scheduler.list_jobs(old_id);
                 if !taken_crons.is_empty() {
-                    saved_crons
-                        .entry(old_role.clone())
-                        .or_default()
-                        .extend(taken_crons);
+                    // Dedupe by job id within this snapshot: if two registry
+                    // entries somehow tag the same role (concurrent activation
+                    // racing the `kill_agent` cleanup, or a bug that left two
+                    // tagged agents alive), the same `CronJob` could be
+                    // collected twice and re-added twice — yielding duplicate
+                    // jobs that fire side-by-side. Deterministically keep
+                    // exactly one per `CronJobId`.
+                    let bucket: &mut Vec<librefang_types::scheduler::CronJob> =
+                        saved_crons.entry(old_role.clone()).or_default();
+                    let seen: std::collections::HashSet<librefang_types::scheduler::CronJobId> =
+                        bucket.iter().map(|j| j.id).collect();
+                    bucket.extend(taken_crons.into_iter().filter(|j| !seen.contains(&j.id)));
                 }
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
