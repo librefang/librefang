@@ -115,10 +115,61 @@ pub fn is_local_provider(provider: &str) -> bool {
 }
 
 /// Overall request timeout for local provider health probes (connect + response).
+///
+/// Tight default for loopback addresses where the daemon should be milliseconds
+/// away — a 2 s budget makes the model switcher recognize a dead local ollama
+/// quickly. Remote-fronted setups (e.g. Open WebUI proxy over HTTPS, see
+/// [`PROBE_REMOTE_TIMEOUT_SECS`]) need a looser budget for TLS + WAN latency.
 const PROBE_TIMEOUT_SECS: u64 = 2;
 
 /// TCP connect timeout — fail fast when the local port is not listening.
 const PROBE_CONNECT_TIMEOUT_SECS: u64 = 1;
+
+/// Total request timeout for non-loopback probe targets (HTTPS reverse proxies,
+/// remote ollama, etc.). 8 s comfortably absorbs cold-start TLS handshakes
+/// (~1–3 s on first connect) plus end-to-end WAN latency.
+const PROBE_REMOTE_TIMEOUT_SECS: u64 = 8;
+
+/// TCP connect timeout for non-loopback probe targets.
+const PROBE_REMOTE_CONNECT_TIMEOUT_SECS: u64 = 3;
+
+/// Format a `reqwest::Error` with its cause chain so probe failures stay
+/// diagnosable. The default `Display` impl drops the inner cause, leaving the
+/// generic `error sending request for url (...)` line for everything from a
+/// timeout to a TLS handshake failure to DNS — flatten the chain so the WARN
+/// line tells operators which it actually was.
+fn format_request_error(err: &reqwest::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source: Option<&dyn std::error::Error> = std::error::Error::source(err);
+    while let Some(cause) = source {
+        parts.push(cause.to_string());
+        source = cause.source();
+    }
+    if err.is_timeout() && !parts.iter().any(|p| p.to_lowercase().contains("timeout")) {
+        parts.push("timed out".to_string());
+    }
+    parts.join(": ")
+}
+
+/// Returns `true` when `base_url` points at a loopback host. Loopback hosts get
+/// the tight [`PROBE_TIMEOUT_SECS`] / [`PROBE_CONNECT_TIMEOUT_SECS`] budgets;
+/// everything else uses the relaxed [`PROBE_REMOTE_TIMEOUT_SECS`] /
+/// [`PROBE_REMOTE_CONNECT_TIMEOUT_SECS`] pair.
+///
+/// Unparseable URLs are treated as loopback to preserve the original
+/// fast-fail behaviour for plain `localhost:11434` style strings.
+fn is_loopback_base_url(base_url: &str) -> bool {
+    match url::Url::parse(base_url) {
+        Ok(u) => match u.host_str() {
+            Some(h) => matches!(
+                h.to_ascii_lowercase().as_str(),
+                "localhost" | "127.0.0.1" | "::1" | "[::1]"
+            ),
+            None => true,
+        },
+        Err(_) => true,
+    }
+}
 
 /// Default TTL for cached probe results (seconds).
 const PROBE_CACHE_TTL_SECS: u64 = 60;
@@ -186,9 +237,15 @@ impl Default for ProbeCache {
 pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str>) -> ProbeResult {
     let start = Instant::now();
 
+    let (connect_timeout_secs, total_timeout_secs) = if is_loopback_base_url(base_url) {
+        (PROBE_CONNECT_TIMEOUT_SECS, PROBE_TIMEOUT_SECS)
+    } else {
+        (PROBE_REMOTE_CONNECT_TIMEOUT_SECS, PROBE_REMOTE_TIMEOUT_SECS)
+    };
+
     let client = match crate::http_client::proxied_client_builder()
-        .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
+        .timeout(Duration::from_secs(total_timeout_secs))
         .build()
     {
         Ok(c) => c,
@@ -235,7 +292,7 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
         Err(e) => {
             return ProbeResult {
                 latency_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("{e}")),
+                error: Some(format_request_error(&e)),
                 ..Default::default()
             };
         }
@@ -473,6 +530,41 @@ mod tests {
     fn test_probe_timeout_value() {
         assert_eq!(PROBE_TIMEOUT_SECS, 2);
         assert_eq!(PROBE_CONNECT_TIMEOUT_SECS, 1);
+        assert_eq!(PROBE_REMOTE_TIMEOUT_SECS, 8);
+        assert_eq!(PROBE_REMOTE_CONNECT_TIMEOUT_SECS, 3);
+        // Remote budget must always exceed the loopback budget; otherwise we
+        // would slow remote probes for no reason.
+        assert!(PROBE_REMOTE_TIMEOUT_SECS > PROBE_TIMEOUT_SECS);
+        assert!(PROBE_REMOTE_CONNECT_TIMEOUT_SECS > PROBE_CONNECT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_loopback_hosts() {
+        assert!(is_loopback_base_url("http://127.0.0.1:11434/v1"));
+        assert!(is_loopback_base_url("http://localhost:11434/v1"));
+        assert!(is_loopback_base_url("http://LOCALHOST:11434"));
+        assert!(is_loopback_base_url("http://[::1]:11434/v1"));
+        assert!(is_loopback_base_url("http://127.0.0.1:8000/"));
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_remote_hosts() {
+        assert!(!is_loopback_base_url(
+            "https://webui.example.com/ollama/v1"
+        ));
+        assert!(!is_loopback_base_url("http://192.168.1.10:11434"));
+        assert!(!is_loopback_base_url("https://api.openai.com/v1"));
+        // LAN hosts that resolve via mDNS / private DNS are still "remote"
+        // for the probe — they cross a network boundary.
+        assert!(!is_loopback_base_url("http://nas.local:11434"));
+    }
+
+    #[test]
+    fn test_is_loopback_base_url_unparseable_falls_back_to_loopback() {
+        // Unparseable URLs preserve the legacy fast-fail budget rather than
+        // mysteriously slowing every probe in a malformed-config scenario.
+        assert!(is_loopback_base_url("not a url"));
+        assert!(is_loopback_base_url(""));
     }
 
     #[test]
