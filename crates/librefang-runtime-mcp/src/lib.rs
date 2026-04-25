@@ -2724,10 +2724,7 @@ mod tests {
             "destructiveHint": true,
         });
         inject_annotation_class(&mut schema, Some(&ann));
-        assert_eq!(
-            schema["metadata"]["tool_class"].as_str(),
-            Some("mutating")
-        );
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
     }
 
     #[test]
@@ -2737,10 +2734,7 @@ mod tests {
         let mut schema = serde_json::json!({"type": "object"});
         let ann = serde_json::json!({"readOnlyHint": false});
         inject_annotation_class(&mut schema, Some(&ann));
-        assert_eq!(
-            schema["metadata"]["tool_class"].as_str(),
-            Some("mutating")
-        );
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
     }
 
     #[test]
@@ -2783,10 +2777,7 @@ mod tests {
             "destructiveHint": true,
         });
         inject_annotation_class(&mut schema, Some(&ann));
-        assert_eq!(
-            schema["metadata"]["tool_class"].as_str(),
-            Some("mutating")
-        );
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
     }
 
     #[test]
