@@ -95,8 +95,8 @@ debounce_ms = 500
 
 # ── Provider URL Overrides (uncomment to use) ────────────────
 # [provider_urls]
-# ollama = "http://localhost:11434/v1"
-# vllm = "http://localhost:8000/v1"
+# ollama = "http://127.0.0.1:11434/v1"
+# vllm = "http://127.0.0.1:8000/v1"
 
 # ── Fallback Providers (LLM failover chain) ──────────────────
 # [[fallback_providers]]
