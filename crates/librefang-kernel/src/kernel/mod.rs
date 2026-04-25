@@ -7859,7 +7859,7 @@ system_prompt = "You are a helpful assistant."
                     warn!(agent = %entry.name, "Failed to create agent dir for manifest persist: {e}");
                     return;
                 }
-                if let Err(e) = std::fs::write(&toml_path, toml_str) {
+                if let Err(e) = atomic_write_toml(&toml_path, &toml_str) {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {e}");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
@@ -13226,6 +13226,67 @@ async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_wake_gate(&stdout)
+}
+
+/// Atomically write a TOML file by staging the new content in a sibling
+/// `.tmp` file and renaming it over the destination.
+///
+/// SECURITY / CORRECTNESS: a plain `fs::write` is non-atomic. Two
+/// concurrent persisters (e.g. `patch_agent` + `set_agent_model`) can
+/// truncate each other's output mid-flight, and a process crash at the
+/// wrong moment leaves a half-written file that fails to parse on next
+/// boot. `rename` is atomic on POSIX filesystems and effectively atomic
+/// on Windows for files on the same volume; if the rename fails we
+/// clean up the staging file.
+///
+/// We also `sync_all` the temp file before rename so the bytes hit the
+/// disk before the directory entry is swapped — without that, a power
+/// loss could leave the renamed file pointing at empty/stale data even
+/// though the rename succeeded.
+fn atomic_write_toml(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Per-call counter so two threads in the same process never share
+    // a tmp filename — otherwise concurrent writers can clobber each
+    // other's staging file before rename, defeating the atomicity.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+
+    // Same-directory tmp path keeps rename on the same filesystem so
+    // it's a true atomic in-place swap rather than a cross-volume copy.
+    let mut tmp = path.to_path_buf();
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
+        .to_os_string();
+    let mut tmp_name = file_name;
+    tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    tmp.set_file_name(tmp_name);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        // fsync so the bytes hit disk before we publish via rename;
+        // without this a power loss between rename and flush would
+        // leave the renamed file pointing at empty/garbage data.
+        f.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // POSIX `rename` is atomic. Windows `MoveFileEx` with
+    // REPLACE_EXISTING (which Rust's std uses) is effectively atomic
+    // for files on the same volume, though there is a brief window
+    // where readers may see ERROR_SHARING_VIOLATION on contention.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Parse the wake gate from script stdout.

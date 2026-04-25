@@ -2161,3 +2161,105 @@ async fn send_to_agent_as_rejects_unparseable_parent_id() {
 
     kernel.shutdown();
 }
+
+// ── atomic_write_toml ────────────────────────────────────────────────
+// `persist_manifest_to_disk` previously used a plain `fs::write` which
+// could leave a corrupt half-written file when the daemon crashed
+// mid-write, or let two concurrent persisters race and truncate each
+// other. `atomic_write_toml` stages the bytes in a sibling temp file
+// and atomically renames it into place.
+
+#[test]
+fn atomic_write_replaces_existing_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.toml");
+    std::fs::write(&path, "old = 1\n").unwrap();
+
+    super::atomic_write_toml(&path, "new = 2\n").expect("write must succeed");
+
+    let got = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(got, "new = 2\n", "atomic write must replace prior content");
+}
+
+#[test]
+fn atomic_write_leaves_no_tmp_file_on_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent.toml");
+    super::atomic_write_toml(&path, "model = \"x\"\n").unwrap();
+
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no .tmp staging file should remain after success"
+    );
+}
+
+#[test]
+fn atomic_write_no_partial_state_under_concurrency() {
+    // Spawn two threads racing to write the same path with very
+    // different payloads. The file must always end up parseable as
+    // exactly one of the two payloads — never a truncated mix.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("manifest.toml");
+    // Seed the file so a partial truncate would be observable.
+    std::fs::write(&path, "seed = 0\n").unwrap();
+
+    let payload_a = format!("name = \"{}\"\n", "a".repeat(4096));
+    let payload_b = format!("name = \"{}\"\n", "b".repeat(4096));
+
+    let path_a = path.clone();
+    let payload_a_clone = payload_a.clone();
+    let t1 = std::thread::spawn(move || {
+        for _ in 0..50 {
+            super::atomic_write_toml(&path_a, &payload_a_clone).unwrap();
+        }
+    });
+    let path_b = path.clone();
+    let payload_b_clone = payload_b.clone();
+    let t2 = std::thread::spawn(move || {
+        for _ in 0..50 {
+            super::atomic_write_toml(&path_b, &payload_b_clone).unwrap();
+        }
+    });
+
+    // While the writers are racing, repeatedly read the file. Every
+    // read must see a complete, parseable payload — never partial.
+    for _ in 0..200 {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            assert!(
+                contents == "seed = 0\n"
+                    || contents == payload_a
+                    || contents == payload_b,
+                "reader observed corrupt/partial state: {} bytes",
+                contents.len()
+            );
+        }
+    }
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let final_contents = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        final_contents == payload_a || final_contents == payload_b,
+        "final file must equal one of the two payloads exactly"
+    );
+    // No stray .tmp files left behind.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no .tmp staging files should remain after concurrent writes"
+    );
+}
