@@ -606,6 +606,8 @@ impl WebSearchEngine {
             return Err(format!("No results found for '{query}' (SearXNG)."));
         }
 
+        let total = data.results.len();
+        let shown = total.min(max_results);
         let mut output = format!("Search results for '{query}' (SearXNG):\n\n");
         for (i, r) in data.results.iter().take(max_results).enumerate() {
             let content = r.content.as_deref().unwrap_or("");
@@ -617,6 +619,14 @@ impl WebSearchEngine {
                 output.push_str(&format!("   Published: {date}\n"));
             }
             output.push('\n');
+        }
+
+        // When client-side truncation hides results, tell the LLM so it can
+        // either widen `max_results` or paginate via `pageno`.
+        if shown < total {
+            output.push_str(&format!(
+                "Showing {shown} of {total} results on page {page} (truncated; pass a higher max_results or fetch the next page).\n",
+            ));
         }
 
         Ok(wrap_external_content("searxng-search", &output))
