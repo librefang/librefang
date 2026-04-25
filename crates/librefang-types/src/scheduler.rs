@@ -1894,8 +1894,7 @@ mod tests {
     #[test]
     fn pre_script_validation_rejects_dyld_insert() {
         let home = fixture_home_with_script("safe.sh");
-        let script =
-            pre_script_with_env(home.path(), "DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib");
+        let script = pre_script_with_env(home.path(), "DYLD_INSERT_LIBRARIES", "/tmp/evil.dylib");
         assert!(matches!(
             validate_pre_script(&script, home.path()),
             Err(PreScriptValidationError::DangerousEnvKey { .. })
