@@ -145,7 +145,17 @@ fn format_request_error(err: &reqwest::Error) -> String {
         parts.push(cause.to_string());
         source = cause.source();
     }
-    if err.is_timeout() && !parts.iter().any(|p| p.to_lowercase().contains("timeout")) {
+    // reqwest renders timeouts as "operation timed out" / "timed out" — the
+    // substring is "timed out", not "timeout". Check both so we don't
+    // double-append the marker when the cause chain already mentioned it.
+    if err.is_timeout()
+        && !parts
+            .iter()
+            .any(|p| {
+                let s = p.to_lowercase();
+                s.contains("timeout") || s.contains("timed out")
+            })
+    {
         parts.push("timed out".to_string());
     }
     parts.join(": ")
