@@ -4949,7 +4949,10 @@ mod tests {
             "a[b",
             &apply_agent_prefix(PrefixStyle::Bracket, "a[b", "hello"),
         );
-        assert!(stacked.ends_with("hello"), "body must be preserved: {stacked}");
+        assert!(
+            stacked.ends_with("hello"),
+            "body must be preserved: {stacked}"
+        );
         assert!(stacked.is_char_boundary(stacked.len()));
 
         // `*` inside the name — bold style relies on `**[name]**`; an
