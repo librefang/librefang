@@ -161,6 +161,13 @@ impl ModelCatalog {
                             model.provider = pid.clone();
                         }
                     }
+                    // Reject malformed text entries (zero context_window /
+                    // max_output_tokens) so we fail at parse instead of
+                    // silently feeding 0 into compaction / budget math.
+                    if let Err(e) = model.validate() {
+                        tracing::warn!("Skipping invalid catalog entry: {e}");
+                        continue;
+                    }
                     models.push(model);
                 }
             }
@@ -880,6 +887,11 @@ impl ModelCatalog {
                     // No provider info at all — skip this model
                     continue;
                 }
+            }
+            // Modality-aware schema gate (see ModelCatalogEntry::validate).
+            if let Err(e) = model.validate() {
+                tracing::warn!("Skipping invalid catalog entry: {e}");
+                continue;
             }
             let lower_id = model.id.to_lowercase();
             let lower_provider = model.provider.to_lowercase();

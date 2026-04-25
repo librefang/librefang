@@ -786,6 +786,14 @@ pub async fn add_custom_model(
         aliases: vec![],
     };
 
+    // Same modality-aware gate the catalog loaders apply: text entries
+    // must have nonzero context_window and max_output_tokens. Reject
+    // synchronously so misconfigured custom models can't enter the
+    // catalog and propagate `0` into compaction / budget math.
+    if let Err(e) = entry.validate() {
+        return ApiErrorResponse::bad_request(e).into_json_tuple();
+    }
+
     let mut catalog = state
         .kernel
         .model_catalog_ref()

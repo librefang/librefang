@@ -188,6 +188,32 @@ impl ModelCatalogEntry {
     pub fn is_image_generation(&self) -> bool {
         self.modality == Modality::Image
     }
+
+    /// Modality-aware schema check applied after TOML deserialization.
+    ///
+    /// `context_window` and `max_output_tokens` use `#[serde(default)]` so
+    /// image and audio entries (which don't have a token context) can omit
+    /// the fields. Without this check, a malformed `Modality::Text` entry
+    /// missing those fields would silently load with `0` and propagate that
+    /// `0` into compaction thresholds and budget math downstream. Catalog
+    /// loaders MUST call this and reject entries that fail.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.modality == Modality::Text {
+            if self.context_window == 0 {
+                return Err(format!(
+                    "text model {}/{} is missing context_window",
+                    self.provider, self.id
+                ));
+            }
+            if self.max_output_tokens == 0 {
+                return Err(format!(
+                    "text model {}/{} is missing max_output_tokens",
+                    self.provider, self.id
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for ModelCatalogEntry {
@@ -520,6 +546,64 @@ mod tests {
         assert!(entry.id.is_empty());
         assert_eq!(entry.tier, ModelTier::Balanced);
         assert!(entry.aliases.is_empty());
+    }
+
+    #[test]
+    fn test_validate_text_requires_nonzero_limits() {
+        // A text entry parsed from TOML that omitted both fields would
+        // land here with zeros — validate() must reject it so callers
+        // never propagate `0` into compaction / budget math.
+        let entry = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            ..Default::default()
+        };
+        let err = entry.validate().unwrap_err();
+        assert!(err.contains("context_window"), "got: {err}");
+
+        // max_output_tokens missing while context_window is set still fails.
+        let partial = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let err2 = partial.validate().unwrap_err();
+        assert!(err2.contains("max_output_tokens"), "got: {err2}");
+
+        // Both populated → ok.
+        let ok = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_image_models_skip_token_check() {
+        // Image entries legitimately omit context_window / max_output_tokens
+        // — validate() must not require them.
+        let img = ModelCatalogEntry {
+            id: "dall-e-3".into(),
+            provider: "openai".into(),
+            modality: Modality::Image,
+            ..Default::default()
+        };
+        assert!(img.validate().is_ok());
+
+        let audio = ModelCatalogEntry {
+            id: "whisper-1".into(),
+            provider: "openai".into(),
+            modality: Modality::Audio,
+            ..Default::default()
+        };
+        assert!(audio.validate().is_ok());
     }
 
     #[test]
