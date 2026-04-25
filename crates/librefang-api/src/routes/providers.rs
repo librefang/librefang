@@ -126,10 +126,13 @@ pub async fn list_models(
                 "display_name": m.display_name,
                 "provider": m.provider,
                 "tier": m.tier,
+                "modality": m.modality,
                 "context_window": m.context_window,
                 "max_output_tokens": m.max_output_tokens,
                 "input_cost_per_m": m.input_cost_per_m,
                 "output_cost_per_m": m.output_cost_per_m,
+                "image_input_cost_per_m": m.image_input_cost_per_m,
+                "image_output_cost_per_m": m.image_output_cost_per_m,
                 "supports_tools": m.supports_tools,
                 "supports_vision": m.supports_vision,
                 "supports_streaming": m.supports_streaming,
@@ -276,10 +279,13 @@ pub async fn get_model(
                     "display_name": m.display_name,
                     "provider": m.provider,
                     "tier": m.tier,
+                    "modality": m.modality,
                     "context_window": m.context_window,
                     "max_output_tokens": m.max_output_tokens,
                     "input_cost_per_m": m.input_cost_per_m,
                     "output_cost_per_m": m.output_cost_per_m,
+                    "image_input_cost_per_m": m.image_input_cost_per_m,
+                    "image_output_cost_per_m": m.image_output_cost_per_m,
                     "supports_tools": m.supports_tools,
                     "supports_vision": m.supports_vision,
                     "supports_streaming": m.supports_streaming,
@@ -636,10 +642,13 @@ pub async fn get_provider(
                             "id": m.id,
                             "display_name": m.display_name,
                             "tier": m.tier,
+                            "modality": m.modality,
                             "context_window": m.context_window,
                             "max_output_tokens": m.max_output_tokens,
                             "input_cost_per_m": m.input_cost_per_m,
                             "output_cost_per_m": m.output_cost_per_m,
+                            "image_input_cost_per_m": m.image_input_cost_per_m,
+                            "image_output_cost_per_m": m.image_output_cost_per_m,
                             "supports_tools": m.supports_tools,
                             "supports_vision": m.supports_vision,
                             "supports_streaming": m.supports_streaming,
@@ -734,11 +743,18 @@ pub async fn add_custom_model(
         .unwrap_or(&id)
         .to_string();
 
+    let modality = match body.get("modality").and_then(|v| v.as_str()) {
+        Some("image") => librefang_types::model_catalog::Modality::Image,
+        Some("audio") => librefang_types::model_catalog::Modality::Audio,
+        _ => librefang_types::model_catalog::Modality::Text,
+    };
+
     let entry = librefang_types::model_catalog::ModelCatalogEntry {
         id: id.clone(),
         display_name: display,
         provider: provider.clone(),
         tier: librefang_types::model_catalog::ModelTier::Custom,
+        modality,
         context_window,
         max_output_tokens: max_output,
         input_cost_per_m: body
@@ -749,6 +765,8 @@ pub async fn add_custom_model(
             .get("output_cost_per_m")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
+        image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
         supports_tools: body
             .get("supports_tools")
             .and_then(|v| v.as_bool())
@@ -767,6 +785,14 @@ pub async fn add_custom_model(
             .unwrap_or(false),
         aliases: vec![],
     };
+
+    // Same modality-aware gate the catalog loaders apply: text entries
+    // must have nonzero context_window and max_output_tokens. Reject
+    // synchronously so misconfigured custom models can't enter the
+    // catalog and propagate `0` into compaction / budget math.
+    if let Err(e) = entry.validate() {
+        return ApiErrorResponse::bad_request(e).into_json_tuple();
+    }
 
     let mut catalog = state
         .kernel

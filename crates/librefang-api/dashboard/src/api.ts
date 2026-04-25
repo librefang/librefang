@@ -290,6 +290,28 @@ export interface AgentTool {
 export interface AgentSessionImage {
   file_id: string;
   filename?: string;
+  /** Optional — backend currently only emits image attachments here, so
+   *  the renderer treats a missing value as image. Threading the field
+   *  through keeps the chat transcript correct if the server starts
+   *  serializing non-image attachments (PDF/text) into history. */
+  content_type?: string;
+}
+
+/** Reference passed back to the agent's `/message` endpoint or WS frame
+ *  after a successful upload. Mirrors `crate::types::AttachmentRef`. */
+export interface AttachmentRef {
+  file_id: string;
+  filename?: string;
+  content_type?: string;
+}
+
+export interface AgentFileUploadResult {
+  file_id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  /** Whisper transcription, populated only for audio uploads. */
+  transcription?: string;
 }
 
 export interface AgentSessionMessage {
@@ -335,6 +357,8 @@ export interface SendAgentMessageOptions {
    * two browser tabs on the same agent don't race each other.
    */
   session_id?: string | null;
+  /** File attachments uploaded via `/api/agents/{id}/upload`. */
+  attachments?: AttachmentRef[];
 }
 
 export interface ApiActionResponse {
@@ -986,6 +1010,7 @@ export async function sendAgentMessage(
   if (options?.thinking !== undefined) body.thinking = options.thinking;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
+  if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
   return post<AgentMessageResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/message`,
     body,
@@ -1128,6 +1153,36 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
     throw await parseError(response);
   }
   return (await response.json()) as { text: string; provider: string; model: string };
+}
+
+// HTTP header values must be visible-ASCII (RFC 7230). Browsers reject
+// non-ASCII bytes in fetch headers, so we replace anything outside
+// 0x20–0x7e (and the header-breaking quote/CR/LF) with `_` before sending
+// the original filename. This loses fidelity for unicode names but never
+// throws, and keeps the server-side label render-safe — no decode pass
+// needed at display time.
+function sanitizeFilenameForHeader(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.replace(/[^\x20-\x7e]|["\r\n]/g, "_");
+}
+
+// Upload a chat attachment for an agent. Body is the raw file bytes; backend
+// expects `Content-Type` to match the file MIME and `X-Filename` for the
+// original name. Server-side limits: 10MB and an exact MIME allowlist
+// (image/audio/text/pdf) — callers should still pre-validate to fail fast.
+export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/upload`, {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Filename": sanitizeFilenameForHeader(file.name),
+    }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as AgentFileUploadResult;
 }
 
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
