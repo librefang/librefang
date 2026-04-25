@@ -1464,6 +1464,8 @@ pub async fn create_schedule(
             model_override: None,
             timeout_secs: None,
             pre_check_script: None,
+            pre_script: None,
+            silent_marker: None,
         }
     };
 
