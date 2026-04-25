@@ -305,6 +305,8 @@ pub struct LibreFangKernel {
     pub(crate) capabilities: CapabilityManager,
     /// Event bus.
     pub(crate) event_bus: EventBus,
+    /// Session lifecycle event bus (push-based pub/sub for session-scoped events).
+    pub(crate) session_lifecycle_bus: Arc<crate::session_lifecycle::SessionLifecycleBus>,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
@@ -1431,6 +1433,13 @@ impl LibreFangKernel {
     #[inline]
     pub fn event_bus_ref(&self) -> &EventBus {
         &self.event_bus
+    }
+
+    /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
+    /// it across tasks).
+    #[inline]
+    pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
+        Arc::clone(&self.session_lifecycle_bus)
     }
 
     /// OFP peer node (set once at startup).
@@ -2631,6 +2640,9 @@ impl LibreFangKernel {
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
+            session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
+                256,
+            )),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             proactive_memory: OnceLock::new(),
@@ -5048,17 +5060,28 @@ system_prompt = "You are a helpful assistant."
             }
         };
 
-        let mut session = self
+        let existing_session = self
             .memory
             .get_session(effective_session_id)
-            .map_err(KernelError::LibreFang)?
-            .unwrap_or_else(|| librefang_memory::session::Session {
-                id: effective_session_id,
-                agent_id,
-                messages: Vec::new(),
-                context_window_tokens: 0,
-                label: None,
-            });
+            .map_err(KernelError::LibreFang)?;
+        let session_was_new = existing_session.is_none();
+        let mut session = existing_session.unwrap_or_else(|| librefang_memory::session::Session {
+            id: effective_session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        });
+
+        // Lifecycle: emit SessionCreated only when get_session returned None.
+        if session_was_new {
+            self.session_lifecycle_bus.publish(
+                crate::session_lifecycle::SessionLifecycleEvent::SessionCreated {
+                    agent_id,
+                    session_id: effective_session_id,
+                },
+            );
+        }
 
         // Check if auto-compaction is needed: message-count OR token-count trigger
         let needs_compact = {
@@ -5317,6 +5340,15 @@ system_prompt = "You are a helpful assistant."
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
+        // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
+        // Arc separately keeps it usable inside the async block via `kernel_clone`.
+        self.session_lifecycle_bus.publish(
+            crate::session_lifecycle::SessionLifecycleEvent::TurnStarted {
+                agent_id,
+                session_id: effective_session_id,
+            },
+        );
+
         let handle = tokio::spawn(async move {
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on
@@ -5516,6 +5548,16 @@ system_prompt = "You are a helpful assistant."
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
 
+                    // Lifecycle: emit TurnCompleted alongside record_usage. Use
+                    // post-loop session length for message_count.
+                    kernel_clone.session_lifecycle_bus.publish(
+                        crate::session_lifecycle::SessionLifecycleEvent::TurnCompleted {
+                            agent_id,
+                            session_id: effective_session_id,
+                            message_count: session.messages.len(),
+                        },
+                    );
+
                     // Atomically check quotas and persist usage to SQLite
                     // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
@@ -5643,6 +5685,15 @@ system_prompt = "You are a helpful assistant."
                 Err(e) => {
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
+                    // Lifecycle: emit TurnFailed before cleanup so subscribers
+                    // see the failure with the live session_id still valid.
+                    kernel_clone.session_lifecycle_bus.publish(
+                        crate::session_lifecycle::SessionLifecycleEvent::TurnFailed {
+                            agent_id,
+                            session_id: effective_session_id,
+                            error: e.to_string(),
+                        },
+                    );
                     if !loop_opts.is_fork {
                         kernel_clone.session_interrupts.remove(&agent_id);
                         kernel_clone.running_tasks.remove(&agent_id);
@@ -8487,6 +8538,17 @@ system_prompt = "You are a helpful assistant."
             librefang_runtime::audit::AuditAction::AgentKill,
             format!("name={}", entry.name),
             "ok",
+        );
+
+        // Lifecycle: agent has been removed from the registry; sessions tied
+        // to this agent are no longer active. Use the agent name as the
+        // best-effort reason — call sites that need richer context can extend
+        // the variant in a future change.
+        self.session_lifecycle_bus.publish(
+            crate::session_lifecycle::SessionLifecycleEvent::AgentTerminated {
+                agent_id,
+                reason: format!("kill_agent(name={})", entry.name),
+            },
         );
 
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
