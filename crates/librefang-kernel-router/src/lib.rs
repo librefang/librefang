@@ -185,6 +185,19 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
 
     let dirs = [home_dir.join("registry").join("hands")];
 
+    // Pass the agents registry alongside HAND.toml parsing so hands that
+    // declare `base = "<template>"` for their agents can resolve the
+    // template. Without this the hand parser fails the flat path with
+    // "requires agents registry directory" and emits a WARN on every
+    // routing scan — and routing happens on every inbound message dispatch,
+    // so the warning floods the log.
+    let agents_dir = home_dir.join("registry").join("agents");
+    let agents_dir_arg: Option<&Path> = if agents_dir.is_dir() {
+        Some(agents_dir.as_path())
+    } else {
+        None
+    };
+
     for hands_dir in &dirs {
         let Ok(entries) = fs::read_dir(hands_dir) else {
             continue;
@@ -206,10 +219,11 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
             let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
                 continue;
             };
-            let Ok(def) = librefang_hands::registry::parse_hand_toml(
+            let Ok(def) = librefang_hands::registry::parse_hand_toml_with_agents_dir(
                 &toml_content,
                 "",
                 std::collections::HashMap::new(),
+                agents_dir_arg,
             ) else {
                 continue;
             };
