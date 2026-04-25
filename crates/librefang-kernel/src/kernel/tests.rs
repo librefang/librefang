@@ -2257,3 +2257,184 @@ fn atomic_write_no_partial_state_under_concurrency() {
         "no .tmp staging files should remain after concurrent writes"
     );
 }
+
+/// Regression: hand `[[settings]]` must survive a daemon restart.
+///
+/// Before the fix, `boot_with_config`'s TOML drift detection block would
+/// overwrite the DB manifest with the bare disk TOML — which never carries
+/// the runtime-materialized `## User Configuration` tail. That stripped the
+/// configured settings from the system prompt on every restart until somebody
+/// re-ran `hand activate` by hand. This test pre-populates a hand, an active
+/// hand_state.json, and a DB agent entry whose manifest already carries the
+/// rendered tail (mimicking a previously activated hand), then forces drift
+/// by bumping a non-prompt field on the disk TOML and re-booting. The saved
+/// manifest must still contain the settings tail after boot.
+#[test]
+fn boot_drift_preserves_hand_settings_tail() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // 1) Install a hand definition under registry/hands/<id>/HAND.toml with one [[settings]].
+    let hand_id = "settingshand";
+    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
+    std::fs::create_dir_all(&hand_dir).unwrap();
+    // Suppress registry_sync's network fetch (which would otherwise wipe our
+    // synthetic hand) by pre-touching the freshness marker.
+    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
+    let hand_toml = r#"
+id = "settingshand"
+version = "1.0.0"
+name = "Settings Hand"
+description = "drift-test hand"
+category = "other"
+
+[[settings]]
+key = "stt"
+label = "STT"
+setting_type = "select"
+default = "groq"
+[[settings.options]]
+value = "groq"
+label = "Groq"
+provider_env = "GROQ_API_KEY"
+
+[agents.operator]
+name = "operator"
+description = "test operator"
+module = "builtin:chat"
+
+[agents.operator.model]
+provider = "openrouter"
+model = "x"
+system_prompt = "BASE PROMPT"
+"#;
+    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+
+    // 2) Persist hand_state.json so the drift loop can recover the user's chosen config.
+    let state_json = serde_json::json!({
+        "version": 4,
+        "instances": [{
+            "hand_id": hand_id,
+            "instance_id": uuid::Uuid::new_v4().to_string(),
+            "config": { "stt": "groq" },
+            "old_agent_ids": {},
+            "coordinator_role": "operator",
+            "status": "Active",
+            "activated_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }]
+    });
+    std::fs::write(
+        home_dir.join("data").join("hand_state.json"),
+        serde_json::to_string_pretty(&state_json).unwrap(),
+    )
+    .unwrap();
+
+    // 3) Mirror the hand TOML at workspaces/<hand_id>-hand/agent.toml so the
+    //    boot loop's drift detection finds a TOML to compare against. We
+    //    deliberately put a DIFFERENT system_prompt body on disk than what we
+    //    seed into the DB so `disk_manifest != entry.manifest` — forcing the
+    //    drift branch.
+    let workspaces_hand_dir = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("operator");
+    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
+    let workspaces_hand_toml = home_dir
+        .join("workspaces")
+        .join("hands")
+        .join(hand_id)
+        .join("hand.toml");
+    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
+    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
+    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+
+    // 4) First boot to initialise SQLite + persist a seed agent entry that
+    //    pretends to be a previously-activated hand agent (carries the
+    //    rendered settings tail and a `hand:<id>` tag). Boot once with no
+    //    pre-existing agents, manually save the seed entry through
+    //    `kernel.memory.save_agent`, drop, re-boot.
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let agent_id = AgentId::from_hand_agent(hand_id, "operator", Some(uuid::Uuid::new_v4()));
+        let agent_name = format!("{hand_id}:operator");
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: agent_name.clone(),
+            description: "operator".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+        // The seed prompt mirrors what activation would have stamped: BASE
+        // PROMPT (matching the registry HAND.toml) plus the rendered tail.
+        manifest.model.system_prompt =
+            "BASE PROMPT\n\n---\n\n## User Configuration\n\n- STT: Groq (groq)".to_string();
+        // The drift loop reads hand membership off `manifest.tags` because
+        // AgentEntry.tags is not persisted by save_agent.
+        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()];
+
+        let entry = AgentEntry {
+            id: agent_id,
+            name: agent_name,
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: Some(workspaces_hand_toml.clone()),
+            tags: vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.shutdown();
+    }
+
+    // 5) Second boot: drift should fire (disk_manifest's BASE PROMPT v2 differs
+    //    from the seeded BASE PROMPT-with-tail), and the fix re-renders the
+    //    `## User Configuration` tail before save_agent.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let agent_name = format!("{hand_id}:operator");
+    let restored = kernel
+        .registry
+        .find_by_name(&agent_name)
+        .expect("hand agent must be restored from DB");
+    let prompt = restored.manifest.model.system_prompt;
+    assert!(
+        prompt.contains("BASE PROMPT v2"),
+        "drift must have applied disk TOML body; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("## User Configuration"),
+        "settings tail must be re-rendered after drift; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("STT"),
+        "rendered settings line must be present; got: {prompt}"
+    );
+
+    kernel.shutdown();
+}

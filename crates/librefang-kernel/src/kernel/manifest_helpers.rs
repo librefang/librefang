@@ -287,6 +287,64 @@ pub(super) fn toml_enabled_false(content: &str) -> bool {
         == Some(false)
 }
 
+/// Marker that introduces the rendered settings tail in the system prompt.
+///
+/// The activation path uses `\n\n---\n\n` as the section separator and
+/// `## User Configuration` as the block heading (see
+/// `librefang_hands::resolve_settings`). We treat the combination as the
+/// canonical anchor for the settings tail so we can detect and replace an
+/// existing one rather than blindly appending a duplicate.
+const USER_CONFIG_TAIL_MARKER: &str = "\n\n---\n\n## User Configuration";
+
+/// Append (or refresh) the rendered `## User Configuration` block on a
+/// manifest's `model.system_prompt` from a hand's `[[settings]]` schema +
+/// instance config.
+///
+/// This is the single source of truth for the "settings -> system prompt"
+/// materialization. Two call sites use it:
+///
+/// 1. Hand activation (`activate_hand`) — turns the disk TOML's bare prompt
+///    into the runtime prompt with settings spliced in before save_agent.
+/// 2. Boot-time TOML drift detection (`new_with_config`) — when the disk
+///    manifest replaces the DB blob, the bare TOML doesn't carry the
+///    settings tail (it's runtime-materialized, not persisted), so without
+///    re-rendering here the agent loses its configured values on every
+///    restart until somebody re-runs `hand activate`.
+///
+/// Idempotency: if the prompt already ends with a `## User Configuration`
+/// tail, that tail is stripped before the freshly resolved one is appended.
+/// This keeps repeated calls (e.g. drift loop firing back-to-back) from
+/// growing the prompt without bound.
+///
+/// No-ops (no allocation, no mutation) when `settings` is empty or the
+/// resolved prompt block is empty.
+///
+/// Returns the env-var allowlist that callers may want to merge into
+/// `manifest.metadata["hand_allowed_env"]`.
+pub(super) fn apply_settings_block_to_manifest(
+    manifest: &mut AgentManifest,
+    settings: &[librefang_hands::HandSetting],
+    instance_config: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let resolved = librefang_hands::resolve_settings(settings, instance_config);
+
+    if resolved.prompt_block.is_empty() {
+        return resolved.env_vars;
+    }
+
+    // Strip any pre-existing settings tail so we replace rather than append.
+    if let Some(idx) = manifest.model.system_prompt.find(USER_CONFIG_TAIL_MARKER) {
+        manifest.model.system_prompt.truncate(idx);
+    }
+
+    manifest.model.system_prompt = format!(
+        "{}\n\n---\n\n{}",
+        manifest.model.system_prompt, resolved.prompt_block
+    );
+
+    resolved.env_vars
+}
+
 pub fn shared_memory_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -398,6 +456,89 @@ system_prompt = "p"
             m.model.system_prompt, "You are JARVIS.",
             "extracted manifest must preserve nested [agents.<role>.model].system_prompt"
         );
+    }
+
+    fn make_settings() -> Vec<librefang_hands::HandSetting> {
+        vec![librefang_hands::HandSetting {
+            key: "stt".to_string(),
+            label: "STT".to_string(),
+            description: String::new(),
+            setting_type: librefang_hands::HandSettingType::Select,
+            default: "groq".to_string(),
+            options: vec![librefang_hands::HandSettingOption {
+                value: "groq".to_string(),
+                label: "Groq".to_string(),
+                provider_env: Some("GROQ_API_KEY".to_string()),
+                binary: None,
+            }],
+            env_var: None,
+        }]
+    }
+
+    fn manifest_with_prompt(prompt: &str) -> AgentManifest {
+        let mut m = AgentManifest::default();
+        m.model.system_prompt = prompt.to_string();
+        m
+    }
+
+    #[test]
+    fn apply_settings_appends_tail_when_settings_present() {
+        let mut m = manifest_with_prompt("BASE");
+        let env = apply_settings_block_to_manifest(
+            &mut m,
+            &make_settings(),
+            &std::collections::HashMap::new(),
+        );
+        assert!(
+            m.model.system_prompt.contains("## User Configuration"),
+            "settings tail must be appended"
+        );
+        assert!(
+            m.model.system_prompt.starts_with("BASE\n\n---\n\n"),
+            "base prompt must be preserved with the canonical separator"
+        );
+        assert_eq!(env, vec!["GROQ_API_KEY".to_string()]);
+    }
+
+    #[test]
+    fn apply_settings_is_noop_when_settings_empty() {
+        let mut m = manifest_with_prompt("BASE");
+        let env = apply_settings_block_to_manifest(&mut m, &[], &std::collections::HashMap::new());
+        assert_eq!(m.model.system_prompt, "BASE", "no settings -> no mutation");
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn apply_settings_is_idempotent_on_repeated_calls() {
+        let mut m = manifest_with_prompt("BASE");
+        let cfg = std::collections::HashMap::new();
+        apply_settings_block_to_manifest(&mut m, &make_settings(), &cfg);
+        let after_first = m.model.system_prompt.clone();
+        apply_settings_block_to_manifest(&mut m, &make_settings(), &cfg);
+        assert_eq!(
+            m.model.system_prompt, after_first,
+            "second invocation must not duplicate the tail"
+        );
+        assert_eq!(
+            m.model
+                .system_prompt
+                .matches("## User Configuration")
+                .count(),
+            1,
+            "exactly one settings block must be present"
+        );
+    }
+
+    #[test]
+    fn apply_settings_returns_none_for_standalone_agent_toml_marker() {
+        // Sanity: ensures the marker constant matches what `resolve_settings` emits.
+        let mut m = manifest_with_prompt("BASE");
+        apply_settings_block_to_manifest(
+            &mut m,
+            &make_settings(),
+            &std::collections::HashMap::new(),
+        );
+        assert!(m.model.system_prompt.contains(USER_CONFIG_TAIL_MARKER));
     }
 
     #[test]
