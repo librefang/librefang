@@ -8,6 +8,7 @@
 //! the `audit_entries` table (schema V8) so the trail survives daemon restarts.
 
 use chrono::Utc;
+use librefang_types::agent::UserId;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,6 +55,16 @@ pub struct AuditEntry {
     pub detail: String,
     /// The outcome of the action (e.g. "ok", "denied", an error message).
     pub outcome: String,
+    /// LibreFang user that triggered the action, if known. `None` for kernel
+    /// internal events (cron jobs, startup tasks) and pre-migration entries
+    /// recorded before user attribution was added in M1.
+    #[serde(default)]
+    pub user_id: Option<UserId>,
+    /// Channel the action originated from (e.g. "telegram", "slack",
+    /// "dashboard", "cli"). `None` for kernel-internal events and
+    /// pre-migration entries.
+    #[serde(default)]
+    pub channel: Option<String>,
     /// SHA-256 hash of the previous entry (or all-zeros for the genesis).
     pub prev_hash: String,
     /// SHA-256 hash of this entry's content concatenated with `prev_hash`.
@@ -61,6 +72,19 @@ pub struct AuditEntry {
 }
 
 /// Computes the SHA-256 hash for a single audit entry from its fields.
+///
+/// `user_id` and `channel` are folded into the hash only when present so
+/// pre-M1 entries — recorded before user attribution existed — verify with
+/// the same hash they were originally written with. New entries that supply
+/// either field commit it to the chain so a later attempt to strip user
+/// attribution from a row would break the Merkle link.
+//
+// Argument count exceeds clippy's default; folding the inputs into a
+// struct would either require building a temporary on every record/verify
+// call or change the on-disk hash inputs, both of which are strictly worse
+// than the readability cost of nine plain arguments. This is private and
+// purely additive — the previous six fields hash identically.
+#[allow(clippy::too_many_arguments)]
 fn compute_entry_hash(
     seq: u64,
     timestamp: &str,
@@ -68,6 +92,8 @@ fn compute_entry_hash(
     action: &AuditAction,
     detail: &str,
     outcome: &str,
+    user_id: Option<&UserId>,
+    channel: Option<&str>,
     prev_hash: &str,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -77,6 +103,14 @@ fn compute_entry_hash(
     hasher.update(action.to_string().as_bytes());
     hasher.update(detail.as_bytes());
     hasher.update(outcome.as_bytes());
+    if let Some(uid) = user_id {
+        hasher.update(b"\x1fuser_id=");
+        hasher.update(uid.0.as_bytes());
+    }
+    if let Some(ch) = channel {
+        hasher.update(b"\x1fchannel=");
+        hasher.update(ch.as_bytes());
+    }
     hasher.update(prev_hash.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -263,10 +297,14 @@ impl AuditLog {
         let mut entries = Vec::new();
         let mut tip = "0".repeat(64);
 
-        // Load existing entries from database
+        // Load existing entries from database. Schema v22 added the
+        // `user_id` / `channel` columns; rows persisted before that
+        // migration return NULL for both, which deserialises to `None`
+        // and keeps the original hash intact (the hash function omits
+        // absent fields, see `compute_entry_hash`).
         if let Ok(db) = conn.lock() {
             let result = db.prepare(
-                "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash FROM audit_entries ORDER BY seq ASC",
+                "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash FROM audit_entries ORDER BY seq ASC",
             );
             if let Ok(mut stmt) = result {
                 let rows = stmt.query_map([], |row| {
@@ -290,6 +328,9 @@ impl AuditLog {
                     let seq_raw: i64 = row.get(0)?;
                     let seq = u64::try_from(seq_raw)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
+                    let user_id_str: Option<String> = row.get(6)?;
+                    let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
+                    let channel: Option<String> = row.get(7)?;
                     Ok(AuditEntry {
                         seq,
                         timestamp: row.get(1)?,
@@ -297,8 +338,10 @@ impl AuditLog {
                         action,
                         detail: row.get(4)?,
                         outcome: row.get(5)?,
-                        prev_hash: row.get(6)?,
-                        hash: row.get(7)?,
+                        user_id,
+                        channel,
+                        prev_hash: row.get(8)?,
+                        hash: row.get(9)?,
                     })
                 });
                 if let Ok(rows) = rows {
@@ -332,15 +375,33 @@ impl AuditLog {
 
     /// Records a new auditable event and returns the SHA-256 hash of the entry.
     ///
-    /// The entry is atomically appended to the chain with the current tip as
-    /// its `prev_hash`, and the tip is advanced to the new hash.
-    /// If a database connection is available, the entry is also persisted.
+    /// Convenience wrapper over [`AuditLog::record_with_context`] that omits
+    /// user / channel attribution. Prefer the contextual variant when the
+    /// caller knows who or where the action originated from — pre-M1 call
+    /// sites use this form and remain valid.
     pub fn record(
         &self,
         agent_id: impl Into<String>,
         action: AuditAction,
         detail: impl Into<String>,
         outcome: impl Into<String>,
+    ) -> String {
+        self.record_with_context(agent_id, action, detail, outcome, None, None)
+    }
+
+    /// Records a new auditable event with optional user / channel attribution.
+    ///
+    /// The entry is atomically appended to the chain with the current tip as
+    /// its `prev_hash`, and the tip is advanced to the new hash.
+    /// If a database connection is available, the entry is also persisted.
+    pub fn record_with_context(
+        &self,
+        agent_id: impl Into<String>,
+        action: AuditAction,
+        detail: impl Into<String>,
+        outcome: impl Into<String>,
+        user_id: Option<UserId>,
+        channel: Option<String>,
     ) -> String {
         let agent_id = agent_id.into();
         let detail = detail.into();
@@ -354,7 +415,15 @@ impl AuditLog {
         let prev_hash = tip.clone();
 
         let hash = compute_entry_hash(
-            seq, &timestamp, &agent_id, &action, &detail, &outcome, &prev_hash,
+            seq,
+            &timestamp,
+            &agent_id,
+            &action,
+            &detail,
+            &outcome,
+            user_id.as_ref(),
+            channel.as_deref(),
+            &prev_hash,
         );
 
         let entry = AuditEntry {
@@ -364,15 +433,19 @@ impl AuditLog {
             action,
             detail,
             outcome,
+            user_id,
+            channel,
             prev_hash,
             hash: hash.clone(),
         };
 
-        // Persist to database if available
+        // Persist to database if available. Schema v22 added the
+        // `user_id` / `channel` columns; old NULL rows keep working
+        // because the hash function omits absent fields.
         if let Some(ref db) = self.db {
             if let Ok(conn) = db.lock() {
                 let _ = conn.execute(
-                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
                         entry.seq as i64,
                         &entry.timestamp,
@@ -380,6 +453,8 @@ impl AuditLog {
                         entry.action.to_string(),
                         &entry.detail,
                         &entry.outcome,
+                        entry.user_id.map(|u| u.to_string()),
+                        entry.channel.as_deref(),
                         &entry.prev_hash,
                         &entry.hash,
                     ],
@@ -433,6 +508,8 @@ impl AuditLog {
                 &entry.action,
                 &entry.detail,
                 &entry.outcome,
+                entry.user_id.as_ref(),
+                entry.channel.as_deref(),
                 &entry.prev_hash,
             );
 
@@ -629,6 +706,111 @@ mod tests {
     }
 
     #[test]
+    fn test_record_with_context_round_trips_user_and_channel() {
+        // RBAC M1: AuditEntry carries user_id + channel attribution. Both
+        // are optional so legacy `record(...)` still works (folds to None).
+        let log = AuditLog::new();
+        let alice = UserId::from_name("Alice");
+
+        log.record("agent-1", AuditAction::AgentSpawn, "boot", "ok"); // legacy
+        log.record_with_context(
+            "agent-1",
+            AuditAction::ToolInvoke,
+            "file_read /tmp/x",
+            "ok",
+            Some(alice),
+            Some("api".to_string()),
+        );
+
+        assert!(log.verify_integrity().is_ok());
+
+        let entries = log.recent(2);
+        assert_eq!(entries[0].user_id, None);
+        assert_eq!(entries[0].channel, None);
+        assert_eq!(entries[1].user_id, Some(alice));
+        assert_eq!(entries[1].channel.as_deref(), Some("api"));
+
+        // Tampering with a recorded user_id must break the chain — proves
+        // attribution is committed to the Merkle hash, not a side note.
+        let tampered_hash = compute_entry_hash(
+            entries[1].seq,
+            &entries[1].timestamp,
+            &entries[1].agent_id,
+            &entries[1].action,
+            &entries[1].detail,
+            &entries[1].outcome,
+            None, // pretend user_id was never there
+            entries[1].channel.as_deref(),
+            &entries[1].prev_hash,
+        );
+        assert_ne!(
+            tampered_hash, entries[1].hash,
+            "stripping user_id must change the hash"
+        );
+    }
+
+    #[test]
+    fn test_record_with_context_persists_user_and_channel() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+
+        let db = Arc::new(Mutex::new(conn));
+        let bob = UserId::from_name("Bob");
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        log.record("agent-1", AuditAction::AgentSpawn, "boot", "ok");
+        log.record_with_context(
+            "agent-1",
+            AuditAction::ConfigChange,
+            "config set: x",
+            "ok",
+            Some(bob),
+            Some("api".to_string()),
+        );
+
+        // Reopen — chain must verify and the contextual entry must round-trip.
+        let log2 = AuditLog::with_db(Arc::clone(&db));
+        assert_eq!(log2.len(), 2);
+        assert!(log2.verify_integrity().is_ok());
+        let entries = log2.recent(2);
+        assert_eq!(entries[1].user_id, Some(bob));
+        assert_eq!(entries[1].channel.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_stable_across_audit_writes() {
+        // The whole point of `UserId::from_name` is that audit attribution
+        // survives a daemon restart. Re-deriving the id from the same name
+        // must yield the same UUID written into earlier entries.
+        let log = AuditLog::new();
+        log.record_with_context(
+            "agent-1",
+            AuditAction::AgentMessage,
+            "ping",
+            "ok",
+            Some(UserId::from_name("Alice")),
+            Some("telegram".to_string()),
+        );
+        let recorded = log.recent(1)[0].user_id.unwrap();
+        let rederived = UserId::from_name("Alice");
+        assert_eq!(recorded, rederived);
+    }
+
+    #[test]
     fn test_audit_persists_to_db() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -639,6 +821,8 @@ mod tests {
                 action TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
                 prev_hash TEXT NOT NULL,
                 hash TEXT NOT NULL
             )",
@@ -695,6 +879,8 @@ mod tests {
                 action TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
                 prev_hash TEXT NOT NULL,
                 hash TEXT NOT NULL
             )",
@@ -751,7 +937,8 @@ mod tests {
             ];
             for (seq, aid, action, detail, outcome) in fabricated {
                 let ts = "2026-04-14T00:00:00+00:00";
-                let hash = compute_entry_hash(seq, ts, aid, &action, detail, outcome, &prev);
+                let hash =
+                    compute_entry_hash(seq, ts, aid, &action, detail, outcome, None, None, &prev);
                 conn.execute(
                     "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
@@ -799,6 +986,8 @@ mod tests {
                 action TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
                 prev_hash TEXT NOT NULL,
                 hash TEXT NOT NULL
             )",

@@ -369,7 +369,10 @@ jobs:
             echo "Running tests for: $CRATES"
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
-            cargo nextest run $PFLAGS --no-fail-fast
+            # `--no-tests=pass` keeps PRs that only touch a crate without
+            # tests (e.g. librefang-desktop) from failing the selective lane
+            # — nextest defaults to exit-4 when -p X resolves to zero tests.
+            cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
           fi
 
   # ── Windows tests: selective on PR, full on main ───────────────────────────────
@@ -405,7 +408,10 @@ jobs:
             echo "Running tests for: $CRATES"
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
-            cargo nextest run $PFLAGS --no-fail-fast
+            # `--no-tests=pass` keeps PRs that only touch a crate without
+            # tests (e.g. librefang-desktop) from failing the selective lane
+            # — nextest defaults to exit-4 when -p X resolves to zero tests.
+            cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
           fi
 
   # ── macOS tests: selective on PR, full on main ─────────────────────────────────
@@ -439,5 +445,8 @@ jobs:
             echo "Running tests for: $CRATES"
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
-            cargo nextest run $PFLAGS --no-fail-fast
+            # `--no-tests=pass` keeps PRs that only touch a crate without
+            # tests (e.g. librefang-desktop) from failing the selective lane
+            # — nextest defaults to exit-4 when -p X resolves to zero tests.
+            cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
           fi
