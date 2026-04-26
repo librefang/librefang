@@ -119,10 +119,16 @@ const CATEGORY_ORDER: &[&str] = &[
     "Other",
 ];
 
+/// Categories visible above the fold. Everything else (Documentation,
+/// Maintenance, Other, Reverted) is folded into a `<details>` block at the
+/// bottom of the section to keep the user-facing view scannable.
+const PRIMARY_CATEGORIES: &[&str] = &["Added", "Fixed", "Changed", "Performance"];
+
 fn generate_classified_output(prs: &[PrInfo]) -> String {
     let conv_re = Regex::new(r"^(\w+)(?:\([^)]*\))?[!]?:\s*(.*)").unwrap();
     let mut categories: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
+    let mut authors: Vec<String> = Vec::new();
 
     for pr in prs {
         let title = pr.title.trim();
@@ -130,11 +136,9 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
             continue;
         }
 
-        let credit = if pr.author.is_empty() {
-            String::new()
-        } else {
-            format!(" (@{})", pr.author)
-        };
+        if !pr.author.is_empty() && !authors.iter().any(|a| a == &pr.author) {
+            authors.push(pr.author.clone());
+        }
 
         let (category, desc) = if let Some(caps) = conv_re.captures(title) {
             let prefix = caps.get(1).unwrap().as_str().to_lowercase();
@@ -159,21 +163,44 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
         categories
             .entry(category)
             .or_default()
-            .push(format!("{} (#{}){}", desc, pr.number, credit));
+            .push(format!("{} (#{})", desc, pr.number));
     }
 
     let mut output = String::new();
+    let mut secondary = String::new();
     for &cat in CATEGORY_ORDER {
-        if let Some(items) = categories.get(cat) {
-            if !items.is_empty() {
-                output.push_str(&format!("### {}\n\n", cat));
-                for item in items {
-                    output.push_str(&format!("- {}\n", item));
-                }
-                output.push('\n');
-            }
+        let Some(items) = categories.get(cat) else {
+            continue;
+        };
+        if items.is_empty() {
+            continue;
         }
+        let target = if PRIMARY_CATEGORIES.contains(&cat) {
+            &mut output
+        } else {
+            &mut secondary
+        };
+        target.push_str(&format!("### {}\n\n", cat));
+        for item in items {
+            target.push_str(&format!("- {}\n", item));
+        }
+        target.push('\n');
     }
+
+    if !secondary.is_empty() {
+        output.push_str("<details>\n<summary>Documentation, maintenance, and other internal changes</summary>\n\n");
+        output.push_str(&secondary);
+        output.push_str("</details>\n\n");
+    }
+
+    if !authors.is_empty() {
+        output.push_str("### Contributors\n\n");
+        output.push_str("Thanks to ");
+        let mentions: Vec<String> = authors.iter().map(|a| format!("@{}", a)).collect();
+        output.push_str(&mentions.join(", "));
+        output.push_str(" for the contributions in this release.\n\n");
+    }
+
     output
 }
 
