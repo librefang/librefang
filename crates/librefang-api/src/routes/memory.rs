@@ -158,23 +158,35 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 ///    kernel's `AuthManager` and use their resolved `UserMemoryAccess`.
 /// 2. No authenticated user (loopback dev / single-user mode, or any
 ///    request the auth middleware allowed through without binding a
-///    user) → fall back to an **owner-equivalent** guard.
+///    user) → fall back to a **fail-closed Viewer-equivalent** guard:
+///    read access is limited to the `proactive` namespace, all writes,
+///    deletes, exports, and PII access are denied.
 ///
-/// SECURITY: the fallback grants full read/write across every namespace
-/// AND `pii_access`. That is intentional for the M2 contract — the
-/// dashboard SPA hits these endpoints loopback with no API key today
-/// and depends on seeing every memory fragment — but it means the
-/// per-user namespace ACL only kicks in when the auth middleware
-/// attaches a real user. Operators who want the ACL enforced on every
-/// request must enable per-user API keys AND ensure the auth allowlist
-/// in `middleware.rs` does not whitelist these routes. See PR #3205
-/// review item #3.
+/// SECURITY (PR #3205 follow-up — Issue #6 fail-open fix): the previous
+/// fallback granted **owner-equivalent** access (`readable=["*"]`,
+/// `writable=["*"]`, `pii_access=true`, `export_allowed=true`,
+/// `delete_allowed=true`) to anonymous loopback callers. That meant any
+/// process with `127.0.0.1` access (or any deployment with
+/// `LIBREFANG_ALLOW_NO_AUTH=1`) could exfiltrate every memory fragment
+/// — including PII — and bulk-delete/export memories without
+/// attribution. Other admin-gated RBAC endpoints (`/api/audit/query`,
+/// `/api/budget/users/*`, `/api/authz/effective/*`) already reject
+/// anonymous callers outright with `PermissionDenied` audit rows.
+///
+/// We pick the slightly looser "Viewer-equivalent" fallback (rather
+/// than a hard 403) so the loopback dashboard SPA — which today hits
+/// these endpoints with no Bearer token — keeps working for the
+/// non-sensitive read path. Dangerous capabilities (PII, export, write,
+/// delete, `kv:*`/`shared:*` namespaces) all fail closed: the guarded
+/// store calls return `AuthDenied` → 403 to the client. To regain the
+/// previous broad access, configure at least one user with an API key +
+/// an `Owner`/`Admin` role and use that token; the auth middleware will
+/// attach `AuthenticatedApiUser` and the matching ACL applies.
 fn guard_for_request(
     state: &AppState,
     extensions: &axum::http::Extensions,
 ) -> librefang_memory::namespace_acl::MemoryNamespaceGuard {
     use librefang_memory::namespace_acl::MemoryNamespaceGuard;
-    use librefang_types::user_policy::UserMemoryAccess;
 
     if let Some(api_user) = extensions.get::<crate::middleware::AuthenticatedApiUser>() {
         let user_id = librefang_types::agent::UserId::from_name(&api_user.name);
@@ -182,14 +194,26 @@ fn guard_for_request(
             return MemoryNamespaceGuard::new(acl);
         }
     }
-    // Owner-equivalent fallback — see SECURITY note above.
-    MemoryNamespaceGuard::new(UserMemoryAccess {
-        readable_namespaces: vec!["*".into()],
-        writable_namespaces: vec!["*".into()],
-        pii_access: true,
-        export_allowed: true,
-        delete_allowed: true,
-    })
+    MemoryNamespaceGuard::new(anonymous_fallback_acl())
+}
+
+/// Least-privilege ACL handed out when the request has no authenticated
+/// `AuthenticatedApiUser` (anonymous loopback / `LIBREFANG_ALLOW_NO_AUTH=1`).
+///
+/// Mirrors `librefang_kernel::auth::default_memory_acl(UserRole::Viewer)`
+/// — read-only access to the `proactive` namespace, no PII, no writes,
+/// no exports, no deletes. We deliberately do NOT call into the kernel
+/// helper directly; inlining here keeps the API-layer fail-closed
+/// contract self-contained and visible at the only call site. See the
+/// SECURITY note on [`guard_for_request`].
+fn anonymous_fallback_acl() -> librefang_types::user_policy::UserMemoryAccess {
+    librefang_types::user_policy::UserMemoryAccess {
+        readable_namespaces: vec!["proactive".into()],
+        writable_namespaces: vec![],
+        pii_access: false,
+        export_allowed: false,
+        delete_allowed: false,
+    }
 }
 
 /// Convert an `AuthDenied` error to a 403 JSON response.
@@ -1303,4 +1327,90 @@ pub async fn memory_config_patch(
         StatusCode::OK,
         Json(serde_json::json!({"status": "updated", "note": "Restart required for full effect"})),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for PR #3205 follow-up — Issue #6 fail-open fix.
+    //!
+    //! Pin the contract that an anonymous request (no
+    //! `AuthenticatedApiUser` extension) gets a Viewer-equivalent ACL,
+    //! NOT the previous owner-equivalent fallback. The owner-equivalent
+    //! fallback (`readable=["*"]`, `pii_access=true`,
+    //! `export_allowed=true`, `delete_allowed=true`) was a fail-open bug
+    //! that let any loopback / `LIBREFANG_ALLOW_NO_AUTH=1` caller
+    //! exfiltrate every memory fragment including PII and bulk-delete
+    //! across agents.
+    //!
+    //! These tests exercise [`anonymous_fallback_acl`] directly because
+    //! constructing a real [`AppState`] requires booting an entire
+    //! kernel; the integration test in `api_integration_test.rs`
+    //! covers the wiring through the HTTP stack.
+    use super::*;
+    use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
+
+    #[test]
+    fn anonymous_fallback_denies_pii_export_and_delete() {
+        let acl = anonymous_fallback_acl();
+        assert!(
+            !acl.pii_access,
+            "anonymous fallback must NOT expose PII (was true pre-fix — Issue #6)"
+        );
+        assert!(
+            !acl.export_allowed,
+            "anonymous fallback must NOT allow bulk export"
+        );
+        assert!(
+            !acl.delete_allowed,
+            "anonymous fallback must NOT allow delete"
+        );
+        assert!(
+            acl.writable_namespaces.is_empty(),
+            "anonymous fallback must NOT permit writes, got {:?}",
+            acl.writable_namespaces
+        );
+        // Reads are scoped to `proactive` only — `kv:*` / `shared:*` /
+        // `kg` must all fail closed. We assert on the namespace list
+        // here AND on the guard semantics below.
+        assert_eq!(
+            acl.readable_namespaces,
+            vec!["proactive".to_string()],
+            "anonymous fallback must only allow reading the `proactive` namespace"
+        );
+    }
+
+    #[test]
+    fn anonymous_fallback_guard_gates_match_acl_intent() {
+        let guard = MemoryNamespaceGuard::new(anonymous_fallback_acl());
+
+        // Allowed: reading the `proactive` namespace so the loopback
+        // dashboard list/search keeps working (with PII redacted).
+        assert!(matches!(
+            guard.check_read("proactive"),
+            NamespaceGate::Allow
+        ));
+
+        // Denied: every other namespace, all writes, all exports, all
+        // deletes — the four channels through which the pre-fix
+        // fallback leaked sensitive data.
+        assert!(matches!(guard.check_read("kv:secrets"), NamespaceGate::Deny(_)));
+        assert!(matches!(guard.check_read("shared:any"), NamespaceGate::Deny(_)));
+        assert!(matches!(guard.check_read("kg"), NamespaceGate::Deny(_)));
+        assert!(matches!(
+            guard.check_write("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_export("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_delete("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(
+            !guard.pii_access_allowed(),
+            "fallback guard must redact PII"
+        );
+    }
 }
