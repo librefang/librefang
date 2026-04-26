@@ -37,8 +37,12 @@
 ```yaml
 name: notify-on-agent-end
 description: "POST to a webhook when an agent finishes a run"
+
+# Events that trigger this hook. Wildcards are supported.
 events:
   - agent:end
+
+# Relative path (from this file's directory) or absolute path.
 command: ./run.sh
 ```
 
@@ -163,10 +167,14 @@ fn transform(&self, ctx: HookContext) -> Result<Option<String>, String>;
 
 ## 示例脚本
 
+任意 agent 结束时发送一条 Slack 兼容的 webhook 通知：
+
 ```bash
 #!/usr/bin/env bash
+# ~/.librefang/hooks/notify-on-end/run.sh
 set -euo pipefail
 
+# Only act on agent:end
 if [ "$HOOK_EVENT" != "agent:end" ]; then
   exit 0
 fi
@@ -177,6 +185,7 @@ TOKENS=$(echo "$HOOK_EVENT_DATA"   | python3 -c "import sys,json; d=json.load(sy
 
 WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 if [ -z "$WEBHOOK_URL" ]; then
+  echo "SLACK_WEBHOOK_URL not set, skipping" >&2
   exit 0
 fi
 
@@ -184,6 +193,14 @@ curl -s -X POST "$WEBHOOK_URL" \
   -H "Content-Type: application/json" \
   -d "{\"text\": \"Agent \`${AGENT_ID}\` finished with status *${STATUS}* (${TOKENS} tokens)\"}"
 ```
+
+让 daemon 能执行它：
+
+```bash
+chmod +x ~/.librefang/hooks/notify-on-end/run.sh
+```
+
+daemon 在启动时以及收到 `SIGHUP` 后会扫描 hooks 目录。运行中的 daemon 不会在执行过程中热重载 hook 文件——新增 hook 后请重启或发送 `SIGHUP`。
 
 ---
 

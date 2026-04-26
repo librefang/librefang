@@ -122,36 +122,6 @@ curl -X POST "http://127.0.0.1:4545/api/approvals/${ID}/approve" \
 
 ---
 
-## 恢复码
-
-启用时会生成 10 个一次性恢复码，以 `totp_recovery_codes` 键存入保险库。每个恢复码：
-
-- 为 10 位随机字母数字；
-- 使用后即被从保险库移除；
-- 在任何接受 `totp_code` 字段的端点（包括 `DELETE /api/approvals/totp`）都可替代 TOTP 使用。
-
-`GET /api/approvals/totp/status` 返回的 `remaining_recovery_codes` 可供仪表盘在用尽之前
-提示用户。一旦用尽，请撤销后重新启用以获取新的一组恢复码。
-
----
-
-## 加固清单
-
-1. 任何暴露到网络的部署都应将 `second_factor` 设为 `"both"`。
-2. `require_approval` 要精简但诚实——凡是写盘、执行 shell、调用变更型 API 的工具都要列进去。
-3. `trusted_senders` 只授予一方自动化 ID，切勿授予公共 webhook ID。
-4. 使用 `totp_tools` 对 `shell_exec`、`file_delete`、`apply_patch` 等破坏性工具
-   额外要求 TOTP——即便审批列表更宽，凭被窃取的一因子仍无法触发破坏。
-5. 生产环境优先使用 `timeout_fallback = "reject"` 而非 `"allow"`。
-6. 将恢复码保存在密码管理器中，不要与 API 令牌放在同一位置。两者同时泄漏时 TOTP 失去意义。
-7. 怀疑保险库被攻破时请轮换 `LIBREFANG_VAULT_KEY`（32 字节）——这会使保险库中的
-   TOTP 密钥失效，强制重新启用。
-
-另请参考：[安全运维](/zh/security/operations) 了解循环守卫与会话修复等运行时防护，
-以及 [通信 API](/zh/integrations/api/communication) 中完整的审批请求 / 响应结构。
-
----
-
 ## 会话级批量审批
 
 **源码：** `librefang-api/src/routes/approvals.rs`
@@ -194,7 +164,38 @@ curl "http://127.0.0.1:4545/api/approvals/session/${SESSION_ID}"
 `session_id` 是 `ApprovalRequest` 上的**可选**字段。在会话级功能引入之前创建的代码路径生成的审批请求不携带 `session_id`，不会出现在会话过滤列表中。这些旧请求仍可通过现有的按 UUID 端点访问：
 
 ```bash
+# Still works for any approval regardless of session_id
 curl -X POST "http://127.0.0.1:4545/api/approvals/${APPROVAL_UUID}/approve" \
   -H "Content-Type: application/json" \
   -d '{"totp_code": "123456"}'
 ```
+
+---
+
+## 恢复码
+
+启用时会生成 10 个一次性恢复码，以 `totp_recovery_codes` 键存入保险库。每个恢复码：
+
+- 为 10 位随机字母数字；
+- 使用后即被从保险库移除；
+- 在任何接受 `totp_code` 字段的端点（包括 `DELETE /api/approvals/totp`）都可替代 TOTP 使用。
+
+`GET /api/approvals/totp/status` 返回的 `remaining_recovery_codes` 可供仪表盘在用尽之前
+提示用户。一旦用尽，请撤销后重新启用以获取新的一组恢复码。
+
+---
+
+## 加固清单
+
+1. 任何暴露到网络的部署都应将 `second_factor` 设为 `"both"`。
+2. `require_approval` 要精简但诚实——凡是写盘、执行 shell、调用变更型 API 的工具都要列进去。
+3. `trusted_senders` 只授予一方自动化 ID，切勿授予公共 webhook ID。
+4. 使用 `totp_tools` 对 `shell_exec`、`file_delete`、`apply_patch` 等破坏性工具
+   额外要求 TOTP——即便审批列表更宽，凭被窃取的一因子仍无法触发破坏。
+5. 生产环境优先使用 `timeout_fallback = "reject"` 而非 `"allow"`。
+6. 将恢复码保存在密码管理器中，不要与 API 令牌放在同一位置。两者同时泄漏时 TOTP 失去意义。
+7. 怀疑保险库被攻破时请轮换 `LIBREFANG_VAULT_KEY`（32 字节）——这会使保险库中的
+   TOTP 密钥失效，强制重新启用。
+
+另请参考：[安全运维](/zh/security/operations) 了解循环守卫与会话修复等运行时防护，
+以及 [通信 API](/zh/integrations/api/communication) 中完整的审批请求 / 响应结构。

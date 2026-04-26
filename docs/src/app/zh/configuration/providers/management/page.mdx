@@ -690,6 +690,9 @@ key = "sk-ant-key-1"
 
 [[providers.anthropic.keys]]
 key = "sk-ant-key-2"
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-3"
 ```
 
 ### 耗尽与冷却
@@ -751,6 +754,7 @@ openai     [██████████████░░░░░░]  req: 
 ### 访问快照
 
 ```bash
+# Current rate-limit snapshot for all providers
 curl http://127.0.0.1:4545/api/providers/rate-limits
 ```
 
