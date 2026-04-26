@@ -3690,3 +3690,63 @@ export async function updateUserPolicy(
     policy,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Effective permissions snapshot (RBAC follow-up to M3/M5/M6)
+// ---------------------------------------------------------------------------
+
+// Mirrors the shape of `librefang_kernel::auth::EffectivePermissions`.
+// Per-slice fields are nullable so the simulator can distinguish "no policy
+// declared" (null) from "explicit empty allow-list" (object with empty
+// arrays). Server returns 404 for unknown users — callers handle that via
+// the query hook's error state, not by getting a synthesised default.
+
+export interface EffectiveToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface EffectiveToolCategories {
+  allowed_groups: string[];
+  denied_groups: string[];
+}
+
+export interface EffectiveMemoryAccess {
+  readable_namespaces: string[];
+  writable_namespaces: string[];
+  pii_access: boolean;
+  export_allowed: boolean;
+  delete_allowed: boolean;
+}
+
+export interface EffectiveBudget {
+  max_hourly_usd: number;
+  max_daily_usd: number;
+  max_monthly_usd: number;
+  alert_threshold: number;
+}
+
+export interface EffectiveChannelToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface EffectivePermissions {
+  user_id: string;
+  name: string;
+  role: string;
+  tool_policy: EffectiveToolPolicy | null;
+  tool_categories: EffectiveToolCategories | null;
+  memory_access: EffectiveMemoryAccess | null;
+  budget: EffectiveBudget | null;
+  channel_tool_rules: Record<string, EffectiveChannelToolPolicy>;
+  channel_bindings: Record<string, string>;
+}
+
+export async function getEffectivePermissions(
+  name: string,
+): Promise<EffectivePermissions> {
+  return get<EffectivePermissions>(
+    `/api/authz/effective/${encodeURIComponent(name)}`,
+  );
+}
