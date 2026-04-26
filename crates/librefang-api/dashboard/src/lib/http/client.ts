@@ -133,9 +133,15 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
-  // per-user budget / policy (M3+M5 stubs)
+  // per-user budget (M5) / policy (M3 stub)
   getUserBudget,
   getUserPolicy,
+} from "../../api";
+
+export type {
+  UserBudgetResponse,
+  UserBudgetWindow,
+  UserBudgetPayload,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -277,6 +283,9 @@ export {
   importUsers,
   // per-user policy (M3 stub)
   updateUserPolicy,
+  // per-user budget (RBAC M5)
+  updateUserBudget,
+  deleteUserBudget,
 } from "../../api";
 
 // ---------------------------------------------------------------------------

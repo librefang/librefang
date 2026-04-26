@@ -2992,3 +2992,151 @@ async fn test_user_budget_detail_includes_enforced_true() {
     assert!(body["monthly"]["spend"].is_number());
     assert!(body["alert_breach"].is_boolean());
 }
+
+/// Round-trip: PUT a budget, GET reflects the new limits, DELETE clears
+/// it back to "no cap" (limit = 0 in the response).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_get_delete_round_trip() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // Initial GET — no cap configured, all limits are 0.
+    let initial: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial["hourly"]["limit"], serde_json::json!(0.0));
+
+    // PUT a real cap.
+    let put_resp = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.5,
+            "max_daily_usd": 12.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.75,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
+
+    // GET should reflect the new caps.
+    let after_put: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_put["hourly"]["limit"], serde_json::json!(1.5));
+    assert_eq!(after_put["daily"]["limit"], serde_json::json!(12.0));
+    assert_eq!(after_put["monthly"]["limit"], serde_json::json!(100.0));
+    assert_eq!(after_put["alert_threshold"], serde_json::json!(0.75));
+
+    // DELETE clears.
+    let del_resp = client
+        .delete(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), 200, "DELETE should clear the cap");
+
+    // GET again — back to limit = 0.
+    let after_delete: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after_delete["hourly"]["limit"],
+        serde_json::json!(0.0),
+        "DELETE must reset limit back to 0 (no cap)"
+    );
+}
+
+/// Validation: PUT with negative or out-of-range values is rejected
+/// before touching disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_invalid_payload() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    for bad in [
+        serde_json::json!({"max_hourly_usd": -1.0}),
+        serde_json::json!({"alert_threshold": 1.5}),
+        serde_json::json!({"alert_threshold": -0.1}),
+    ] {
+        let resp = client
+            .put(&url)
+            .header("authorization", "Bearer alice-admin-key")
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "expected 400 for invalid payload {bad:?}"
+        );
+    }
+}
+
+/// Authz: a non-admin caller is rejected even when the URL is well-formed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_viewer_with_403() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "admin", "alice-admin-key"),
+            ("Bob", "viewer", "bob-viewer-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer bob-viewer-key")
+        .json(&serde_json::json!({"max_hourly_usd": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not write user budget");
+}
+
+/// 404 path: PUT against an unknown user surfaces a real error (not a
+/// silent insert).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_unknown_user_returns_404() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/NonExistent", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({"max_hourly_usd": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

@@ -27,7 +27,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/budget/users", axum::routing::get(user_budget_ranking))
         .route(
             "/budget/users/{user_id}",
-            axum::routing::get(user_budget_detail),
+            axum::routing::get(user_budget_detail)
+                .put(update_user_budget)
+                .delete(delete_user_budget),
         )
 }
 use axum::extract::{Path, Query, State};
@@ -673,4 +675,214 @@ pub async fn user_budget_detail(
         "enforced": true,
     }))
     .into_response()
+}
+
+/// PUT /api/budget/users/{user_id} — admin-only per-user budget upsert.
+///
+/// `user_id` accepts the same forms as the GET sibling (UUID or configured
+/// name). The request body mirrors `UserBudgetConfig`:
+/// ```json
+/// { "max_hourly_usd": 1.0, "max_daily_usd": 10.0, "max_monthly_usd": 100.0,
+///   "alert_threshold": 0.8 }
+/// ```
+/// Any window set to `0.0` is "unlimited on that window" (same semantics as
+/// the kernel-side metering check). Missing fields default to `0.0` /
+/// `0.8` so a partial payload upgrades cleanly.
+///
+/// On success the cap takes effect on the **next** LLM call — already-
+/// billed responses are returned unchanged. Persists to `config.toml` via
+/// `users::persist_users` and triggers a kernel reload (auth manager picks
+/// up the new `UserConfig.budget`).
+#[utoipa::path(
+    put,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses(
+        (status = 200, description = "Budget written and reloaded", body = serde_json::Value),
+        (status = 400, description = "Invalid budget payload (negative limit, threshold out of range)"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "No user matches the given id/name"),
+    )
+)]
+pub async fn update_user_budget(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    // Parse + validate. Anything that would make `MeteringEngine::
+    // check_user_budget` behave surprisingly is rejected here so the
+    // operator sees a 400 instead of a silently-wrong cap.
+    let max_hourly_usd = body["max_hourly_usd"].as_f64().unwrap_or(0.0);
+    let max_daily_usd = body["max_daily_usd"].as_f64().unwrap_or(0.0);
+    let max_monthly_usd = body["max_monthly_usd"].as_f64().unwrap_or(0.0);
+    let alert_threshold = body["alert_threshold"].as_f64().unwrap_or(0.8);
+
+    for (label, v) in [
+        ("max_hourly_usd", max_hourly_usd),
+        ("max_daily_usd", max_daily_usd),
+        ("max_monthly_usd", max_monthly_usd),
+    ] {
+        if v.is_nan() || v.is_infinite() || v < 0.0 {
+            return ApiErrorResponse::bad_request(format!(
+                "{label} must be a finite, non-negative number (got {v})"
+            ))
+            .into_response();
+        }
+    }
+    if !(0.0..=1.0).contains(&alert_threshold)
+        || alert_threshold.is_nan()
+        || alert_threshold.is_infinite()
+    {
+        return ApiErrorResponse::bad_request(format!(
+            "alert_threshold must be in 0.0..=1.0 (got {alert_threshold})"
+        ))
+        .into_response();
+    }
+
+    let new_budget = librefang_types::config::UserBudgetConfig {
+        max_hourly_usd,
+        max_daily_usd,
+        max_monthly_usd,
+        alert_threshold,
+    };
+
+    // Resolve the path param to a name we can match in the on-disk
+    // `[[users]]` array. Same parse-as-uuid-then-from_name shape as
+    // `user_budget_detail`.
+    let target_user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    let new_budget_for_closure = new_budget.clone();
+    let result = super::users::persist_users(&state, move |users| {
+        let idx = users
+            .iter()
+            .position(|u| UserId::from_name(&u.name) == target_user_id)
+            .ok_or_else(|| {
+                super::users::PersistError::NotFound(format!(
+                    "no user matches '{user_id_param}'"
+                ))
+            })?;
+        users[idx].budget = Some(new_budget_for_closure);
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::RoleChange,
+                format!(
+                    "user budget updated: hourly={max_hourly_usd} daily={max_daily_usd} monthly={max_monthly_usd} alert={alert_threshold}"
+                ),
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "budget": new_budget,
+                })),
+            )
+                .into_response()
+        }
+        Err(super::users::PersistError::NotFound(m)) => {
+            ApiErrorResponse::not_found(m).into_response()
+        }
+        Err(super::users::PersistError::BadRequest(m)) => {
+            ApiErrorResponse::bad_request(m).into_response()
+        }
+        Err(super::users::PersistError::Conflict(m)) => {
+            ApiErrorResponse::conflict(m).into_response()
+        }
+        Err(super::users::PersistError::Internal(m)) => {
+            ApiErrorResponse::internal(m).into_response()
+        }
+    }
+}
+
+/// DELETE /api/budget/users/{user_id} — clear the per-user budget.
+///
+/// Sets `UserConfig.budget` back to `None` and persists. Subsequent LLM
+/// calls from this user are bounded only by global / per-agent /
+/// per-provider caps. Returns 200 even when the user had no budget set
+/// (idempotent — same shape as `delete_agent_budget`'s sibling pattern).
+#[utoipa::path(
+    delete,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses(
+        (status = 200, description = "Budget cleared (or already absent)"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "No user matches the given id/name"),
+    )
+)]
+pub async fn delete_user_budget(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    let target_user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    let result = super::users::persist_users(&state, move |users| {
+        let idx = users
+            .iter()
+            .position(|u| UserId::from_name(&u.name) == target_user_id)
+            .ok_or_else(|| {
+                super::users::PersistError::NotFound(format!(
+                    "no user matches '{user_id_param}'"
+                ))
+            })?;
+        users[idx].budget = None;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::RoleChange,
+                "user budget cleared",
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "message": "budget cleared"})),
+            )
+                .into_response()
+        }
+        Err(super::users::PersistError::NotFound(m)) => {
+            ApiErrorResponse::not_found(m).into_response()
+        }
+        Err(super::users::PersistError::BadRequest(m)) => {
+            ApiErrorResponse::bad_request(m).into_response()
+        }
+        Err(super::users::PersistError::Conflict(m)) => {
+            ApiErrorResponse::conflict(m).into_response()
+        }
+        Err(super::users::PersistError::Internal(m)) => {
+            ApiErrorResponse::internal(m).into_response()
+        }
+    }
 }
