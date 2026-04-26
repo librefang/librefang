@@ -345,13 +345,11 @@ pub async fn update_user(
 
     let target_existing = name.clone();
     let renamed_to_for_closure = renamed_to.clone();
-    // Carries the final UserConfig out of the persist closure so we can
-    // serialize it into the response body (incl. preserved RBAC M3 policy
-    // fields).
-    let captured_updated: std::sync::Arc<std::sync::Mutex<Option<UserConfig>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let captured = captured_updated.clone();
-    match persist_users(&state, move |users| {
+    // The closure returns the final `UserConfig` so the response body
+    // can serialize the post-merge view (incl. preserved RBAC M3 policy
+    // fields). `persist_users` is generic over the closure's `Ok` type,
+    // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
+    match persist_users(&state, move |users| -> Result<UserConfig, PersistError> {
         let idx = users
             .iter()
             .position(|u| u.name == target_existing)
@@ -382,19 +380,11 @@ pub async fn update_user(
             memory_access: preserved.memory_access,
             channel_tool_rules: preserved.channel_tool_rules,
         };
-        *captured.lock().expect("captured_updated mutex poisoned") = Some(users[idx].clone());
-        Ok(())
+        Ok(users[idx].clone())
     })
     .await
     {
-        Ok(()) => {
-            let final_cfg = captured_updated
-                .lock()
-                .expect("captured_updated mutex poisoned")
-                .clone()
-                .expect("persist_users succeeded but didn't capture the updated user");
-            (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response()
-        }
+        Ok(final_cfg) => (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response(),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
@@ -632,15 +622,18 @@ enum PersistError {
 /// Read `config.toml`, run `mutate` on a clone of the current `users`
 /// vector, then rewrite the `[[users]]` array-of-tables and reload the
 /// kernel. The mutator returns a `PersistError` to abort the write with a
-/// chosen status code.
-async fn persist_users<F>(state: &Arc<AppState>, mutate: F) -> Result<(), PersistError>
+/// chosen status code, or any `R` to be threaded back to the caller —
+/// `update_user` uses this to surface the post-merge `UserConfig`
+/// (including preserved RBAC M3 policy fields) without an out-of-band
+/// `Arc<Mutex>` capture.
+async fn persist_users<F, R>(state: &Arc<AppState>, mutate: F) -> Result<R, PersistError>
 where
-    F: FnOnce(&mut Vec<UserConfig>) -> Result<(), PersistError>,
+    F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
     let _guard = state.config_write_lock.lock().await;
 
     let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
-    mutate(&mut users)?;
+    let captured = mutate(&mut users)?;
 
     let config_path = state.kernel.home_dir().join("config.toml");
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
@@ -684,27 +677,22 @@ where
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for u in &users {
-            let mut t = toml_edit::Table::new();
-            t["name"] = toml_edit::value(u.name.clone());
-            t["role"] = toml_edit::value(u.role.clone());
-            if !u.channel_bindings.is_empty() {
-                let mut bindings = toml_edit::Table::new();
-                bindings.set_implicit(false);
-                // Stable ordering for deterministic diffs.
-                let mut keys: Vec<&String> = u.channel_bindings.keys().collect();
-                keys.sort();
-                for k in keys {
-                    bindings[k] =
-                        toml_edit::value(u.channel_bindings.get(k).cloned().unwrap_or_default());
-                }
-                t["channel_bindings"] = toml_edit::Item::Table(bindings);
-            }
-            if let Some(hash) = &u.api_key_hash {
-                if !hash.trim().is_empty() {
-                    t["api_key_hash"] = toml_edit::value(hash.clone());
-                }
-            }
-            aot.push(t);
+            // Serialize the whole UserConfig via serde so RBAC M3 (#3205)
+            // fields (`tool_policy` / `tool_categories` / `memory_access`
+            // / `channel_tool_rules`) survive the round-trip. Earlier
+            // drafts hand-emitted the four M6 fields and silently dropped
+            // the M3 ones — the per-user policy got reset every time the
+            // dashboard edited a name or role. The `#[serde(skip_serializing_if)]`
+            // on each optional field keeps the on-disk shape minimal.
+            //
+            // We go through `toml_edit::ser::to_document` (NOT `toml::to_string`)
+            // because the source struct interleaves scalar fields with
+            // nested tables (`channel_bindings` table sits before the
+            // `api_key_hash` scalar), which the strict `toml` serializer
+            // rejects with `ValueAfterTable`. `toml_edit` reorders for us.
+            let single = toml_edit::ser::to_document(u)
+                .map_err(|e| PersistError::Internal(format!("serialize user '{}': {e}", u.name)))?;
+            aot.push(single.as_table().clone());
         }
         doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
     }
@@ -747,5 +735,5 @@ where
         "completed",
     );
 
-    Ok(())
+    Ok(captured)
 }

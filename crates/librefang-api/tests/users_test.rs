@@ -10,7 +10,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
@@ -22,10 +22,15 @@ struct Harness {
 }
 
 async fn boot() -> Harness {
+    boot_with_seed_users(vec![]).await
+}
+
+async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
     let tmp = tempfile::tempdir().expect("temp dir");
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
+        users: seed,
         default_model: DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
@@ -335,6 +340,118 @@ async fn users_create_rejects_invalid_api_key_hash() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+/// PR #3209 re-review — the M6 dashboard's `PUT /api/users/{name}` MUST
+/// preserve the RBAC M3 (#3205) per-user policy fields (`tool_policy`,
+/// `tool_categories`, `memory_access`, `channel_tool_rules`) across an
+/// edit it doesn't itself surface. Without the preserve-and-merge in
+/// `update_user`, an admin retitling a Viewer would silently flip
+/// `pii_access` back to `false`-via-default and disable the
+/// per-user tool policy. Same coverage for the bulk-import update path.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_update_and_import_preserve_rbac_m3_policy_fields() {
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    // Seed a user with non-default RBAC M3 fields the M6 dashboard
+    // doesn't expose. The kernel boots from this config and the
+    // on-disk `config.toml` round-trips it.
+    let seed = UserConfig {
+        name: "Bob".into(),
+        role: "viewer".into(),
+        channel_bindings: {
+            let mut m = HashMap::new();
+            m.insert("telegram".into(), "111".into());
+            m
+        },
+        api_key_hash: None,
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }),
+        tool_categories: None,
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        channel_tool_rules: HashMap::new(),
+    };
+    let h = boot_with_seed_users(vec![seed.clone()]).await;
+
+    // 1. Direct PUT — admin retitles Bob (rename + role change). The
+    //    request body never mentions tool_policy / memory_access; the
+    //    server must fill them in from the pre-existing config.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Bob",
+        Some(serde_json::json!({
+            "name": "BobRenamed",
+            "role": "user",
+            "channel_bindings": {"telegram": "111"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_put = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "BobRenamed")
+        .cloned()
+        .expect("renamed user must exist");
+    assert_eq!(after_put.role, "user", "role change applied");
+    assert_eq!(
+        after_put.tool_policy, seed.tool_policy,
+        "tool_policy was clobbered by PUT"
+    );
+    assert_eq!(
+        after_put.memory_access, seed.memory_access,
+        "memory_access (incl. pii_access=false) was clobbered by PUT"
+    );
+
+    // 2. Bulk-import update — same user, no policy fields in the CSV
+    //    payload. The import path's "if name matches existing" branch
+    //    must also preserve the RBAC M3 fields.
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({
+            "dry_run": false,
+            "rows": [
+                {"name": "BobRenamed", "role": "admin"},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_import = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "BobRenamed")
+        .cloned()
+        .expect("user must still exist after import");
+    assert_eq!(after_import.role, "admin", "import applied role bump");
+    assert_eq!(
+        after_import.tool_policy, seed.tool_policy,
+        "tool_policy was clobbered by bulk import"
+    );
+    assert_eq!(
+        after_import.memory_access, seed.memory_access,
+        "memory_access was clobbered by bulk import"
+    );
 }
 
 /// PR #3209 review item — `persist_users` MUST refuse to overwrite a
