@@ -16082,7 +16082,8 @@ impl KernelHandle for LibreFangKernel {
 
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
-        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let agent_display = self.approval_agent_display(agent_id);
+        let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
         let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
             id: request_id,
@@ -16165,9 +16166,9 @@ impl KernelHandle for LibreFangKernel {
                 };
 
             let msg = format!(
-                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                "{} Approval needed: agent {} wants to run `{}` — {}",
                 risk_level.emoji(),
-                agent_id,
+                agent_display,
                 tool_name,
                 description,
             );
@@ -16236,7 +16237,8 @@ impl KernelHandle for LibreFangKernel {
 
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
-        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let agent_display = self.approval_agent_display(agent_id);
+        let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
         let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
             id: request_id,
@@ -16310,9 +16312,9 @@ impl KernelHandle for LibreFangKernel {
                 }
             };
             let msg = format!(
-                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                "{} Approval needed: agent {} wants to run `{}` — {}",
                 risk_level.emoji(),
-                agent_id,
+                agent_display,
                 tool_name,
                 description,
             );
@@ -17137,6 +17139,18 @@ impl KernelHandle for LibreFangKernel {
 // ---------------------------------------------------------------------------
 
 impl LibreFangKernel {
+    /// Render an agent identifier for human-facing messages: `"name" (short-id)`
+    /// when the agent is in the registry, otherwise the raw id verbatim.
+    fn approval_agent_display(&self, agent_id: &str) -> String {
+        if let Ok(aid) = agent_id.parse::<AgentId>() {
+            if let Some(entry) = self.registry.get(aid) {
+                let short = agent_id.get(..8).unwrap_or(agent_id);
+                return format!("\"{}\" ({})", entry.name, short);
+            }
+        }
+        format!("\"{}\"", agent_id)
+    }
+
     async fn notify_escalated_approval(
         &self,
         req: &librefang_types::approval::ApprovalRequest,
@@ -17178,10 +17192,10 @@ impl LibreFangKernel {
             };
 
         let msg = format!(
-            "{} ESCALATION #{}: Approval still needed: agent \"{}\" wants to run `{}` - {}",
+            "{} ESCALATION #{}: Approval still needed: agent {} wants to run `{}` - {}",
             req.risk_level.emoji(),
             req.escalation_count,
-            req.agent_id,
+            self.approval_agent_display(&req.agent_id),
             req.tool_name,
             req.description,
         );
