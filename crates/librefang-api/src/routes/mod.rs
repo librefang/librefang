@@ -14,6 +14,8 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod agents;
+pub mod audit;
+pub mod authz;
 pub mod auto_dream;
 pub mod budget;
 pub mod channels;
@@ -30,6 +32,7 @@ pub mod providers;
 pub mod skills;
 pub mod system;
 pub mod terminal;
+pub mod users;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -43,6 +46,8 @@ pub mod workflows;
 // warning, but `router()` is only accessed via qualified paths (e.g.
 // `routes::agents::router()`), so there is no actual conflict.
 pub use agents::*;
+pub use audit::*;
+pub use authz::*;
 pub use auto_dream::*;
 pub use budget::*;
 pub use channels::*;
@@ -58,6 +63,7 @@ pub use providers::*;
 pub use skills::*;
 pub use system::*;
 pub use terminal::*;
+pub use users::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;

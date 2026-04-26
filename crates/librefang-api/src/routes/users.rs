@@ -1,0 +1,751 @@
+//! User RBAC management endpoints (Phase 4 / RBAC M6).
+//!
+//! These endpoints expose CRUD over `[[users]]` entries in `config.toml`,
+//! plus a bulk-import endpoint used by the dashboard CSV-import wizard.
+//!
+//! Auth: NOT in the public allowlist — every request goes through the
+//! authenticated middleware path. Mutating calls (`POST` / `PUT` /
+//! `DELETE` under `/api/users*`) are additionally gated to `Owner` via
+//! `middleware::is_owner_only_write` because they map to
+//! `Action::ManageUsers` in the kernel — without that gate an Admin
+//! per-user API key could `POST /api/users` to create a `role: "owner"`
+//! user with a chosen `api_key_hash` and self-promote. `GET` stays
+//! Admin-or-above so the permission simulator's user list keeps working.
+//! Static api_key / dashboard session callers bypass the per-user role
+//! check by design (they are owner-equivalent shared secrets).
+//!
+//! Persistence model: we read the live `KernelConfig`, mutate the `users`
+//! vector, then rewrite the `[[users]]` array-of-tables in `config.toml`
+//! using `toml_edit` so unrelated comments/sections are preserved. After
+//! every successful write we trigger a kernel reload so the in-memory
+//! `AuthManager` picks up the change without restart.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::Json;
+use librefang_types::config::UserConfig;
+use serde::{Deserialize, Serialize};
+
+use super::AppState;
+
+pub fn router() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route("/users", axum::routing::get(list_users).post(create_user))
+        .route(
+            "/users/{name}",
+            axum::routing::get(get_user)
+                .put(update_user)
+                .delete(delete_user),
+        )
+        .route("/users/import", axum::routing::post(import_users))
+}
+
+// ---------------------------------------------------------------------------
+// View models
+// ---------------------------------------------------------------------------
+
+/// Sanitized user view returned over the wire — never echoes the
+/// `api_key_hash` value, only its presence.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct UserView {
+    pub name: String,
+    pub role: String,
+    pub channel_bindings: HashMap<String, String>,
+    pub has_api_key: bool,
+}
+
+impl From<&UserConfig> for UserView {
+    fn from(cfg: &UserConfig) -> Self {
+        Self {
+            name: cfg.name.clone(),
+            role: cfg.role.clone(),
+            channel_bindings: cfg.channel_bindings.clone(),
+            has_api_key: cfg
+                .api_key_hash
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// Payload for creating or replacing a user. `api_key_hash` is accepted
+/// pre-hashed (Argon2 phc string) — the dashboard hashes locally before
+/// sending. `None` clears any existing hash on update; absent on create.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct UserUpsert {
+    pub name: String,
+    #[serde(default = "default_role")]
+    pub role: String,
+    #[serde(default)]
+    pub channel_bindings: HashMap<String, String>,
+    #[serde(default)]
+    pub api_key_hash: Option<String>,
+}
+
+fn default_role() -> String {
+    "user".to_string()
+}
+
+/// Bulk-import payload. `rows` are pre-parsed by the frontend (drag-drop
+/// CSV, dialect-aware). `dry_run = true` returns counts without persisting.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct BulkImportRequest {
+    #[serde(default)]
+    pub rows: Vec<UserUpsert>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct BulkImportRow {
+    pub index: usize,
+    pub name: String,
+    pub status: String, // "created" | "updated" | "failed"
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct BulkImportResult {
+    pub created: usize,
+    pub updated: usize,
+    pub failed: usize,
+    pub dry_run: bool,
+    pub rows: Vec<BulkImportRow>,
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+const VALID_ROLES: &[&str] = &["owner", "admin", "user", "viewer"];
+
+fn validate_role(role: &str) -> Result<String, String> {
+    let normalized = role.trim().to_lowercase();
+    if VALID_ROLES.iter().any(|r| *r == normalized) {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "invalid role '{role}' — expected one of: {}",
+            VALID_ROLES.join(", ")
+        ))
+    }
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if trimmed.len() > 128 {
+        return Err("name too long (max 128 chars)".to_string());
+    }
+    Ok(())
+}
+
+/// Reject anything that isn't a parseable Argon2id PHC string.
+///
+/// The dashboard hashes locally before sending so the daemon never sees
+/// the plaintext, but the wire shape is still `String` — without this
+/// check an Owner could paste an arbitrary value (a hash exfiltrated
+/// from a different database, a constant, an empty-after-trim string)
+/// into `api_key_hash` and silently grant whoever knows that hash's
+/// preimage a working API key. `password_hash::PasswordHash::new` parses
+/// the PHC structure (algorithm / params / salt / hash segments) without
+/// running the verifier, so we get format validation for free.
+///
+/// `None` and trim-empty strings are treated as "clear the existing hash"
+/// and accepted unchanged.
+fn validate_api_key_hash(hash: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = hash else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    argon2::password_hash::PasswordHash::new(trimmed).map_err(|e| {
+        format!(
+            "api_key_hash is not a valid Argon2 PHC string: {e} \
+             (expected `$argon2id$v=19$m=…,t=…,p=…$<salt>$<hash>`)"
+        )
+    })?;
+    Ok(Some(trimmed.to_string()))
+}
+
+fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({ "status": "error", "error": msg.into() })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    get,
+    path = "/api/users",
+    tag = "users",
+    responses(
+        (status = 200, description = "List of registered users", body = [UserView])
+    )
+)]
+pub async fn list_users(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    let users: Vec<UserView> = cfg.users.iter().map(UserView::from).collect();
+    Json(users).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/users/{name}",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    responses(
+        (status = 200, description = "User detail", body = UserView),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn get_user(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    match cfg.users.iter().find(|u| u.name == name) {
+        Some(u) => Json(UserView::from(u)).into_response(),
+        None => err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found")),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/users",
+    tag = "users",
+    request_body = UserUpsert,
+    responses(
+        (status = 201, description = "User created", body = UserView),
+        (status = 400, description = "Validation error"),
+        (status = 409, description = "User already exists"),
+    )
+)]
+pub async fn create_user(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UserUpsert>,
+) -> impl IntoResponse {
+    if let Err(e) = validate_name(&req.name) {
+        return err_response(StatusCode::BAD_REQUEST, e);
+    }
+    let role = match validate_role(&req.role) {
+        Ok(r) => r,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+
+    let new_cfg = UserConfig {
+        name: req.name.trim().to_string(),
+        role,
+        channel_bindings: req.channel_bindings,
+        api_key_hash,
+        // RBAC M5 (#3203) per-user budget — read-only display data in
+        // this slice (no write endpoint, no per-user enforcement; the
+        // metering pipeline still only enforces global / per-agent /
+        // per-provider caps). For now budget is set by editing
+        // config.toml directly; a follow-up adds the write path.
+        budget: None,
+        // RBAC M3 (#3205) per-user policy fields. M6's create endpoint
+        // doesn't accept them yet — the dashboard's matrix editor
+        // (`/users/{name}/policy`) is the future home, ships as a stub
+        // page for now. Default to "no opinion" so the kernel's role-
+        // based defaults (and existing channel/category rules) decide.
+        tool_policy: None,
+        tool_categories: None,
+        memory_access: None,
+        channel_tool_rules: HashMap::new(),
+    };
+
+    // Pre-check duplicates so we can map them to 409 cleanly. The persist
+    // closure does its own check too (in case of a race), but the live
+    // snapshot here lets us avoid acquiring the write lock for an obvious
+    // conflict.
+    if state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .any(|u| u.name == new_cfg.name)
+    {
+        return err_response(
+            StatusCode::CONFLICT,
+            format!("user '{}' already exists", new_cfg.name),
+        );
+    }
+
+    let to_push = new_cfg.clone();
+    match persist_users(&state, move |users| {
+        if users.iter().any(|u| u.name == to_push.name) {
+            return Err(PersistError::Conflict(format!(
+                "user '{}' already exists",
+                to_push.name
+            )));
+        }
+        users.push(to_push);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => (StatusCode::CREATED, Json(UserView::from(&new_cfg))).into_response(),
+        Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
+        Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
+        Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
+        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/users/{name}",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    request_body = UserUpsert,
+    responses(
+        (status = 200, description = "User updated", body = UserView),
+        (status = 400, description = "Validation error"),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn update_user(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<UserUpsert>,
+) -> impl IntoResponse {
+    if let Err(e) = validate_name(&req.name) {
+        return err_response(StatusCode::BAD_REQUEST, e);
+    }
+    let role = match validate_role(&req.role) {
+        Ok(r) => r,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+
+    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+
+    // The PUT body's `name` is treated as the desired final name; the URL
+    // path identifies the user being updated. Allow rename so the dashboard
+    // can edit the display name without a delete-and-recreate dance.
+    let renamed_to = req.name.trim().to_string();
+    let new_role = role;
+    let new_bindings = req.channel_bindings;
+    let new_api_key_hash = api_key_hash;
+
+    let target_existing = name.clone();
+    let renamed_to_for_closure = renamed_to.clone();
+    // The closure returns the final `UserConfig` so the response body
+    // can serialize the post-merge view (incl. preserved RBAC M3 policy
+    // fields). `persist_users` is generic over the closure's `Ok` type,
+    // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
+    match persist_users(&state, move |users| -> Result<UserConfig, PersistError> {
+        let idx = users
+            .iter()
+            .position(|u| u.name == target_existing)
+            .ok_or_else(|| PersistError::NotFound(format!("user '{target_existing}' not found")))?;
+        // If renaming, ensure no collision with another existing user.
+        if renamed_to_for_closure != target_existing
+            && users.iter().any(|u| u.name == renamed_to_for_closure)
+        {
+            return Err(PersistError::Conflict(format!(
+                "another user named '{}' already exists",
+                renamed_to_for_closure
+            )));
+        }
+        // RBAC M3 (#3205) + M5 (#3203): preserve per-user `tool_policy`,
+        // `tool_categories`, `memory_access`, `channel_tool_rules`, and
+        // `budget` across the rename/role/binding edit. The M6 dashboard
+        // only exposes name/role/bindings/api_key_hash today; clobbering
+        // the RBAC fields here would silently disable a Viewer's PII
+        // redaction the moment an admin retitles their account. `budget`
+        // is currently set via config.toml (no write endpoint yet, full
+        // per-user enforcement lands in an M5 follow-up), and the same
+        // preserve-across-edit rule applies.
+        let preserved = users[idx].clone();
+        users[idx] = UserConfig {
+            name: renamed_to_for_closure.clone(),
+            role: new_role.clone(),
+            channel_bindings: new_bindings.clone(),
+            api_key_hash: new_api_key_hash.clone(),
+            budget: preserved.budget,
+            tool_policy: preserved.tool_policy,
+            tool_categories: preserved.tool_categories,
+            memory_access: preserved.memory_access,
+            channel_tool_rules: preserved.channel_tool_rules,
+        };
+        Ok(users[idx].clone())
+    })
+    .await
+    {
+        Ok(final_cfg) => (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response(),
+        Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
+        Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
+        Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
+        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/users/{name}",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    responses(
+        (status = 200, description = "User deleted"),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let target = name.clone();
+    match persist_users(&state, move |users| {
+        let before = users.len();
+        users.retain(|u| u.name != target);
+        if users.len() == before {
+            Err(PersistError::NotFound(format!("user '{target}' not found")))
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status":"ok","deleted":name})),
+        )
+            .into_response(),
+        Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
+        Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
+        Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
+        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/users/import",
+    tag = "users",
+    request_body = BulkImportRequest,
+    responses(
+        (status = 200, description = "Import result", body = BulkImportResult),
+    )
+)]
+pub async fn import_users(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkImportRequest>,
+) -> impl IntoResponse {
+    // Validate every row first so the preview can surface errors without
+    // mutating state.
+    let mut prepared: Vec<(usize, Result<UserConfig, String>)> = Vec::with_capacity(req.rows.len());
+    for (i, row) in req.rows.iter().enumerate() {
+        let prepared_row = (|| -> Result<UserConfig, String> {
+            validate_name(&row.name)?;
+            let role = validate_role(&row.role)?;
+            let api_key_hash = validate_api_key_hash(row.api_key_hash.as_deref())?;
+            Ok(UserConfig {
+                name: row.name.trim().to_string(),
+                role,
+                channel_bindings: row.channel_bindings.clone(),
+                api_key_hash,
+                // CSV import doesn't carry RBAC M5 (#3203) budget or
+                // M3 (#3205) policy fields — start blank for new rows;
+                // the per-row update path below preserves existing
+                // values for rows that match an already-registered name.
+                budget: None,
+                tool_policy: None,
+                tool_categories: None,
+                memory_access: None,
+                channel_tool_rules: HashMap::new(),
+            })
+        })();
+        prepared.push((i, prepared_row));
+    }
+
+    if req.dry_run {
+        // Compute the would-be counts without writing.
+        let cfg = state.kernel.config_ref();
+        let existing_names: std::collections::HashSet<&str> =
+            cfg.users.iter().map(|u| u.name.as_str()).collect();
+        let mut rows_out = Vec::with_capacity(prepared.len());
+        let mut created = 0usize;
+        let mut updated = 0usize;
+        let mut failed = 0usize;
+        for (i, prepared_row) in &prepared {
+            match prepared_row {
+                Ok(u) => {
+                    let status = if existing_names.contains(u.name.as_str()) {
+                        updated += 1;
+                        "updated"
+                    } else {
+                        created += 1;
+                        "created"
+                    };
+                    rows_out.push(BulkImportRow {
+                        index: *i,
+                        name: u.name.clone(),
+                        status: status.to_string(),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    failed += 1;
+                    rows_out.push(BulkImportRow {
+                        index: *i,
+                        name: req.rows[*i].name.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e.clone()),
+                    });
+                }
+            }
+        }
+        return Json(BulkImportResult {
+            created,
+            updated,
+            failed,
+            dry_run: true,
+            rows: rows_out,
+        })
+        .into_response();
+    }
+
+    // Commit phase. Snapshot existing names BEFORE persisting so we can
+    // classify each applied row as created vs updated. Failed rows already
+    // have entries in `rows_out`; valid rows are appended after persist
+    // succeeds (so the order in `rows_out` matches the input).
+    let mut rows_out: Vec<BulkImportRow> = Vec::new();
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut failed = 0usize;
+
+    let pre_existing: std::collections::HashSet<String> = state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .map(|u| u.name.clone())
+        .collect();
+
+    let mut to_apply: Vec<(usize, UserConfig)> = Vec::new();
+    for (i, prepared_row) in prepared.into_iter() {
+        match prepared_row {
+            Ok(u) => to_apply.push((i, u)),
+            Err(e) => {
+                failed += 1;
+                rows_out.push(BulkImportRow {
+                    index: i,
+                    name: req.rows[i].name.clone(),
+                    status: "failed".to_string(),
+                    error: Some(e),
+                });
+            }
+        }
+    }
+
+    let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
+    let result = persist_users(&state, move |users| {
+        for new_u in &payload {
+            if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
+                // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
+                // user policy and budget when a CSV row updates an
+                // existing user — same reasoning as `update_user`.
+                let preserved = users[idx].clone();
+                users[idx] = UserConfig {
+                    budget: preserved.budget,
+                    tool_policy: preserved.tool_policy,
+                    tool_categories: preserved.tool_categories,
+                    memory_access: preserved.memory_access,
+                    channel_tool_rules: preserved.channel_tool_rules,
+                    ..new_u.clone()
+                };
+            } else {
+                users.push(new_u.clone());
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            for (i, u) in to_apply {
+                let status = if pre_existing.contains(&u.name) {
+                    updated += 1;
+                    "updated"
+                } else {
+                    created += 1;
+                    "created"
+                };
+                rows_out.push(BulkImportRow {
+                    index: i,
+                    name: u.name,
+                    status: status.to_string(),
+                    error: None,
+                });
+            }
+            // Stable ordering for callers that diff against the input row
+            // index — failures may have been pushed first.
+            rows_out.sort_by_key(|r| r.index);
+            Json(BulkImportResult {
+                created,
+                updated,
+                failed,
+                dry_run: false,
+                rows: rows_out,
+            })
+            .into_response()
+        }
+        Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
+        Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
+        Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
+        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
+
+enum PersistError {
+    BadRequest(String),
+    Conflict(String),
+    NotFound(String),
+    Internal(String),
+}
+
+/// Read `config.toml`, run `mutate` on a clone of the current `users`
+/// vector, then rewrite the `[[users]]` array-of-tables and reload the
+/// kernel. The mutator returns a `PersistError` to abort the write with a
+/// chosen status code, or any `R` to be threaded back to the caller —
+/// `update_user` uses this to surface the post-merge `UserConfig`
+/// (including preserved RBAC M3 policy fields) without an out-of-band
+/// `Arc<Mutex>` capture.
+async fn persist_users<F, R>(state: &Arc<AppState>, mutate: F) -> Result<R, PersistError>
+where
+    F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
+{
+    let _guard = state.config_write_lock.lock().await;
+
+    let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
+    let captured = mutate(&mut users)?;
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
+        || config_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(PersistError::BadRequest(
+            "invalid config file path".to_string(),
+        ));
+    }
+
+    // Read the existing file. A read failure on an existing file (permission
+    // denied, hardware fault, …) MUST abort — falling back to "" would
+    // silently drop every other section in `config.toml` (agents, providers,
+    // taint rules, etc.) on the next write. The caller's
+    // `backups/config.toml.prev` from the previous successful write is the
+    // recovery point of last resort.
+    let raw = if config_path.exists() {
+        std::fs::read_to_string(&config_path).map_err(|e| {
+            PersistError::Internal(format!("could not read existing config.toml: {e}"))
+        })?
+    } else {
+        String::new()
+    };
+    // Parse with `toml_edit` so we preserve comments / formatting / unrelated
+    // sections. A parse failure means the on-disk file is already corrupt;
+    // refuse to write rather than overwriting with an empty document, which
+    // would clobber every other section the operator is hand-editing.
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
+        PersistError::Internal(format!(
+            "config.toml is not valid TOML — refusing to overwrite: {e}"
+        ))
+    })?;
+
+    // Replace the entire `users` key with a freshly built array-of-tables
+    // (or remove it when the vector is empty so we don't leave a stranded
+    // `users = []` behind).
+    if users.is_empty() {
+        doc.remove("users");
+    } else {
+        let mut aot = toml_edit::ArrayOfTables::new();
+        for u in &users {
+            // Serialize the whole UserConfig via serde so RBAC M3 (#3205)
+            // fields (`tool_policy` / `tool_categories` / `memory_access`
+            // / `channel_tool_rules`) survive the round-trip. Earlier
+            // drafts hand-emitted the four M6 fields and silently dropped
+            // the M3 ones — the per-user policy got reset every time the
+            // dashboard edited a name or role. The `#[serde(skip_serializing_if)]`
+            // on each optional field keeps the on-disk shape minimal.
+            //
+            // We go through `toml_edit::ser::to_document` (NOT `toml::to_string`)
+            // because the source struct interleaves scalar fields with
+            // nested tables (`channel_bindings` table sits before the
+            // `api_key_hash` scalar), which the strict `toml` serializer
+            // rejects with `ValueAfterTable`. `toml_edit` reorders for us.
+            let single = toml_edit::ser::to_document(u)
+                .map_err(|e| PersistError::Internal(format!("serialize user '{}': {e}", u.name)))?;
+            aot.push(single.as_table().clone());
+        }
+        doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
+    }
+
+    let new_toml = doc.to_string();
+    let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
+        .map_err(|e| PersistError::Internal(format!("invalid config after edit: {e}")))?;
+    parsed.clamp_bounds();
+    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed) {
+        return Err(PersistError::BadRequest(format!(
+            "invalid config: {}",
+            errors.join("; ")
+        )));
+    }
+
+    if config_path.exists() {
+        if let Some(home_dir) = config_path.parent() {
+            let backups_dir = home_dir.join("backups");
+            if std::fs::create_dir_all(&backups_dir).is_ok() {
+                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+            }
+        }
+    }
+
+    std::fs::write(&config_path, &new_toml)
+        .map_err(|e| PersistError::Internal(format!("write failed: {e}")))?;
+
+    if let Err(e) = state.kernel.reload_config().await {
+        // The file is on disk; surface a soft error so the dashboard can
+        // show the reason without rolling back. The next manual reload (or
+        // restart) will pick it up.
+        tracing::warn!(error = %e, "user config reload failed after write");
+        return Err(PersistError::Internal(format!("reload failed: {e}")));
+    }
+
+    state.kernel.audit().record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        "users updated".to_string(),
+        "completed",
+    );
+
+    Ok(captured)
+}

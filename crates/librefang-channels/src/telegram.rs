@@ -3,11 +3,12 @@
 //! Uses long-polling via `getUpdates` with exponential backoff on failures.
 //! No external Telegram crate — just `reqwest` for full control over error handling.
 
+use crate::bridge::SENDER_USER_ID_KEY;
 use crate::formatter;
 use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
-    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    InteractiveButton, InteractiveMessage, LifecycleReaction,
+    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType,
+    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction, PlatformRole,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -1455,6 +1456,73 @@ impl TelegramAdapter {
             })
             .unwrap_or_default()
     }
+
+    /// Look up a user's chat status via Bot API `getChatMember`.
+    ///
+    /// Returns the raw status string (`creator`, `administrator`, `member`,
+    /// `restricted`, `left`, `kicked`) on success. Returns `Ok(None)` when
+    /// Telegram says the user is not part of the chat (`left` / `kicked`)
+    /// since those map to "no derived role" in the kernel mapping logic.
+    /// Errors are surfaced for transport/auth failures.
+    pub async fn api_get_chat_member(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/getChatMember",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        // chat_id may be a numeric id like "-100123" or a `@username`; both
+        // are accepted by the Bot API as a JSON string.
+        let user_id_num: i64 = user_id
+            .parse()
+            .map_err(|_| format!("Invalid Telegram user_id: {user_id}"))?;
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id_num,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        let status_code = resp.status();
+        let body_value: serde_json::Value = resp.json().await?;
+        parse_chat_member_response(&body_value)
+            .map_err(|desc| format!("Telegram getChatMember failed ({status_code}): {desc}").into())
+    }
+}
+
+/// Translate a Telegram `getChatMember` response into an optional status string.
+///
+/// Returns `Ok(Some(status))` for `creator` / `administrator` / `member` /
+/// `restricted`, `Ok(None)` for `left` / `kicked` (treated as "user not in
+/// chat" so the kernel falls through to default-deny), and `Err(description)`
+/// when the response indicates `ok = false`.
+pub(crate) fn parse_chat_member_response(
+    body: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    if body["ok"].as_bool() != Some(true) {
+        let desc = body["description"].as_str().unwrap_or("unknown error");
+        return Err(desc.to_string());
+    }
+    let status = body["result"]["status"].as_str().unwrap_or("");
+    if status.is_empty() || status == "left" || status == "kicked" {
+        return Ok(None);
+    }
+    Ok(Some(status.to_string()))
+}
+
+#[async_trait]
+impl ChannelRoleQuery for TelegramAdapter {
+    async fn lookup_role(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .api_get_chat_member(chat_id, user_id)
+            .await?
+            .map(PlatformRole::single))
+    }
 }
 
 impl TelegramAdapter {
@@ -1900,6 +1968,17 @@ impl ChannelAdapter for TelegramAdapter {
                                 "user_id".to_string(),
                                 serde_json::json!(user_id.to_string()),
                             );
+                            // poll_answer's sender.platform_id is already the
+                            // user id (DMs only — polls don't fire in groups
+                            // with this update shape), so the bridge fallback
+                            // resolves correctly. Populate the metadata key
+                            // anyway for consistency with the message and
+                            // callback_query paths so downstream code never
+                            // has to special-case the source update kind.
+                            metadata.insert(
+                                SENDER_USER_ID_KEY.to_string(),
+                                serde_json::json!(user_id.to_string()),
+                            );
 
                             let mut msg = ChannelMessage {
                                 channel: ChannelType::Telegram,
@@ -2335,6 +2414,11 @@ fn parse_telegram_callback_query(
         serde_json::json!(callback_query_id),
     );
     metadata.insert("user_id".to_string(), serde_json::json!(user_id_str));
+    // See parse_telegram_message: RBAC needs the actual user id, not chat_id.
+    metadata.insert(
+        SENDER_USER_ID_KEY.to_string(),
+        serde_json::json!(user_id_str),
+    );
     metadata.insert(
         "message_id".to_string(),
         serde_json::json!(message_id.to_string()),
@@ -2727,6 +2811,16 @@ async fn parse_telegram_update(
     // Build metadata
     let mut metadata = HashMap::new();
 
+    // RBAC and per-user rate limiting key off `metadata[SENDER_USER_ID_KEY]`.
+    // For group/supergroup chats `sender.platform_id` is the chat_id, not the
+    // sender's user id, so without this entry `bridge::sender_user_id()` would
+    // fall back to the chat_id and `auth_manager.identify("telegram", chat_id)`
+    // would reject every group message as "Unrecognized user".
+    metadata.insert(
+        SENDER_USER_ID_KEY.to_string(),
+        serde_json::json!(user_id.to_string()),
+    );
+
     // Store reply-to-message metadata for downstream consumers.
     if let Some(reply) = message.get("reply_to_message") {
         let reply_message_id = reply["message_id"].as_i64().unwrap_or(0);
@@ -2924,6 +3018,73 @@ fn sanitize_telegram_html(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_resolution_creator_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "creator", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("creator".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_administrator_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "administrator", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("administrator".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_member_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "member", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("member".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_left_returns_none() {
+        // `left` and `kicked` should map to None so the kernel falls
+        // through to default-deny instead of treating "user not in chat"
+        // as a hard error.
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "left" }
+        });
+        assert!(parse_chat_member_response(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn role_resolution_kicked_returns_none() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "kicked" }
+        });
+        assert!(parse_chat_member_response(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn role_resolution_api_error_is_err() {
+        let body = serde_json::json!({
+            "ok": false,
+            "description": "USER_ID_INVALID"
+        });
+        let err = parse_chat_member_response(&body).unwrap_err();
+        assert!(err.contains("USER_ID_INVALID"));
+    }
 
     fn test_client() -> reqwest::Client {
         crate::http_client::new_client()
@@ -3430,6 +3591,18 @@ mod tests {
         assert!(
             matches!(msg.content, ChannelContent::Text(ref t) if t == "Forwarded from channel")
         );
+        // sender_chat fallback yields the *channel id*, not a user id. We
+        // still write it into SENDER_USER_ID_KEY for shape consistency, but
+        // it is not a real user identity — RBAC will (correctly) reject it
+        // because no `[[users]]` entry maps to a negative channel id.
+        // Documenting the value here so a future change can't silently flip
+        // anonymous-admin / channel-on-behalf posts into authorized users.
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("-1001999888777"),
+        );
     }
 
     #[tokio::test]
@@ -3534,6 +3707,66 @@ mod tests {
             .unwrap();
         assert!(msg.is_group);
         assert!(!msg.metadata.contains_key("was_mentioned"));
+    }
+
+    #[tokio::test]
+    async fn test_group_message_carries_sender_user_id_metadata() {
+        // Regression: in groups, sender.platform_id is the chat_id. The
+        // actual sender user id must be exposed via metadata[SENDER_USER_ID_KEY]
+        // so RBAC and per-user rate limiting resolve to the user, not the
+        // group, otherwise auth_manager.identify("telegram", chat_id) rejects
+        // every group message as "Unrecognized user".
+        let update = serde_json::json!({
+            "update_id": 700,
+            "message": {
+                "message_id": 100,
+                "from": { "id": 111222333_i64, "first_name": "Alice" },
+                "chat": { "id": -1001234567890_i64, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "ping"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        assert!(msg.is_group);
+        assert_eq!(msg.sender.platform_id, "-1001234567890");
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("111222333"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_message_also_carries_sender_user_id_metadata() {
+        // In DMs platform_id == user_id, but downstream code shouldn't have to
+        // special-case channel mode — always populate the metadata key.
+        let update = serde_json::json!({
+            "update_id": 701,
+            "message": {
+                "message_id": 101,
+                "from": { "id": 111222333_i64, "first_name": "Alice" },
+                "chat": { "id": 111222333_i64, "type": "private" },
+                "date": 1700000000,
+                "text": "ping"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("111222333"),
+        );
     }
 
     #[tokio::test]
@@ -4072,6 +4305,17 @@ mod tests {
             other => panic!("Expected ButtonCallback, got {other:?}"),
         }
         assert!(msg.metadata.contains_key("callback_query_id"));
+        // Regression: callback_query in a supergroup must expose the actual
+        // user id via SENDER_USER_ID_KEY so RBAC resolves to the user, not
+        // to the group's chat_id (which platform_id holds for groups).
+        // Mirrors the message-path coverage in
+        // test_group_message_carries_sender_user_id_metadata.
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("42"),
+        );
     }
 
     #[tokio::test]

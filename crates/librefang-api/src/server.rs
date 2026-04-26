@@ -47,6 +47,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(routes::config::router())
         .merge(routes::agents::router())
+        .merge(routes::audit::router())
+        .merge(routes::authz::router())
         .merge(routes::channels::router())
         .merge(routes::system::router())
         .merge(routes::memory::router())
@@ -62,6 +64,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::media::router())
         .merge(routes::prompts::routes())
         .merge(routes::terminal::router())
+        .merge(routes::users::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -208,6 +211,7 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
                 name: user.name.clone(),
                 role: librefang_kernel::auth::UserRole::from_str_role(&user.role),
                 api_key_hash: api_key_hash.to_string(),
+                user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
         })
         .collect()
@@ -926,6 +930,9 @@ pub async fn build_router(
         user_api_keys: Arc::new(user_api_keys_vec),
         require_auth_for_reads,
         allow_no_auth,
+        // RBAC M5: hand the audit log to the auth layer so role-denial
+        // events land in the same hash chain as everything else.
+        audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

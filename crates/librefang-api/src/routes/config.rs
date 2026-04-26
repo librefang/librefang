@@ -298,14 +298,21 @@ api_key_env = "{api_key_env}"
         (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
     )
 )]
-pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn shutdown(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     tracing::info!("Shutdown requested via API");
-    // SECURITY: Record shutdown in audit trail
-    state.kernel.audit().record(
+    // SECURITY: Record shutdown in audit trail with the caller's user_id
+    // (None for loopback/unauthenticated calls — see middleware.rs).
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
         "ok",
+        user_id,
+        Some("api".to_string()),
     );
     state.kernel.shutdown();
     // Signal the HTTP server to initiate graceful shutdown so the process exits.
@@ -1493,13 +1500,19 @@ pub async fn run_migrate(
         (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
     )
 )]
-pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // SECURITY: Record config reload in audit trail
-    state.kernel.audit().record(
+pub async fn config_reload(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    // SECURITY: Record config reload in audit trail with caller attribution.
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "config reload requested via API",
         "pending",
+        user_id,
+        Some("api".to_string()),
     );
     match state.kernel.reload_config().await {
         Ok(plan) => {
@@ -1842,6 +1855,7 @@ pub fn ui_options_overlay(
 )]
 pub async fn config_set(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let path = match body.get("path").and_then(|v| v.as_str()) {
@@ -2029,11 +2043,14 @@ pub async fn config_set(
             }
         };
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     let mut body = serde_json::json!({"status": reload_status, "path": path});

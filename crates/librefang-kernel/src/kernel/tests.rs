@@ -861,6 +861,20 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     let first_manifest = first_entry.manifest.clone();
 
     kernel
+        .update_hand_agent_runtime_override(
+            first_agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                model: Some("override-model".to_string()),
+                provider: Some("override-provider".to_string()),
+                max_tokens: Some(12345),
+                temperature: Some(0.2),
+                web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+                ..Default::default()
+            },
+        )
+        .expect("hand runtime override should update");
+
+    kernel
         .deactivate_hand(first_instance.instance_id)
         .expect("apitester hand should deactivate cleanly");
 
@@ -901,6 +915,183 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     assert_eq!(
         second_manifest.mcp_servers, first_manifest.mcp_servers,
         "reactivation should preserve MCP server assignments"
+    );
+    assert_ne!(
+        second_manifest.model.model, "override-model",
+        "deactivate/reactivate should rebuild from hand definition, not runtime override"
+    );
+    assert_ne!(
+        second_manifest.model.provider, "override-provider",
+        "provider override should not survive a new hand activation"
+    );
+    assert_ne!(
+        second_manifest.model.max_tokens, 12345,
+        "max_tokens override should be cleared on fresh activation"
+    );
+    assert_ne!(
+        second_manifest.model.temperature, 0.2,
+        "temperature override should be cleared on fresh activation"
+    );
+    assert_ne!(
+        second_manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always,
+        "web search override should be cleared on fresh activation"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn reactivate_builds_from_hand_toml_not_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-reactivation-hand-toml");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let first_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate the first time: {e}"),
+    };
+    let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
+    let first_entry = kernel
+        .registry
+        .get(first_agent_id)
+        .expect("first apitester hand agent entry");
+    let resolved_manifest = first_entry.manifest.clone();
+
+    let runtime_override = librefang_hands::HandAgentRuntimeOverride {
+        model: Some("override-model".to_string()),
+        provider: Some("override-provider".to_string()),
+        api_key_env: Some(Some("OVERRIDE_API_KEY_ENV".to_string())),
+        base_url: Some(Some("https://override.invalid/v1".to_string())),
+        max_tokens: Some(12345),
+        temperature: Some(0.2),
+        web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+    };
+
+    kernel
+        .update_hand_agent_runtime_override(first_agent_id, runtime_override.clone())
+        .expect("hand runtime override should update");
+
+    let overridden_entry = kernel
+        .registry
+        .get(first_agent_id)
+        .expect("overridden apitester hand agent entry");
+    assert_eq!(overridden_entry.manifest.model.model, "override-model");
+    assert_eq!(
+        overridden_entry.manifest.model.provider,
+        "override-provider"
+    );
+    assert_eq!(
+        overridden_entry.manifest.model.api_key_env.as_deref(),
+        Some("OVERRIDE_API_KEY_ENV")
+    );
+    assert_eq!(
+        overridden_entry.manifest.model.base_url.as_deref(),
+        Some("https://override.invalid/v1")
+    );
+    assert_eq!(overridden_entry.manifest.model.max_tokens, 12345);
+    assert!((overridden_entry.manifest.model.temperature - 0.2).abs() < 1e-6);
+    assert_eq!(
+        overridden_entry.manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always
+    );
+
+    kernel
+        .deactivate_hand(first_instance.instance_id)
+        .expect("apitester hand should deactivate cleanly");
+
+    let second_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test (second activation): {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate the second time: {e}"),
+    };
+    let second_agent_id = second_instance
+        .agent_id()
+        .expect("second apitester agent id");
+    let second_entry = kernel
+        .registry
+        .get(second_agent_id)
+        .expect("second apitester hand agent entry");
+    let reactivated_manifest = &second_entry.manifest;
+
+    assert_eq!(
+        reactivated_manifest.model.model, resolved_manifest.model.model,
+        "fresh activation must resolve model from HAND.toml/defaults, not prior runtime override"
+    );
+    assert_eq!(
+        reactivated_manifest.model.provider, resolved_manifest.model.provider,
+        "fresh activation must resolve provider from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.api_key_env, resolved_manifest.model.api_key_env,
+        "fresh activation must resolve api_key_env from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.base_url, resolved_manifest.model.base_url,
+        "fresh activation must resolve base_url from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.max_tokens, resolved_manifest.model.max_tokens,
+        "fresh activation must resolve max_tokens from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.temperature, resolved_manifest.model.temperature,
+        "fresh activation must resolve temperature from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.web_search_augmentation, resolved_manifest.web_search_augmentation,
+        "fresh activation must resolve web_search_augmentation from HAND.toml/defaults"
+    );
+
+    assert_ne!(
+        reactivated_manifest.model.model,
+        runtime_override.model.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.provider,
+        runtime_override.provider.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.api_key_env.as_deref(),
+        runtime_override
+            .api_key_env
+            .unwrap()
+            .unwrap()
+            .as_str()
+            .into()
+    );
+    assert_ne!(
+        reactivated_manifest.model.base_url.as_deref(),
+        runtime_override.base_url.unwrap().as_deref()
+    );
+    assert_ne!(
+        reactivated_manifest.model.max_tokens,
+        runtime_override.max_tokens.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.temperature,
+        runtime_override.temperature.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.web_search_augmentation,
+        runtime_override.web_search_augmentation.unwrap()
     );
 
     kernel.shutdown();
@@ -2395,31 +2586,39 @@ fn atomic_write_no_partial_state_under_concurrency() {
     );
 }
 
-/// Regression: hand `[[settings]]` must survive a daemon restart.
+/// Regression: hand `[[settings]]` must survive a daemon restart (issue
+/// #3143, originally guarded by the boot TOML drift loop).
 ///
-/// Before the fix, `boot_with_config`'s TOML drift detection block would
-/// overwrite the DB manifest with the bare disk TOML — which never carries
-/// the runtime-materialized `## User Configuration` tail. That stripped the
-/// configured settings from the system prompt on every restart until somebody
-/// re-ran `hand activate` by hand. This test pre-populates a hand, an active
-/// hand_state.json, and a DB agent entry whose manifest already carries the
-/// rendered tail (mimicking a previously activated hand), then forces drift
-/// by bumping a non-prompt field on the disk TOML and re-booting. The saved
-/// manifest must still contain the settings tail after boot.
+/// Updated semantics after #a023519d: hand-agent rows in SQLite are no
+/// longer rehydrated by `load_all_agents` (see the explicit
+/// `if entry.is_hand { continue; }` skip). Hand agents are instead rebuilt
+/// from scratch on every daemon restart via
+/// [`LibreFangKernel::activate_hand_with_id`], which is driven by
+/// `start_background_agents` reading `hand_state.json`. The tail-render
+/// responsibility moved out of the boot drift loop and into that
+/// activation path, where [`apply_settings_block_to_manifest`] stamps the
+/// `## User Configuration` block before the agent is registered.
+///
+/// This test pins down the post-#a023519d contract: after a simulated
+/// restart, the restored agent's `system_prompt` must carry both the
+/// registry HAND.toml body AND the freshly-rendered settings tail. We
+/// replay the same restore path `start_background_agents` uses (load
+/// saved state, call `activate_hand_with_id`) deterministically, without
+/// spinning up the full async background-agents coroutine — see the
+/// sibling `hand_runtime_override_survives_restart_via_activate_hand_with_id`
+/// for the same pattern.
 #[test]
 fn boot_drift_preserves_hand_settings_tail() {
-    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
-
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().to_path_buf();
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
 
-    // 1) Install a hand definition under registry/hands/<id>/HAND.toml with one [[settings]].
+    // 1) Install a hand definition under registry/hands/<id>/HAND.toml
+    //    with one [[settings]]. Pre-touch `.sync_marker` so `registry_sync`
+    //    treats the cache as fresh and does not wipe our synthetic hand.
     let hand_id = "settingshand";
     let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
     std::fs::create_dir_all(&hand_dir).unwrap();
-    // Suppress registry_sync's network fetch (which would otherwise wipe our
-    // synthetic hand) by pre-touching the freshness marker.
     std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
     let hand_toml = r#"
 id = "settingshand"
@@ -2450,12 +2649,15 @@ system_prompt = "BASE PROMPT"
 "#;
     std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
 
-    // 2) Persist hand_state.json so the drift loop can recover the user's chosen config.
+    // 2) Persist hand_state.json so the restore path can recover the
+    //    user's chosen config. This is the exact file
+    //    `start_background_agents` reads during boot.
+    let instance_id = uuid::Uuid::new_v4();
     let state_json = serde_json::json!({
         "version": 4,
         "instances": [{
             "hand_id": hand_id,
-            "instance_id": uuid::Uuid::new_v4().to_string(),
+            "instance_id": instance_id.to_string(),
             "config": { "stt": "groq" },
             "old_agent_ids": {},
             "coordinator_role": "operator",
@@ -2470,103 +2672,61 @@ system_prompt = "BASE PROMPT"
     )
     .unwrap();
 
-    // 3) Mirror the hand TOML at workspaces/<hand_id>-hand/agent.toml so the
-    //    boot loop's drift detection finds a TOML to compare against. We
-    //    deliberately put a DIFFERENT system_prompt body on disk than what we
-    //    seed into the DB so `disk_manifest != entry.manifest` — forcing the
-    //    drift branch.
-    let workspaces_hand_dir = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("operator");
-    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
-    let workspaces_hand_toml = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("hand.toml");
-    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
-    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
-    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
-
-    // 4) First boot to initialise SQLite + persist a seed agent entry that
-    //    pretends to be a previously-activated hand agent (carries the
-    //    rendered settings tail and a `hand:<id>` tag). Boot once with no
-    //    pre-existing agents, manually save the seed entry through
-    //    `kernel.memory.save_agent`, drop, re-boot.
-    {
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
-
-        let agent_id = AgentId::from_hand_agent(hand_id, "operator", Some(uuid::Uuid::new_v4()));
-        let agent_name = format!("{hand_id}:operator");
-        let mut manifest = librefang_types::agent::AgentManifest {
-            name: agent_name.clone(),
-            description: "operator".to_string(),
-            module: "builtin:chat".to_string(),
-            ..Default::default()
-        };
-        manifest.model.provider = "openrouter".to_string();
-        manifest.model.model = "x".to_string();
-        // The seed prompt mirrors what activation would have stamped: BASE
-        // PROMPT (matching the registry HAND.toml) plus the rendered tail.
-        manifest.model.system_prompt =
-            "BASE PROMPT\n\n---\n\n## User Configuration\n\n- STT: Groq (groq)".to_string();
-        // The drift loop reads hand membership off `manifest.tags` because
-        // AgentEntry.tags is not persisted by save_agent.
-        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()];
-
-        let entry = AgentEntry {
-            id: agent_id,
-            name: agent_name,
-            manifest,
-            state: AgentState::Running,
-            mode: AgentMode::default(),
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-            parent: None,
-            children: vec![],
-            session_id: SessionId::new(),
-            source_toml_path: Some(workspaces_hand_toml.clone()),
-            tags: vec![format!("hand:{hand_id}"), "hand_role:operator".to_string()],
-            identity: Default::default(),
-            onboarding_completed: false,
-            onboarding_completed_at: None,
-            is_hand: false,
-            ..Default::default()
-        };
-        kernel.memory.save_agent(&entry).expect("seed save_agent");
-        kernel.shutdown();
-    }
-
-    // 5) Second boot: drift should fire (disk_manifest's BASE PROMPT v2 differs
-    //    from the seeded BASE PROMPT-with-tail), and the fix re-renders the
-    //    `## User Configuration` tail before save_agent.
+    // 3) Boot the kernel. `HandRegistry::reload_from_disk` runs inside
+    //    `boot_with_config` and ingests our synthetic HAND.toml.
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let agent_name = format!("{hand_id}:operator");
+    // Sanity: the synthetic hand landed in the in-memory registry.
+    assert!(
+        kernel.hand_registry.get_definition(hand_id).is_some(),
+        "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
+    );
+
+    // 4) Replay the restore path manually — exactly what
+    //    `start_background_agents` does for each entry in
+    //    `hand_state.json`, minus the async prelude.
+    let state_path = home_dir.join("data").join("hand_state.json");
+    let saved = librefang_hands::registry::HandRegistry::load_state(&state_path);
+    let saved_hand = saved
+        .into_iter()
+        .find(|s| s.hand_id == hand_id)
+        .expect("hand_state.json must carry the persisted instance");
+
+    let timestamps = saved_hand
+        .activated_at
+        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let instance = kernel
+        .activate_hand_with_id(
+            &saved_hand.hand_id,
+            saved_hand.config,
+            saved_hand.agent_runtime_overrides,
+            saved_hand.instance_id,
+            timestamps,
+        )
+        .expect("activate_hand_with_id should restore the hand");
+
+    // 5) Inspect the restored operator agent's rendered prompt.
+    let agent_id = *instance
+        .agent_ids
+        .get("operator")
+        .expect("operator role must be present in restored instance");
     let restored = kernel
         .registry
-        .find_by_name(&agent_name)
-        .expect("hand agent must be restored from DB");
-    let prompt = restored.manifest.model.system_prompt;
+        .get(agent_id)
+        .expect("restored operator agent must be registered in memory");
+    let prompt = &restored.manifest.model.system_prompt;
     assert!(
-        prompt.contains("BASE PROMPT v2"),
-        "drift must have applied disk TOML body; got: {prompt}"
+        prompt.contains("BASE PROMPT"),
+        "base HAND.toml body must be present; got: {prompt}"
     );
     assert!(
         prompt.contains("## User Configuration"),
-        "settings tail must be re-rendered after drift; got: {prompt}"
+        "settings tail must be rendered by activate_hand_with_id; got: {prompt}"
     );
     assert!(
         prompt.contains("STT"),
@@ -2579,20 +2739,22 @@ system_prompt = "BASE PROMPT"
 /// Regression: hand `## Reference Knowledge` and `## Your Team` tails must
 /// survive a daemon restart (issue #3143).
 ///
-/// Same drift mechanism as `boot_drift_preserves_hand_settings_tail`, but
-/// covers the two other rendered tails the activation path appends to a
-/// hand-derived agent's `system_prompt`. Pre-fix, only the settings tail
-/// was re-rendered after drift — the skill section and team roster were
-/// silently stripped on every restart.
+/// Same updated semantics as `boot_drift_preserves_hand_settings_tail` —
+/// after #a023519d the restore is driven by `activate_hand_with_id` rather
+/// than by `load_all_agents`' TOML drift loop. This test covers the other
+/// two rendered tails that the activation path stamps onto a hand-derived
+/// agent's `system_prompt`:
 ///
-/// Sets up a multi-agent hand whose SKILL.md is loaded into
-/// `def.skill_content`, seeds a DB agent whose manifest carries both
-/// rendered tails, then forces drift via a body-text edit on the disk
-/// TOML. After reboot, both tails must be back.
+/// - `## Reference Knowledge`, sourced from the hand's `SKILL.md` via
+///   [`apply_skill_reference_block_to_manifest`].
+/// - `## Your Team`, the peer roster emitted by
+///   [`apply_team_block_to_manifest`] for multi-agent hands.
+///
+/// Pre-fix, both tails were silently stripped on every restart. The fix
+/// is that activate_hand_with_id always re-renders them from the
+/// HandDefinition, so they come back for free after a reboot.
 #[test]
 fn boot_drift_preserves_skill_and_team_tails() {
-    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
-
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().to_path_buf();
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
@@ -2606,7 +2768,7 @@ fn boot_drift_preserves_skill_and_team_tails() {
 id = "teamhand"
 version = "1.0.0"
 name = "Team Hand"
-description = "drift-test multi-agent hand"
+description = "restart-test multi-agent hand"
 category = "other"
 
 [agents.lead]
@@ -2631,104 +2793,86 @@ model = "x"
 system_prompt = "WORKER PROMPT"
 "#;
     std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
-    // SKILL.md is read by HandRegistry::reload_from_disk and stuffed into
-    // def.skill_content — that's the input to apply_skill_reference_block_to_manifest.
+    // SKILL.md is read by `HandRegistry::reload_from_disk` and stuffed
+    // into `def.skill_content` — the input to
+    // `apply_skill_reference_block_to_manifest`.
     std::fs::write(
         hand_dir.join("SKILL.md"),
         "## Skill\n\nuseful background context",
     )
     .unwrap();
 
-    // Mirror the hand TOML at the workspaces location so the drift loop
-    // finds a TOML to compare against. Force a body-text drift via
-    // BASE PROMPT -> BASE PROMPT v2 — this difference survives the
-    // sanitized projection (manifest_for_diff strips only the rendered
-    // tails, not the base prompt body) so the drift branch fires.
-    let workspaces_hand_dir = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("lead");
-    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
-    let workspaces_hand_toml = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("hand.toml");
-    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
-    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
-    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
+    // Persist hand_state.json so the restore path has something to
+    // recover. `coordinator_role = "lead"` is informational; the
+    // restore path re-derives the coordinator from the HAND.toml.
+    let instance_id = uuid::Uuid::new_v4();
+    let state_json = serde_json::json!({
+        "version": 4,
+        "instances": [{
+            "hand_id": hand_id,
+            "instance_id": instance_id.to_string(),
+            "config": {},
+            "old_agent_ids": {},
+            "coordinator_role": "lead",
+            "status": "Active",
+            "activated_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }]
+    });
+    std::fs::write(
+        home_dir.join("data").join("hand_state.json"),
+        serde_json::to_string_pretty(&state_json).unwrap(),
+    )
+    .unwrap();
 
-    // First boot — initialise SQLite, then seed a DB entry that mimics a
-    // previously-activated lead agent (carries Reference Knowledge + Your
-    // Team tails).
-    {
-        let config = KernelConfig {
-            home_dir: home_dir.clone(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
-
-        let agent_id = AgentId::from_hand_agent(hand_id, "lead", Some(uuid::Uuid::new_v4()));
-        let agent_name = format!("{hand_id}:lead");
-        let mut manifest = librefang_types::agent::AgentManifest {
-            name: agent_name.clone(),
-            description: "lead agent".to_string(),
-            module: "builtin:chat".to_string(),
-            ..Default::default()
-        };
-        manifest.model.provider = "openrouter".to_string();
-        manifest.model.model = "x".to_string();
-        manifest.model.system_prompt = "BASE PROMPT\n\n---\n\n## Reference Knowledge\n\nuseful background context\n\n## Your Team\n\n- **worker**: executes tasks (use agent_send to message)".to_string();
-        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:lead".to_string()];
-
-        let entry = AgentEntry {
-            id: agent_id,
-            name: agent_name,
-            manifest,
-            state: AgentState::Running,
-            mode: AgentMode::default(),
-            created_at: chrono::Utc::now(),
-            last_active: chrono::Utc::now(),
-            parent: None,
-            children: vec![],
-            session_id: SessionId::new(),
-            source_toml_path: Some(workspaces_hand_toml.clone()),
-            tags: vec![format!("hand:{hand_id}"), "hand_role:lead".to_string()],
-            identity: Default::default(),
-            onboarding_completed: false,
-            onboarding_completed_at: None,
-            is_hand: false,
-            ..Default::default()
-        };
-        kernel.memory.save_agent(&entry).expect("seed save_agent");
-        kernel.shutdown();
-    }
-
-    // Second boot: drift fires (BASE PROMPT vs BASE PROMPT v2 in the
-    // sanitized projection); the fix re-renders both tails before
-    // save_agent persists the new blob.
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let agent_name = format!("{hand_id}:lead");
+    assert!(
+        kernel.hand_registry.get_definition(hand_id).is_some(),
+        "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
+    );
+
+    // Replay the exact restore path used by `start_background_agents`.
+    let state_path = home_dir.join("data").join("hand_state.json");
+    let saved = librefang_hands::registry::HandRegistry::load_state(&state_path);
+    let saved_hand = saved
+        .into_iter()
+        .find(|s| s.hand_id == hand_id)
+        .expect("hand_state.json must carry the persisted instance");
+    let timestamps = saved_hand
+        .activated_at
+        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let instance = kernel
+        .activate_hand_with_id(
+            &saved_hand.hand_id,
+            saved_hand.config,
+            saved_hand.agent_runtime_overrides,
+            saved_hand.instance_id,
+            timestamps,
+        )
+        .expect("activate_hand_with_id should restore the hand");
+
+    let lead_agent_id = *instance
+        .agent_ids
+        .get("lead")
+        .expect("lead role must be present in restored instance");
     let restored = kernel
         .registry
-        .find_by_name(&agent_name)
-        .expect("hand agent must be restored from DB");
-    let prompt = restored.manifest.model.system_prompt;
+        .get(lead_agent_id)
+        .expect("restored lead agent must be registered in memory");
+    let prompt = &restored.manifest.model.system_prompt;
     assert!(
-        prompt.contains("BASE PROMPT v2"),
-        "drift must have applied disk TOML body; got: {prompt}"
+        prompt.contains("BASE PROMPT"),
+        "base HAND.toml body must be present; got: {prompt}"
     );
     assert!(
         prompt.contains("## Reference Knowledge"),
-        "Reference Knowledge tail must be re-rendered after drift; got: {prompt}"
+        "Reference Knowledge tail must be rendered on restart; got: {prompt}"
     );
     assert!(
         prompt.contains("useful background context"),
@@ -2736,70 +2880,415 @@ system_prompt = "WORKER PROMPT"
     );
     assert!(
         prompt.contains("## Your Team"),
-        "Your Team tail must be re-rendered after drift; got: {prompt}"
+        "Your Team tail must be rendered on restart; got: {prompt}"
     );
     assert!(
         prompt.contains("- **worker**:"),
-        "peer line must be present; got: {prompt}"
+        "peer roster line must be present; got: {prompt}"
     );
 
     kernel.shutdown();
 }
 
-/// Regression: when only the rendered tails differ (no real TOML drift),
-/// the boot loop must NOT treat that as a meaningful diff and must NOT
-/// rewrite the DB blob unnecessarily. The sanitized `manifest_for_diff`
-/// projection covers this — without it, every restart of a hand-with-tails
-/// agent would burn a save_agent write even when the source TOML was
-/// unchanged.
+// NOTE: two companion tests were removed here (see git log for
+// `boot_drift_skipped_when_only_rendered_tails_differ` and
+// `boot_drift_skips_tail_render_when_hand_role_tag_missing`). Both
+// scenarios exercised the pre-#a023519d TOML drift loop inside
+// `load_all_agents`, which is no longer reached for `is_hand = true`
+// rows — the `if entry.is_hand { continue; }` guard now short-circuits
+// them before any drift / tail-render logic runs.
+//
+//   - "skipped when only rendered tails differ" asserted that the drift
+//     loop's sanitized `manifest_for_diff` projection avoided an
+//     unnecessary save_agent write when only tail content had changed.
+//     That write budget no longer exists in the hand-agent restore path
+//     because hand agents are not persisted-through-restart at all:
+//     they're rebuilt from HAND.toml + hand_state.json every boot via
+//     `activate_hand_with_id`, so "drift detection" has nothing to
+//     compare against. The test has no behavioural analogue left.
+//
+//   - "skips tail render when hand_role tag missing" was a negative-path
+//     guard for the drift loop's reliance on the legacy `hand_role:`
+//     manifest tag to pick the per-role tail override. The restore path
+//     now derives the role from the HAND.toml `[agents.<role>]` key
+//     rather than from a tag on the DB row, so the missing-tag failure
+//     mode it covered cannot occur.
+//
+// The surviving two tests above
+// (`boot_drift_preserves_hand_settings_tail` and
+// `boot_drift_preserves_skill_and_team_tails`) pin the behaviour that
+// still matters: every tail (`## User Configuration`,
+// `## Reference Knowledge`, `## Your Team`) must be present on the
+// restored manifest after a simulated restart through
+// `activate_hand_with_id`.
+
+/// Deterministic regression for the hand runtime-override persistence fix:
+///
+/// 1. Boot a kernel against a tempdir home_dir.
+/// 2. Activate the `apitester` hand.
+/// 3. Apply a `HandAgentRuntimeOverride` covering model, provider, max_tokens,
+///    temperature and `web_search_augmentation` via
+///    [`LibreFangKernel::update_hand_agent_runtime_override`].
+/// 4. Persist hand state and shut the kernel down.
+/// 5. Boot a fresh kernel from the same home_dir, then directly exercise the
+///    same restore path as `start_background_agents`: load `hand_state.json`
+///    and call `activate_hand_with_id` with the persisted overrides. This
+///    avoids running the full `start_background_agents` coroutine (which
+///    performs network-y registry sync + context engine bootstrap + periodic
+///    probes) and keeps the test deterministic and runtime-free.
+/// 6. Assert the restored manifest carries every override field.
+///
+/// The heavier end-to-end variant that drives `start_background_agents`
+/// through a dedicated tokio runtime lives below this one and is `#[ignore]`d
+/// — see the comment there for why.
 #[test]
-fn boot_drift_skipped_when_only_rendered_tails_differ() {
+fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-hand-override-restart");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    // ── Boot 1: activate apitester, apply override, persist, shutdown ──
+    let override_cfg = librefang_hands::HandAgentRuntimeOverride {
+        model: Some("test-override-model".to_string()),
+        provider: Some("test-override-provider".to_string()),
+        max_tokens: Some(54321),
+        temperature: Some(0.37),
+        web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+        ..Default::default()
+    };
+
+    let (persisted_agent_id, persisted_instance_id) = {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+            Ok(inst) => inst,
+            Err(e) if e.to_string().contains("unsatisfied requirements") => {
+                eprintln!("Skipping test: {e}");
+                kernel.shutdown();
+                return;
+            }
+            Err(e) => panic!("apitester hand should activate: {e}"),
+        };
+        let agent_id = instance.agent_id().expect("apitester hand agent id");
+
+        kernel
+            .update_hand_agent_runtime_override(agent_id, override_cfg.clone())
+            .expect("runtime override should apply");
+
+        // Sanity: in-memory manifest already carries the overrides.
+        let entry = kernel
+            .registry
+            .get(agent_id)
+            .expect("apitester hand agent entry");
+        assert_eq!(entry.manifest.model.model, "test-override-model");
+        assert_eq!(entry.manifest.model.provider, "test-override-provider");
+        assert_eq!(entry.manifest.model.max_tokens, 54321);
+        assert!((entry.manifest.model.temperature - 0.37).abs() < 1e-6);
+        assert_eq!(
+            entry.manifest.web_search_augmentation,
+            WebSearchAugmentationMode::Always
+        );
+
+        // `update_hand_agent_runtime_override` already calls persist_hand_state
+        // internally — calling it again is idempotent and documents intent.
+        kernel.persist_hand_state();
+
+        let result = (agent_id, instance.instance_id);
+        kernel.shutdown();
+        result
+    };
+
+    // ── Boot 2: reload saved state and replay the restore path manually ──
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+
+    let state_path = home_dir.join("data").join("hand_state.json");
+    let saved = librefang_hands::registry::HandRegistry::load_state(&state_path);
+    assert!(
+        !saved.is_empty(),
+        "hand_state.json should carry the persisted apitester instance"
+    );
+    let saved_hand = saved
+        .into_iter()
+        .find(|s| s.hand_id == "apitester")
+        .expect("apitester entry in hand_state.json");
+    assert_eq!(
+        saved_hand.instance_id,
+        Some(persisted_instance_id),
+        "persisted instance_id must round-trip through hand_state.json"
+    );
+    let persisted_override = saved_hand
+        .agent_runtime_overrides
+        .values()
+        .next()
+        .cloned()
+        .expect("agent_runtime_overrides must be persisted for the hand's role");
+    assert_eq!(persisted_override, override_cfg);
+
+    // Replay exactly what `start_background_agents` does for hand restoration,
+    // minus the async prelude.
+    let timestamps = saved_hand
+        .activated_at
+        .and_then(|a| saved_hand.updated_at.map(|u| (a, u)));
+    let restored_instance = kernel
+        .activate_hand_with_id(
+            &saved_hand.hand_id,
+            saved_hand.config.clone(),
+            saved_hand.agent_runtime_overrides.clone(),
+            saved_hand.instance_id,
+            timestamps,
+        )
+        .expect("activate_hand_with_id should restore apitester");
+
+    let restored_agent_id = restored_instance
+        .agent_id()
+        .expect("restored apitester agent id");
+    // Note: the first activation goes through `activate_hand` which passes
+    // `instance_id = None` to `AgentId::from_hand_agent` (legacy format),
+    // while the restart path uses `Some(instance_id)` (new format). So the
+    // deterministic ids *differ by design* between the two boots — the
+    // invariant we actually care about for this regression is that the
+    // restored manifest carries the persisted overrides, not that the
+    // agent-id byte pattern is stable across the format bump.
+    let _ = persisted_agent_id;
+
+    let restored_entry = kernel
+        .registry
+        .get(restored_agent_id)
+        .expect("restored apitester agent entry");
+    let m = &restored_entry.manifest;
+    assert_eq!(
+        m.model.model, "test-override-model",
+        "model override must be re-applied on restart"
+    );
+    assert_eq!(
+        m.model.provider, "test-override-provider",
+        "provider override must be re-applied on restart"
+    );
+    assert_eq!(
+        m.model.max_tokens, 54321,
+        "max_tokens override must be re-applied on restart"
+    );
+    assert!(
+        (m.model.temperature - 0.37).abs() < 1e-6,
+        "temperature override must be re-applied on restart (got {})",
+        m.model.temperature
+    );
+    assert_eq!(
+        m.web_search_augmentation,
+        WebSearchAugmentationMode::Always,
+        "web_search_augmentation override must be re-applied on restart"
+    );
+
+    kernel.shutdown();
+}
+
+/// Full end-to-end variant that drives hand restoration through
+/// `start_background_agents`. Ignored by default because that coroutine pulls
+/// in the registry sync + context-engine bootstrap + periodic background
+/// probes, which are network/time dependent and therefore flaky under
+/// sandboxed CI. The deterministic path above
+/// (`hand_runtime_override_survives_restart_via_activate_hand_with_id`)
+/// covers the same restore logic without those barriers. Keep this test
+/// around so a human can run it locally with
+/// `cargo test -p librefang-kernel -- --ignored` when regressing the fix.
+#[test]
+#[ignore = "exercises async start_background_agents — flaky in offline/sandbox CI; see sibling deterministic test"]
+fn hand_runtime_override_survives_restart_via_start_background_agents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-kernel-hand-override-restart-e2e");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let override_cfg = librefang_hands::HandAgentRuntimeOverride {
+        model: Some("e2e-override-model".to_string()),
+        provider: Some("e2e-override-provider".to_string()),
+        max_tokens: Some(13579),
+        temperature: Some(0.42),
+        web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+        ..Default::default()
+    };
+
+    // Boot 1: activate + override + persist + shutdown.
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+        let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+            Ok(inst) => inst,
+            Err(e) if e.to_string().contains("unsatisfied requirements") => {
+                eprintln!("Skipping test: {e}");
+                kernel.shutdown();
+                return;
+            }
+            Err(e) => panic!("apitester hand should activate: {e}"),
+        };
+        let agent_id = instance.agent_id().expect("apitester hand agent id");
+        kernel
+            .update_hand_agent_runtime_override(agent_id, override_cfg.clone())
+            .expect("runtime override should apply");
+        kernel.persist_hand_state();
+        kernel.shutdown();
+    }
+
+    // Boot 2: run `start_background_agents` through a dedicated current-thread
+    // tokio runtime. We can't use `#[tokio::test]` because `LibreFangKernel`
+    // spawns background tasks on a tokio runtime during boot and must be
+    // constructed outside of an async context in this codebase.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("second boot"));
+    kernel.set_self_handle();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        kernel.start_background_agents().await;
+    });
+
+    let instance = kernel
+        .hand_registry
+        .list_instances()
+        .into_iter()
+        .find(|i| i.hand_id == "apitester")
+        .expect("apitester instance must be restored by start_background_agents");
+    let agent_id = instance.agent_id().expect("restored apitester agent id");
+    let entry = kernel
+        .registry
+        .get(agent_id)
+        .expect("restored apitester agent entry");
+    let m = &entry.manifest;
+    assert_eq!(m.model.model, "e2e-override-model");
+    assert_eq!(m.model.provider, "e2e-override-provider");
+    assert_eq!(m.model.max_tokens, 13579);
+    assert!((m.model.temperature - 0.42).abs() < 1e-6);
+    assert_eq!(m.web_search_augmentation, WebSearchAugmentationMode::Always);
+
+    // Explicitly drop the runtime before shutdown so background tasks can
+    // settle without racing with `shutdown()`.
+    drop(rt);
+    // `kernel` is an Arc; unwrap for shutdown.
+    let kernel = Arc::try_unwrap(kernel)
+        .ok()
+        .expect("kernel Arc should have no outstanding clones");
+    kernel.shutdown();
+}
+
+/// After `deactivate_hand`, the SQLite `agents` row for every agent owned
+/// by the instance must be gone — even when the agents are no longer in the
+/// in-memory registry (the restart scenario).
+///
+/// `kill_agent` already calls `memory.remove_agent` on its happy path, but
+/// it bails out early at `registry.remove(agent_id)?` when the agent isn't
+/// registered. Hand-agents fall into exactly that path after a restart,
+/// because #a023519d skips `is_hand=true` rows in `load_all_agents` so
+/// they never get rehydrated into the in-memory registry. To reproduce the
+/// regression without a full second boot we manually evict the agents from
+/// the registry before calling `deactivate_hand` and assert the SQLite row
+/// is still scrubbed.
+#[test]
+fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-deactivate-gc");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
+
+    let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+
+    // Snapshot all agent ids this instance owns before we tear it down.
+    let agent_ids: Vec<_> = instance.agent_ids.values().copied().collect();
+    assert!(
+        !agent_ids.is_empty(),
+        "hand activation should yield at least one agent"
+    );
+    for id in &agent_ids {
+        assert!(
+            kernel
+                .memory
+                .load_agent(*id)
+                .expect("load_agent before deactivate")
+                .is_some(),
+            "hand-agent row must exist in SQLite before deactivate (id={id})"
+        );
+    }
+
+    // Simulate the post-restart state: hand_registry still knows the
+    // instance (from hand_state.json), but the in-memory agent registry
+    // never rehydrated it (since `load_all_agents` skips is_hand rows).
+    // This is the exact edge case where the plain `kill_agent` call would
+    // Err out without touching the SQLite row — the scenario the new
+    // explicit `memory.remove_agent` pass in `deactivate_hand` covers.
+    for id in &agent_ids {
+        let _ = kernel.registry.remove(*id);
+    }
+
+    kernel
+        .deactivate_hand(instance.instance_id)
+        .expect("deactivate_hand should succeed");
+
+    for id in &agent_ids {
+        assert!(
+            kernel
+                .memory
+                .load_agent(*id)
+                .expect("load_agent after deactivate")
+                .is_none(),
+            "hand-agent row must be gone from SQLite after deactivate (id={id})"
+        );
+    }
+
+    kernel.shutdown();
+}
+
+/// On boot, every `is_hand = true` row in SQLite that is NOT claimed by an
+/// active `HandInstance` must be GC'd. Simulates the crash-leak scenario:
+/// a hand-agent row persists in the DB (perhaps from a daemon that crashed
+/// mid-deactivate, or a pre-#a023519d install), but no `hand_state.json`
+/// references it, so nothing restores it. Without GC the row would linger
+/// forever because `load_all_agents` skips `is_hand` entries.
+#[test]
+fn boot_gc_removes_orphaned_hand_agent_rows() {
     use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 
     let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().to_path_buf();
+    let home_dir = tmp.path().join("librefang-kernel-boot-gc");
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
 
-    let hand_id = "stillhand";
-    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
-    std::fs::create_dir_all(&hand_dir).unwrap();
-    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
-
-    let hand_toml = r#"
-id = "stillhand"
-version = "1.0.0"
-name = "Still Hand"
-description = "no-drift test"
-category = "other"
-
-[agents.main]
-name = "operator"
-description = "the only agent"
-module = "builtin:chat"
-
-[agents.main.model]
-provider = "openrouter"
-model = "x"
-system_prompt = "STABLE PROMPT"
-"#;
-    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
-    std::fs::write(hand_dir.join("SKILL.md"), "stable skill notes").unwrap();
-
-    let workspaces_hand_dir = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("main");
-    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
-    let workspaces_hand_toml = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("hand.toml");
-    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
-    // Disk TOML matches registry exactly — no real source-of-truth drift.
-    std::fs::write(&workspaces_hand_toml, hand_toml).unwrap();
-
+    // First boot: seed a bare `is_hand = true` row with no corresponding
+    // `hand_state.json` entry, then shutdown.
+    let orphan_id = AgentId::new();
     {
         let config = KernelConfig {
             home_dir: home_dir.clone(),
@@ -2808,26 +3297,19 @@ system_prompt = "STABLE PROMPT"
         };
         let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
 
-        let agent_id = AgentId::from_hand_agent(hand_id, "main", Some(uuid::Uuid::new_v4()));
-        let agent_name = format!("{hand_id}:operator");
         let mut manifest = librefang_types::agent::AgentManifest {
-            name: agent_name.clone(),
-            description: "the only agent".to_string(),
+            name: "orphan-hand-agent".to_string(),
+            description: "stale hand-agent row".to_string(),
             module: "builtin:chat".to_string(),
             ..Default::default()
         };
+        manifest.is_hand = true;
         manifest.model.provider = "openrouter".to_string();
         manifest.model.model = "x".to_string();
-        // Seeded prompt carries the rendered Reference Knowledge tail.
-        // Without manifest_for_diff this would always look "different"
-        // from the bare disk TOML and trigger a clobber every boot.
-        manifest.model.system_prompt =
-            "STABLE PROMPT\n\n---\n\n## Reference Knowledge\n\nstable skill notes".to_string();
-        manifest.tags = vec![format!("hand:{hand_id}"), "hand_role:main".to_string()];
 
         let entry = AgentEntry {
-            id: agent_id,
-            name: agent_name,
+            id: orphan_id,
+            name: "orphan-hand-agent".to_string(),
             manifest,
             state: AgentState::Running,
             mode: AgentMode::default(),
@@ -2836,108 +3318,64 @@ system_prompt = "STABLE PROMPT"
             parent: None,
             children: vec![],
             session_id: SessionId::new(),
-            source_toml_path: Some(workspaces_hand_toml.clone()),
-            tags: vec![format!("hand:{hand_id}"), "hand_role:main".to_string()],
+            source_toml_path: None,
+            tags: vec![],
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
-            is_hand: false,
+            is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        assert!(
+            kernel
+                .memory
+                .load_agent(orphan_id)
+                .expect("load_agent after seed")
+                .is_some(),
+            "seed row must be in SQLite before GC runs"
+        );
         kernel.shutdown();
     }
 
+    // Second boot: GC runs inside `start_background_agents`. Spin up the
+    // kernel and drive that explicitly — `boot_with_config` alone doesn't
+    // invoke the background path.
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("second boot"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        kernel.start_background_agents().await;
+    });
 
-    let agent_name = format!("{hand_id}:operator");
-    let restored = kernel
-        .registry
-        .find_by_name(&agent_name)
-        .expect("hand agent must be restored from DB");
-    let prompt = restored.manifest.model.system_prompt;
-    // Tail must still be intact — drift did not fire, so the seeded
-    // tail-carrying prompt is what we get back.
     assert!(
-        prompt.starts_with("STABLE PROMPT"),
-        "base body must be unchanged; got: {prompt}"
-    );
-    assert!(
-        prompt.contains("## Reference Knowledge"),
-        "tail must survive a no-op restart; got: {prompt}"
+        kernel
+            .memory
+            .load_agent(orphan_id)
+            .expect("load_agent after GC")
+            .is_none(),
+        "boot GC must remove orphaned is_hand=true row (id={orphan_id})"
     );
 
     kernel.shutdown();
 }
 
-/// Negative-path coverage for the `hand_role:` tag lookup at
-/// `kernel/mod.rs:~3057`. When a hand-derived agent carries the `hand:<id>`
-/// tag but is missing the `hand_role:<role>` companion (e.g. activated by an
-/// older codepath that didn't stamp it, or a hand-stitched record imported
-/// from elsewhere), the drift branch must:
-///
-///   1. Not panic — the role lookup is a guard, not an assertion.
-///   2. Apply the disk TOML body change so config edits still propagate.
-///   3. Skip the skill / team re-render — without the role we can't pick the
-///      right per-role override, so we'd rather drop the rendered tails than
-///      stamp the wrong content.
-///
-/// The next `hand activate` re-stamps both tags and restores the tails; this
-/// test only proves the boot path degrades gracefully in the meantime.
 #[test]
-fn boot_drift_skips_tail_render_when_hand_role_tag_missing() {
+fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
     use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 
     let tmp = tempfile::tempdir().unwrap();
-    let home_dir = tmp.path().to_path_buf();
+    let home_dir = tmp.path().join("librefang-kernel-boot-gc-corrupt");
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
 
-    let hand_id = "rolelesshand";
-    let hand_dir = home_dir.join("registry").join("hands").join(hand_id);
-    std::fs::create_dir_all(&hand_dir).unwrap();
-    std::fs::write(home_dir.join("registry").join(".sync_marker"), "").unwrap();
-
-    let hand_toml = r#"
-id = "rolelesshand"
-version = "1.0.0"
-name = "Roleless Hand"
-description = "missing-role drift test"
-category = "other"
-
-[agents.main]
-name = "operator"
-description = "the only agent"
-module = "builtin:chat"
-
-[agents.main.model]
-provider = "openrouter"
-model = "x"
-system_prompt = "BASE PROMPT"
-"#;
-    std::fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
-    std::fs::write(hand_dir.join("SKILL.md"), "skill notes").unwrap();
-
-    let workspaces_hand_dir = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("main");
-    std::fs::create_dir_all(&workspaces_hand_dir).unwrap();
-    let workspaces_hand_toml = home_dir
-        .join("workspaces")
-        .join("hands")
-        .join(hand_id)
-        .join("hand.toml");
-    std::fs::create_dir_all(workspaces_hand_toml.parent().unwrap()).unwrap();
-    // Force a body-text drift so the drift branch fires.
-    let drift_toml = hand_toml.replace("BASE PROMPT", "BASE PROMPT v2");
-    std::fs::write(&workspaces_hand_toml, drift_toml).unwrap();
-
+    let orphan_id = AgentId::new();
     {
         let config = KernelConfig {
             home_dir: home_dir.clone(),
@@ -2946,24 +3384,19 @@ system_prompt = "BASE PROMPT"
         };
         let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
 
-        let agent_id = AgentId::from_hand_agent(hand_id, "main", Some(uuid::Uuid::new_v4()));
-        let agent_name = format!("{hand_id}:operator");
         let mut manifest = librefang_types::agent::AgentManifest {
-            name: agent_name.clone(),
-            description: "the only agent".to_string(),
+            name: "orphan-hand-agent-corrupt".to_string(),
+            description: "stale hand-agent row".to_string(),
             module: "builtin:chat".to_string(),
             ..Default::default()
         };
+        manifest.is_hand = true;
         manifest.model.provider = "openrouter".to_string();
         manifest.model.model = "x".to_string();
-        manifest.model.system_prompt =
-            "BASE PROMPT\n\n---\n\n## Reference Knowledge\n\nskill notes".to_string();
-        // Crucial: only the `hand:` tag is stamped — `hand_role:` is missing.
-        manifest.tags = vec![format!("hand:{hand_id}")];
 
         let entry = AgentEntry {
-            id: agent_id,
-            name: agent_name,
+            id: orphan_id,
+            name: "orphan-hand-agent-corrupt".to_string(),
             manifest,
             state: AgentState::Running,
             mode: AgentMode::default(),
@@ -2972,43 +3405,232 @@ system_prompt = "BASE PROMPT"
             parent: None,
             children: vec![],
             session_id: SessionId::new(),
-            source_toml_path: Some(workspaces_hand_toml.clone()),
-            tags: vec![format!("hand:{hand_id}")],
+            source_toml_path: None,
+            tags: vec![],
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
-            is_hand: false,
+            is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed save_agent");
+        kernel.memory.save_agent(&entry).expect("seed orphan row");
         kernel.shutdown();
     }
 
-    // Second boot must not panic even though hand_role tag is absent.
+    std::fs::write(home_dir.join("data").join("hand_state.json"), "{not-json")
+        .expect("write corrupt hand_state.json");
+
     let config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("second boot");
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("second boot"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        kernel.start_background_agents().await;
+    });
 
-    let agent_name = format!("{hand_id}:operator");
-    let restored = kernel
+    assert!(
+        kernel
+            .memory
+            .load_agent(orphan_id)
+            .expect("load_agent after skipped GC")
+            .is_some(),
+        "corrupt hand_state.json must suppress orphan GC so rows are not deleted"
+    );
+
+    kernel.shutdown();
+}
+
+/// Covers [`LibreFangKernel::clear_hand_agent_runtime_override`]:
+///
+/// 1. Spawn the `apitester` hand and snapshot its default manifest fields.
+/// 2. Apply a full runtime override via
+///    [`LibreFangKernel::update_hand_agent_runtime_override`] and assert the
+///    live manifest picks up the new values.
+/// 3. Clear via `clear_hand_agent_runtime_override` and assert:
+///    - the manifest is reset to the defaults captured in step 1,
+///    - the per-role entry in `hand_state.agent_runtime_overrides` is gone,
+///    - a second clear returns `Ok(())` (idempotent at the kernel level).
+/// 4. Clearing against an unknown agent id surfaces
+///    [`LibreFangError::AgentNotFound`].
+#[test]
+fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-hand-clear");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+    let agent_id = instance.agent_id().expect("apitester hand agent id");
+    let default_entry = kernel
         .registry
-        .find_by_name(&agent_name)
-        .expect("hand agent must be restored from DB");
-    let prompt = restored.manifest.model.system_prompt;
-    // Drift applied the disk TOML body change.
-    assert!(
-        prompt.contains("BASE PROMPT v2"),
-        "drift must have applied disk TOML body even without hand_role; got: {prompt}"
+        .get(agent_id)
+        .expect("apitester hand agent entry");
+    let default_manifest = default_entry.manifest.clone();
+
+    // Apply override that touches every mapped field so we can prove the
+    // clear is thorough.
+    kernel
+        .update_hand_agent_runtime_override(
+            agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                model: Some("clear-override-model".to_string()),
+                provider: Some("clear-override-provider".to_string()),
+                api_key_env: Some(Some("CLEAR_OVERRIDE_KEY".to_string())),
+                base_url: Some(Some("https://clear.example".to_string())),
+                max_tokens: Some(9999),
+                temperature: Some(0.11),
+                web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+            },
+        )
+        .expect("apply override");
+    let overridden = kernel
+        .registry
+        .get(agent_id)
+        .expect("apitester hand agent entry post-override");
+    assert_eq!(overridden.manifest.model.model, "clear-override-model");
+    assert_eq!(overridden.manifest.model.max_tokens, 9999);
+
+    // Clear and check the manifest is back to defaults.
+    kernel
+        .clear_hand_agent_runtime_override(agent_id)
+        .expect("clear override");
+    let cleared = kernel
+        .registry
+        .get(agent_id)
+        .expect("apitester hand agent entry post-clear");
+    assert_eq!(
+        cleared.manifest.model.model, default_manifest.model.model,
+        "model must match the HAND.toml default after clear"
     );
-    // Reference Knowledge tail is gone — disk_manifest replaced the prompt
-    // and the role-keyed re-render was skipped.
-    assert!(
-        !prompt.contains("## Reference Knowledge"),
-        "skill tail must NOT be re-rendered when hand_role tag is missing; got: {prompt}"
+    assert_eq!(
+        cleared.manifest.model.provider, default_manifest.model.provider,
+        "provider must match the HAND.toml default after clear"
     );
+    assert_eq!(
+        cleared.manifest.model.api_key_env, default_manifest.model.api_key_env,
+        "api_key_env must match the HAND.toml default after clear"
+    );
+    assert_eq!(
+        cleared.manifest.model.base_url, default_manifest.model.base_url,
+        "base_url must match the HAND.toml default after clear"
+    );
+    assert_eq!(
+        cleared.manifest.model.max_tokens, default_manifest.model.max_tokens,
+        "max_tokens must match the HAND.toml default after clear"
+    );
+    assert!(
+        (cleared.manifest.model.temperature - default_manifest.model.temperature).abs() < 1e-6,
+        "temperature must match the HAND.toml default after clear"
+    );
+    assert_eq!(
+        cleared.manifest.web_search_augmentation, default_manifest.web_search_augmentation,
+        "web_search_augmentation must match the HAND.toml default after clear"
+    );
+
+    // hand_state must no longer carry the per-role entry.
+    let restored_instance = kernel
+        .hand_registry
+        .get_instance(instance.instance_id)
+        .expect("instance still active");
+    assert!(
+        restored_instance.agent_runtime_overrides.is_empty(),
+        "hand_state.agent_runtime_overrides must be empty after clear, got {:?}",
+        restored_instance.agent_runtime_overrides
+    );
+
+    // Second clear is a no-op — the kernel helper returns `Ok(())` even
+    // though the hand registry reports `Ok(None)` for the removal.
+    kernel
+        .clear_hand_agent_runtime_override(agent_id)
+        .expect("second clear is idempotent");
+
+    // Unknown agent id ⇒ AgentNotFound.
+    let missing = kernel.clear_hand_agent_runtime_override(AgentId::new());
+    assert!(
+        matches!(
+            missing,
+            Err(KernelError::LibreFang(LibreFangError::AgentNotFound(_)))
+        ),
+        "unknown agent id should surface AgentNotFound, got {missing:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-hand-merge");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+    let agent_id = instance.agent_id().expect("apitester hand agent id");
+
+    kernel
+        .update_hand_agent_runtime_override(
+            agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                model: Some("merged-model".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("apply model override");
+    kernel
+        .update_hand_agent_runtime_override(
+            agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                provider: Some("merged-provider".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("apply provider override");
+
+    let restored_instance = kernel
+        .hand_registry
+        .get_instance(instance.instance_id)
+        .expect("instance still active");
+    let persisted = restored_instance
+        .agent_runtime_overrides
+        .values()
+        .next()
+        .expect("override entry must exist");
+    assert_eq!(persisted.model.as_deref(), Some("merged-model"));
+    assert_eq!(persisted.provider.as_deref(), Some("merged-provider"));
 
     kernel.shutdown();
 }
@@ -3447,6 +4069,185 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
         "second handle must observe the permit held by the first call"
     );
     drop(permit);
+
+    kernel.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// push_notification routing — locks the global-fallback match arm.
+//
+// `push_notification` resolves the delivery target list from
+// (event_type, agent_id) against `notification.agent_rules` first, and falls
+// back to `notification.alert_channels` / `approval_channels` based on the
+// event_type. Heartbeat alerts (`event_type = "health_check_failed"`) are
+// supposed to land in `alert_channels` alongside `task_failed` /
+// `tool_failure` — these tests pin that contract so a future refactor of
+// the match arm cannot silently disable it (see #3218).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_falls_back_to_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["ops:agent unresponsive".to_string()],
+        "health_check_failed must fall back to alert_channels when no agent_rule matches"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        // alert_channels is set but should be ignored — agent_rule wins.
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: "*".to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "heartbeat-topic".to_string(),
+                thread_id: None,
+            }],
+            events: vec!["health_check_failed".to_string()],
+        }],
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("worker-7", "health_check_failed", "agent unresponsive")
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["heartbeat-topic:agent unresponsive".to_string()],
+        "matching agent_rule must override alert_channels for health_check_failed"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_no_targets_when_unconfigured() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // No agent_rules, no alert_channels — heartbeat must stay silent rather
+    // than panic or accidentally fan out somewhere.
+    config.notification = NotificationConfig::default();
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .await;
+
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "push_notification with no configured targets must produce no sends"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_unknown_event_type_yields_no_targets() {
+    // Regression: the global-fallback match arm has an explicit allowlist
+    // (`approval_requested` / `task_completed` / `task_failed` / `tool_failure`
+    // / `health_check_failed`). Anything else must produce zero targets — a
+    // typo in event_type should never accidentally page operators.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "approvals".to_string(),
+            thread_id: None,
+        }],
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "alerts".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "totally_made_up_event", "should not deliver")
+        .await;
+
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "unknown event_type must not deliver to any global channel"
+    );
 
     kernel.shutdown();
 }

@@ -1401,10 +1401,18 @@ pub async fn configure_channel(
         }
     }
 
-    // Write config.toml section
-    if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
-        return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
-            .into_json_tuple();
+    // Write config.toml section. Hold `config_write_lock` so we serialize
+    // against `POST /api/config/set` (which holds the same mutex). Without
+    // the lock, an interleaved provider write could be silently overwritten
+    // when this path's read-modify-write completes — see issue #3183. The
+    // guard is dropped at end of scope, before the hot-reload await below,
+    // so it does not gate channel reloads.
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+        if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
+            return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
+                .into_json_tuple();
+        }
     }
 
     // Hot-reload: activate the channel immediately
@@ -1480,10 +1488,14 @@ pub async fn remove_channel(
         }
     }
 
-    // Remove config section
-    if let Err(e) = remove_channel_config(&config_path, &name) {
-        return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
-            .into_json_tuple();
+    // Remove config section. Same locking discipline as `configure_channel`
+    // — see issue #3183 for the race scenario.
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+        if let Err(e) = remove_channel_config(&config_path, &name) {
+            return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
+                .into_json_tuple();
+        }
     }
 
     // Hot-reload: deactivate the channel immediately

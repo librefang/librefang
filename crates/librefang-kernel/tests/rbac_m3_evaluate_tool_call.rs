@@ -76,6 +76,7 @@ fn user(
         role: role.to_string(),
         channel_bindings: bindings,
         api_key_hash: None,
+        budget: None,
         tool_policy,
         tool_categories,
         memory_access: None,

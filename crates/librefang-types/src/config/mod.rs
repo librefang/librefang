@@ -137,6 +137,71 @@ mod tests {
     }
 
     #[test]
+    fn channel_role_mapping_full_toml_roundtrip() {
+        // All three platforms populated.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+creator_role = "owner"
+member_role = "user"
+
+[channel_role_mapping.discord]
+role_map = { "Moderator" = "admin", "Member" = "user", "Guest" = "viewer" }
+
+[channel_role_mapping.slack]
+admin_role = "admin"
+member_role = "user"
+guest_role = "viewer"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).expect("toml parse");
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert_eq!(tg.creator_role.as_deref(), Some("owner"));
+        assert_eq!(tg.member_role.as_deref(), Some("user"));
+
+        let dc = cfg.channel_role_mapping.discord.as_ref().unwrap();
+        assert_eq!(dc.role_map.get("Moderator"), Some(&"admin".to_string()));
+        assert_eq!(dc.role_map.get("Guest"), Some(&"viewer".to_string()));
+
+        let sl = cfg.channel_role_mapping.slack.as_ref().unwrap();
+        assert_eq!(sl.admin_role.as_deref(), Some("admin"));
+        assert_eq!(sl.guest_role.as_deref(), Some("viewer"));
+        assert!(sl.owner_role.is_none()); // Not set in source.
+
+        // Round-trip back to TOML and reparse — survives serialization.
+        let serialized = toml::to_string(&cfg).expect("toml serialize");
+        let reparsed: KernelConfig = toml::from_str(&serialized).expect("toml reparse");
+        assert!(!reparsed.channel_role_mapping.is_empty());
+    }
+
+    #[test]
+    fn channel_role_mapping_partial_toml() {
+        // Only Telegram configured — other platforms fall through to None.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).unwrap();
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert!(tg.creator_role.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+    }
+
+    #[test]
+    fn channel_role_mapping_empty_default() {
+        let cfg = KernelConfig::default();
+        assert!(cfg.channel_role_mapping.is_empty());
+        assert!(cfg.channel_role_mapping.telegram.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+        // Empty mapping serialises to empty TOML output (skip_serializing_if).
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("[channel_role_mapping"));
+    }
+
+    #[test]
     fn test_user_config_serde() {
         let uc = UserConfig {
             name: "Alice".to_string(),
@@ -147,6 +212,7 @@ mod tests {
                 m
             },
             api_key_hash: None,
+            budget: None,
             tool_policy: None,
             tool_categories: None,
             memory_access: None,
@@ -177,6 +243,7 @@ mod tests {
             role: "user".to_string(),
             channel_bindings: std::collections::HashMap::new(),
             api_key_hash: None,
+            budget: None,
             tool_policy: Some(UserToolPolicy {
                 allowed_tools: vec!["web_*".to_string()],
                 denied_tools: vec!["shell_exec".to_string()],
@@ -564,6 +631,230 @@ mod tests {
         config.web.fetch.timeout_secs = 0;
         config.clamp_bounds();
         assert_eq!(config.web.fetch.timeout_secs, 30);
+    }
+
+    /// PR #3203 review item — `UserBudgetConfig::alert_threshold` is
+    /// documented "clamped to 0..=1" but the field is bare `f64`. Without
+    /// the clamp in `clamp_bounds`, an out-of-range value silently makes
+    /// `alert_breach` either permanently false (>1) or permanently true
+    /// (<0), which is exactly what the documentation promises NOT to happen.
+    #[test]
+    fn test_clamp_bounds_user_alert_threshold() {
+        use crate::config::types::{UserBudgetConfig, UserConfig};
+        let mut config = KernelConfig {
+            users: vec![
+                UserConfig {
+                    name: "TooHigh".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: 5.0,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "Negative".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: -0.5,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "NaN".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: f64::NAN,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "InRange".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: 0.65,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        config.clamp_bounds();
+        assert_eq!(
+            config.users[0].budget.as_ref().unwrap().alert_threshold,
+            1.0,
+            "above-1 must clamp DOWN to 1.0"
+        );
+        assert_eq!(
+            config.users[1].budget.as_ref().unwrap().alert_threshold,
+            0.0,
+            "below-0 must clamp UP to 0.0"
+        );
+        assert_eq!(
+            config.users[2].budget.as_ref().unwrap().alert_threshold,
+            0.8,
+            "NaN must reset to default 0.8 (otherwise pct >= NaN is always false)"
+        );
+        assert_eq!(
+            config.users[3].budget.as_ref().unwrap().alert_threshold,
+            0.65,
+            "in-range value must round-trip unchanged"
+        );
+    }
+
+    /// PR #3205 review follow-up — `pii_access`/`export_allowed`/
+    /// `delete_allowed` are no-ops without read access (the runtime
+    /// guard checks the flag AND `readable_namespaces`). An admin who
+    /// toggles a flag without declaring namespaces gets a silent
+    /// privilege misconfiguration. `validate()` must surface this so
+    /// the typo is caught at boot, not at first failed call.
+    #[test]
+    fn test_validate_warns_on_memory_access_flags_without_readable_namespaces() {
+        use crate::config::types::UserConfig;
+        use crate::user_policy::UserMemoryAccess;
+        let config = KernelConfig {
+            users: vec![
+                UserConfig {
+                    name: "PiiTypo".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        pii_access: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+                UserConfig {
+                    name: "ProperlyConfigured".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        pii_access: true,
+                        readable_namespaces: vec!["proactive".into()],
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        let warnings = config.validate();
+        let pii_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("memory_access") && w.contains("readable_namespaces"))
+            .collect();
+        assert_eq!(
+            pii_warnings.len(),
+            1,
+            "exactly one warning expected (PiiTypo only); got: {warnings:#?}"
+        );
+        let w = pii_warnings[0];
+        assert!(w.contains("PiiTypo"), "warning must name the user: {w}");
+        assert!(w.contains("pii_access"), "warning must list the flag: {w}");
+        assert!(
+            !w.contains("ProperlyConfigured"),
+            "warning must NOT name the correctly-configured user: {w}"
+        );
+    }
+
+    /// `delete_allowed` is gated on **write** access (`check_delete` →
+    /// `check_write`), not read access. The earlier validate pass
+    /// grouped it under `readable_namespaces`, which would silently miss
+    /// a user with read-but-no-write + `delete_allowed = true`. This
+    /// test pins the corrected dual-pass semantics: the writable check
+    /// fires independently of the readable check.
+    #[test]
+    fn test_validate_warns_on_delete_allowed_without_writable_namespaces() {
+        use crate::config::types::UserConfig;
+        use crate::user_policy::UserMemoryAccess;
+        let config = KernelConfig {
+            users: vec![
+                // Has readable but NOT writable + delete_allowed = true →
+                // delete will silently fail; must warn.
+                UserConfig {
+                    name: "DeleteTypo".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        readable_namespaces: vec!["proactive".into()],
+                        writable_namespaces: vec![],
+                        delete_allowed: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+                // Properly configured for delete: has writable + flag.
+                // Must NOT trigger the new warning.
+                UserConfig {
+                    name: "DeleteOk".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        readable_namespaces: vec!["proactive".into()],
+                        writable_namespaces: vec!["proactive".into()],
+                        delete_allowed: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        let warnings = config.validate();
+        let delete_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("delete_allowed") && w.contains("writable_namespaces"))
+            .collect();
+        assert_eq!(
+            delete_warnings.len(),
+            1,
+            "exactly one warning expected (DeleteTypo only); got: {warnings:#?}"
+        );
+        let w = delete_warnings[0];
+        assert!(w.contains("DeleteTypo"), "warning must name the user: {w}");
+        assert!(
+            !w.contains("DeleteOk"),
+            "warning must NOT name the correctly-configured user: {w}"
+        );
     }
 
     #[test]
