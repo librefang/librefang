@@ -708,30 +708,44 @@ pub async fn rotate_user_key(
     };
 
     let target = name.clone();
-    let result = persist_users(&state, move |users| -> Result<(), PersistError> {
-        let idx = users
-            .iter()
-            .position(|u| u.name == target)
-            .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
-        // Preserve every other field — rotation only swaps `api_key_hash`,
-        // it must not zero out budget / RBAC M3 policy / channel bindings.
-        users[idx].api_key_hash = Some(new_hash);
-        Ok(())
-    })
-    .await;
+    // Capture the OLD `api_key_hash` (pre-rotation) so we can compute a
+    // short audit fingerprint AFTER the persist succeeds — without it
+    // an audit entry like `"api_key rotated by alice for user bob"`
+    // is forensically useless when correlating with an authentication
+    // log line "auth failed with leaked key X". The fingerprint is the
+    // first 8 hex chars of `sha256(old_argon2_hash)` — a hash-of-hash —
+    // so we never write any plaintext or any reversibly-related material
+    // into the audit log; the operator just gets a stable correlation
+    // ID for the just-revoked credential.
+    let result =
+        persist_users(&state, move |users| -> Result<Option<String>, PersistError> {
+            let idx = users
+                .iter()
+                .position(|u| u.name == target)
+                .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
+            let old_hash = users[idx].api_key_hash.clone();
+            // Preserve every other field — rotation only swaps `api_key_hash`,
+            // it must not zero out budget / RBAC M3 policy / channel bindings.
+            users[idx].api_key_hash = Some(new_hash);
+            Ok(old_hash)
+        })
+        .await;
 
     // The post-rotation `UserConfig` isn't part of the response shape (no
     // leakage of the new hash) but we still need to drive `persist_users`
     // through the on-disk write + reload + middleware-snapshot refresh
-    // before serializing the success body. Discard the captured value.
-    if let Err(e) = result {
-        return match e {
-            PersistError::NotFound(m) => err_response(StatusCode::NOT_FOUND, m),
-            PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
-            PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
-            PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        };
-    }
+    // before serializing the success body.
+    let old_hash = match result {
+        Ok(h) => h,
+        Err(e) => {
+            return match e {
+                PersistError::NotFound(m) => err_response(StatusCode::NOT_FOUND, m),
+                PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
+                PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
+                PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+            };
+        }
+    };
 
     // `persist_users` already refreshed `state.user_api_keys` after the
     // kernel reload — count the swapped entry for the wire response so
@@ -920,13 +934,35 @@ where
         }
     }
 
+    // Acquire the auth-snapshot write lock BEFORE the disk write so the
+    // middleware can never observe an intermediate state where the new
+    // hash is already on disk (and reachable through `kernel.config_ref()`)
+    // but the `state.user_api_keys` Vec the middleware actually verifies
+    // against still holds the OLD record. Earlier ordering was
+    // `write file → reload → acquire lock → swap`, which left a small
+    // race window: any request landing between the file write and the
+    // snapshot swap would hit the stale `Vec<ApiUserAuth>` and pass auth
+    // with the just-rotated plaintext — bounded by `reload_config`
+    // latency (a few ms under load) but exploitable. Holding the lock
+    // across persist + reload + swap means every concurrent auth check
+    // either sees the pre-rotation snapshot OR blocks on this writer
+    // until the swap completes; never an in-between read where the
+    // on-disk hash and the live `Vec` disagree. Auth blocking during
+    // rotation is the correct behavior (the operator just rotated;
+    // concurrent requests with the old key SHOULD fail).
+    let mut user_keys_guard = state.user_api_keys.write().await;
+
     std::fs::write(&config_path, &new_toml)
         .map_err(|e| PersistError::Internal(format!("write failed: {e}")))?;
 
     if let Err(e) = state.kernel.reload_config().await {
         // The file is on disk; surface a soft error so the dashboard can
         // show the reason without rolling back. The next manual reload (or
-        // restart) will pick it up.
+        // restart) will pick it up. Drop the guard so subsequent reads
+        // aren't blocked on a failed-write path — the on-disk state has
+        // moved forward, and a stale `Vec<ApiUserAuth>` is no worse than
+        // pre-fix behaviour for this failure mode.
+        drop(user_keys_guard);
         tracing::warn!(error = %e, "user config reload failed after write");
         return Err(PersistError::Internal(format!("reload failed: {e}")));
     }
@@ -936,11 +972,10 @@ where
     // (rotate-key, update_user, import_users) only become effective after
     // a daemon restart — the bug rotate-key exists to fix. Done in the
     // shared helper so every user-mutation path benefits, not only the
-    // rotation endpoint.
-    {
-        let refreshed = rebuild_api_user_records(state.as_ref());
-        *state.user_api_keys.write().await = refreshed;
-    }
+    // rotation endpoint. Still holding `user_keys_guard` here so the swap
+    // is atomic with the persist + reload above.
+    *user_keys_guard = rebuild_api_user_records(state.as_ref());
+    drop(user_keys_guard);
 
     state.kernel.audit().record(
         "system",

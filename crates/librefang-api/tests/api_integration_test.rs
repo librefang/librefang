@@ -114,6 +114,7 @@ async fn start_test_server_with_provider(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1608,6 +1609,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         kernel.config_ref().api_key.clone(),
     ));
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -1627,6 +1630,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1635,7 +1639,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(Vec::new()),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
         // open-server path to keep them green.
@@ -2777,6 +2781,8 @@ async fn start_test_server_with_rbac_users(
 
     let audit_log = kernel.audit().clone();
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -2796,6 +2802,7 @@ async fn start_test_server_with_rbac_users(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -2804,7 +2811,7 @@ async fn start_test_server_with_rbac_users(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(api_user_records),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
         // without a Bearer header and need them to flow through to the
@@ -3075,6 +3082,8 @@ async fn start_test_server_with_full_user_configs(
 
     let audit_log = kernel.audit().clone();
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -3094,6 +3103,7 @@ async fn start_test_server_with_full_user_configs(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -3102,7 +3112,7 @@ async fn start_test_server_with_full_user_configs(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(api_user_records),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(audit_log),
