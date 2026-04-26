@@ -42,6 +42,12 @@ use librefang_types::tool::{AgentLoopSignal, ToolApprovalSubmission, ToolDefinit
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use tracing::{debug, info, instrument, warn};
 
 /// Synthetic `SenderContext.channel` value the cron dispatcher uses for
 /// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
@@ -54,12 +60,6 @@ pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
 /// carve-out as [`SYSTEM_CHANNEL_CRON`] — both are kernel-internal and
 /// have no user to attribute to. Issue #3243.
 pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
-use tracing::{debug, info, instrument, warn};
 
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
