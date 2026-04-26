@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 use tracing::{info, warn};
@@ -263,6 +264,19 @@ pub struct HandStateEntry {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadStateStatus {
+    Missing,
+    Loaded,
+    ParseFailed,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadStateResult {
+    pub status: LoadStateStatus,
+    pub entries: Vec<HandStateEntry>,
+}
+
 fn legacy_agent_runtime_overrides(
     config: &HashMap<String, serde_json::Value>,
 ) -> BTreeMap<String, HandAgentRuntimeOverride> {
@@ -399,7 +413,7 @@ impl HandRegistry {
         };
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| HandError::Config(format!("serialize hand state: {e}")))?;
-        std::fs::write(path, json)
+        atomic_write_json(path, &json)
             .map_err(|e| HandError::Config(format!("write hand state: {e}")))?;
         Ok(())
     }
@@ -409,17 +423,35 @@ impl HandRegistry {
     /// The `old_agent_ids` are the agent UUIDs from before the restart, used to
     /// reassign cron jobs to newly spawned agents (issue #402).
     pub fn load_state(path: &std::path::Path) -> Vec<HandStateEntry> {
+        Self::load_state_detailed(path).entries
+    }
+
+    pub fn load_state_detailed(path: &std::path::Path) -> LoadStateResult {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
-            Err(_) => return Vec::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return LoadStateResult {
+                    status: LoadStateStatus::Missing,
+                    entries: Vec::new(),
+                };
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "failed to read hand state");
+                return LoadStateResult {
+                    status: LoadStateStatus::ParseFailed,
+                    entries: Vec::new(),
+                };
+            }
         };
 
         // Try typed deserialization first (v3 format with PersistedState struct).
         if let Ok(state) = serde_json::from_str::<PersistedState>(&data) {
-            return state
-                .instances
-                .into_iter()
-                .filter_map(|inst| {
+            return LoadStateResult {
+                status: LoadStateStatus::Loaded,
+                entries: state
+                    .instances
+                    .into_iter()
+                    .filter_map(|inst| {
                     let status = inst.status;
                     match &status {
                         HandStatus::Active | HandStatus::Paused => {}
@@ -447,19 +479,20 @@ impl HandRegistry {
                         agent_runtime_overrides.entry(role).or_insert(legacy);
                     }
 
-                    Some(HandStateEntry {
-                        hand_id: inst.hand_id,
-                        config: inst.config,
-                        agent_runtime_overrides,
-                        old_agent_ids: inst.agent_ids,
-                        coordinator_role,
-                        status,
-                        instance_id: Some(inst.instance_id),
-                        activated_at: inst.activated_at,
-                        updated_at: inst.updated_at,
+                        Some(HandStateEntry {
+                            hand_id: inst.hand_id,
+                            config: inst.config,
+                            agent_runtime_overrides,
+                            old_agent_ids: inst.agent_ids,
+                            coordinator_role,
+                            status,
+                            instance_id: Some(inst.instance_id),
+                            activated_at: inst.activated_at,
+                            updated_at: inst.updated_at,
+                        })
                     })
-                })
-                .collect();
+                    .collect(),
+            };
         }
 
         // Fallback: legacy v2/v1 format using untyped parsing.
@@ -470,7 +503,10 @@ impl HandRegistry {
                         Some(serde_json::Value::Array(arr)) => arr,
                         _ => {
                             warn!("Hand state file has no instances array");
-                            return Vec::new();
+                            return LoadStateResult {
+                                status: LoadStateStatus::ParseFailed,
+                                entries: Vec::new(),
+                            };
                         }
                     }
                 } else if let serde_json::Value::Array(arr) = wrapper {
@@ -478,78 +514,87 @@ impl HandRegistry {
                     arr
                 } else {
                     warn!("Hand state file has unrecognized format");
-                    return Vec::new();
+                    return LoadStateResult {
+                        status: LoadStateStatus::ParseFailed,
+                        entries: Vec::new(),
+                    };
                 }
             } else {
                 warn!("Failed to parse hand state file as JSON");
-                return Vec::new();
+                return LoadStateResult {
+                    status: LoadStateStatus::ParseFailed,
+                    entries: Vec::new(),
+                };
             };
 
-        entries
-            .into_iter()
-            .filter_map(|e| {
-                let hand_id = e["hand_id"].as_str()?.to_string();
-                let status = e
-                    .get("status")
-                    .and_then(|v| serde_json::from_value::<HandStatus>(v.clone()).ok())
-                    .unwrap_or(HandStatus::Active);
+        LoadStateResult {
+            status: LoadStateStatus::Loaded,
+            entries: entries
+                .into_iter()
+                .filter_map(|e| {
+                    let hand_id = e["hand_id"].as_str()?.to_string();
+                    let status = e
+                        .get("status")
+                        .and_then(|v| serde_json::from_value::<HandStatus>(v.clone()).ok())
+                        .unwrap_or(HandStatus::Active);
 
-                match &status {
-                    HandStatus::Active | HandStatus::Paused => {}
-                    HandStatus::Error(message) => {
-                        info!(
-                            hand = %hand_id,
-                            error = %message,
-                            "Skipping errored hand from persisted state"
-                        );
-                        return None;
+                    match &status {
+                        HandStatus::Active | HandStatus::Paused => {}
+                        HandStatus::Error(message) => {
+                            info!(
+                                hand = %hand_id,
+                                error = %message,
+                                "Skipping errored hand from persisted state"
+                            );
+                            return None;
+                        }
+                        HandStatus::Inactive => {
+                            info!(hand = %hand_id, "Skipping inactive hand from persisted state");
+                            return None;
+                        }
                     }
-                    HandStatus::Inactive => {
-                        info!(hand = %hand_id, "Skipping inactive hand from persisted state");
-                        return None;
-                    }
-                }
 
-                let config: HashMap<String, serde_json::Value> =
-                    serde_json::from_value(e["config"].clone()).unwrap_or_default();
+                    let config: HashMap<String, serde_json::Value> =
+                        serde_json::from_value(e["config"].clone()).unwrap_or_default();
 
-                // v2: agent_id as single AgentId → convert to {"main": id}
-                // v1: agent_id as single AgentId → same conversion
-                let old_agent_ids: BTreeMap<String, AgentId> =
-                    if let Some(id_val) = e.get("agent_id") {
-                        if let Ok(id) = serde_json::from_value::<AgentId>(id_val.clone()) {
-                            let mut map = BTreeMap::new();
-                            map.insert("main".to_string(), id);
-                            map
+                    // v2: agent_id as single AgentId → convert to {"main": id}
+                    // v1: agent_id as single AgentId → same conversion
+                    let old_agent_ids: BTreeMap<String, AgentId> =
+                        if let Some(id_val) = e.get("agent_id") {
+                            if let Ok(id) = serde_json::from_value::<AgentId>(id_val.clone()) {
+                                let mut map = BTreeMap::new();
+                                map.insert("main".to_string(), id);
+                                map
+                            } else {
+                                BTreeMap::new()
+                            }
                         } else {
                             BTreeMap::new()
-                        }
-                    } else {
-                        BTreeMap::new()
-                    };
-                let coordinator_role = HandInstance::normalize_coordinator_role(
-                    &old_agent_ids,
-                    e.get("coordinator_role").and_then(|v| v.as_str()),
-                );
+                        };
+                    let coordinator_role = HandInstance::normalize_coordinator_role(
+                        &old_agent_ids,
+                        e.get("coordinator_role").and_then(|v| v.as_str()),
+                    );
 
-                let instance_id = e
-                    .get("instance_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok());
+                    let instance_id = e
+                        .get("instance_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok());
 
-                Some(HandStateEntry {
-                    hand_id,
-                    config,
-                    agent_runtime_overrides: BTreeMap::new(),
-                    old_agent_ids,
-                    coordinator_role,
-                    status,
-                    instance_id,
-                    activated_at: None,
-                    updated_at: None,
+                    Some(HandStateEntry {
+                        hand_id,
+                        config,
+                        agent_runtime_overrides: BTreeMap::new(),
+                        old_agent_ids,
+                        coordinator_role,
+                        status,
+                        instance_id,
+                        activated_at: None,
+                        updated_at: None,
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+        }
     }
 
     /// Insert a definition into the registry, rejecting duplicates.
@@ -955,6 +1000,63 @@ impl HandRegistry {
         Ok(())
     }
 
+    pub fn merge_agent_runtime_override(
+        &self,
+        instance_id: Uuid,
+        role: &str,
+        override_config: HandAgentRuntimeOverride,
+    ) -> HandResult<HandAgentRuntimeOverride> {
+        let mut entry = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(HandError::InstanceNotFound(instance_id))?;
+        let previous = entry
+            .agent_runtime_overrides
+            .get(role)
+            .cloned()
+            .unwrap_or_default();
+        let merged = HandAgentRuntimeOverride {
+            model: override_config.model.or(previous.model),
+            provider: override_config.provider.or(previous.provider),
+            api_key_env: override_config.api_key_env.or(previous.api_key_env),
+            base_url: override_config.base_url.or(previous.base_url),
+            max_tokens: override_config.max_tokens.or(previous.max_tokens),
+            temperature: override_config.temperature.or(previous.temperature),
+            web_search_augmentation: override_config
+                .web_search_augmentation
+                .or(previous.web_search_augmentation),
+        };
+        entry
+            .agent_runtime_overrides
+            .insert(role.to_string(), merged.clone());
+        entry.updated_at = chrono::Utc::now();
+        Ok(merged)
+    }
+
+    pub fn restore_agent_runtime_override(
+        &self,
+        instance_id: Uuid,
+        role: &str,
+        override_config: Option<HandAgentRuntimeOverride>,
+    ) -> HandResult<()> {
+        let mut entry = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or(HandError::InstanceNotFound(instance_id))?;
+        match override_config {
+            Some(config) => {
+                entry
+                    .agent_runtime_overrides
+                    .insert(role.to_string(), config);
+            }
+            None => {
+                entry.agent_runtime_overrides.remove(role);
+            }
+        }
+        entry.updated_at = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Drop the runtime override entry for `(instance_id, role)`, returning
     /// the previous value if any.
     ///
@@ -1132,6 +1234,46 @@ impl HandRegistry {
             degraded,
         })
     }
+}
+
+fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    let mut tmp = path.to_path_buf();
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
+        .to_os_string();
+    let mut tmp_name = file_name;
+    tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    tmp.set_file_name(tmp_name);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 /// Readiness snapshot for a hand definition — combines requirement checks
@@ -2580,6 +2722,55 @@ metrics = []
                 .unwrap_or(false),
             "helper temperature must migrate from legacy blob: {:?}",
             helper.temperature
+        );
+    }
+
+    #[test]
+    fn load_state_migrates_legacy_model_overrides_when_typed_field_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+
+        let state_json = serde_json::json!({
+            "version": 4,
+            "instances": [{
+                "hand_id": "legacy-only-hand",
+                "instance_id": "22222222-2222-2222-2222-222222222222",
+                "config": {
+                    "__model_overrides__": {
+                        "main": {
+                            "model": "legacy-only-model",
+                            "provider": "legacy-only-provider",
+                            "max_tokens": 4242,
+                            "temperature": 0.24
+                        }
+                    }
+                },
+                "agent_ids": {},
+                "coordinator_role": "main",
+                "status": "Active"
+            }]
+        });
+        std::fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&state_json).unwrap(),
+        )
+        .unwrap();
+
+        let restored = HandRegistry::load_state(&state_path);
+        assert_eq!(restored.len(), 1);
+        let main = restored[0]
+            .agent_runtime_overrides
+            .get("main")
+            .expect("legacy-only override must migrate");
+        assert_eq!(main.model.as_deref(), Some("legacy-only-model"));
+        assert_eq!(main.provider.as_deref(), Some("legacy-only-provider"));
+        assert_eq!(main.max_tokens, Some(4242));
+        assert!(
+            main.temperature
+                .map(|t| (t - 0.24).abs() < 1e-6)
+                .unwrap_or(false),
+            "legacy-only temperature must migrate: {:?}",
+            main.temperature
         );
     }
 }

@@ -1,6 +1,11 @@
 name: Kernel Ignored Tests
 
 on:
+  pull_request:
+    paths:
+      - 'crates/librefang-kernel/**'
+      - 'crates/librefang-hands/**'
+      - '.github/workflows/kernel-ignored-tests.yml'
   schedule:
     - cron: "23 4 * * *"
   workflow_dispatch:

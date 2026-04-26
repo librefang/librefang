@@ -3367,6 +3367,85 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
     kernel.shutdown();
 }
 
+#[test]
+fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
+    use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-boot-gc-corrupt");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let orphan_id = AgentId::new();
+    {
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config).expect("first boot");
+
+        let mut manifest = librefang_types::agent::AgentManifest {
+            name: "orphan-hand-agent-corrupt".to_string(),
+            description: "stale hand-agent row".to_string(),
+            module: "builtin:chat".to_string(),
+            ..Default::default()
+        };
+        manifest.is_hand = true;
+        manifest.model.provider = "openrouter".to_string();
+        manifest.model.model = "x".to_string();
+
+        let entry = AgentEntry {
+            id: orphan_id,
+            name: "orphan-hand-agent-corrupt".to_string(),
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: vec![],
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: true,
+            ..Default::default()
+        };
+        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        kernel.shutdown();
+    }
+
+    std::fs::write(home_dir.join("data").join("hand_state.json"), "{not-json")
+        .expect("write corrupt hand_state.json");
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("second boot"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        kernel.start_background_agents().await;
+    });
+
+    assert!(
+        kernel
+            .memory
+            .load_agent(orphan_id)
+            .expect("load_agent after skipped GC")
+            .is_some(),
+        "corrupt hand_state.json must suppress orphan GC so rows are not deleted"
+    );
+
+    kernel.shutdown();
+}
+
 /// Covers [`LibreFangKernel::clear_hand_agent_runtime_override`]:
 ///
 /// 1. Spawn the `apitester` hand and snapshot its default manifest fields.
@@ -3494,6 +3573,64 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         ),
         "unknown agent id should surface AgentNotFound, got {missing:?}"
     );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-hand-merge");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+
+    let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+    let agent_id = instance.agent_id().expect("apitester hand agent id");
+
+    kernel
+        .update_hand_agent_runtime_override(
+            agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                model: Some("merged-model".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("apply model override");
+    kernel
+        .update_hand_agent_runtime_override(
+            agent_id,
+            librefang_hands::HandAgentRuntimeOverride {
+                provider: Some("merged-provider".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("apply provider override");
+
+    let restored_instance = kernel
+        .hand_registry
+        .get_instance(instance.instance_id)
+        .expect("instance still active");
+    let persisted = restored_instance
+        .agent_runtime_overrides
+        .values()
+        .next()
+        .expect("override entry must exist");
+    assert_eq!(persisted.model.as_deref(), Some("merged-model"));
+    assert_eq!(persisted.provider.as_deref(), Some("merged-provider"));
 
     kernel.shutdown();
 }

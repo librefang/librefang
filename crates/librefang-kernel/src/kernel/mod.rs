@@ -3033,7 +3033,8 @@ impl LibreFangKernel {
             std::collections::HashMap<String, serde_json::Value>,
         > = {
             let state_path = cfg.home_dir.join("data").join("hand_state.json");
-            librefang_hands::registry::HandRegistry::load_state(&state_path)
+            librefang_hands::registry::HandRegistry::load_state_detailed(&state_path)
+                .entries
                 .into_iter()
                 .map(|e| (e.hand_id, e.config))
                 .collect()
@@ -9742,68 +9743,34 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    pub fn update_hand_agent_runtime_override(
+    fn persist_hand_state_result(&self) -> KernelResult<()> {
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
+        self.hand_registry
+            .persist_state(&state_path)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+    }
+
+    fn apply_hand_agent_runtime_override_to_registry(
         &self,
         agent_id: AgentId,
-        override_config: librefang_hands::HandAgentRuntimeOverride,
+        default_manifest: &librefang_types::agent::AgentManifest,
+        merged: &librefang_hands::HandAgentRuntimeOverride,
     ) -> KernelResult<()> {
-        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
-        let role = instance
-            .agent_ids
-            .iter()
-            .find_map(|(role, id)| (*id == agent_id).then(|| role.clone()))
-            .ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Hand role not found for agent {agent_id}"
-                )))
-            })?;
-
-        let previous = instance
-            .agent_runtime_overrides
-            .get(&role)
-            .cloned()
-            .unwrap_or_default();
-        let merged = librefang_hands::HandAgentRuntimeOverride {
-            model: override_config.model.or(previous.model),
-            provider: override_config.provider.or(previous.provider),
-            api_key_env: override_config.api_key_env.or(previous.api_key_env),
-            base_url: override_config.base_url.or(previous.base_url),
-            max_tokens: override_config.max_tokens.or(previous.max_tokens),
-            temperature: override_config.temperature.or(previous.temperature),
-            web_search_augmentation: override_config
-                .web_search_augmentation
-                .or(previous.web_search_augmentation),
-        };
-
         if merged.model.is_some()
             || merged.provider.is_some()
             || merged.api_key_env.is_some()
             || merged.base_url.is_some()
         {
-            let entry = self.registry.get(agent_id).ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-            })?;
-            let model = merged
-                .model
-                .clone()
-                .unwrap_or_else(|| entry.manifest.model.model.clone());
-            let provider = merged
-                .provider
-                .clone()
-                .unwrap_or_else(|| entry.manifest.model.provider.clone());
-            let api_key_env = merged
-                .api_key_env
-                .clone()
-                .unwrap_or_else(|| entry.manifest.model.api_key_env.clone());
-            let base_url = merged
-                .base_url
-                .clone()
-                .unwrap_or_else(|| entry.manifest.model.base_url.clone());
-
+            let (default_model, default_provider, default_api_key_env, default_base_url) =
+                self.resolve_hand_agent_model_defaults(default_manifest);
             self.registry
-                .update_model_provider_config(agent_id, model, provider, api_key_env, base_url)
+                .update_model_provider_config(
+                    agent_id,
+                    merged.model.clone().unwrap_or(default_model),
+                    merged.provider.clone().unwrap_or(default_provider),
+                    merged.api_key_env.clone().unwrap_or(default_api_key_env),
+                    merged.base_url.clone().unwrap_or(default_base_url),
+                )
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(max_tokens) = merged.max_tokens {
@@ -9821,11 +9788,91 @@ system_prompt = "You are a helpful assistant."
                 .update_web_search_augmentation(agent_id, mode)
                 .map_err(KernelError::LibreFang)?;
         }
+        Ok(())
+    }
 
-        self.hand_registry
-            .update_agent_runtime_override(instance.instance_id, &role, merged)
+    fn resolve_hand_agent_model_defaults(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+    ) -> (String, String, Option<String>, Option<String>) {
+        let cfg = self.config.load();
+        let mut provider = manifest.model.provider.clone();
+        let mut model = manifest.model.model.clone();
+        let mut api_key_env = manifest.model.api_key_env.clone();
+        let mut base_url = manifest.model.base_url.clone();
+        if provider == "default" {
+            provider = cfg.default_model.provider.clone();
+            if api_key_env.is_none() {
+                api_key_env = Some(cfg.default_model.api_key_env.clone());
+            }
+            if base_url.is_none() {
+                base_url = cfg.default_model.base_url.clone();
+            }
+        }
+        if model == "default" {
+            model = cfg.default_model.model.clone();
+        }
+        (model, provider, api_key_env, base_url)
+    }
+
+    pub fn update_hand_agent_runtime_override(
+        &self,
+        agent_id: AgentId,
+        override_config: librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()> {
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let role = instance
+            .agent_ids
+            .iter()
+            .find_map(|(role, id)| (*id == agent_id).then(|| role.clone()))
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand role not found for agent {agent_id}"
+                )))
+            })?;
+        let def = self
+            .hand_registry
+            .get_definition(&instance.hand_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand definition not loaded for {}",
+                    instance.hand_id
+                )))
+            })?;
+        let agent_def = def.agents.get(&role).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Hand role not found for agent {agent_id}"
+            )))
+        })?;
+
+        let previous = instance.agent_runtime_overrides.get(&role).cloned();
+        let merged = self
+            .hand_registry
+            .merge_agent_runtime_override(instance.instance_id, &role, override_config)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
-        self.persist_hand_state();
+        if let Err(err) = self.persist_hand_state_result() {
+            let _ = self.hand_registry.restore_agent_runtime_override(
+                instance.instance_id,
+                &role,
+                previous,
+            );
+            return Err(err);
+        }
+        if let Err(err) = self.apply_hand_agent_runtime_override_to_registry(
+            agent_id,
+            &agent_def.manifest,
+            &merged,
+        ) {
+            let _ = self.hand_registry.restore_agent_runtime_override(
+                instance.instance_id,
+                &role,
+                previous,
+            );
+            let _ = self.persist_hand_state_result();
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -9872,23 +9919,8 @@ system_prompt = "You are a helpful assistant."
                 // runs at activation time. Going through the raw manifest
                 // would leave `model = "default"` on disk, which the LLM
                 // driver can't route.
-                let cfg = self.config.load();
-                let mut provider = agent_def.manifest.model.provider.clone();
-                let mut model = agent_def.manifest.model.model.clone();
-                let mut api_key_env = agent_def.manifest.model.api_key_env.clone();
-                let mut base_url = agent_def.manifest.model.base_url.clone();
-                if provider == "default" {
-                    provider = cfg.default_model.provider.clone();
-                    if api_key_env.is_none() {
-                        api_key_env = Some(cfg.default_model.api_key_env.clone());
-                    }
-                    if base_url.is_none() {
-                        base_url = cfg.default_model.base_url.clone();
-                    }
-                }
-                if model == "default" {
-                    model = cfg.default_model.model.clone();
-                }
+                let (model, provider, api_key_env, base_url) =
+                    self.resolve_hand_agent_model_defaults(&agent_def.manifest);
 
                 self.registry
                     .update_model_provider_config(agent_id, model, provider, api_key_env, base_url)
@@ -9924,7 +9956,7 @@ system_prompt = "You are a helpful assistant."
         self.hand_registry
             .clear_agent_runtime_override(instance.instance_id, &role)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
-        self.persist_hand_state();
+        self.persist_hand_state_result()?;
         Ok(())
     }
 
@@ -10851,10 +10883,10 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
-        let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
-        if !saved_hands.is_empty() {
-            info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for saved_hand in saved_hands {
+        let saved_hands = librefang_hands::registry::HandRegistry::load_state_detailed(&state_path);
+        if !saved_hands.entries.is_empty() {
+            info!("Restoring {} persisted hand(s)", saved_hands.entries.len());
+            for saved_hand in saved_hands.entries {
                 let hand_id = saved_hand.hand_id;
                 let config = saved_hand.config;
                 let agent_runtime_overrides = saved_hand.agent_runtime_overrides;
@@ -10995,7 +11027,13 @@ system_prompt = "You are a helpful assistant."
         //
         // Non-hand agents are untouched; we filter on `entry.is_hand`
         // before considering a row for deletion.
-        {
+        //
+        // Hand agents restore from `hand_state.json`, not from the generic
+        // SQLite boot path. The `is_hand = true` SQLite rows are secondary
+        // state used for continuity and cleanup only. If `hand_state.json`
+        // is unreadable, skip GC so a transient parse failure cannot delete
+        // the only surviving hand-agent metadata.
+        if saved_hands.status != librefang_hands::registry::LoadStateStatus::ParseFailed {
             let live_hand_agents: std::collections::HashSet<AgentId> = self
                 .hand_registry
                 .list_instances()
@@ -11035,6 +11073,11 @@ system_prompt = "You are a helpful assistant."
                 }
                 Err(e) => warn!("GC: failed to enumerate agents for orphan scan: {e}"),
             }
+        } else {
+            warn!(
+                path = %state_path.display(),
+                "Skipping orphaned hand-agent GC because hand_state.json failed to parse"
+            );
         }
 
         // Context-engine bootstrap is async; run it at daemon startup so hook
