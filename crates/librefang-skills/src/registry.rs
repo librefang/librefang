@@ -674,6 +674,7 @@ mod tests {
             source: None,
             config: Default::default(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         }
     }
 

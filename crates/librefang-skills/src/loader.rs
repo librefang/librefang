@@ -68,6 +68,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
+                &manifest.env_passthrough,
             )
             .await
         }
@@ -78,6 +79,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
+                &manifest.env_passthrough,
             )
             .await
         }
@@ -88,6 +90,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
+                &manifest.env_passthrough,
             )
             .await
         }
@@ -117,6 +120,7 @@ async fn execute_python(
     tool_name: &str,
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
+    env_passthrough: &[String],
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -162,7 +166,12 @@ async fn execute_python(
 
     // SECURITY: Isolate environment to prevent secret leakage.
     // Skills are third-party code — they must not inherit API keys,
-    // tokens, or credentials from the host environment.
+    // tokens, or credentials from the host environment by default.
+    // Skills that legitimately need specific env vars (e.g. credential
+    // helpers for tool subprocesses) can opt in via skill.toml's
+    // `env_passthrough = ["VAR_NAME"]` allowlist. The variable name is
+    // public (visible in the manifest); only its host-side value crosses
+    // the boundary.
     cmd.env_clear();
     // Preserve PATH for binary resolution and platform essentials
     if let Ok(path) = std::env::var("PATH") {
@@ -182,6 +191,9 @@ async fn execute_python(
     }
     // Python needs PYTHONIOENCODING for UTF-8 output
     cmd.env("PYTHONIOENCODING", "utf-8");
+    // Per-skill env passthrough allowlist (default empty). Only forwards
+    // vars actually set in the host environment.
+    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -230,6 +242,7 @@ async fn execute_node(
     tool_name: &str,
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
+    env_passthrough: &[String],
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -292,6 +305,9 @@ async fn execute_node(
     }
     // Node needs NODE_PATH sometimes
     cmd.env("NODE_NO_WARNINGS", "1");
+    // Per-skill env passthrough allowlist (default empty). Only forwards
+    // vars actually set in the host environment.
+    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -338,6 +354,7 @@ async fn execute_shell(
     tool_name: &str,
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
+    env_passthrough: &[String],
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -400,6 +417,9 @@ async fn execute_shell(
             cmd.env("TEMP", tmp);
         }
     }
+    // Per-skill env passthrough allowlist (default empty). Only forwards
+    // vars actually set in the host environment.
+    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -449,6 +469,24 @@ async fn execute_shell(
             output: serde_json::json!({ "result": stdout.trim() }),
             is_error: false,
         }),
+    }
+}
+
+/// Apply a per-skill env passthrough allowlist to a subprocess command.
+///
+/// For each variable name in `allowlist`, if the variable is set in the
+/// host environment, inject it into the child command. Variables not
+/// present in the host environment are silently skipped — the skill
+/// declared interest, but the host operator chose not to provide.
+///
+/// Mirrors the existing `[exec_policy].allowed_env_vars` mechanism for
+/// `shell_exec`. Default is empty (full `env_clear` isolation preserved
+/// for skills that don't opt in).
+fn apply_env_passthrough(cmd: &mut tokio::process::Command, allowlist: &[String]) {
+    for var_name in allowlist {
+        if let Ok(val) = std::env::var(var_name) {
+            cmd.env(var_name, val);
+        }
     }
 }
 
@@ -668,6 +706,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "greet", &serde_json::json!({}))
@@ -719,6 +758,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
@@ -770,6 +810,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
@@ -817,6 +858,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let err = execute_skill_tool(
@@ -865,6 +907,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "test_tool", &serde_json::json!({}))
@@ -873,6 +916,87 @@ echo '{"greeting": "hello from shell"}'
         assert!(!result.is_error);
         let note = result.output["note"].as_str().unwrap();
         assert!(note.contains("system prompt"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_env_passthrough_allowlist_injects_var() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+
+        // Use a unique env var name to avoid collisions with parallel tests
+        // or the host environment.
+        let allowed_var = "LIBREFANG_TEST_PASSTHROUGH_ALLOWED";
+        let blocked_var = "LIBREFANG_TEST_PASSTHROUGH_BLOCKED";
+        // SAFETY: tests in this module run serially-enough; the values
+        // are scoped to this test's subprocess.
+        std::env::set_var(allowed_var, "hello-from-host");
+        std::env::set_var(blocked_var, "should-not-leak");
+
+        let dir = TempDir::new().unwrap();
+        let script = format!(
+            "#!/bin/bash\n\
+             read INPUT\n\
+             echo \"{{\\\"allowed\\\": \\\"${{{allowed_var}:-MISSING}}\\\", \\\"blocked\\\": \\\"${{{blocked_var}:-MISSING}}\\\"}}\"\n",
+        );
+        std::fs::write(dir.path().join("run.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "test-env-passthrough".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "env passthrough test".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "run.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "probe".to_string(),
+                    description: "probe env".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
+            env_passthrough: vec![allowed_var.to_string()],
+        };
+
+        let result = execute_skill_tool(&manifest, dir.path(), "probe", &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // Cleanup before assertions so a panic doesn't leak state.
+        std::env::remove_var(allowed_var);
+        std::env::remove_var(blocked_var);
+
+        assert!(!result.is_error, "probe failed: {:?}", result.output);
+        assert_eq!(
+            result.output["allowed"].as_str(),
+            Some("hello-from-host"),
+            "allowlisted var did not reach subprocess: {:?}",
+            result.output
+        );
+        assert_eq!(
+            result.output["blocked"].as_str(),
+            Some("MISSING"),
+            "non-allowlisted var leaked into subprocess: {:?}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -914,6 +1038,7 @@ echo '{"greeting": "hello from shell"}'
             source: None,
             config: std::collections::HashMap::new(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         };
 
         let err = execute_skill_tool(&manifest, dir.path(), "evil_tool", &serde_json::json!({}))
