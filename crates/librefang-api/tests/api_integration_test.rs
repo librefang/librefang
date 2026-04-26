@@ -3496,6 +3496,81 @@ async fn test_authz_check_returns_allow_for_permitted_tool() {
     assert_eq!(body["decision"], "allow");
     assert_eq!(body["allowed"], true);
     assert!(body["reason"].is_null());
+    // `scope` advertises that this is a user-policy-only decision and
+    // does NOT consult per-agent ToolPolicy or channel_rules. Operators
+    // and any future dashboard consumer rely on this marker to display
+    // the "runtime gate may differ" disclaimer.
+    assert_eq!(
+        body["scope"], "user_policy_only",
+        "scope must mark the decision as user-policy-only — see authz.rs::check docstring"
+    );
+}
+
+/// Regression for #3231 follow-up: a typical query must always carry
+/// `scope: "user_policy_only"` so callers can render the disclaimer
+/// that the runtime gate may still deny or require approval (per-agent
+/// ToolPolicy + ApprovalPolicy.channel_rules are not consulted by this
+/// endpoint).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_response_advertises_user_policy_only_scope() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Allow case.
+    let allow: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search&channel=api",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(allow["decision"], "allow");
+    assert_eq!(
+        allow["scope"], "user_policy_only",
+        "allow path must carry scope marker"
+    );
+
+    // Deny case — scope marker must travel with every decision class.
+    let deny: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deny["decision"], "deny");
+    assert_eq!(
+        deny["scope"], "user_policy_only",
+        "deny path must carry scope marker"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3536,6 +3611,7 @@ async fn test_authz_check_returns_deny_for_blocked_tool() {
     assert_eq!(body["decision"], "deny");
     assert_eq!(body["allowed"], false);
     assert!(body["reason"].as_str().unwrap_or("").contains("shell_exec"));
+    assert_eq!(body["scope"], "user_policy_only");
 }
 
 #[tokio::test(flavor = "multi_thread")]
