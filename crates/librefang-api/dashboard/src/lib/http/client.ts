@@ -335,8 +335,6 @@ export type {
   AuditQueryEntry,
   AuditQueryFilters,
   AuditQueryResponse,
-  UserBudgetEntry,
-  UserBudgetResponse,
   PermissionPolicy,
   PermissionPolicyUpdate,
   UserToolPolicy,
