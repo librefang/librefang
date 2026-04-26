@@ -34,8 +34,10 @@ fn boot(users: Vec<UserConfig>, groups: Vec<ToolGroup>) -> std::sync::Arc<LibreF
     // kernel — drop ordering is irrelevant here, the test is short-lived.
     Box::leak(Box::new(tmp));
 
-    let mut tool_policy = ToolPolicy::default();
-    tool_policy.groups = groups;
+    let tool_policy = ToolPolicy {
+        groups,
+        ..Default::default()
+    };
 
     let config = KernelConfig {
         home_dir: home.clone(),
@@ -216,11 +218,13 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
 
     let kernel = boot(vec![], vec![]);
 
-    let mut manifest = AgentManifest::default();
-    manifest.name = format!("hand-test-{}", uuid::Uuid::new_v4());
-    manifest.is_hand = true;
-    manifest.tags = vec!["hand:test".to_string()];
-    manifest.module = "builtin:chat".to_string();
+    let manifest = AgentManifest {
+        name: format!("hand-test-{}", uuid::Uuid::new_v4()),
+        is_hand: true,
+        tags: vec!["hand:test".to_string()],
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
     let agent_id = kernel.spawn_agent(manifest).expect("spawn hand agent");
 
     // Sanity: without force_human → AutoApproved.
