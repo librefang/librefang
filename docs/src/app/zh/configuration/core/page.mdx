@@ -873,3 +873,90 @@ ollama = ""    # 显式"不走代理"覆盖
 | `provider_proxy_urls` | `HashMap<string, string>` | `{}` | per-provider 代理 URL 覆盖。空字符串 `""` 显式让某 provider 绕过代理(全局 `[proxy]` 设了但希望某 provider 直连时用,如 `ollama`)。 |
 | `provider_request_timeout_secs` | `HashMap<string, u64>` | `{}` | per-provider HTTP 读超时秒数覆盖。已在前面 `[provider_request_timeout_secs]` 文档过;此处作为完整性列出。 |
 
+---
+
+### 其他配置段(附录)
+
+这些段在代码里有 schema,但通常保持默认即可。这里的设置只在高级运维场景需要动 —— 列出来,知道字段名时能找到。
+
+```toml
+# 工具超时 —— 全局默认 + 按工具覆盖
+tool_timeout_secs = 60
+[tool_timeouts]
+"shell_exec" = 300
+"web_*"      = 30
+
+# Fallback LLM provider(主 provider 失败时按顺序尝试)
+[[fallback_providers]]
+provider = "groq"
+model    = "llama-3.3-70b-versatile"
+
+# 启动时加载的静态 MCP server
+[[mcp_servers]]
+name = "github"
+url  = "https://api.example.com/mcp"
+
+# Webhook 触发 —— 外部系统把事件推进 LibreFang
+[webhook_triggers]
+enabled = true
+secret_env = "WEBHOOK_TRIGGERS_SECRET"
+
+# Extensions / MCP 集成 —— 自动重连旋钮
+[extensions]
+auto_reconnect = true
+reconnect_max_attempts = 10
+reconnect_max_backoff_secs = 300
+health_check_interval_secs = 60
+
+# 配置热加载(文件 watcher)
+[reload]
+enabled = true
+debounce_ms = 500
+
+# 入站消息的 auto-reply 后台引擎
+[auto_reply]
+enabled = false
+# (provider 专属调优 —— 见 librefang-runtime::auto_reply)
+
+# 广播路由(多收件人投递)
+[broadcast]
+enabled = false
+max_fanout = 100
+
+# A2UI canvas 工具
+[canvas]
+enabled = false
+max_html_bytes = 524288
+allowed_tags = []   # 空 = 所有安全标签
+
+# A2A 协议配置(跨实例 agent-to-agent)
+[a2a]
+listen_path = "/a2a"
+trust_anchors = []
+
+# 设备配对
+[pairing]
+enabled = true
+ttl_secs = 600
+
+# 全局 exec policy(可被 per-agent 或 per-tool 覆盖)
+[exec_policy]
+allow_shell = true
+shell_allowlist = ["git", "cargo", "npm"]
+```
+
+| 段 | 用途 | 何时动它 |
+|---|---|---|
+| `tool_timeout_secs` / `[tool_timeouts]` | 工具执行的全局默认 + 按工具墙钟上限。支持 glob(`web_*`),最长匹配胜出。 | 慢工具(长 shell build、大 embedding 请求)调高;便宜的 web fetch 调低。 |
+| `[[fallback_providers]]` | 有序的 `(provider, model)` 列表,主 provider 5xx 或限流时 agent loop 按序回退。 | 把昂贵的 frontier 模型配一个便宜快的 fallback。 |
+| `[[mcp_servers]]` | 启动时加载的静态 MCP server 配置。(动态加用 `/api/mcp/servers`。) | 写死一个公司内永远要连的 MCP server。 |
+| `[webhook_triggers]` | 外部事件注入 —— 把 `{event_type, payload}` 推到 daemon,匹配的 `[[trigger]]` 块就触发。 | 外部 CI / 监控系统需要唤醒 agent 时。 |
+| `[extensions]` | **MCP 集成**专用的重连 / 健康检查旋钮。 | 不稳定 MCP server 调退避。 |
+| `[reload]` | `~/.librefang/config.toml` 热加载 watcher。 | 网络文件系统 inotify 不可靠时禁掉。 |
+| `[auto_reply]` | 后台引擎,对某些入站模式直接回复,不走完整 agent 轮次。 | 默认关 —— 高频客服通道才开。 |
+| `[broadcast]` | 多收件人消息扇出(对比单播)。 | Agent 需要一次推 ≥10 个 channel 时启用。 |
+| `[canvas]` | A2UI 工具,在 dashboard 渲染 agent 写的 HTML。出于安全默认关。 | 启用前审核 `allowed_tags`。 |
+| `[a2a]` | A2A 协议监听路径 + 跨实例鉴权的可信发行者列表。 | 联邦多个 LibreFang 实例时设置。 |
+| `[pairing]` | 设备配对 TTL 与主开关。 | 单用户场景禁掉。 |
+| `[exec_policy]` | 全局默认 shell/exec 允许列表;`agent.toml` 里的 per-agent `[exec_policy]` 覆盖给那个 agent。 | 锁死 daemon 默认,选择性给可信 agent 更宽访问。 |
+

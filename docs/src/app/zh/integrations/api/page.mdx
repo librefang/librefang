@@ -508,3 +508,22 @@ Retry-After: 60
 | GET | `/api/clawhub-cn/search` | 搜索 ClawHub 中国镜像 |
 | **Init** | | |
 | POST | `/api/init` | 快速初始化向导(被 `librefang setup --quick` 调用) |
+| **Dashboard 鉴权** | | |
+| POST | `/auth/logout` | 清掉 dashboard session cookie |
+| **API meta / 自检** | | |
+| GET | `/api/versions` | API 版本发现(versioned vs unversioned 路由映射) |
+| GET | `/api/profiles` | 列出工具 profile(模板里用的命名工具集) |
+| GET | `/api/profiles/{name}` | 按名取一个工具 profile |
+| **Prompt 版本化 & A/B 测试**(`[prompt_intelligence] enabled = true` 时) | | |
+| GET | `/agents/{agent_id}/prompts/versions` | 列出 agent 的 prompt 版本 |
+| POST | `/agents/{agent_id}/prompts/versions` | 保存新 prompt 版本 |
+| GET | `/prompts/versions/{id}` | 取单个 prompt 版本 |
+| DELETE | `/prompts/versions/{id}` | 删除 prompt 版本 |
+| POST | `/prompts/versions/{id}/activate` | 把这个版本激活给该 agent |
+| GET | `/agents/{agent_id}/prompts/experiments` | 列出 agent 的 A/B 实验 |
+| POST | `/agents/{agent_id}/prompts/experiments` | 创建 A/B 实验 |
+| GET | `/prompts/experiments/{id}` | 实验详情 |
+| POST | `/prompts/experiments/{id}/start` | 启动实验(开始采样) |
+| POST | `/prompts/experiments/{id}/pause` | 暂停实验 |
+| POST | `/prompts/experiments/{id}/complete` | 完成实验 + 记录胜者 |
+| GET | `/prompts/experiments/{id}/metrics` | 按 arm 的指标(impression / wins / cost / latency) |

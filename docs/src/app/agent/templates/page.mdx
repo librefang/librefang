@@ -405,3 +405,85 @@ api_key_env = "GROQ_API_KEY"         # env var holding the API key
 ```
 
 Any agent spawned without an explicit model override will use this default configuration.
+
+---
+
+## Agent Manifest Field Reference
+
+`agent.toml` accepts a number of top-level fields that aren't shown in the standard quick-start templates. Listing the full set so you can find the field name when you need it. All fields are optional unless marked otherwise.
+
+### Tool / skill scoping
+
+```toml
+tool_allowlist = ["web_search", "web_fetch", "file_read", "file_write"]
+tool_blocklist = ["shell_exec"]
+tools_disabled = false             # explicit master kill-switch — overrides everything else
+allowed_plugins = ["truncate", "redact"]   # plugin names; empty = all available plugins
+mcp_servers    = ["github", "linear"]     # MCP server names; empty = all connected servers
+skills_disabled = false            # explicit master kill-switch for skills
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tool_allowlist` | `Vec<string>` | `[]` (= all tools) | Whitelist of tool names this agent may call. Empty list = unrestricted. |
+| `tool_blocklist` | `Vec<string>` | `[]` | Tools this agent **may not** call. Applied **after** `tool_allowlist` so a name on both lists is denied. |
+| `tools_disabled` | bool | `false` | Master kill-switch — when `true`, the agent has zero tools regardless of allowlist / profile. |
+| `allowed_plugins` | `Vec<string>` | `[]` (= all plugins) | Plugin allowlist for this agent. |
+| `mcp_servers` | `Vec<string>` | `[]` (= all servers) | MCP server allowlist. Useful when one corp server has dangerous tools and you only want a few agents talking to it. |
+| `skills_disabled` | bool | `false` | Master kill-switch for skills. |
+
+### Identity & spawn behaviour
+
+```toml
+generate_identity_files = true     # create SOUL.md / IDENTITY.md / TOOLS.md on first spawn
+inherit_parent_context  = true     # subagents inherit parent context by default
+auto_evolve             = true     # background skill-evolution review after each turn
+is_hand                 = false    # auto-set when spawned by a Hand
+pinned_model            = "anthropic/claude-sonnet-4"   # locks model in Stable kernel mode
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `generate_identity_files` | bool | `true` | Create `SOUL.md` / `IDENTITY.md` / `TOOLS.md` / `USER.md` in `.identity/` on first spawn. Set `false` for ephemeral agents that don't need an evolving identity. |
+| `inherit_parent_context` | bool | `true` | When this agent runs as a subagent of a workflow, inherit the parent's session context. `false` gives a clean context window. |
+| `auto_evolve` | bool | `true` | After each agent turn, run the background skill-evolution review (looks for repeated patterns and proposes new skills). Disable to keep the skill library frozen. |
+| `is_hand` | bool | `false` | Auto-populated when a Hand spawns the agent. Don't set manually. |
+| `pinned_model` | `Option<string>` | `None` | When the kernel is in **Stable** mode, this model is used regardless of the global default. No effect in Normal mode. |
+
+### Channel & exec policy overrides (per-agent)
+
+```toml
+[channel_overrides]
+dm_policy = "always"
+group_policy = "trigger_only"
+group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
+
+[exec_policy]
+shell_allowlist = ["git", "cargo"]
+deny = ["rm -rf"]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `[channel_overrides]` | `Option<ChannelOverrides>` | `None` (inherit channel-level) | Per-agent overrides for `dm_policy` / `group_policy` / `model` / `system_prompt` / etc. Resolution order: agent-level → channel-level → built-in default. See [Channels](/integrations/channels#channel-overrides) for the full schema. |
+| `[exec_policy]` | `Option<ExecPolicy>` | `None` (inherit kernel default) | Per-agent shell / exec policy override. Either a string shorthand (`"strict"` / `"trusted"`) or a full table with `shell_allowlist` / `deny` / `cwd_allowlist`. |
+
+### Response shaping & augmentation
+
+```toml
+show_progress = true
+response_format = "json_object"   # or { type = "json_schema", schema = "..." }
+web_search_augmentation = "auto"  # "off" | "auto" | "always"
+
+[[context_injection]]
+name = "rules"
+content = "Be concise. Never use emoji."
+position = "system"
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `show_progress` | bool | `true` | Surface tool execution progress in channel replies (e.g. "🔧 running shell_exec…"). Disable for production / customer-facing agents. |
+| `response_format` | `Option<ResponseFormat>` | `None` | Constrain LLM output. Options: `"text"`, `"json_object"`, or `{ type = "json_schema", schema = … }`. Provider must support structured output (OpenAI / Gemini / Mistral). |
+| `web_search_augmentation` | enum | provider default | When the model has no built-in tool support, auto-inject web search results into the prompt. `"off"` / `"auto"` / `"always"`. |
+| `[[context_injection]]` | `Vec<ContextInjection>` | `[]` | Static prompt fragments merged into every session start. Each entry has `name`, `content`, `position` (`system` / `before_user` / `after_reset`), optional `condition` expression. |

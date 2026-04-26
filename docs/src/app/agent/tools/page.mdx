@@ -30,6 +30,91 @@ Agents in different LibreFang instances can discover and message each other over
 
 ---
 
+## Same-Daemon Inter-Agent Tools
+
+For talking to other agents **inside the same LibreFang daemon** (no A2A protocol overhead) — spawn, list, find, kill, and send messages directly.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `agent_send` | `agent_id`, `message` | Send a message to another agent in this daemon and wait for the reply. Uses the in-process kernel router; respects the agent_call depth limit. |
+| `agent_spawn` | `template`, optional `name`, `goal` | Spawn a child agent from a template. Returns the new `agent_id`. Sub-agents are denied `agent_spawn` and `agent_kill` by default to prevent fork bombs. |
+| `agent_list` | — | List accessible agents (id, name, status). |
+| `agent_find` | `query` | Search agents by name, ID, or tag. |
+| `agent_kill` | `agent_id` | Terminate a running agent. Forbidden in sub-agent context by default. |
+| `goal_update` | `goal` | Update **this** agent's goal/objective mid-turn. The new goal is written into the agent's manifest and surfaces in subsequent prompts. |
+
+`max_agent_call_depth` in `[kernel]` (default `5`) caps how deep an `agent_send` chain can recurse — prevents A→B→A loops from ever reaching production.
+
+---
+
+## Memory Tools (per-agent)
+
+Direct access to the agent's proactive-memory store from inside the loop. Distinct from the auto-recall machinery — these are the tools the agent can call explicitly.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `memory_store` | `content`, optional `category`, `scope` | Persist a custom memory entry. `scope` ∈ `user_memory` / `session_memory` / `agent_memory`. |
+| `memory_recall` | `query`, optional `limit`, `scope` | Semantic search over the agent's memories. |
+| `memory_list` | optional `category`, `scope`, `limit` | Enumerate memories without a search query. |
+
+See [Memory System](/agent/memory#proactive-memory) for the entry schema, scopes, decay formula, and consolidation trigger.
+
+---
+
+## Task Queue Tools
+
+The shared task board lets agents post work that other agents can claim. Useful for fan-out, oncall handoff, and long-running async jobs.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `task_post` | `title`, `body`, optional `assignee`, `priority` | Create a new task in the shared queue. |
+| `task_claim` | optional `priority_filter` | Claim ownership of the highest-priority pending task. The TTL is `[task_board] claim_ttl_secs` (default 600s). |
+| `task_complete` | `task_id`, optional `result` | Mark a claimed task done. |
+| `task_list` | optional `status`, `assignee` | List tasks with optional filters. |
+
+The claim TTL exists to recover from worker crashes — if the claimer doesn't `task_complete` within the TTL, the sweeper resets the task to `pending` so another worker can pick it up.
+
+---
+
+## Channel Tools
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `channel_send` | `channel`, `target`, `content` (text / image / file / poll) | Send a message, image, file, or poll to a channel user — **without going through the agent loop**. Useful for pushing alerts, async results, or out-of-band notifications. |
+
+`channel_send` is what `[deliver_only]` webhook mode uses internally; agents can also call it directly. Capability: `channel.*`.
+
+---
+
+## Workflow / Event Tools
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `workflow_run` | `workflow_id`, optional `inputs` | Execute a stored workflow synchronously and return its result. |
+| `event_publish` | `event_type`, `payload` | Publish a structured event onto the event bus. Triggers (`[[trigger]]` blocks on agent manifests) listening on `event_type` will fire. |
+| `system_time` | — | Get the daemon's current wall-clock time (RFC3339 UTC). Cheap; no external clock call. |
+
+`event_publish` is the bridge between agents and the trigger system — an agent that detects "a new file landed in /inbox" can publish `inbox.new_file`, and any trigger configured on that event runs.
+
+---
+
+## Skill Evolution (extended)
+
+In addition to `skill_evolve_patch` (documented above with its 5-strategy fuzzy matcher) and `skill_read_file`:
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `skill_evolve_create` | `name`, `manifest`, optional `body` | Create a brand-new skill from scratch. |
+| `skill_evolve_update` | `name`, `body` | Replace a skill's body wholesale (no fuzzy match — just overwrite). |
+| `skill_evolve_delete` | `name` | Delete a skill entirely. |
+| `skill_evolve_rollback` | `name`, optional `version` | Revert a skill to a prior version. Without `version`, rolls back one step. |
+| `skill_evolve_write_file` | `skill`, `path`, `body` | Add a supporting file under `references/` / `templates/` / `scripts/` / `assets/`. |
+| `skill_evolve_remove_file` | `skill`, `path` | Remove a supporting file. |
+
+Every `skill_evolve_*` operation appends to the skill's evolution history; `GET /api/skills/{name}` returns the full audit trail.
+
+---
+
 ## Browser Automation
 
 Eight tools wrap a Playwright-controlled headless browser. All of them require the agent to have the `browser.*` capability and a configured `[browser]` section in `config.toml` (see [Core Configuration](/configuration/core#browser)).
@@ -37,11 +122,13 @@ Eight tools wrap a Playwright-controlled headless browser. All of them require t
 | Tool | Purpose |
 |---|---|
 | `browser_navigate(url)` | Open or navigate the active tab. |
+| `browser_back()` | Navigate back one step in the tab's history stack. |
 | `browser_click(selector)` | Click the element matching the CSS / text selector. |
 | `browser_type(selector, text)` | Focus the element and type text (key-by-key, debounced). |
 | `browser_scroll(direction, amount?)` | Scroll up / down / to selector. |
 | `browser_wait(condition, timeout_ms?)` | Wait for selector / network-idle / time. |
 | `browser_screenshot(full_page?)` | Capture the viewport (or full page) as a `ContentBlock::ImageFile`. |
+| `browser_read_page()` | Extract the page's full text + structural outline (cheaper than a screenshot when the model just needs text). |
 | `browser_run_js(script)` | Run arbitrary JS in the page context, return the JSON-serialised result. |
 | `browser_close()` | Close the active tab and release the slot. |
 

@@ -875,3 +875,90 @@ ollama = ""    # explicit "no proxy" override
 | `qwen_code_path` | string \| null | `null` (look up `qwen` on `PATH`) | Absolute path to the Qwen Code CLI binary. Necessary when the daemon runs as a service that doesn't inherit the user's full PATH. Equivalent to setting `provider_urls.qwen-code`. |
 | `provider_proxy_urls` | `HashMap<string, string>` | `{}` | Per-provider proxy URL overrides. Empty string `""` for a provider explicitly bypasses the proxy (useful when a global `[proxy]` is set but you want one provider to connect direct, e.g. `ollama`). |
 | `provider_request_timeout_secs` | `HashMap<string, u64>` | `{}` | Per-provider HTTP read-timeout overrides in seconds. Already documented above in `[provider_request_timeout_secs]`; included here for completeness. |
+
+---
+
+### Additional config sections (appendix)
+
+These sections have schemas in code but are typically left at their defaults. Settings here only need to be touched for advanced operator scenarios — listing them so you can find the field name when you do.
+
+```toml
+# Tool timeouts — global default + per-tool overrides
+tool_timeout_secs = 60
+[tool_timeouts]
+"shell_exec" = 300
+"web_*"      = 30
+
+# Fallback LLM providers (tried in order on primary failure)
+[[fallback_providers]]
+provider = "groq"
+model    = "llama-3.3-70b-versatile"
+
+# Static MCP servers loaded at boot
+[[mcp_servers]]
+name = "github"
+url  = "https://api.example.com/mcp"
+
+# Webhook triggers — external systems pushing events into LibreFang
+[webhook_triggers]
+enabled = true
+secret_env = "WEBHOOK_TRIGGERS_SECRET"
+
+# Extensions / MCP integrations — auto-reconnect knobs
+[extensions]
+auto_reconnect = true
+reconnect_max_attempts = 10
+reconnect_max_backoff_secs = 300
+health_check_interval_secs = 60
+
+# Config hot-reload (file watcher)
+[reload]
+enabled = true
+debounce_ms = 500
+
+# Auto-reply background engine for inbound messages
+[auto_reply]
+enabled = false
+# (provider-specific tuning — see librefang-runtime::auto_reply)
+
+# Broadcast routing (multi-recipient delivery)
+[broadcast]
+enabled = false
+max_fanout = 100
+
+# A2UI canvas tool
+[canvas]
+enabled = false
+max_html_bytes = 524288
+allowed_tags = []   # empty = all safe tags
+
+# A2A protocol config (agent-to-agent across instances)
+[a2a]
+listen_path = "/a2a"
+trust_anchors = []
+
+# Device pairing
+[pairing]
+enabled = true
+ttl_secs = 600
+
+# Global exec policy (overrideable per-agent or per-tool)
+[exec_policy]
+allow_shell = true
+shell_allowlist = ["git", "cargo", "npm"]
+```
+
+| Section | Purpose | When to touch |
+|---|---|---|
+| `tool_timeout_secs` / `[tool_timeouts]` | Global default + per-tool wall-clock cap on tool execution. Glob patterns supported (`web_*`); longest match wins. | Bump for slow tools (long shell builds, large embedding requests); lower for cheap web fetches. |
+| `[[fallback_providers]]` | Ordered list of `(provider, model)` pairs the agent loop falls back to when the primary 5xx's or rate-limits. | Pair an expensive frontier model with a cheap fast fallback. |
+| `[[mcp_servers]]` | Static MCP server configs loaded at boot. (Dynamic adds via `/api/mcp/servers`.) | Hard-code a corp internal MCP server you always want connected. |
+| `[webhook_triggers]` | External event injection — push `{event_type, payload}` to the daemon and matching `[[trigger]]` blocks fire. | When an external CI / monitoring system needs to wake an agent. |
+| `[extensions]` | Reconnect / health-check knobs for **MCP integrations** specifically. | Tune backoff for flaky MCP servers. |
+| `[reload]` | `~/.librefang/config.toml` hot-reload watcher. | Disable when running on a network filesystem with unreliable inotify. |
+| `[auto_reply]` | Background engine that auto-responds to certain inbound patterns without going through a full agent turn. | Off by default — opt in for high-volume support channels. |
+| `[broadcast]` | Multi-recipient message fan-out (vs unicast). | Enable when agents need to push to ≥10 channels at once. |
+| `[canvas]` | A2UI tool that renders agent-authored HTML in the dashboard. Off by default for safety. | Enable + audit `allowed_tags` before turning on. |
+| `[a2a]` | A2A protocol listen path + accepted-issuer allowlist for cross-instance auth. | Set when federating multiple LibreFang instances. |
+| `[pairing]` | Device pairing TTL and master toggle. | Disable in single-user setups. |
+| `[exec_policy]` | Global default shell/exec allowlist; per-agent `[exec_policy]` in `agent.toml` overrides this for that agent only. | Lock down the daemon's default; selectively grant trusted agents broader access. |
