@@ -366,6 +366,7 @@ async fn users_update_and_import_preserve_rbac_m3_policy_fields() {
             m
         },
         api_key_hash: None,
+        budget: None,
         tool_policy: Some(UserToolPolicy {
             allowed_tools: vec!["web_search".into()],
             denied_tools: vec!["shell_exec".into()],

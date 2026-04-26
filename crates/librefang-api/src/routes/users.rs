@@ -256,6 +256,12 @@ pub async fn create_user(
         role,
         channel_bindings: req.channel_bindings,
         api_key_hash,
+        // RBAC M5 (#3203) per-user budget — read-only display data in
+        // this slice (no write endpoint, no per-user enforcement; the
+        // metering pipeline still only enforces global / per-agent /
+        // per-provider caps). For now budget is set by editing
+        // config.toml directly; a follow-up adds the write path.
+        budget: None,
         // RBAC M3 (#3205) per-user policy fields. M6's create endpoint
         // doesn't accept them yet — the dashboard's matrix editor
         // (`/users/{name}/policy`) is the future home, ships as a stub
@@ -363,18 +369,22 @@ pub async fn update_user(
                 renamed_to_for_closure
             )));
         }
-        // RBAC M3 (#3205): preserve per-user `tool_policy`,
-        // `tool_categories`, `memory_access`, and `channel_tool_rules`
-        // across the rename/role/binding edit. The M6 dashboard only
-        // exposes name/role/bindings/api_key_hash today; clobbering the
-        // RBAC-M3 fields here would silently disable a Viewer's PII
-        // redaction the moment an admin retitles their account.
+        // RBAC M3 (#3205) + M5 (#3203): preserve per-user `tool_policy`,
+        // `tool_categories`, `memory_access`, `channel_tool_rules`, and
+        // `budget` across the rename/role/binding edit. The M6 dashboard
+        // only exposes name/role/bindings/api_key_hash today; clobbering
+        // the RBAC fields here would silently disable a Viewer's PII
+        // redaction the moment an admin retitles their account. `budget`
+        // is currently set via config.toml (no write endpoint yet, full
+        // per-user enforcement lands in an M5 follow-up), and the same
+        // preserve-across-edit rule applies.
         let preserved = users[idx].clone();
         users[idx] = UserConfig {
             name: renamed_to_for_closure.clone(),
             role: new_role.clone(),
             channel_bindings: new_bindings.clone(),
             api_key_hash: new_api_key_hash.clone(),
+            budget: preserved.budget,
             tool_policy: preserved.tool_policy,
             tool_categories: preserved.tool_categories,
             memory_access: preserved.memory_access,
@@ -456,10 +466,11 @@ pub async fn import_users(
                 role,
                 channel_bindings: row.channel_bindings.clone(),
                 api_key_hash,
-                // CSV import doesn't carry RBAC M3 (#3205) policy fields
-                // — start blank for new rows; the per-row update path
-                // below preserves existing policy for rows that match an
-                // already-registered name.
+                // CSV import doesn't carry RBAC M5 (#3203) budget or
+                // M3 (#3205) policy fields — start blank for new rows;
+                // the per-row update path below preserves existing
+                // values for rows that match an already-registered name.
+                budget: None,
                 tool_policy: None,
                 tool_categories: None,
                 memory_access: None,
@@ -553,11 +564,12 @@ pub async fn import_users(
     let result = persist_users(&state, move |users| {
         for new_u in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
-                // RBAC M3 (#3205): preserve existing per-user policy
-                // fields when a CSV row updates an existing user — same
-                // reasoning as `update_user`.
+                // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
+                // user policy and budget when a CSV row updates an
+                // existing user — same reasoning as `update_user`.
                 let preserved = users[idx].clone();
                 users[idx] = UserConfig {
+                    budget: preserved.budget,
                     tool_policy: preserved.tool_policy,
                     tool_categories: preserved.tool_categories,
                     memory_access: preserved.memory_access,
