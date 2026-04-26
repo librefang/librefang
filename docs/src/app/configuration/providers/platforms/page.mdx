@@ -6,8 +6,6 @@ This page covers providers that route through a platform-specific gateway, enter
 
 - Replicate
 - NVIDIA NIM
-- Voyage AI
-- Anyscale
 - DeepInfra
 - Azure OpenAI
 - Qwen (DashScope)
@@ -66,47 +64,9 @@ This page covers providers that route through a platform-specific gateway, enter
 
 ---
 
-## Voyage AI
-
-| | |
-|---|---|
-| **Display Name** | Voyage AI |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `VOYAGE_API_KEY` |
-| **Base URL** | `https://api.voyageai.com/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | Embedding and reranking models |
-
-**Notes:** Voyage AI specializes in embedding and reranking models used for semantic search and RAG pipelines.
-
-**Setup:**
-1. Sign up at [voyageai.com](https://www.voyageai.com)
-2. Create an API key
-3. `export VOYAGE_API_KEY="pa-..."`
-
----
-
-## Anyscale
-
-| | |
-|---|---|
-| **Display Name** | Anyscale |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `ANYSCALE_API_KEY` |
-| **Base URL** | `https://api.endpoints.anyscale.com/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | Open-source models (Llama, Mistral, etc.) |
-
-**Setup:**
-1. Sign up at [anyscale.com](https://www.anyscale.com)
-2. Create an API key
-3. `export ANYSCALE_API_KEY="esecret_..."`
-
----
+<!-- Voyage AI / Anyscale removed: no driver implementation in code,
+     no env var wiring, no model catalog entries. Re-add when a
+     real driver lands. -->
 
 ## DeepInfra
 

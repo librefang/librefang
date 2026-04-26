@@ -87,19 +87,21 @@
 
 ## Embedding 自动检测
 
-embeddings 驱动设为 `provider = "auto"` 时，LibreFang 按优先级列表选第一个可达的 embeddings 后端。云 API key 优先；本地服务器在后。当前顺序：
+embeddings 驱动设为 `provider = "auto"` 时，LibreFang 按优先级列表选第一个可达的 embeddings 后端。云 API key 优先；本地服务器在后。当前顺序(对照 `librefang-runtime::embedding::detect_embedding_provider` 验证):
 
-1. `OPENAI_API_KEY`
-2. `COHERE_API_KEY`
-3. `JINA_API_KEY`
-4. `VOYAGE_API_KEY`
-5. `MIXEDBREAD_API_KEY`
-6. `MISTRAL_API_KEY`
-7. `OLLAMA_HOST`（本地）
-8. `VLLM_BASE_URL`（本地）
-9. `LMSTUDIO_BASE_URL`（本地）
+1. `OPENAI_API_KEY` → `"openai"`
+2. `OPENROUTER_API_KEY` → `"openrouter"`
+3. `MISTRAL_API_KEY` → `"mistral"`
+4. `TOGETHER_API_KEY` → `"together"`
+5. `FIREWORKS_API_KEY` → `"fireworks"`
+6. `COHERE_API_KEY` → `"cohere"`
+7. `OLLAMA_HOST`(本地)
+8. `VLLM_BASE_URL`(本地)
+9. `LMSTUDIO_BASE_URL`(本地)
 
-把 `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` 任意一个设成可达的 URL 就够了——本地条目不需要 API key。`create_embedding_driver` 用同一优先级，所以 `auto` 启动时挑的跟显式 `provider = "vllm"` 构造的一致。
+把 `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` 任意一个设成可达的 URL 就够了——本地条目不需要 API key。`create_embedding_driver` 用同一优先级,所以 `auto` 启动时挑的跟显式 `provider = "vllm"` 构造的一致。
+
+`GROQ_API_KEY` 故意**不**在梯队里 —— Groq 没有 `/v1/embeddings` 端点,自动选了它会在第一次真调时静默 404。同理,没有接通 embedding 驱动的 provider(`VOYAGE`、`JINA`、`MIXEDBREAD`、`BEDROCK` 自动挑选时 —— 显式配 Bedrock 是可以的)即使 chat key 设了也不会被自动选。
 
 ---
 

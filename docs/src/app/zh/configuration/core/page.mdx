@@ -711,3 +711,165 @@ require_auth_for_reads = true
 | `dashboard_pass_hash` | string | 自动 | Argon2id hash, 自动写入。**不要手动设**这个字段 —— 用 `librefang hash-password` 生成。 |
 | `require_auth_for_reads` | bool \| null | `null` | 覆盖读端点鉴权允许列表。`null` 走默认(loopback 上不鉴权,其他地址鉴权)。 |
 
+---
+
+### `[skills]`
+
+用户安装的 skill 加载与禁用列表。Bundled skill(daemon 自带的约 60 个)总是加载;`[skills]` 只控制用户放在 `~/.librefang/skills/` 和额外路径下的那些。
+
+```toml
+[skills]
+load_user = true
+extra_dirs = ["/srv/librefang/team-skills"]
+disabled = ["legacy-research"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `load_user` | bool | `true` | 加载 `~/.librefang/skills/` 下的用户 skill。`false` 完全跳过用户 skill(如复现 bundled-only 的 bug)。 |
+| `extra_dirs` | `Vec<PathBuf>` | `[]` | 额外的 skill 目录。每个必须是绝对路径。在主 skill 目录之后只读扫描;**同名时本地 skill 胜出**。 |
+| `disabled` | `Vec<string>` | `[]` | 加载时跳过的 skill 名。临时禁用某个进化或市场安装的 skill 不用删目录。按 manifest 的 `name` 大小写敏感匹配。 |
+
+---
+
+### `[notification]`
+
+approval 请求和任务状态告警发到哪。默认空 = approval 只显示在 dashboard 收件箱 —— 设了 channel 才会同时推送 Telegram / Slack / email 等。
+
+```toml
+[notification]
+# 所有 approval 同时扇出到 Telegram 和 Slack
+approval_channels = [
+  { kind = "telegram", target = "123456789" },
+  { kind = "slack", target = "C0123456" },
+]
+# 失败告警只到 email
+alert_channels = [
+  { kind = "email", target = "ops@example.com" },
+]
+
+# Per-agent 覆盖 — research-bot 的 approval 改发研究负责人
+[[notification.agent_rules]]
+agent = "research-bot"
+targets = [{ kind = "telegram", target = "987654321" }]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `approval_channels` | `Vec<NotificationTarget>` | `[]` | 待 approval 扇出到哪。每个 target 有 `kind`(`telegram`、`slack`、`discord`、`email`、`webhook`、`feishu`、`dingtalk` 等)和 `target` 字符串(chat ID、channel ID、邮箱、URL 等)。 |
+| `alert_channels` | `Vec<NotificationTarget>` | `[]` | 任务完成 / 失败告警发到哪。结构同 `approval_channels`。 |
+| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | per-agent 覆盖 —— 列 `{agent, targets}` 把单个 agent 的 approval 重定向到非全局 channel。 |
+
+按工具路由(如"shell_exec approval 给 oncall,file_write approval 给开发组")用 `[approval] routing`,不是 `[notification]`。
+
+---
+
+### `[triggers]`
+
+事件驱动 trigger 系统的安全闸门。封顶 trigger 触发频率、单事件最多触发数,以及 trigger 调 trigger 的链深度。
+
+```toml
+[triggers]
+cooldown_secs = 5
+max_per_event = 10
+max_depth = 5
+max_workflow_secs = 3600
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cooldown_secs` | u64 | `5` | 同一 trigger 两次触发的最小间隔秒数。防止啰嗦的 trigger 把 agent 循环打满。 |
+| `max_per_event` | usize | `10` | 单个事件最多触发多少 trigger。超量 warn 并丢弃。 |
+| `max_depth` | usize | `5` | 最大递归深度 —— trigger 触发另一 trigger 时深度 +1。超过 `max_depth` 链中止并 warn。 |
+| `max_workflow_secs` | u64 | `3600` | trigger spawn 出的 workflow 单次墙钟上限。 |
+
+cron 和 agent manifest 上的 `[[trigger]]` 共享这些上限。生产环境不希望 trigger 链就把 `max_depth` 调成 1。
+
+---
+
+### `[task_board]`
+
+共享任务队列的安全闸门。Task board 是 agent 拉 `pending` 工作的持久化队列;worker 认领任务后崩溃没完成的话,sweeper 在 `claim_ttl_secs` 后把它重置为 `pending`,让别的 worker 接手。
+
+```toml
+[task_board]
+claim_ttl_secs = 600        # 10 分钟
+sweep_interval_secs = 30
+max_retries = 0             # 0 = 无限重试
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `claim_ttl_secs` | u64 | `600` | `in_progress` 任务最多被认领多久,sweeper 之后重置。`0` 完全关闭 sweep。 |
+| `sweep_interval_secs` | u64 | `30` | sweeper 扫描卡住任务的频率。 |
+| `max_retries` | u32 | `0` | 卡住任务被自动重置多少次后标 `failed`。`0` = 无限重试(幂等任务的安全默认;有副作用的任务调低)。 |
+
+`claim_ttl_secs` 调到约 2× 最慢任务的预期时长。调太低,健康长任务会被从 worker 手里抢走;太高,崩溃恢复慢。
+
+---
+
+### `[registry]`
+
+Skill / plugin / 模板注册表同步。注册表镜像在本地 `~/.librefang/registry-cache/`,缓存过期后重新下载。
+
+```toml
+[registry]
+cache_ttl_secs = 86400            # 24 小时
+registry_mirror = "https://ghproxy.cn"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cache_ttl_secs` | u64 | `86400` | 本地注册表缓存的 TTL。 |
+| `registry_mirror` | string | `""` | **所有出站 GitHub URL** 的镜像/代理前缀(tarball、git clone、raw 内容)。设了之后 `https://github.com/...` 变成 `<mirror>/https://github.com/...`。中国大陆访问慢/被屏蔽时有用。 |
+
+常见 mirror 值:`https://ghproxy.cn`、`https://gh-proxy.com`、内部企业代理。留空直连 GitHub。
+
+---
+
+### `[azure_openai]`
+
+Azure OpenAI 部署的 provider 专属配置块。Azure 用的 URL 格式和鉴权头都跟标准 OpenAI 不同,所以 platform 驱动有自己的 config 段。三个字段都退到环境变量 —— 看哪种密钥管理风格更顺手。
+
+```toml
+[azure_openai]
+endpoint = "https://my-resource.openai.azure.com"
+deployment = "gpt-4o"
+api_version = "2024-02-01"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `endpoint` | string \| null | env `AZURE_OPENAI_ENDPOINT` | Azure 资源 URL(`https://<resource>.openai.azure.com`)。 |
+| `api_version` | string \| null | env `AZURE_OPENAI_API_VERSION` 或 `"2024-02-01"` | Azure REST API 版本。 |
+| `deployment` | string \| null | env `AZURE_OPENAI_DEPLOYMENT`,然后 `default_model.model` | Azure 部署名。不设就用 `default_model.model` 的值。 |
+
+鉴权用 `AZURE_OPENAI_API_KEY`(头是 `api-key`,不是 `Authorization: Bearer`)。完整设置见 [Azure OpenAI provider 条目](/zh/configuration/providers/platforms#azure-openai)。
+
+---
+
+### 顶层字段(运维路径与 per-provider HTTP)
+
+5 个额外的顶层字段,影响 daemon I/O 和 per-provider 网络。所有可选,默认 `None` 除非另注。
+
+```toml
+[kernel]
+config_version = 1
+log_dir = "/var/log/librefang"
+qwen_code_path = "/home/user/.local/bin/qwen"
+
+# Per-provider HTTP knob(不在子段下)
+[provider_proxy_urls]
+openai = "http://corp-proxy.local:8080"
+anthropic = "http://corp-proxy.local:8080"
+ollama = ""    # 显式"不走代理"覆盖
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `config_version` | u32 | `1` | 配置 schema 版本。给 auto-migrator 用,知道 daemon 启动时是否要升级你的配置。**不要手动设** —— `librefang upgrade` 写。 |
+| `log_dir` | PathBuf \| null | `null`(= `~/.librefang/`) | 自定义日志目录。home 目录在慢盘上、想把日志放本地 SSD 时用。 |
+| `qwen_code_path` | string \| null | `null`(到 `PATH` 找 `qwen`) | Qwen Code CLI 的绝对路径。daemon 作为 service 跑、没继承用户完整 PATH 时必填。等同于设 `provider_urls.qwen-code`。 |
+| `provider_proxy_urls` | `HashMap<string, string>` | `{}` | per-provider 代理 URL 覆盖。空字符串 `""` 显式让某 provider 绕过代理(全局 `[proxy]` 设了但希望某 provider 直连时用,如 `ollama`)。 |
+| `provider_request_timeout_secs` | `HashMap<string, u64>` | `{}` | per-provider HTTP 读超时秒数覆盖。已在前面 `[provider_request_timeout_secs]` 文档过;此处作为完整性列出。 |
+

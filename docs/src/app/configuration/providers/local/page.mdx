@@ -87,19 +87,21 @@ This page covers providers that run on your machine, inside your network, or beh
 
 ## Embedding auto-detection
 
-When the embeddings driver is set to `provider = "auto"`, LibreFang walks a priority list to pick the first reachable embeddings backend. Cloud API keys win first; local servers come after. The current order:
+When the embeddings driver is set to `provider = "auto"`, LibreFang walks a priority list to pick the first reachable embeddings backend. Cloud API keys win first; local servers come after. The current order (verified against `librefang-runtime::embedding::detect_embedding_provider`):
 
-1. `OPENAI_API_KEY`
-2. `COHERE_API_KEY`
-3. `JINA_API_KEY`
-4. `VOYAGE_API_KEY`
-5. `MIXEDBREAD_API_KEY`
-6. `MISTRAL_API_KEY`
+1. `OPENAI_API_KEY` → `"openai"`
+2. `OPENROUTER_API_KEY` → `"openrouter"`
+3. `MISTRAL_API_KEY` → `"mistral"`
+4. `TOGETHER_API_KEY` → `"together"`
+5. `FIREWORKS_API_KEY` → `"fireworks"`
+6. `COHERE_API_KEY` → `"cohere"`
 7. `OLLAMA_HOST` (local)
 8. `VLLM_BASE_URL` (local)
 9. `LMSTUDIO_BASE_URL` (local)
 
 Setting any of `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` to a reachable URL is enough — no API key needed for the local entries. The same priority is applied by `create_embedding_driver`, so what `auto` picks at startup matches what an explicit `provider = "vllm"` would build.
+
+`GROQ_API_KEY` is deliberately **not** in the ladder — Groq exposes no `/v1/embeddings` endpoint, so auto-picking it would produce silent 404s at the first real call. Likewise, providers without a wired embedding driver (`VOYAGE`, `JINA`, `MIXEDBREAD`, `BEDROCK` for auto-pick — Bedrock works when explicitly configured) are not auto-detected even if their chat keys are set.
 
 ---
 
