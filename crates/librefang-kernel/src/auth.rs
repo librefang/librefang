@@ -111,7 +111,7 @@ impl AuthManager {
         };
 
         for config in user_configs {
-            let user_id = UserId::new();
+            let user_id = UserId::from_name(&config.name);
             let role = UserRole::from_str_role(&config.role);
             let identity = UserIdentity {
                 id: user_id,
@@ -312,5 +312,32 @@ mod tests {
         assert_eq!(UserRole::from_str_role("user"), UserRole::User);
         assert_eq!(UserRole::from_str_role("OWNER"), UserRole::Owner);
         assert_eq!(UserRole::from_str_role("unknown"), UserRole::User);
+    }
+
+    #[test]
+    fn test_user_ids_stable_across_manager_rebuilds() {
+        // RBAC M1: AuthManager now derives ids via UserId::from_name so
+        // restarting the daemon (or rebuilding the manager from the same
+        // config) keeps audit-log attribution intact. Random v4 ids would
+        // break correlation on every boot.
+        let cfg = test_configs();
+        let m1 = AuthManager::new(&cfg);
+        let m2 = AuthManager::new(&cfg);
+
+        let alice1 = m1.identify("telegram", "123456").unwrap();
+        let alice2 = m2.identify("telegram", "123456").unwrap();
+        assert_eq!(alice1, alice2, "same name must map to the same UserId");
+
+        // The id is also discoverable directly from the configured name —
+        // this is the contract the API-key path in middleware.rs depends on.
+        assert_eq!(alice1, UserId::from_name("Alice"));
+    }
+
+    #[test]
+    fn test_distinct_users_get_distinct_ids() {
+        let manager = AuthManager::new(&test_configs());
+        let alice = manager.identify("telegram", "123456").unwrap();
+        let guest = manager.identify("telegram", "999999").unwrap();
+        assert_ne!(alice, guest);
     }
 }

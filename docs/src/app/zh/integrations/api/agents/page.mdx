@@ -168,9 +168,12 @@
 
 ```json
 {
-  "message": "What files are in the current directory?"
+  "message": "What files are in the current directory?",
+  "session_id": "optional-session-uuid"
 }
 ```
+
+**可选 `session_id`**：按请求覆盖此消息落到哪个 session。省略时用 agent 当前 session。给了就路由到那个特定 session（必须是该 agent 已存在的 session），让一个 agent 从单个客户端同时服务多条平行 chat，不需要先 `POST /sessions/{id}/switch`。fan-out 后端和多 tab dashboard 用得上。
 
 **响应** `200 OK`：
 
@@ -186,6 +189,25 @@
 ### POST /api/agents/&lbrace;id&rbrace;/message/stream
 
 发送消息并以 Server-Sent Events 流的方式接收响应（参见 [SSE 流式传输](#sse-流式传输)）。
+
+### GET /api/agents/&lbrace;id&rbrace;/attach
+
+作为额外只读订阅者附加到**当前 session** 的 SSE 流——多客户端联合观察时有用，CLI、Tauri 桌面、浏览器多 tab 想跟同一回合 live。
+
+`POST /message/stream` 本身保持 single-consumer（只发起方拿到）；本端点由按 session 的 `SessionStreamHub` 把每个 `StreamEvent` 同时复制给原调用方和任意数量的额外订阅者。订阅者不推进回合，只观察。
+
+**行为：**
+
+- 连接保持到当前回合结束。回合结束时服务端干净关闭。
+- 你 attach 时没有正在跑的回合，连接等下一个。
+- 单个 agent 可有多个并发 attacher，不会拖慢生产者（broadcast channel；按事件的扇出常数代价）。
+- 事件格式跟 `/message/stream` 完全一样，已有解析器无需改动。
+
+```bash
+# 第二个客户端联合观察当前回合
+curl -N 'http://127.0.0.1:4545/api/agents/$AGENT/attach' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY'
+```
 
 ### GET /api/agents/&lbrace;id&rbrace;/session
 
@@ -357,6 +379,26 @@
 
 通过上传 ID 获取之前上传的文件。
 
+### 支持的附件类型
+
+`POST /api/agents/{id}/message`（或 streaming 变体）的 body 引用附件时，后端在调用 LLM 前会把每个 `file_id` 解析为 content block。识别三类：
+
+| 类别 | 检测 | 产出 block |
+|---|---|---|
+| **图片** | `Content-Type: image/*`（`png`、`jpeg`、`webp`、`gif`） | 内联 base64 图片 block |
+| **PDF** | `Content-Type: application/pdf` | 文本 block，前缀 `[Attached PDF: <filename>]` 跟提取的纯文本 |
+| **文本 / 代码** | 任何 `text/*` MIME，列出的 `application/*` JSON/XML/YAML/TOML/JS/TS/SQL/GraphQL 类型，**或**浏览器没填 MIME 时识别已知扩展名 | 文本 block，前缀 `[Attached file: <filename>]` 跟 UTF-8 内容 |
+
+识别的文本/代码扩展名包括 `.txt`、`.md`、`.markdown`、`.rst`、`.csv`、`.tsv`、`.log`、`.json`、`.yaml`、`.yml`、`.toml`、`.xml`、`.ini`、`.conf`、`.cfg`、`.env`、`.html`、`.css`、`.js`、`.ts`、`.tsx`、`.jsx`、`.vue`、`.svelte`、`.py`、`.rs`、`.go`、`.java`、`.kt`、`.swift`、`.scala`、`.c`、`.cpp`、`.h`、`.rb`、`.php`、`.lua`、`.r`、`.sh`、`.bash`、`.sql`、`.graphql`、`.proto`、`.ipynb`、`Dockerfile`、`Makefile` 等等。
+
+**上限：**
+
+- PDF 文本提取和文本文件读取都截断在 200,000 字符。
+- 扫描件 / 纯图片 PDF 会带一段简短说明指出无法提取文本，模型仍能看到附件存在。
+- 三类都不匹配的文件被跳过并记 warn 日志；LLM 调用照常带上其余附件继续。
+
+**本地小模型注意：** 用户消息含多段文本（比如附件头 + 用户提示）时，runtime 在 session-repair 层把同 role 相邻的文本 block 合并。这个归一化在任何 driver 调用之前发生，所以经 Ollama / vLLM / LM Studio 的 chat-tuned 小模型只看到单段 user 文本加图片，依然会注意到附件。
+
 ### GET /api/agents/&lbrace;id&rbrace;/ws
 
 用于实时双向聊天的 WebSocket 连接（参见 [WebSocket 协议](#websocket-协议)）。
@@ -368,6 +410,38 @@
 ### POST /api/agents/&lbrace;id&rbrace;/memory/import
 
 从 JSON 导入 Agent 的记忆条目。
+
+### Owner Notice
+
+agent 可以发**结构化的私密旁路消息**给运营者，跟用户可见的回复并行。`notify_owner` 内置 tool 在回合中收集一条或多条 notice；runtime 聚合到 `ReplyEnvelope.owner_notice: Option<String>` 字段。
+
+通知出现在三处：
+
+- **`POST /message`** 响应 body：顶层 `owner_notice` 字符串，跟 `response` 同级。
+- **`POST /message/stream` / `GET /attach`** SSE：在最终 `Done` 之前的 `StreamEvent::OwnerNotice { text }` 事件。
+- **WhatsApp gateway**：设了 `OWNER_JIDS` 环境变量（逗号分隔的 JID）后，每条 notice 扇出到这组 owner。其他 channel adapter 可以同样接入。
+
+适合 "这个用户问了我没法在公开消息里答的事——升级给运维" 流程，或者任何不该让用户在 chat 里看到的审计轨迹。
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/trajectory
+
+导出某个 session 的脱敏 trajectory（审计轨迹）。响应打包了该 session 的消息加最小元数据（agent 名、模型、system prompt 指纹、librefang 版本），所有消息都过隐私脱敏器再序列化。用于支持、审计、合规流程，需要分享 session 但又不能泄密时用这个。
+
+**Query 参数：**
+
+- `format=json`（默认）：单 JSON 对象，content-type `application/json`。
+- `format=jsonl`：NDJSON — 第一行是元数据头，后续每行一条消息；content-type `application/x-ndjson`。方便 streaming 进 log pipeline 或 `jq` filter。
+
+**响应状态：**
+
+- `200` — trajectory 包。
+- `400` — agent 或 session id 不是合法 UUID。
+- `404` — agent 或 session 不存在。
+
+```bash
+curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?format=jsonl' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY' > session.jsonl
+```
 
 ---
 
@@ -496,6 +570,29 @@
 ---
 
 ## 触发器端点
+
+### 触发响应路由
+
+触发器触发的响应路由到**该 agent 的主通道** —— agent 在 `[channels]` 下注册的那个通道。之前的行为在调用路径上没有调用方通道时（cron 样的触发、调度器事件）会静默丢弃响应。现在响应总会落到可见的地方：agent 自己拥有的面向用户的表面。
+
+### `task_posted` 触发器的 `assignee_match:self` 过滤
+
+`task_posted` 触发器可以选择只在任务被指派给 agent 自己时触发（按 agent id 匹配）：
+
+```json
+{
+  "pattern": {
+    "task_posted": {
+      "assignee_match": "self"
+    }
+  }
+}
+```
+
+`assignee_match` 接受：
+
+- `"self"` — 仅当 `task.assignee_id == agent.id` 触发。"我应该处理分配给我的任务" 类 agent 用这个。
+- `"any"`（默认） — 旧行为；任何 `task_posted` 事件都触发，不看 assignee。
 
 ### GET /api/triggers
 
@@ -764,6 +861,8 @@
 **源码：** `librefang-runtime/src/interrupt.rs`
 
 `SessionInterrupt` 是一个 `Arc<AtomicBool>` 信号，agent 循环在每个工具调用边界处检查它。设置该标志后，循环在当前工具调用完成后干净退出——不会强制终止线程或取消正在进行的网络请求。
+
+**级联到 `agent_send` 子 agent**：父 agent 的 `/stop` 现在会传播到它通过 `agent_send` tool 派出的每个子 agent。级联沿着 `agent_send` 调用时建立的父→子边走，所以对面向用户的 agent 单次 `/stop` 会停掉它启动的整个 fan-out 树 — 用户放弃后不会有孤儿子 agent 循环继续。完全递归：子 agent 自己又调了 `agent_send` 的话继续向下传。
 
 ### 中断端点
 

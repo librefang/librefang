@@ -10,14 +10,35 @@ use uuid::Uuid;
 /// Metadata key for stable prefix mode flag.
 pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Stable namespace for deriving deterministic [`UserId`] values from
+/// [`UserConfig::name`]. Generated once and frozen — changing this constant
+/// rotates every existing `UserId` and breaks audit-log correlation across
+/// the whole fleet, so it must never be changed.
+pub const LIBREFANG_USER_NAMESPACE: Uuid =
+    Uuid::from_u128(0x4c46_4147_5f55_5345_525f_4e53_5f76_3501);
+
 /// Unique identifier for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserId(pub Uuid);
 
 impl UserId {
     /// Generate a new random UserId.
+    ///
+    /// Prefer [`UserId::from_name`] for users that come from configuration —
+    /// random UUIDs change on every restart, which makes audit-log
+    /// correlation across daemon restarts impossible.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Derive a stable UserId from a user's configured name.
+    ///
+    /// Uses UUID v5 with [`LIBREFANG_USER_NAMESPACE`] so the same name
+    /// always maps to the same id — across restarts, across config reloads,
+    /// across nodes. Renaming a user produces a new id (intentionally —
+    /// rename = new identity, old audit history stays attached to the old id).
+    pub fn from_name(name: &str) -> Self {
+        Self(Uuid::new_v5(&LIBREFANG_USER_NAMESPACE, name.as_bytes()))
     }
 }
 
@@ -1336,6 +1357,28 @@ mod tests {
         let json = serde_json::to_string(&u).unwrap();
         let back: UserId = serde_json::from_str(&json).unwrap();
         assert_eq!(u, back);
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_stable() {
+        // Same name → same id, across calls. This is the contract that lets
+        // audit log entries survive daemon restarts.
+        assert_eq!(UserId::from_name("Alice"), UserId::from_name("Alice"));
+        assert_eq!(UserId::from_name(""), UserId::from_name(""));
+    }
+
+    #[test]
+    fn test_user_id_from_name_differs_per_name() {
+        assert_ne!(UserId::from_name("Alice"), UserId::from_name("Bob"));
+        // Case-sensitive — caller controls normalization.
+        assert_ne!(UserId::from_name("alice"), UserId::from_name("Alice"));
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_v5() {
+        // UUID v5 (SHA-1 + namespace) — version nibble must be 5.
+        let id = UserId::from_name("Alice");
+        assert_eq!(id.0.get_version_num(), 5);
     }
 
     #[test]

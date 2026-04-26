@@ -93,9 +93,23 @@ default_agent = "home-assistant"
 
 ## 通道覆盖
 
-每个通道适配器都支持 `ChannelOverrides`，允许在不修改 Agent manifest 的情况下按通道自定义行为。在 `config.toml` 中添加 `[channels.<name>.overrides]` 段落：
+每个通道适配器都支持 `ChannelOverrides`，可在两个层级自定义按通道行为：
+
+- **通道级** 在 `config.toml` —— 对使用该通道的所有 agent 生效。加 `[channels.<name>.overrides]` 段。
+- **Agent 级** 在 `agent.toml` —— 只对该 agent 在所有通道上生效。加顶层 `[channel_overrides]` 段。
+
+**解析顺序**：agent 级 → 通道级 → 内置默认。哪一层设了哪一层赢；没设的字段穿透到下一层（跟 `exec_policy` 一样的模式）。
 
 ```toml
+# agent.toml —— 每个 agent 自己的覆盖（比如 "这个 agent 永远回 DM"）
+[channel_overrides]
+dm_policy = "always"
+group_policy = "trigger_only"
+group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
+```
+
+```toml
+# config.toml —— 该通道上对所有 agent 的默认
 [channels.telegram.overrides]
 model = "gemini-2.5-flash"
 system_prompt = "You are a concise Telegram assistant. Keep replies under 200 words."
@@ -174,3 +188,85 @@ usage_footer = "compact"
 4. **兜底**：如果没有匹配的路由规则，消息会发送到第一个可用的 Agent。
 
 当渠道配置了 `default_agent` 时，来自该渠道的消息会跳过语义路由和关键词路由，直接发送到指定的 Agent。用户仍可通过 `/agent` 命令手动切换 Agent。
+
+---
+
+## 出站标记
+
+在 `ChannelOverrides` 里设 `prefix_agent_name` 给每条出站消息加 agent 名前缀。多个 agent 共享一个频道时有用——读者一眼能看出是哪个 agent 回的。
+
+| 风格 | 包装效果 |
+|---|---|
+| `Off`（默认） | 不变——跟 agent 文本字节相同 |
+| `Bracket` | `[agent-name] 回复内容` |
+| `BoldBracket` | `**[agent-name]** 回复内容`（粗体渲染依赖通道的输出格式） |
+
+```toml
+[channels.telegram.overrides]
+prefix_agent_name = "BoldBracket"
+```
+
+包装在每个非流式成功路径上跑一次（`auto_reply`、kernel-streaming-with-status accumulated、streaming-fallback `buffered_text`、非流式 fallback、re-resolution 后重试、`dispatch_with_blocks`）。streaming tee（每个 chunk 到达就转发）**不**包装——前缀会跟 chunk 边界穿插。
+
+## Signal 默认纯文本
+
+Signal adapter 默认 `OutputFormat::PlainText`。`signal-cli` 把 Markdown 星号下划线原样渲染，留着会产生可见噪音。要重启 Markdown，在 agent 或频道上覆盖：
+
+```toml
+[channels.signal.overrides]
+output_format = "markdown_v2"
+```
+
+其他通道保留各自的 formatter 默认值——只翻了 Signal。
+
+## 反应表情与处理状态
+
+几个 adapter 可以贴一个反应到用户消息表示"我在处理"，发送回复时移除。各通道独立：
+
+- **Slack** — `reactions_enabled` 开关（环境变量 `SLACK_REACTIONS`，默认 `true`）。收消息加 👀，回复时换成 ✅。`already_reacted` / `no_reaction` 错误静默忽略（fail-open）。
+- **Feishu** — 收消息加 `Typing` reaction，回复发送时移除。两个调用都 fire-and-forget；API 失败 `warn!` 但绝不阻塞消息处理。
+
+要在自定义 adapter 上加同样能力，把 reaction 调用 `tokio::spawn` 出去，把 `(reaction_id, message_id)` 存在按 chat id 索引的 map 里。
+
+## Feishu @提及保留
+
+Feishu 之前会静默删掉传入文本里的 `@_user_N` 占位符。Feishu adapter 现在用 mention payload 解析出的 `@<display-name>` 替换（`name` 缺失时回退 `open_id`），并把 `@_all` 重写为 `@all`。agent 看到原始对话语气——"@alice 你能 check 下吗？"——而不是裸标点。
+
+## Signal 媒体附件
+
+Signal adapter 现在支持发送 `Image`、`Voice`、`Video`、`Audio`、`Animation`、`File`、`FileData`、`MediaGroup` content block。媒体 URL 被下载并 base64 编码进 `/v2/send` 的 `base64_attachments`。`MediaGroup` 递归调用 `send()`。不支持的类型（`Poll`、`Sticker` …）`warn!` 优雅降级——纯文本 fallback 或跳过——而不是失败整个回复。
+
+## WhatsApp 语音 + DM/群消息策略
+
+WhatsApp adapter 暴露：
+
+- `send_voice(to, audio, mime_type)` — Cloud API 模式经 `/{phone_number_id}/media` 上传，再用返回的 `media_id` 发 `audio` 消息；Gateway 模式 base64 编码后 POST 到 `/message/send-voice`。
+- adapter 上的 `dm_policy: DmPolicy`（默认 `Respond`）和 `group_policy: GroupPolicy`（默认 `MentionOnly`），形状跟 Telegram 一致。Builder 方法：`with_dm_policy()`、`with_group_policy()`、`with_bot_phone()`、`with_bot_name()`。
+- `WhatsAppAdapter::should_handle_message(is_group, text) -> bool` 给 bridge / webhook 入口过滤用。
+
+`MentionOnly` 检查消息文本是否含 bot phone 或 bot name；`TriggerOnly` 检查 `group_trigger_patterns`；`Always` 和 `Never` 短路。
+
+## Webhook `deliver_only` 模式
+
+webhook 通道可作为 pass-through 跑：传入 payload 完全绕过 LLM（无 sanitizer、无 rate limiter、无 agent 查找），直接转发到目标通道。适合只需要让消息落到 Telegram / Slack 等地方的推送通知和带外告警。
+
+```toml
+[channels.webhook]
+enabled = true
+deliver_only = true
+deliver = "telegram:123456789"     # deliver_only 为 true 时必填
+```
+
+`deliver_only = true` 但 `deliver` 未设时，librefang 启动时打 warn，webhook 保持不激活。扇出在内部用 `__deliver_only__` / `__deliver_target__` metadata 信号化，adapter trait 签名保持不变。
+
+## 通道文件下载
+
+Telegram（及其他通道）发的文件以**临时认证 URL** 形式过来，**LLM 无法直接访问**。bridge 现在下载到可配置目录，把消息重写成本地路径 content block——非图片文件变成 `ContentBlock::Text` 带保存路径（agent 调 `file_read`），图片变成 `ContentBlock::ImageFile`。
+
+```toml
+[channels]
+file_download_dir = "/var/lib/librefang/channel-files"   # 默认：~/.librefang/data/channel-files
+file_download_max_bytes = 33554432                       # 默认：32 MiB
+```
+
+启动 sweep 移除 24h 以上的过期文件；下载过程中还有概率 1/256 的额外 sweep，长跑的守护进程不会堆积孤儿附件。
