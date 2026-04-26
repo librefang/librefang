@@ -2329,6 +2329,18 @@ impl LibreFangKernel {
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
+        // Validate channel-role-mapping role strings at boot so operator
+        // typos (e.g. `admin_role = "admn"`) surface as a WARN line at
+        // startup rather than as silent default-deny on every message.
+        // The runtime path is already strict (RBAC M4); this is purely
+        // a visibility fix.
+        let typo_count = crate::auth::validate_channel_role_mapping(&config.channel_role_mapping);
+        if typo_count > 0 {
+            warn!(
+                "channel_role_mapping: {typo_count} entr(ies) reference an unrecognized \
+                 LibreFang role and will default-deny — see WARN lines above"
+            );
+        }
 
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
@@ -10144,6 +10156,19 @@ system_prompt = "You are a helpful assistant."
                     );
                     self.auth
                         .reload(&new_config.users, &new_config.tool_policy.groups);
+                    // Re-validate channel-role-mapping role strings on
+                    // every reload so an operator who just edited the
+                    // config and introduced a typo sees a WARN instead
+                    // of silent default-deny on the next message.
+                    let typos = crate::auth::validate_channel_role_mapping(
+                        &new_config.channel_role_mapping,
+                    );
+                    if typos > 0 {
+                        warn!(
+                            "Hot-reload: channel_role_mapping has {typos} typo'd role \
+                             string(s) — see WARN lines above"
+                        );
+                    }
                 }
                 HotAction::ReloadTaintRules => {
                     // Actual swap is performed by the caller (`reload_config`)

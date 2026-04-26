@@ -916,6 +916,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_to_guild_cache_serves_dm_entry_without_http() {
+        // Regression: prior to caching the `None` arm, every DM
+        // message round-tripped a `GET /channels/{id}` to Discord on
+        // every resolve_role call. The `Option<String>` cache must
+        // hold the DM marker so a second lookup is a pure cache hit.
+        //
+        // We exercise the cache hit path directly (pre-populating the
+        // map) so the test does not need HTTP mocking. If the read
+        // path stops honoring the cached `None`, this returns Some
+        // (or panics on the unwrap from a real HTTP call) and the
+        // assertion fires.
+        let adapter = DiscordAdapter::new(
+            "test-token".to_string(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            Vec::new(),
+            0,
+        );
+        // Pre-populate as if a previous DM lookup had cached None.
+        adapter
+            .channel_to_guild
+            .insert("dm-channel-1".to_string(), None);
+        adapter
+            .channel_to_guild
+            .insert("guild-channel-2".to_string(), Some("guild-x".to_string()));
+
+        // DM hit must return Ok(None) without touching the network.
+        // (If the cache read regressed and HTTP was called, the test
+        // would fail with a connection error against discord.com.)
+        let dm = adapter
+            .api_resolve_channel_guild("dm-channel-1")
+            .await
+            .expect("cached DM lookup must not error");
+        assert_eq!(dm, None);
+
+        // Guild hit must return the cached guild id.
+        let guild = adapter
+            .api_resolve_channel_guild("guild-channel-2")
+            .await
+            .expect("cached guild lookup must not error");
+        assert_eq!(guild.as_deref(), Some("guild-x"));
+    }
+
+    #[tokio::test]
     async fn test_parse_discord_message_basic() {
         let bot_id = Arc::new(RwLock::new(Some("bot123".to_string())));
         let d = serde_json::json!({

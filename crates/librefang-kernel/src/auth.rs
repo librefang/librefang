@@ -1904,4 +1904,182 @@ mod channel_role_tests {
             );
         }
     }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Operator-visibility: typo'd `[channel_role_mapping]` strings
+    // ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_channel_role_mapping_counts_typos_across_all_platforms() {
+        // The runtime translator already fails closed (covered by
+        // `channel_role_typo_in_mapping_falls_closed_to_viewer` above).
+        // This is the operator-visibility companion: the validator must
+        // count every typo so the boot/reload paths can summarise them
+        // in a WARN line. Valid entries do not contribute to the count.
+        let mapping = ChannelRoleMapping {
+            telegram: Some(TelegramRoleMapping {
+                creator_role: Some("owner".to_string()),
+                admin_role: Some("admn".to_string()), // typo
+                member_role: Some("user".to_string()),
+            }),
+            discord: Some(DiscordRoleMapping {
+                role_map: {
+                    let mut m = HashMap::new();
+                    m.insert("Boss".to_string(), "owner".to_string());
+                    m.insert("Mod".to_string(), "amdin".to_string()); // typo
+                    m.insert("Member".to_string(), "viewr".to_string()); // typo
+                    m
+                },
+            }),
+            slack: Some(SlackRoleMapping {
+                owner_role: Some("owner".to_string()),
+                admin_role: Some("admin".to_string()),
+                member_role: Some("user".to_string()),
+                guest_role: Some("ghost".to_string()), // typo
+            }),
+        };
+        // 1 telegram + 2 discord + 1 slack = 4 typos.
+        assert_eq!(super::validate_channel_role_mapping(&mapping), 4);
+    }
+
+    #[test]
+    fn validate_channel_role_mapping_returns_zero_when_clean() {
+        let mapping = telegram_only_mapping();
+        assert_eq!(super::validate_channel_role_mapping(&mapping), 0);
+        // Empty mapping (no platform tables configured) is also zero.
+        assert_eq!(
+            super::validate_channel_role_mapping(&ChannelRoleMapping::default()),
+            0
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Adapter↔kernel contract: the chat_id passed to lookup_role is
+    // exactly `sender.chat_id`, forwarded verbatim. This is the wire
+    // that broke before #b7b58efb (Discord chat_id was assumed to be
+    // the guild id but adapter-side actually receives the channel id).
+    // Pin the contract so a future regression where the resolver
+    // accidentally forwards `sender.user_id` or `sender.platform_id`
+    // surfaces as a test failure instead of as silent default-deny.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Captures the `chat_id` argument the resolver passes to
+    /// `lookup_role`. Returns a fixed role so the resolver can complete.
+    struct ChatIdCapturingQuery {
+        captured: Arc<std::sync::Mutex<Option<String>>>,
+        result: PlatformRole,
+    }
+
+    #[async_trait]
+    impl ChannelRoleQuery for ChatIdCapturingQuery {
+        async fn lookup_role(
+            &self,
+            chat_id: &str,
+            _user_id: &str,
+        ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+            *self.captured.lock().unwrap() = Some(chat_id.to_string());
+            Ok(Some(self.result.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn contract_resolver_forwards_sender_chat_id_verbatim_telegram() {
+        // Telegram chat_id format: signed integer string (groups are
+        // negative). Whatever the adapter put in `sender.chat_id` is
+        // what `lookup_role` must receive.
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let query = ChatIdCapturingQuery {
+            captured: captured.clone(),
+            result: PlatformRole::single("administrator"),
+        };
+        let mgr = AuthManager::new(&[]);
+        let sender = telegram_sender("tg-bob", "-1001234567890");
+        let _ = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("-1001234567890"),
+            "Telegram chat_id must round-trip from sender → adapter unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn contract_resolver_forwards_sender_chat_id_verbatim_discord() {
+        // Discord `sender.platform_id` (and therefore chat_id in
+        // SenderContext) is the *channel* id, not the guild id. The
+        // resolver must forward the channel id verbatim — the adapter
+        // resolves channel → guild internally. This test pins the
+        // exact contract that broke before #b7b58efb.
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let query = ChatIdCapturingQuery {
+            captured: captured.clone(),
+            result: PlatformRole::many(vec!["Admin".to_string()]),
+        };
+        let mapping = ChannelRoleMapping {
+            discord: Some(DiscordRoleMapping {
+                role_map: {
+                    let mut m = HashMap::new();
+                    m.insert("Admin".to_string(), "admin".to_string());
+                    m
+                },
+            }),
+            ..Default::default()
+        };
+        let mgr = AuthManager::new(&[]);
+        let sender = SenderContext {
+            channel: "discord".to_string(),
+            user_id: "discord-user-123".to_string(),
+            chat_id: Some("discord-channel-987".to_string()),
+            display_name: "Tester".to_string(),
+            ..Default::default()
+        };
+        let _ = mgr
+            .resolve_role_for_sender(&sender, &mapping, Some(&query))
+            .await;
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("discord-channel-987"),
+            "Discord must forward channel id verbatim — adapter does \
+             channel→guild resolution internally"
+        );
+    }
+
+    #[tokio::test]
+    async fn contract_resolver_forwards_sender_chat_id_verbatim_slack() {
+        // Slack adapter ignores chat_id (workspace-scoped roles), but
+        // the resolver still forwards the value the caller supplied —
+        // adapters opt out by ignoring, not by the kernel substituting.
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let query = ChatIdCapturingQuery {
+            captured: captured.clone(),
+            result: PlatformRole::single("admin"),
+        };
+        let mapping = ChannelRoleMapping {
+            slack: Some(SlackRoleMapping {
+                owner_role: Some("owner".to_string()),
+                admin_role: Some("admin".to_string()),
+                member_role: Some("user".to_string()),
+                guest_role: Some("guest".to_string()),
+            }),
+            ..Default::default()
+        };
+        let mgr = AuthManager::new(&[]);
+        let sender = SenderContext {
+            channel: "slack".to_string(),
+            user_id: "U-bob".to_string(),
+            chat_id: Some("C-DEADBEEF".to_string()),
+            display_name: "Tester".to_string(),
+            ..Default::default()
+        };
+        let _ = mgr
+            .resolve_role_for_sender(&sender, &mapping, Some(&query))
+            .await;
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("C-DEADBEEF"),
+            "Slack chat_id must be forwarded verbatim even though the \
+             adapter ignores it — substitution is the adapter's choice"
+        );
+    }
 }
