@@ -114,6 +114,7 @@ async fn start_test_server_with_provider(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1608,6 +1609,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         kernel.config_ref().api_key.clone(),
     ));
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -1627,6 +1630,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1635,7 +1639,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(Vec::new()),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
         // open-server path to keep them green.
@@ -2777,6 +2781,8 @@ async fn start_test_server_with_rbac_users(
 
     let audit_log = kernel.audit().clone();
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -2796,6 +2802,7 @@ async fn start_test_server_with_rbac_users(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -2804,7 +2811,7 @@ async fn start_test_server_with_rbac_users(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(api_user_records),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
         // without a Bearer header and need them to flow through to the
@@ -3076,6 +3083,8 @@ async fn start_test_server_with_full_user_configs(
 
     let audit_log = kernel.audit().clone();
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -3095,6 +3104,7 @@ async fn start_test_server_with_full_user_configs(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -3103,7 +3113,7 @@ async fn start_test_server_with_full_user_configs(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(api_user_records),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(audit_log),
@@ -3497,6 +3507,81 @@ async fn test_authz_check_returns_allow_for_permitted_tool() {
     assert_eq!(body["decision"], "allow");
     assert_eq!(body["allowed"], true);
     assert!(body["reason"].is_null());
+    // `scope` advertises that this is a user-policy-only decision and
+    // does NOT consult per-agent ToolPolicy or channel_rules. Operators
+    // and any future dashboard consumer rely on this marker to display
+    // the "runtime gate may differ" disclaimer.
+    assert_eq!(
+        body["scope"], "user_policy_only",
+        "scope must mark the decision as user-policy-only — see authz.rs::check docstring"
+    );
+}
+
+/// Regression for #3231 follow-up: a typical query must always carry
+/// `scope: "user_policy_only"` so callers can render the disclaimer
+/// that the runtime gate may still deny or require approval (per-agent
+/// ToolPolicy + ApprovalPolicy.channel_rules are not consulted by this
+/// endpoint).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_response_advertises_user_policy_only_scope() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Allow case.
+    let allow: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search&channel=api",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(allow["decision"], "allow");
+    assert_eq!(
+        allow["scope"], "user_policy_only",
+        "allow path must carry scope marker"
+    );
+
+    // Deny case — scope marker must travel with every decision class.
+    let deny: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deny["decision"], "deny");
+    assert_eq!(
+        deny["scope"], "user_policy_only",
+        "deny path must carry scope marker"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3537,6 +3622,7 @@ async fn test_authz_check_returns_deny_for_blocked_tool() {
     assert_eq!(body["decision"], "deny");
     assert_eq!(body["allowed"], false);
     assert!(body["reason"].as_str().unwrap_or("").contains("shell_exec"));
+    assert_eq!(body["scope"], "user_policy_only");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3908,5 +3994,70 @@ async fn users_policy_put_owner_only() {
         resp.status(),
         200,
         "Owner must be allowed to upsert per-user policy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// API-key rotation owner-only gate (RBAC follow-up to #3054 / M3 / M6)
+// ---------------------------------------------------------------------------
+
+/// Pins the owner-only gate on `POST /api/users/{name}/rotate-key`.
+/// Without `is_owner_only_write` covering the rotation path, an Admin
+/// per-user API key could rotate any other user's key — including the
+/// Owner's — and lock everyone else out. This is the same blast radius
+/// as user create/delete, which is why all of `/api/users/*` non-GET goes
+/// through the `Owner` gate at `middleware.rs:109`.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_admin_returns_403() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: None, // populated by helper
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: None,
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-user-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Admin attempting to rotate Bob's key — must be rejected by the
+    // middleware's owner-only gate before the handler is even invoked.
+    let resp = client
+        .post(format!("{}/api/users/Bob/rotate-key", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must NOT be able to rotate another user's key — only Owner. \
+         If this returns 200, an admin can self-promote by rotating the owner's key."
+    );
+
+    // Bob attempting to self-rotate is also rejected — same gate. The
+    // self-service "rotate my own key" workflow is intentionally NOT
+    // supported through this endpoint; users should ask an Owner. This
+    // matches the kernel's `Action::ManageUsers` posture.
+    let resp = client
+        .post(format!("{}/api/users/Bob/rotate-key", server.base_url))
+        .header("authorization", "Bearer bob-user-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Non-Owner users (incl. self-rotate) must be rejected"
     );
 }

@@ -23,6 +23,8 @@ import {
   Wand2,
   KeyRound,
   Shield,
+  RefreshCw,
+  Copy,
   ListChecks,
   Database,
   Wallet,
@@ -34,6 +36,7 @@ import {
   useCreateUser,
   useDeleteUser,
   useImportUsers,
+  useRotateUserKey,
   useUpdateUser,
 } from "../lib/mutations/users";
 import { parseUsersCsv } from "../lib/csvParser";
@@ -104,6 +107,13 @@ export function UsersPage() {
   const [confirmDelete, setConfirmDelete] = useState<UserItem | null>(null);
   const [wizardUser, setWizardUser] = useState<UserItem | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // Rotation flow holds two pieces of state: the user the operator is
+  // confirming a rotate against (pre-confirm), and the freshly-rotated
+  // plaintext key (post-confirm, copy-once display). They are separate so
+  // closing the post-rotate modal does not re-open the confirm.
+  const [confirmRotate, setConfirmRotate] = useState<UserItem | null>(null);
+  const [rotatedKey, setRotatedKey] =
+    useState<{ name: string; plaintext: string } | null>(null);
 
   // ── data ─────────────────────────────────────────────────────────────
   const usersQuery = useUsers({
@@ -114,6 +124,7 @@ export function UsersPage() {
   const createMut = useCreateUser();
   const updateMut = useUpdateUser();
   const deleteMut = useDeleteUser();
+  const rotateMut = useRotateUserKey();
 
   const users = usersQuery.data ?? [];
 
@@ -313,6 +324,16 @@ export function UsersPage() {
                   >
                     {t("common.edit", "Edit")}
                   </Button>
+                  {u.has_api_key ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      leftIcon={<RefreshCw className="h-3 w-3" />}
+                      onClick={() => setConfirmRotate(u)}
+                    >
+                      {t("users.rotate_key", "Rotate API key")}
+                    </Button>
+                  ) : null}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -426,6 +447,127 @@ export function UsersPage() {
               </Button>
             </div>
           </div>
+        ) : null}
+      </Modal>
+
+      {/* Rotate-key confirm */}
+      <Modal
+        isOpen={confirmRotate !== null}
+        onClose={() => setConfirmRotate(null)}
+        title={t("users.confirm_rotate_title", "Rotate API key?")}
+        size="sm"
+      >
+        {confirmRotate ? (
+          <div className="space-y-4">
+            <p className="text-sm text-text-dim">
+              {t(
+                "users.confirm_rotate_body",
+                "Generates a fresh API key for this user. The old key stops working immediately — any client still using it will start receiving 401 errors on the next request. The new plaintext key will be shown ONCE on the next screen; the server cannot reproduce it later.",
+              )}
+            </p>
+            <p className="text-sm font-mono">{confirmRotate.name}</p>
+            <div className="flex gap-2 justify-end">
+              <Button
+                variant="secondary"
+                onClick={() => setConfirmRotate(null)}
+              >
+                {t("common.cancel", "Cancel")}
+              </Button>
+              <Button
+                variant="primary"
+                leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+                isLoading={rotateMut.isPending}
+                onClick={async () => {
+                  const target = confirmRotate;
+                  setConfirmRotate(null);
+                  try {
+                    const res = await rotateMut.mutateAsync(target.name);
+                    setRotatedKey({
+                      name: target.name,
+                      plaintext: res.new_api_key,
+                    });
+                  } catch (e) {
+                    // Surface failure inline in the same spot — no silent
+                    // swallow. Common cause: caller is Admin, not Owner.
+                    setRotatedKey({
+                      name: target.name,
+                      plaintext: `__ERROR__:${
+                        e instanceof Error ? e.message : String(e)
+                      }`,
+                    });
+                  }
+                }}
+              >
+                {t("users.rotate_key_confirm", "Rotate now")}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Post-rotation: copy-once display of the new plaintext key */}
+      <Modal
+        isOpen={rotatedKey !== null}
+        onClose={() => setRotatedKey(null)}
+        title={
+          rotatedKey?.plaintext.startsWith("__ERROR__:")
+            ? t("users.rotate_key_error_title", "Rotation failed")
+            : t("users.rotate_key_done_title", "New API key — copy now")
+        }
+        size="md"
+      >
+        {rotatedKey ? (
+          rotatedKey.plaintext.startsWith("__ERROR__:") ? (
+            <div className="space-y-3">
+              <p className="text-sm text-error">
+                {rotatedKey.plaintext.slice("__ERROR__:".length)}
+              </p>
+              <div className="flex justify-end">
+                <Button
+                  variant="secondary"
+                  onClick={() => setRotatedKey(null)}
+                >
+                  {t("common.close", "Close")}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-sm text-warning font-medium">
+                {t(
+                  "users.rotate_key_done_warning",
+                  "This is the ONLY time the plaintext key will be shown. Copy and store it now — the server cannot reproduce it later.",
+                )}
+              </p>
+              <p className="text-xs text-text-dim">
+                {t("users.rotate_key_done_user", "User")}:{" "}
+                <span className="font-mono">{rotatedKey.name}</span>
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="grow rounded bg-main/40 px-3 py-2 font-mono text-xs break-all">
+                  {rotatedKey.plaintext}
+                </code>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  leftIcon={<Copy className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(rotatedKey.plaintext);
+                  }}
+                >
+                  {t("common.copy", "Copy")}
+                </Button>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  variant="primary"
+                  onClick={() => setRotatedKey(null)}
+                >
+                  {t("users.rotate_key_done_close", "I've copied the key")}
+                </Button>
+              </div>
+            </div>
+          )
         ) : null}
       </Modal>
     </div>

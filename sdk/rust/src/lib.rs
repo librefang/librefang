@@ -1413,6 +1413,10 @@ impl UsersResource {
     pub async fn delete_user(&self, name: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::DELETE, &format!("/api/users/{}", name), None, &[]).await
     }
+
+    pub async fn rotate_user_key(&self, name: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/users/{}/rotate-key", name), None, &[]).await
+    }
 }
 
 // ── Webhooks ──

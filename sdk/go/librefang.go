@@ -1258,6 +1258,10 @@ func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
 
+func (r *UsersResource) RotateUserKey(name string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/users/%s/rotate-key", name), nil, nil)
+}
+
 // ── Webhooks Resource
 
 type WebhooksResource struct{ client *Client }
