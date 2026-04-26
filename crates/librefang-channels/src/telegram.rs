@@ -1901,6 +1901,17 @@ impl ChannelAdapter for TelegramAdapter {
                                 "user_id".to_string(),
                                 serde_json::json!(user_id.to_string()),
                             );
+                            // poll_answer's sender.platform_id is already the
+                            // user id (DMs only — polls don't fire in groups
+                            // with this update shape), so the bridge fallback
+                            // resolves correctly. Populate the metadata key
+                            // anyway for consistency with the message and
+                            // callback_query paths so downstream code never
+                            // has to special-case the source update kind.
+                            metadata.insert(
+                                SENDER_USER_ID_KEY.to_string(),
+                                serde_json::json!(user_id.to_string()),
+                            );
 
                             let mut msg = ChannelMessage {
                                 channel: ChannelType::Telegram,
@@ -3446,6 +3457,18 @@ mod tests {
         assert!(
             matches!(msg.content, ChannelContent::Text(ref t) if t == "Forwarded from channel")
         );
+        // sender_chat fallback yields the *channel id*, not a user id. We
+        // still write it into SENDER_USER_ID_KEY for shape consistency, but
+        // it is not a real user identity — RBAC will (correctly) reject it
+        // because no `[[users]]` entry maps to a negative channel id.
+        // Documenting the value here so a future change can't silently flip
+        // anonymous-admin / channel-on-behalf posts into authorized users.
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("-1001999888777"),
+        );
     }
 
     #[tokio::test]
@@ -4148,6 +4171,17 @@ mod tests {
             other => panic!("Expected ButtonCallback, got {other:?}"),
         }
         assert!(msg.metadata.contains_key("callback_query_id"));
+        // Regression: callback_query in a supergroup must expose the actual
+        // user id via SENDER_USER_ID_KEY so RBAC resolves to the user, not
+        // to the group's chat_id (which platform_id holds for groups).
+        // Mirrors the message-path coverage in
+        // test_group_message_carries_sender_user_id_metadata.
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("42"),
+        );
     }
 
     #[tokio::test]
