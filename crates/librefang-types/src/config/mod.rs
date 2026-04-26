@@ -137,6 +137,71 @@ mod tests {
     }
 
     #[test]
+    fn channel_role_mapping_full_toml_roundtrip() {
+        // All three platforms populated.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+creator_role = "owner"
+member_role = "user"
+
+[channel_role_mapping.discord]
+role_map = { "Moderator" = "admin", "Member" = "user", "Guest" = "viewer" }
+
+[channel_role_mapping.slack]
+admin_role = "admin"
+member_role = "user"
+guest_role = "viewer"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).expect("toml parse");
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert_eq!(tg.creator_role.as_deref(), Some("owner"));
+        assert_eq!(tg.member_role.as_deref(), Some("user"));
+
+        let dc = cfg.channel_role_mapping.discord.as_ref().unwrap();
+        assert_eq!(dc.role_map.get("Moderator"), Some(&"admin".to_string()));
+        assert_eq!(dc.role_map.get("Guest"), Some(&"viewer".to_string()));
+
+        let sl = cfg.channel_role_mapping.slack.as_ref().unwrap();
+        assert_eq!(sl.admin_role.as_deref(), Some("admin"));
+        assert_eq!(sl.guest_role.as_deref(), Some("viewer"));
+        assert!(sl.owner_role.is_none()); // Not set in source.
+
+        // Round-trip back to TOML and reparse — survives serialization.
+        let serialized = toml::to_string(&cfg).expect("toml serialize");
+        let reparsed: KernelConfig = toml::from_str(&serialized).expect("toml reparse");
+        assert!(!reparsed.channel_role_mapping.is_empty());
+    }
+
+    #[test]
+    fn channel_role_mapping_partial_toml() {
+        // Only Telegram configured — other platforms fall through to None.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).unwrap();
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert!(tg.creator_role.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+    }
+
+    #[test]
+    fn channel_role_mapping_empty_default() {
+        let cfg = KernelConfig::default();
+        assert!(cfg.channel_role_mapping.is_empty());
+        assert!(cfg.channel_role_mapping.telegram.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+        // Empty mapping serialises to empty TOML output (skip_serializing_if).
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("[channel_role_mapping"));
+    }
+
+    #[test]
     fn test_user_config_serde() {
         let uc = UserConfig {
             name: "Alice".to_string(),
@@ -719,6 +784,75 @@ mod tests {
         assert!(w.contains("pii_access"), "warning must list the flag: {w}");
         assert!(
             !w.contains("ProperlyConfigured"),
+            "warning must NOT name the correctly-configured user: {w}"
+        );
+    }
+
+    /// `delete_allowed` is gated on **write** access (`check_delete` →
+    /// `check_write`), not read access. The earlier validate pass
+    /// grouped it under `readable_namespaces`, which would silently miss
+    /// a user with read-but-no-write + `delete_allowed = true`. This
+    /// test pins the corrected dual-pass semantics: the writable check
+    /// fires independently of the readable check.
+    #[test]
+    fn test_validate_warns_on_delete_allowed_without_writable_namespaces() {
+        use crate::config::types::UserConfig;
+        use crate::user_policy::UserMemoryAccess;
+        let config = KernelConfig {
+            users: vec![
+                // Has readable but NOT writable + delete_allowed = true →
+                // delete will silently fail; must warn.
+                UserConfig {
+                    name: "DeleteTypo".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        readable_namespaces: vec!["proactive".into()],
+                        writable_namespaces: vec![],
+                        delete_allowed: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+                // Properly configured for delete: has writable + flag.
+                // Must NOT trigger the new warning.
+                UserConfig {
+                    name: "DeleteOk".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        readable_namespaces: vec!["proactive".into()],
+                        writable_namespaces: vec!["proactive".into()],
+                        delete_allowed: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        let warnings = config.validate();
+        let delete_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("delete_allowed") && w.contains("writable_namespaces"))
+            .collect();
+        assert_eq!(
+            delete_warnings.len(),
+            1,
+            "exactly one warning expected (DeleteTypo only); got: {warnings:#?}"
+        );
+        let w = delete_warnings[0];
+        assert!(w.contains("DeleteTypo"), "warning must name the user: {w}");
+        assert!(
+            !w.contains("DeleteOk"),
             "warning must NOT name the correctly-configured user: {w}"
         );
     }

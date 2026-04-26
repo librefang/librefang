@@ -174,12 +174,16 @@ impl MemoryNamespaceGuard {
 /// fragment tagged `"PII"` would slip past the metadata path and only
 /// trigger the regex backstop — fine for free-form text but a leak for
 /// structured PII (e-mail/phone we wrote into a custom field name).
+///
+/// Uses ASCII lowercasing — `TaintLabel` variants are pure-ASCII
+/// identifiers, so locale-aware `to_lowercase()` is unnecessary cost
+/// and risks edge cases (Turkish locale `I → ı`).
 fn has_pii_label(metadata: &HashMap<String, serde_json::Value>) -> bool {
-    let target = TaintLabel::Pii.to_string().to_lowercase();
+    let target = TaintLabel::Pii.to_string().to_ascii_lowercase();
     let Some(value) = metadata.get(PII_METADATA_KEY) else {
         return false;
     };
-    let matches = |s: &str| s.to_lowercase() == target;
+    let matches = |s: &str| s.eq_ignore_ascii_case(&target);
     match value {
         serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str().is_some_and(matches)),
         serde_json::Value::String(s) => matches(s),

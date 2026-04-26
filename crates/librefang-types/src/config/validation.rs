@@ -739,37 +739,55 @@ impl KernelConfig {
             }
         }
 
-        // RBAC M3 review follow-up: per-user `memory_access` flags
-        // (`pii_access` / `export_allowed` / `delete_allowed`) only
-        // matter alongside read access — the runtime guard checks the
-        // flag AND `readable_namespaces` for export/delete, and PII
-        // redaction only applies to fragments the user can read in the
-        // first place. An admin who toggles a flag without declaring
-        // namespaces gets a no-op that looks like it works, which is a
-        // silent privilege misconfiguration. Flag it loudly so the typo
-        // is caught at boot, not at first failed call.
+        // RBAC M3 review follow-up: per-user `memory_access` flags only
+        // matter alongside the namespace list they actually depend on.
+        // `MemoryNamespaceGuard` gates each flag like this:
+        //
+        //   pii_access     → needs READ access (redaction only runs on
+        //                    items the user can read).
+        //   export_allowed → needs READ access (`check_export` calls
+        //                    `check_read` after the flag check).
+        //   delete_allowed → needs WRITE access (`check_delete` calls
+        //                    `check_write`).
+        //
+        // The earlier version of this pass grouped `delete_allowed` under
+        // `readable_namespaces` — wrong; a user with read but no write
+        // access who set `delete_allowed = true` would NOT have been
+        // warned even though delete silently fails. Split into two
+        // independent passes that mirror the runtime gates.
         for user in &self.users {
             let Some(ref acl) = user.memory_access else {
                 continue;
             };
-            if !acl.readable_namespaces.is_empty() {
-                continue;
+
+            // Pass 1 — read-dependent flags vs readable_namespaces.
+            if acl.readable_namespaces.is_empty() {
+                let read_dependent: Vec<&'static str> = [
+                    ("pii_access", acl.pii_access),
+                    ("export_allowed", acl.export_allowed),
+                ]
+                .into_iter()
+                .filter_map(|(name, on)| on.then_some(name))
+                .collect();
+                if !read_dependent.is_empty() {
+                    warnings.push(format!(
+                        "[users.{}.memory_access] sets {:?} = true but \
+                         `readable_namespaces` is empty — these flags are no-ops without \
+                         read access. Likely a typo: did you mean to add \
+                         `readable_namespaces = [\"...\"]`?",
+                        user.name, read_dependent,
+                    ));
+                }
             }
-            let problematic: Vec<&'static str> = [
-                ("pii_access", acl.pii_access),
-                ("export_allowed", acl.export_allowed),
-                ("delete_allowed", acl.delete_allowed),
-            ]
-            .into_iter()
-            .filter_map(|(name, on)| on.then_some(name))
-            .collect();
-            if !problematic.is_empty() {
+
+            // Pass 2 — write-dependent flags vs writable_namespaces.
+            if acl.delete_allowed && acl.writable_namespaces.is_empty() {
                 warnings.push(format!(
-                    "[users.{}.memory_access] sets {:?} = true but \
-                     `readable_namespaces` is empty — these flags are no-ops without \
-                     read access. Likely a typo: did you mean to add \
-                     `readable_namespaces = [\"...\"]`?",
-                    user.name, problematic,
+                    "[users.{}.memory_access] sets `delete_allowed` = true but \
+                     `writable_namespaces` is empty — delete is gated on write \
+                     access (not read). Likely a typo: did you mean to add \
+                     `writable_namespaces = [\"...\"]`?",
+                    user.name,
                 ));
             }
         }
