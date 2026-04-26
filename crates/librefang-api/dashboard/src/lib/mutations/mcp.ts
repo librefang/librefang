@@ -2,12 +2,14 @@ import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-q
 import {
   addMcpServer,
   updateMcpServer,
+  patchMcpServerTaint,
   deleteMcpServer,
   reconnectMcpServer,
   reloadMcp,
   startMcpAuth,
   revokeMcpAuth,
 } from "../http/client";
+import type { McpTaintPolicy } from "../../api";
 import { mcpKeys } from "../queries/keys";
 
 function invalidateMcpServer(qc: QueryClient, id: string) {
@@ -82,5 +84,30 @@ export function useRevokeMcpAuth() {
   return useMutation({
     mutationFn: revokeMcpAuth,
     onSuccess: (_data, id) => invalidateMcpServer(qc, id),
+  });
+}
+
+/**
+ * Issue #3050: dedicated mutation for the taint policy tree editor.
+ *
+ * Uses the dedicated `PATCH /api/mcp/servers/{id}/taint` endpoint, which
+ * accepts only `{ taint_scanning?, taint_policy? }`. This avoids the
+ * round-trip of every other server field (transport, env, headers, …) that
+ * the older PUT-based path required, removing the silent-drop risk if a
+ * future required field gets added without dashboard support.
+ */
+export function useUpdateMcpTaintPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      taint_scanning,
+      taint_policy,
+    }: {
+      id: string;
+      taint_scanning?: boolean;
+      taint_policy?: McpTaintPolicy;
+    }) => patchMcpServerTaint(id, { taint_scanning, taint_policy }),
+    onSuccess: (_data, variables) => invalidateMcpServer(qc, variables.id),
   });
 }

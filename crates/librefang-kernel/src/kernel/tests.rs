@@ -2191,18 +2191,19 @@ async fn cascade_primitives_via_session_interrupts_dashmap() {
     let kernel = cascade_test_kernel();
 
     // Simulate a parent mid-turn by registering its interrupt the same way
-    // `execute_llm_agent` / the streaming entry does.
+    // `execute_llm_agent` / the streaming entry does. Post-#3172 the map is
+    // keyed by `(agent, session)`; we register one session for the parent.
     let parent_id = AgentId::new();
+    let parent_session_id = SessionId::new();
     let parent_interrupt = SessionInterrupt::new();
     kernel
         .session_interrupts
-        .insert(parent_id, parent_interrupt.clone());
+        .insert((parent_id, parent_session_id), parent_interrupt.clone());
 
-    // The lookup pattern `send_message_as` uses internally.
+    // The lookup pattern `send_message_as` uses internally — now via the
+    // helper that finds any active session for the agent.
     let upstream = kernel
-        .session_interrupts
-        .get(&parent_id)
-        .map(|r| r.clone())
+        .any_session_interrupt_for_agent(parent_id)
         .expect("parent interrupt must be discoverable via session_interrupts");
 
     // `execute_llm_agent` forms the child's interrupt via `new_with_upstream`.
@@ -2232,10 +2233,7 @@ async fn no_upstream_when_parent_has_no_active_turn() {
     let kernel = cascade_test_kernel();
 
     let idle_parent_id = AgentId::new();
-    let upstream = kernel
-        .session_interrupts
-        .get(&idle_parent_id)
-        .map(|r| r.clone());
+    let upstream = kernel.any_session_interrupt_for_agent(idle_parent_id);
     assert!(upstream.is_none());
 
     kernel.shutdown();
@@ -3011,6 +3009,444 @@ system_prompt = "BASE PROMPT"
         !prompt.contains("## Reference Knowledge"),
         "skill tail must NOT be re-rendered when hand_role tag is missing; got: {prompt}"
     );
+
+    kernel.shutdown();
+}
+
+// ── Per-(agent, session) cancellation tracking (#3172) ──────────────────────
+//
+// These tests exercise the kernel-level rekey only — they don't drive a real
+// agent loop. They construct a freshly-booted kernel and hand-insert
+// `RunningTask` entries to simulate concurrent loops. This is the cheapest
+// way to assert the bug the issue describes: pre-rekey, two
+// `running_tasks.insert(agent_id, ...)` calls would silently overwrite,
+// leaving the first abort handle un-stoppable.
+
+#[test]
+fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-rekey-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session_a = SessionId::new();
+    let session_b = SessionId::new();
+
+    // Spawn two long-running tokio tasks so we get genuine `AbortHandle`s.
+    // Pre-rekey, the second insert would overwrite the first; here we
+    // expect both to coexist and be independently abortable.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h_a = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let h_b = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+
+    kernel.running_tasks.insert(
+        (agent_id, session_a),
+        RunningTask {
+            abort: h_a.abort_handle(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+    kernel.running_tasks.insert(
+        (agent_id, session_b),
+        RunningTask {
+            abort: h_b.abort_handle(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+
+    let snapshot = kernel.list_running_sessions(agent_id);
+    assert_eq!(
+        snapshot.len(),
+        2,
+        "both concurrent sessions should be listed; got {snapshot:?}"
+    );
+    assert!(kernel.agent_has_active_session(agent_id));
+
+    // Stop only session_a. session_b must remain.
+    let stopped = kernel
+        .stop_session_run(agent_id, session_a)
+        .expect("stop_session_run");
+    assert!(stopped, "session_a stop should report true");
+
+    let snapshot = kernel.list_running_sessions(agent_id);
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "session_b should still be in the registry after stopping session_a; got {snapshot:?}"
+    );
+    assert_eq!(snapshot[0].session_id, session_b);
+
+    // Stopping a session that's already gone returns false (idempotent).
+    let again = kernel
+        .stop_session_run(agent_id, session_a)
+        .expect("idempotent stop");
+    assert!(!again, "second stop on the same session must report false");
+
+    // Cleanup: cancel session_b too so the runtime drops cleanly.
+    let _ = kernel.stop_session_run(agent_id, session_b);
+    drop(rt);
+    kernel.shutdown();
+}
+
+#[test]
+fn test_stop_agent_run_fans_out_across_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-fanout-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let other_agent = AgentId(uuid::Uuid::new_v4());
+    let s1 = SessionId::new();
+    let s2 = SessionId::new();
+    let s3 = SessionId::new();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mk_handle = || {
+        rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .abort_handle()
+    };
+
+    kernel.running_tasks.insert(
+        (agent_id, s1),
+        RunningTask {
+            abort: mk_handle(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+    kernel.running_tasks.insert(
+        (agent_id, s2),
+        RunningTask {
+            abort: mk_handle(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+    // Different agent — must NOT be touched by stop_agent_run.
+    kernel.running_tasks.insert(
+        (other_agent, s3),
+        RunningTask {
+            abort: mk_handle(),
+            started_at: chrono::Utc::now(),
+        },
+    );
+
+    let stopped = kernel
+        .stop_agent_run(agent_id)
+        .expect("stop_agent_run should succeed");
+    assert!(stopped, "fan-out stop should report true with active loops");
+
+    assert!(kernel.list_running_sessions(agent_id).is_empty());
+    assert!(!kernel.agent_has_active_session(agent_id));
+    // Other agent's loop is intact.
+    assert_eq!(kernel.list_running_sessions(other_agent).len(), 1);
+
+    drop(rt);
+    kernel.shutdown();
+}
+
+#[test]
+fn test_stop_agent_run_returns_false_when_no_active_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-empty-stop-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let stopped = kernel.stop_agent_run(agent_id).expect("stop_agent_run");
+    assert!(
+        !stopped,
+        "stop_agent_run on idle agent must return false, got true"
+    );
+    assert!(kernel.list_running_sessions(agent_id).is_empty());
+    kernel.shutdown();
+}
+
+/// Fork-shaped dispatch must not register itself in `running_tasks` or
+/// `session_interrupts`. The fork deliberately reuses the parent's
+/// `(agent, session)` key for prompt-cache alignment, so registering would
+/// clobber the parent's abort handle and cause `stop_agent_run` during the
+/// fork window to abort the fork instead of the parent.
+///
+/// We exercise the invariant directly: register the parent first, then
+/// simulate the fork code path's deliberate skip (the production code in
+/// `send_message_streaming_with_sender_and_opts` and `execute_llm_agent`
+/// guards both inserts behind `if !loop_opts.is_fork`). After the fork
+/// "would have run", the parent's entry must still point to the parent's
+/// abort handle, and the snapshot must contain exactly one session.
+#[test]
+fn test_fork_does_not_overwrite_parent_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-fork-skip-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let parent_session = SessionId::new();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let parent_handle = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let parent_abort = parent_handle.abort_handle();
+
+    // Parent registration mirrors the production `is_fork = false` path:
+    // insert into both `running_tasks` and `session_interrupts` keyed by
+    // `(agent, parent_session)`.
+    let parent_started_at = chrono::Utc::now();
+    kernel.running_tasks.insert(
+        (agent_id, parent_session),
+        RunningTask {
+            abort: parent_abort,
+            started_at: parent_started_at,
+        },
+    );
+    let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+    kernel
+        .session_interrupts
+        .insert((agent_id, parent_session), parent_interrupt.clone());
+
+    // Snapshot before "fork": one parent entry.
+    let before = kernel.list_running_sessions(agent_id);
+    assert_eq!(before.len(), 1, "parent must be registered");
+    assert_eq!(before[0].session_id, parent_session);
+
+    // Production code path for forks SKIPS both inserts (see the
+    // `if !is_fork` guards in `send_message_streaming_with_sender_and_opts`
+    // and the `if !loop_opts.is_fork` guard in `execute_llm_agent`). We
+    // therefore make zero registry mutations here — the fork's runtime
+    // identity is owned by its caller (auto_memorize / dream), not the
+    // session-stop registry.
+
+    // After the fork "would have run": parent registration intact, no
+    // duplicate entry, no overwrite.
+    let after = kernel.list_running_sessions(agent_id);
+    assert_eq!(
+        after.len(),
+        1,
+        "fork must not register a second entry under the parent's key"
+    );
+    assert_eq!(after[0].session_id, parent_session);
+    assert_eq!(
+        after[0].started_at, parent_started_at,
+        "parent's started_at must not be overwritten by a fork"
+    );
+
+    // The interrupt clone we registered earlier must still be the same
+    // logical handle (sharing the inner Arc) — a fork-side overwrite would
+    // have replaced it with a fresh interrupt and broken cancellation
+    // chaining.
+    let observed = kernel
+        .any_session_interrupt_for_agent(agent_id)
+        .expect("parent interrupt must still be discoverable");
+    parent_interrupt.cancel();
+    assert!(
+        observed.is_cancelled(),
+        "parent and observed interrupt must share the same Arc<AtomicBool>"
+    );
+
+    drop(rt);
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` resolves a `New`-mode manifest with
+/// `max_concurrent_invocations = 4` to a 4-permit semaphore — the
+/// happy path for parallel trigger fires.
+#[test]
+fn test_agent_concurrency_for_resolves_new_mode_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-new-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "parallel-trigger-agent".to_string(),
+                description: "new-mode agent allowed to fan out".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(4),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(
+        sem.available_permits(),
+        4,
+        "New + cap=4 must resolve to a 4-permit semaphore"
+    );
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` clamps `Persistent` + cap > 1 to a 1-permit
+/// semaphore. Regression cover: the clamp lives in the resolver, not in
+/// validation, because it is structural to the dispatch path.
+#[test]
+fn test_agent_concurrency_for_clamps_persistent_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-persistent-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "misconfigured-persistent-agent".to_string(),
+                description: "persistent + cap=4 must clamp".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::Persistent,
+                max_concurrent_invocations: Some(4),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(
+        sem.available_permits(),
+        1,
+        "Persistent + cap > 1 must clamp to 1 (parallel writes to a single \
+         session's history are undefined)"
+    );
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` floors `Some(0)` to 1 — a 0-permit
+/// semaphore would deadlock the agent on first dispatch.
+#[test]
+fn test_agent_concurrency_for_floors_zero_to_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-zero-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "typo-zero-agent".to_string(),
+                description: "Some(0) must floor to 1".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(0),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(sem.available_permits(), 1);
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` caches the resolved semaphore — a second
+/// call returns the same `Arc`, so permits acquired by an in-flight
+/// dispatch are observed by subsequent dispatches (and not silently
+/// reset by a re-resolution).
+#[test]
+fn test_agent_concurrency_for_returns_cached_semaphore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-cache-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "cache-test-agent".to_string(),
+                description: "second resolve returns same Arc".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(2),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let first = kernel.agent_concurrency_for(aid);
+    let permit = first
+        .clone()
+        .try_acquire_owned()
+        .expect("first permit available");
+    let second = kernel.agent_concurrency_for(aid);
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "second resolve must return the cached Arc, not a fresh semaphore"
+    );
+    assert_eq!(
+        second.available_permits(),
+        1,
+        "second handle must observe the permit held by the first call"
+    );
+    drop(permit);
 
     kernel.shutdown();
 }

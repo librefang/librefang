@@ -200,6 +200,7 @@ impl SetupWizard {
             auto_evolve: true,
             channel_overrides: None,
             max_history_messages: None,
+            max_concurrent_invocations: None,
             cache_context: false,
         };
 

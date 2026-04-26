@@ -256,6 +256,15 @@ pub async fn create_user(
         role,
         channel_bindings: req.channel_bindings,
         api_key_hash,
+        // RBAC M3 (#3205) per-user policy fields. M6's create endpoint
+        // doesn't accept them yet — the dashboard's matrix editor
+        // (`/users/{name}/policy`) is the future home, ships as a stub
+        // page for now. Default to "no opinion" so the kernel's role-
+        // based defaults (and existing channel/category rules) decide.
+        tool_policy: None,
+        tool_categories: None,
+        memory_access: None,
+        channel_tool_rules: HashMap::new(),
     };
 
     // Pre-check duplicates so we can map them to 409 cleanly. The persist
@@ -330,35 +339,62 @@ pub async fn update_user(
     // path identifies the user being updated. Allow rename so the dashboard
     // can edit the display name without a delete-and-recreate dance.
     let renamed_to = req.name.trim().to_string();
-    let updated = UserConfig {
-        name: renamed_to.clone(),
-        role,
-        channel_bindings: req.channel_bindings,
-        api_key_hash,
-    };
+    let new_role = role;
+    let new_bindings = req.channel_bindings;
+    let new_api_key_hash = api_key_hash;
 
     let target_existing = name.clone();
-    let updated_clone = updated.clone();
+    let renamed_to_for_closure = renamed_to.clone();
+    // Carries the final UserConfig out of the persist closure so we can
+    // serialize it into the response body (incl. preserved RBAC M3 policy
+    // fields).
+    let captured_updated: std::sync::Arc<std::sync::Mutex<Option<UserConfig>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured = captured_updated.clone();
     match persist_users(&state, move |users| {
         let idx = users
             .iter()
             .position(|u| u.name == target_existing)
             .ok_or_else(|| PersistError::NotFound(format!("user '{target_existing}' not found")))?;
         // If renaming, ensure no collision with another existing user.
-        if updated_clone.name != target_existing
-            && users.iter().any(|u| u.name == updated_clone.name)
+        if renamed_to_for_closure != target_existing
+            && users.iter().any(|u| u.name == renamed_to_for_closure)
         {
             return Err(PersistError::Conflict(format!(
                 "another user named '{}' already exists",
-                updated_clone.name
+                renamed_to_for_closure
             )));
         }
-        users[idx] = updated_clone;
+        // RBAC M3 (#3205): preserve per-user `tool_policy`,
+        // `tool_categories`, `memory_access`, and `channel_tool_rules`
+        // across the rename/role/binding edit. The M6 dashboard only
+        // exposes name/role/bindings/api_key_hash today; clobbering the
+        // RBAC-M3 fields here would silently disable a Viewer's PII
+        // redaction the moment an admin retitles their account.
+        let preserved = users[idx].clone();
+        users[idx] = UserConfig {
+            name: renamed_to_for_closure.clone(),
+            role: new_role.clone(),
+            channel_bindings: new_bindings.clone(),
+            api_key_hash: new_api_key_hash.clone(),
+            tool_policy: preserved.tool_policy,
+            tool_categories: preserved.tool_categories,
+            memory_access: preserved.memory_access,
+            channel_tool_rules: preserved.channel_tool_rules,
+        };
+        *captured.lock().expect("captured_updated mutex poisoned") = Some(users[idx].clone());
         Ok(())
     })
     .await
     {
-        Ok(()) => (StatusCode::OK, Json(UserView::from(&updated))).into_response(),
+        Ok(()) => {
+            let final_cfg = captured_updated
+                .lock()
+                .expect("captured_updated mutex poisoned")
+                .clone()
+                .expect("persist_users succeeded but didn't capture the updated user");
+            (StatusCode::OK, Json(UserView::from(&final_cfg))).into_response()
+        }
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
@@ -430,6 +466,14 @@ pub async fn import_users(
                 role,
                 channel_bindings: row.channel_bindings.clone(),
                 api_key_hash,
+                // CSV import doesn't carry RBAC M3 (#3205) policy fields
+                // — start blank for new rows; the per-row update path
+                // below preserves existing policy for rows that match an
+                // already-registered name.
+                tool_policy: None,
+                tool_categories: None,
+                memory_access: None,
+                channel_tool_rules: HashMap::new(),
             })
         })();
         prepared.push((i, prepared_row));
@@ -519,7 +563,17 @@ pub async fn import_users(
     let result = persist_users(&state, move |users| {
         for new_u in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
-                users[idx] = new_u.clone();
+                // RBAC M3 (#3205): preserve existing per-user policy
+                // fields when a CSV row updates an existing user — same
+                // reasoning as `update_user`.
+                let preserved = users[idx].clone();
+                users[idx] = UserConfig {
+                    tool_policy: preserved.tool_policy,
+                    tool_categories: preserved.tool_categories,
+                    memory_access: preserved.memory_access,
+                    channel_tool_rules: preserved.channel_tool_rules,
+                    ..new_u.clone()
+                };
             } else {
                 users.push(new_u.clone());
             }
