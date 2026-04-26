@@ -304,6 +304,46 @@ fn collect_rotation_key_specs(
     specs
 }
 
+/// Resolve the effective session id used by the dispatch site in
+/// `send_message_full_with_upstream`. Mirrors the resolution that
+/// `execute_llm_agent` performs internally so the kernel and any failure /
+/// supervisor logs agree on which session id was actually used — including
+/// when `session_mode = "new"` would otherwise mint a fresh id deeper in
+/// the stack. Returns `None` for module types that do not carry a session
+/// (wasm, python).
+fn resolve_dispatch_session_id(
+    module: &str,
+    agent_id: AgentId,
+    entry_session_id: SessionId,
+    manifest_session_mode: librefang_types::agent::SessionMode,
+    sender_context: Option<&SenderContext>,
+    session_mode_override: Option<librefang_types::agent::SessionMode>,
+    session_id_override: Option<SessionId>,
+) -> Option<SessionId> {
+    if module.starts_with("wasm:") || module.starts_with("python:") {
+        return None;
+    }
+    if let Some(sid) = session_id_override {
+        return Some(sid);
+    }
+    Some(match sender_context {
+        Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
+            let scope = match &ctx.chat_id {
+                Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                _ => ctx.channel.clone(),
+            };
+            SessionId::for_channel(agent_id, &scope)
+        }
+        _ => {
+            let mode = session_mode_override.unwrap_or(manifest_session_mode);
+            match mode {
+                librefang_types::agent::SessionMode::Persistent => entry_session_id,
+                librefang_types::agent::SessionMode::New => SessionId::new(),
+            }
+        }
+    })
+}
+
 /// One in-flight `(agent, session)` loop. Stored in
 /// `LibreFangKernel.running_tasks` to support per-session cancellation
 /// (`stop_session_run`) and runtime introspection
@@ -4752,6 +4792,21 @@ system_prompt = "You are a helpful assistant."
             return Ok(AgentLoopResult::default());
         }
 
+        // Resolve the effective session id up front for the LLM path so we
+        // can include it in supervisor / failure logs below, then pass it
+        // back down as the explicit override so the kernel and the log line
+        // agree on the id even when `session_mode = "new"` would otherwise
+        // mint a fresh session inside `execute_llm_agent`.
+        let resolved_session_id: Option<SessionId> = resolve_dispatch_session_id(
+            &entry.manifest.module,
+            agent_id,
+            entry.session_id,
+            entry.manifest.session_mode,
+            sender_context,
+            session_mode_override,
+            session_id_override,
+        );
+
         // Dispatch based on module type
         let result = match entry.manifest.module.as_str() {
             module if module.starts_with("wasm:") => {
@@ -4772,7 +4827,7 @@ system_prompt = "You are a helpful assistant."
                     sender_context,
                     session_mode_override,
                     thinking_override,
-                    session_id_override,
+                    resolved_session_id.or(session_id_override),
                     upstream_interrupt,
                 )
                 .await
@@ -5075,7 +5130,15 @@ system_prompt = "You are a helpful assistant."
 
                 // Record the failure in supervisor for health reporting
                 self.supervisor.record_panic();
-                warn!(agent_id = %agent_id, error = %e, "Agent loop failed — recorded in supervisor");
+                let session_id_for_log = resolved_session_id
+                    .map(|s| s.0.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
+                warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id_for_log,
+                    error = %e,
+                    "Agent loop failed — recorded in supervisor"
+                );
 
                 // Push failure notification to alert_channels
                 let agent_name = self
