@@ -4875,6 +4875,13 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 // ── Config.toml channel management helpers ──────────────────────────
 
 /// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
+///
+/// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
+/// formatting of unrelated sections (providers, agents, etc.). The previous
+/// `toml::Value` round-trip silently rewrote the entire file on every
+/// channel write — see issue #3183. Callers must hold
+/// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
+/// which performs an asymmetric read-modify-write on the same file.
 pub(crate) fn upsert_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -4888,65 +4895,60 @@ pub(crate) fn upsert_channel_config(
         String::new()
     };
 
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
+    let mut doc: toml_edit::DocumentMut = if content.trim().is_empty() {
+        toml_edit::DocumentMut::new()
     } else {
-        toml::from_str(&content)?
+        content.parse()?
     };
 
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
     // Ensure [channels] table exists
-    if !root.contains_key("channels") {
-        root.insert(
-            "channels".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
+    if !doc.contains_table("channels") {
+        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    let channels_table = root
-        .get_mut("channels")
-        .and_then(|v| v.as_table_mut())
+    let channels_table = doc["channels"]
+        .as_table_mut()
         .ok_or("channels is not a table")?;
 
     // Build channel sub-table with correct TOML types
-    let mut ch_table = toml::map::Map::new();
+    let mut ch_table = toml_edit::Table::new();
     for (k, (v, ft)) in fields {
-        let toml_val = match ft {
+        let item = match ft {
             FieldType::Number => {
                 if let Ok(n) = v.parse::<i64>() {
-                    toml::Value::Integer(n)
+                    toml_edit::value(n)
                 } else {
-                    toml::Value::String(v.clone())
+                    toml_edit::value(v.clone())
                 }
             }
             FieldType::List => {
                 // Always store list items as strings so that numeric IDs
                 // (e.g. Discord guild snowflakes, Telegram user IDs) are
                 // deserialized correctly into Vec<String> config fields.
-                let items: Vec<toml::Value> = v
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| toml::Value::String(s.to_string()))
-                    .collect();
-                toml::Value::Array(items)
+                let mut arr = toml_edit::Array::new();
+                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    arr.push(s);
+                }
+                toml_edit::value(arr)
             }
-            _ => toml::Value::String(v.clone()),
+            _ => toml_edit::value(v.clone()),
         };
-        ch_table.insert(k.clone(), toml_val);
+        ch_table.insert(k, item);
     }
-    channels_table.insert(channel_name.to_string(), toml::Value::Table(ch_table));
+    channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
 
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    std::fs::write(config_path, doc.to_string())?;
     Ok(())
 }
 
 /// Remove a `[channels.<name>]` section from config.toml.
+///
+/// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
+/// callers must hold `AppState::config_write_lock`.
 pub(crate) fn remove_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -4962,17 +4964,13 @@ pub(crate) fn remove_channel_config(
         return Ok(());
     }
 
-    let mut doc: toml::Value = toml::from_str(&content)?;
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
 
-    if let Some(channels) = doc
-        .as_table_mut()
-        .and_then(|r| r.get_mut("channels"))
-        .and_then(|c| c.as_table_mut())
-    {
+    if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
         channels.remove(channel_name);
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    std::fs::write(config_path, doc.to_string())?;
     Ok(())
 }
 
@@ -5670,5 +5668,123 @@ mod tests {
             Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
             other => panic!("expected http transport, got {other:?}"),
         }
+    }
+
+    /// Regression for #3183: writing a channel section must not destroy
+    /// unrelated provider settings (or the user's comments and key order)
+    /// in `config.toml`. The previous `toml::Value` round-trip rebuilt the
+    /// entire document on every channel write, which dropped comments and
+    /// — combined with the missing `config_write_lock` — could clobber a
+    /// concurrent provider write from `POST /api/config/set`.
+    #[test]
+    fn upsert_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# Top-of-file comment that must survive channel writes
+api_port = 4545
+
+[providers.nim]
+# NVIDIA NIM provider — issue #3183 repro
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+api_key_env = \"NIM_API_KEY\"
+
+[channels.discord]
+bot_token_env = \"OLD_DISCORD_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("DISCORD_BOT_TOKEN".to_string(), FieldType::Text),
+        );
+        fields.insert(
+            "guild_ids".to_string(),
+            ("123, 456".to_string(), FieldType::List),
+        );
+
+        upsert_channel_config(&config_path, "discord", &fields).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+
+        // Provider section must be intact — this is the original bug.
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] section was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("base_url = \"https://integrate.api.nvidia.com/v1\""),
+            "NIM base_url was dropped — got:\n{raw}"
+        );
+
+        // Comments and the top-level scalar must survive the rewrite.
+        assert!(
+            raw.contains("# Top-of-file comment that must survive channel writes"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# NVIDIA NIM provider"),
+            "in-section comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("api_port = 4545"),
+            "top-level scalar was dropped — got:\n{raw}"
+        );
+
+        // The new channel fields must be written with correct TOML types
+        // (list of strings, not list of integers — see the FieldType::List
+        // comment about Discord guild snowflakes).
+        #[derive(serde::Deserialize)]
+        struct Discord {
+            bot_token_env: String,
+            guild_ids: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Channels {
+            discord: Discord,
+        }
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            channels: Channels,
+        }
+        let parsed: Wrapper = toml::from_str(&raw).expect("config must round-trip");
+        assert_eq!(parsed.channels.discord.bot_token_env, "DISCORD_BOT_TOKEN");
+        assert_eq!(parsed.channels.discord.guild_ids, vec!["123", "456"]);
+    }
+
+    /// Companion to the upsert test: removing a channel must also leave
+    /// every other section untouched.
+    #[test]
+    fn remove_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# keep me
+[providers.nim]
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+
+[channels.discord]
+bot_token_env = \"DISCORD_BOT_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        remove_channel_config(&config_path, "discord").expect("remove should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# keep me"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            !raw.contains("[channels.discord]"),
+            "channel section should have been removed — got:\n{raw}"
+        );
     }
 }
