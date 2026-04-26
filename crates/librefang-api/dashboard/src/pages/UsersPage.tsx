@@ -36,6 +36,7 @@ import {
   useImportUsers,
   useUpdateUser,
 } from "../lib/mutations/users";
+import { parseUsersCsv } from "../lib/csvParser";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -663,6 +664,11 @@ function IdentityWizardModal({
   const [channel, setChannel] = useState<string>("telegram");
   const [platformId, setPlatformId] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Operator must explicitly attest they've checked the platform_id belongs
+  // to the target user. There's no automated ownership check (no bot DM
+  // challenge yet), so an Owner could otherwise socially-engineer attribution
+  // by binding a stranger's telegram_id to a user row. See PR #3209 follow-up.
+  const [acknowledged, setAcknowledged] = useState(false);
 
   // Reset when target user changes.
   const lastUser = useRef<string | null>(null);
@@ -672,6 +678,7 @@ function IdentityWizardModal({
     setChannel("telegram");
     setPlatformId("");
     setError(null);
+    setAcknowledged(false);
   } else if (!user) {
     lastUser.current = null;
   }
@@ -817,6 +824,45 @@ function IdentityWizardModal({
                   )}
                 </p>
               </Card>
+
+              {/* Ownership warning — there is currently no automated
+                  challenge/response over the channel bot, so the platform_id
+                  is taken on faith. Surface that risk so an Owner can't
+                  silently bind another user's id. */}
+              <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs space-y-2">
+                <p className="font-bold text-warning">
+                  {t(
+                    "users.wizard_unverified_title",
+                    "No automated ownership check",
+                  )}
+                </p>
+                <p className="text-text-dim">
+                  {t(
+                    "users.wizard_unverified_body",
+                    "LibreFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
+                    { user: user.name },
+                  )}
+                </p>
+                <label className="flex items-start gap-2 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={acknowledged}
+                    onChange={e => setAcknowledged(e.target.checked)}
+                    disabled={busy}
+                  />
+                  <span className="text-text">
+                    {t(
+                      "users.wizard_unverified_ack",
+                      "I have verified out-of-band that {{platformId}} belongs to {{user}}.",
+                      {
+                        platformId: platformId || "this id",
+                        user: user.name,
+                      },
+                    )}
+                  </span>
+                </label>
+              </div>
             </div>
           ) : null}
 
@@ -850,7 +896,25 @@ function IdentityWizardModal({
               <Button
                 variant="primary"
                 isLoading={busy}
+                disabled={!acknowledged}
+                title={
+                  !acknowledged
+                    ? t(
+                        "users.wizard_ack_required",
+                        "Acknowledge the ownership warning to save.",
+                      )
+                    : undefined
+                }
                 onClick={async () => {
+                  if (!acknowledged) {
+                    setError(
+                      t(
+                        "users.wizard_ack_required",
+                        "Acknowledge the ownership warning to save.",
+                      ),
+                    );
+                    return;
+                  }
                   setError(null);
                   try {
                     await onCommit(user, channel, platformId.trim());
@@ -885,7 +949,7 @@ function BulkImportModal({
   const [error, setError] = useState<string | null>(null);
   const importMut = useImportUsers();
 
-  const parsed = useMemo(() => parseCsv(rawText), [rawText]);
+  const parsed = useMemo(() => parseUsersCsv(rawText, ROLES), [rawText]);
 
   const onFile = (file: File) => {
     const reader = new FileReader();
@@ -1073,85 +1137,5 @@ function DropZone({ onFile }: { onFile: (file: File) => void }) {
 // Tiny CSV parser tuned for the import shape: header row + simple rows. We
 // don't pull in a full CSV library because the dashboard ships zero-bundle
 // hot paths and the import body shape is a documented narrow contract.
-function parseCsv(raw: string): {
-  rows: UserUpsertPayload[];
-  errors: string[];
-} {
-  const errors: string[] = [];
-  const lines = raw
-    .split(/\r?\n/)
-    .map(l => l.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return { rows: [], errors };
-  const header = splitCsvRow(lines[0]).map(h => h.toLowerCase());
-  if (!header.includes("name")) {
-    errors.push("Header must include a `name` column.");
-    return { rows: [], errors };
-  }
-  if (!header.includes("role")) {
-    errors.push("Header must include a `role` column.");
-    return { rows: [], errors };
-  }
-  const rows: UserUpsertPayload[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cells = splitCsvRow(lines[i]);
-    const get = (key: string) => {
-      const idx = header.indexOf(key);
-      return idx >= 0 ? cells[idx] ?? "" : "";
-    };
-    const name = get("name").trim();
-    if (!name) {
-      errors.push(`Row ${i + 1}: missing name`);
-      continue;
-    }
-    const role = (get("role") || "user").trim().toLowerCase();
-    if (!ROLES.includes(role as RoleName)) {
-      errors.push(
-        `Row ${i + 1}: invalid role '${role}' (expected one of ${ROLES.join(
-          ", ",
-        )})`,
-      );
-    }
-    const channel_bindings: Record<string, string> = {};
-    for (const col of header) {
-      if (col === "name" || col === "role") continue;
-      const val = get(col).trim();
-      if (val) channel_bindings[col] = val;
-    }
-    rows.push({ name, role, channel_bindings });
-  }
-  return { rows, errors };
-}
-
-function splitCsvRow(line: string): string[] {
-  // Minimal RFC-4180-ish split: handles quoted fields with commas inside.
-  const out: string[] = [];
-  let cur = "";
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (quoted) {
-      if (c === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cur += c;
-      }
-    } else {
-      if (c === ",") {
-        out.push(cur);
-        cur = "";
-      } else if (c === '"') {
-        quoted = true;
-      } else {
-        cur += c;
-      }
-    }
-  }
-  out.push(cur);
-  return out;
-}
+// CSV parsing now lives in `lib/csvParser.ts` so it can be unit-tested for
+// quoted-newline + BOM handling without dragging in React.
