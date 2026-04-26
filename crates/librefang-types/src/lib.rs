@@ -30,6 +30,7 @@ pub mod tool;
 pub mod tool_class;
 pub mod tool_compat;
 pub mod tool_policy;
+pub mod user_policy;
 pub mod webhook;
 pub mod workflow_template;
 

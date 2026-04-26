@@ -199,6 +199,57 @@ pub trait KernelHandle: Send + Sync {
         false
     }
 
+    /// Resolve the per-user memory ACL for the given sender + channel
+    /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
+    /// `UserMemoryAccess` so the runtime can build a
+    /// `MemoryNamespaceGuard` and gate proactive-memory reads.
+    ///
+    /// `None` means RBAC is disabled (no registered users) or the sender
+    /// could not be attributed to any registered user — callers should
+    /// treat this as "no per-user restriction" so the existing single-user
+    /// behaviour is preserved.
+    ///
+    /// Default impl returns `None` so embedders / stubs that haven't
+    /// wired RBAC keep the pre-M3 behaviour.
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        let _ = (sender_id, channel);
+        None
+    }
+
+    /// Resolve the per-user RBAC gate for a tool invocation (RBAC M3,
+    /// issue #3054 Phase 2).
+    ///
+    /// Combines the user's `UserToolPolicy`, `channel_tool_rules`,
+    /// `tool_categories`, and role-based approval escalation into a single
+    /// runtime-facing verdict. Returns:
+    ///
+    /// * `Allow` — no per-user objection; continue with the existing
+    ///   approval/capability gates.
+    /// * `Deny` — hard deny; the dispatcher refuses without prompting.
+    /// * `NeedsApproval` — user's own role would block, but a higher role
+    ///   could authorise; route through the approval queue.
+    ///
+    /// Default impl returns `Allow` so installations without a real
+    /// kernel (test stubs, embedded callers without an `AuthManager`)
+    /// keep their pre-M3 behaviour. The real kernel always overrides
+    /// this; flipping the default to `NeedsApproval` was discussed
+    /// during PR #3205 review but rejected because it broke ~8 unrelated
+    /// runtime tests that rely on the default mock — the loudness gain
+    /// is not worth a fragile contract for stub kernels.
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        let _ = (tool_name, sender_id, channel);
+        librefang_types::user_policy::UserToolGate::Allow
+    }
+
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
     async fn request_approval(
         &self,

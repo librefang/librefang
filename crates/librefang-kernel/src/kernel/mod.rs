@@ -2322,8 +2322,10 @@ impl LibreFangKernel {
         let wasm_sandbox = WasmSandbox::new()
             .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
-        // Initialize RBAC authentication manager
-        let auth = AuthManager::new(&config.users);
+        // Initialize RBAC authentication manager. Tool groups are passed
+        // through so per-user `tool_categories` (RBAC M3) can resolve
+        // group names to their tool patterns.
+        let auth = AuthManager::with_tool_groups(&config.users, &config.tool_policy.groups);
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
@@ -10134,6 +10136,15 @@ system_prompt = "You are a helpful assistant."
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
+                HotAction::ReloadAuth => {
+                    info!(
+                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups)",
+                        new_config.users.len(),
+                        new_config.tool_policy.groups.len(),
+                    );
+                    self.auth
+                        .reload(&new_config.users, &new_config.tool_policy.groups);
+                }
                 HotAction::ReloadTaintRules => {
                     // Actual swap is performed by the caller (`reload_config`)
                     // after this match completes — this arm is informational
@@ -15281,6 +15292,43 @@ impl KernelHandle for LibreFangKernel {
             .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        if !self.auth.is_enabled() {
+            return None;
+        }
+        let user_id = self.auth.resolve_user(sender_id, channel)?;
+        self.auth.memory_acl_for(user_id)
+    }
+
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        // Only the synthetic `"cron"` channel is treated as a system-
+        // internal call. The cron dispatcher synthesises
+        // `SenderContext{channel:"cron"}` (see kernel/mod.rs ~10876)
+        // before fanning out to agents; everything else MUST carry a
+        // real `(channel, sender_id)` tuple.
+        //
+        // Earlier drafts also matched `"system"` / `"internal"` and
+        // treated `(None, None)` as system, but neither sentinel is
+        // synthesised anywhere in the codebase, and the `(None, None)`
+        // shortcut silently re-opened the H7 fail-open at the trait
+        // boundary the AuthManager unit tests were written to close
+        // (PR #3205 review item #1). Both have been removed: an
+        // unattributed inbound now goes through the guest gate so
+        // RBAC fails closed end-to-end.
+        let system_call = matches!(channel, Some("cron"));
+        self.auth
+            .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,
@@ -15432,16 +15480,27 @@ impl KernelHandle for LibreFangKernel {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
-                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                    info!(
-                        agent_id,
-                        tool_name, "Auto-approved for hand agent (non-blocking)"
-                    );
-                    return Ok(ToolApprovalSubmission::AutoApproved);
+        // EXCEPTION (RBAC M3, #3054): when the per-user policy demanded approval
+        // (`force_human=true`), the carve-out MUST NOT fire — otherwise a Viewer/User
+        // chatting with a hand-tagged agent silently inherits the agent's full
+        // tool surface, defeating user-level RBAC entirely.
+        if !deferred.force_human {
+            if let Ok(aid) = agent_id.parse::<AgentId>() {
+                if let Some(entry) = self.registry.get(aid) {
+                    if entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                        info!(
+                            agent_id,
+                            tool_name, "Auto-approved for hand agent (non-blocking)"
+                        );
+                        return Ok(ToolApprovalSubmission::AutoApproved);
+                    }
                 }
             }
+        } else {
+            debug!(
+                agent_id,
+                tool_name, "Hand-agent auto-approval skipped because user policy demanded approval"
+            );
         }
 
         let policy = self.approval_manager.policy();
