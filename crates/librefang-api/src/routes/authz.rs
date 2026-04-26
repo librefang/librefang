@@ -30,8 +30,9 @@ use axum::Json;
 use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::user_policy::UserToolGate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 /// Build admin-gated authz / effective-permissions routes.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -145,13 +146,63 @@ pub struct CheckQuery {
     pub channel: Option<String>,
 }
 
-/// GET /api/authz/check — admin-only single-decision permission query.
+/// Response body for `GET /api/authz/check`.
 ///
-/// Answers "can user X invoke tool Y on channel Z right now?" by calling
-/// the same `AuthManager::resolve_user_tool_decision` the runtime gate
-/// path uses. **Production single source of truth** — this endpoint
-/// returns whatever the dispatcher would return, no parallel
-/// re-implementation that could drift.
+/// Dashboard surfaces (when added) MUST display the disclaimer that
+/// goes with `scope = "user_policy_only"`: "User-policy decision only —
+/// runtime gate may differ" because per-agent `ToolPolicy` and global
+/// `ApprovalPolicy.channel_rules` are not consulted by this endpoint.
+/// Today no dashboard page consumes this endpoint; new consumers must
+/// honour that contract before shipping.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuthzCheckResponse {
+    /// Echoes the `user` query parameter (UUID or name as supplied).
+    pub user: String,
+    /// Echoes the `action` query parameter.
+    pub action: String,
+    /// Echoes the `channel` query parameter, or `null` when omitted.
+    pub channel: Option<String>,
+    /// Decision label: `"allow"`, `"deny"`, or `"needs_approval"`.
+    pub decision: String,
+    /// Convenience flag — true only when `decision == "allow"`.
+    pub allowed: bool,
+    /// Human-readable reason when the decision is not `allow`. `None`
+    /// for `allow`.
+    pub reason: Option<String>,
+    /// **Always** `"user_policy_only"`. Marker that this decision is
+    /// computed from the user's RBAC slice alone (Layer A + Layer B in
+    /// [`AuthManager::resolve_decision_for_user`]) and does NOT include
+    /// per-agent `ToolPolicy::check_tool`, global
+    /// `ApprovalPolicy.channel_rules`, or the per-call approval gate.
+    /// The runtime tool-gate may therefore deny or require approval for
+    /// a tool that this endpoint reports as allowed.
+    pub scope: &'static str,
+}
+
+/// GET /api/authz/check — admin-only **user-policy-only** decision query.
+///
+/// Answers "would user X's per-user RBAC policy permit tool Y on channel
+/// Z?" by calling [`AuthManager::resolve_decision_for_user`], which walks
+/// Layer A (the user's own `tool_policy` / `tool_categories` /
+/// `channel_tool_rules`) and Layer B (role-escalation: would an admin
+/// have allowed it?).
+///
+/// **Scope is intentionally narrow — this is NOT the full runtime gate
+/// decision.** The production tool-gate path additionally intersects with:
+/// - per-agent [`ToolPolicy::check_tool`] (allow/blocklist from
+///   `agent.toml` — varies per agent),
+/// - global `ApprovalPolicy.channel_rules` (e.g. `shell_*` always
+///   requires approval regardless of user policy),
+/// - the existing per-call approval / capability gates.
+///
+/// Those layers depend on which agent is invoking the tool and the
+/// runtime context, neither of which this query carries. So an `Allow`
+/// here can still surface as `NeedsApproval` or `Deny` at runtime if a
+/// per-agent ToolPolicy or channel rule says so. The response always
+/// carries `scope: "user_policy_only"` to make this contract explicit
+/// to operators debugging gate mismatches; widening to the full gate
+/// path is a future RFC (would require an `agent_id` query param —
+/// breaking API change).
 ///
 /// Returns 404 when the user can't be matched, so external callers can
 /// distinguish "not registered" from "registered but denied". The
@@ -167,7 +218,7 @@ pub struct CheckQuery {
         ("channel" = Option<String>, Query, description = "Channel context (telegram, slack, api, ...)"),
     ),
     responses(
-        (status = 200, description = "Decision payload", body = serde_json::Value),
+        (status = 200, description = "User-policy decision payload (scope = user_policy_only)", body = AuthzCheckResponse),
         (status = 404, description = "Unknown user"),
     )
 )]
@@ -204,21 +255,34 @@ pub async fn check(
     // surface doesn't have, and would silently fall back to the guest
     // gate (returning `needs_approval`) for users whose policy actually
     // hard-denies the action.
+    //
+    // SCOPE NOTE: `resolve_decision_for_user` walks Layer A (user's
+    // own policy) + Layer B (role escalation) ONLY. The runtime
+    // tool-gate also intersects per-agent `ToolPolicy::check_tool` (from
+    // `agent.toml`) and global `ApprovalPolicy.channel_rules`
+    // (e.g. `shell_*` always-approve), neither of which is consulted
+    // here — both depend on an `agent_id` the caller doesn't supply.
+    // The response sets `scope: "user_policy_only"` to advertise this;
+    // future widening to the full gate is tracked as an API-breaking
+    // RFC (M6/M7).
     let gate = auth.resolve_decision_for_user(user_id, &q.action, q.channel.as_deref());
 
     let (decision, allowed, reason) = match gate {
-        UserToolGate::Allow => ("allow", true, None),
-        UserToolGate::Deny { reason } => ("deny", false, Some(reason)),
-        UserToolGate::NeedsApproval { reason } => ("needs_approval", false, Some(reason)),
+        UserToolGate::Allow => ("allow".to_string(), true, None),
+        UserToolGate::Deny { reason } => ("deny".to_string(), false, Some(reason)),
+        UserToolGate::NeedsApproval { reason } => {
+            ("needs_approval".to_string(), false, Some(reason))
+        }
     };
 
-    Json(serde_json::json!({
-        "user": q.user,
-        "action": q.action,
-        "channel": q.channel,
-        "decision": decision,
-        "allowed": allowed,
-        "reason": reason,
-    }))
+    Json(AuthzCheckResponse {
+        user: q.user,
+        action: q.action,
+        channel: q.channel,
+        decision,
+        allowed,
+        reason,
+        scope: "user_policy_only",
+    })
     .into_response()
 }

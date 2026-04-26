@@ -240,6 +240,7 @@ use crate::types;
         routes::users::update_user,
         routes::users::delete_user,
         routes::users::import_users,
+        routes::users::rotate_user_key,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -368,6 +369,7 @@ use crate::types;
         routes::users::BulkImportRequest,
         routes::users::BulkImportResult,
         routes::users::BulkImportRow,
+        routes::users::RotateKeyResponse,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),

@@ -130,6 +130,11 @@ pub struct AppState {
     /// Shared api_key_lock from the auth middleware — updated on password/api_key change
     /// so the new credentials take effect immediately without restart.
     pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
+    /// Shared per-user API key snapshot — same Arc the auth middleware
+    /// reads from, so swapping the inner Vec via `rotate_user_key` (or any
+    /// future user-mutation endpoint) makes the change visible to the very
+    /// next request without a daemon restart.
+    pub user_api_keys: Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.

@@ -340,6 +340,21 @@ impl AuthManager {
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
         self.users.clear();
         self.channel_index.clear();
+        // Drop every cached channel-derived role. Without this, an
+        // operator who edits `[[users]]` channel bindings or
+        // `[channel_role_mapping]` and reloads still sees the OLD
+        // resolved role for any sender whose role was already cached
+        // this session — the new policy is applied for fresh senders
+        // but cached ones effectively keep stale (possibly elevated)
+        // privileges until the daemon restarts. Clearing here is the
+        // counterpart to `invalidate_role_cache()` for the hot-reload
+        // path. `DashMap::clear` takes the per-shard locks internally;
+        // no external coordination needed even though concurrent
+        // `resolve_role_for_sender` calls may race the swap — they'll
+        // observe either the pre-clear or post-clear state, never a
+        // torn one, and a missed entry just means one extra platform
+        // lookup, not stale privileges.
+        self.role_cache.clear();
         // Panic on a poisoned lock: silently keeping the stale snapshot
         // would mean `/api/config/reload` reports success while the new
         // `[tool_policy.groups]` are never enforced — exactly the
@@ -495,7 +510,7 @@ impl AuthManager {
                 } else {
                     match query.lookup_role(chat_id, &sender.user_id).await {
                         Ok(Some(platform_role)) => (
-                            translate_platform_role(mapping, &sender.channel, &platform_role),
+                            translate_platform_role_for_sender(mapping, sender, &platform_role),
                             false,
                         ),
                         Ok(None) => (None, false),
@@ -800,6 +815,63 @@ fn translate_platform_role(
             .as_ref()
             .and_then(|m| translate_slack_role(m, role)),
         _ => None,
+    }
+}
+
+/// Sender-aware wrapper around [`translate_platform_role`] that closes
+/// platform-specific privilege-escalation holes the raw mapping logic
+/// can't see.
+///
+/// **Telegram DM `creator` escalation**: when a user opens a private
+/// chat with the bot, `getChatMember(chat_id=user_id, user_id=user_id)`
+/// queries the user's status in their own DM. The Bot API returns
+/// `creator` for that case (the user "owns" the conversation with the
+/// bot), so a mapping like `creator_role = "owner"` would auto-promote
+/// every DM sender to Owner — i.e. anyone who can DM the bot becomes
+/// an admin of the LibreFang instance.
+///
+/// `creator` is meaningful only for groups/supergroups/channels (the
+/// actual chat owner). In a DM (`chat_id == user_id`) we drop the
+/// `creator` token so the kernel falls through to the next layer of
+/// resolution (default-deny Viewer). `administrator` and `member` are
+/// untouched — they don't show up for the self-DM query in practice
+/// and aren't a privilege risk anyway.
+fn translate_platform_role_for_sender(
+    mapping: &ChannelRoleMapping,
+    sender: &SenderContext,
+    role: &librefang_channels::types::PlatformRole,
+) -> Option<UserRole> {
+    if sender.channel == "telegram" && is_telegram_self_dm(sender) {
+        if let Some(primary) = role.roles.first() {
+            if primary == "creator" {
+                debug!(
+                    user = %sender.user_id,
+                    "ignoring Telegram `creator` status in self-DM \
+                     (chat_id == user_id) to prevent owner auto-promotion; \
+                     falling through to default-deny"
+                );
+                return None;
+            }
+        }
+    }
+    translate_platform_role(mapping, &sender.channel, role)
+}
+
+/// Detect Telegram DMs where the `chat_id` equals the `user_id`.
+///
+/// Telegram's Bot API uses the user's own ID as the chat_id for private
+/// (1:1) conversations with the bot. Group/supergroup/channel chat_ids
+/// are negative or otherwise distinct from any user_id. The `is_group`
+/// flag set by the channel adapter is also checked as a defence-in-
+/// depth signal — if either says "this is a 1:1 DM", we treat it as
+/// such.
+fn is_telegram_self_dm(sender: &SenderContext) -> bool {
+    if sender.is_group {
+        return false;
+    }
+    match sender.chat_id.as_deref() {
+        Some(chat_id) => chat_id == sender.user_id,
+        None => false,
     }
 }
 
@@ -2253,6 +2325,151 @@ mod channel_role_tests {
             Some("C-DEADBEEF"),
             "Slack chat_id must be forwarded verbatim even though the \
              adapter ignores it — substitution is the adapter's choice"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_dm_creator_does_not_auto_promote_to_owner() {
+        // Privilege-escalation regression test (PR #3202 follow-up,
+        // issue #3): in a Telegram DM the Bot API returns `creator`
+        // for `getChatMember(chat_id=user_id, user_id=user_id)` because
+        // the user "owns" their own DM with the bot. Mapping
+        // `creator_role = "owner"` would then auto-promote any user
+        // who DMs the bot to Owner. The resolver must drop the
+        // `creator` token in that case and fall through to
+        // default-deny Viewer.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("creator"))),
+            calls: calls.clone(),
+        };
+        // chat_id == user_id is the Telegram DM signature. is_group is
+        // explicitly false (default) so both DM signals agree.
+        let dm_sender = telegram_sender("tg-mallory", "tg-mallory");
+        let role = mgr
+            .resolve_role_for_sender(&dm_sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(
+            role,
+            UserRole::Viewer,
+            "Telegram DM must NOT honor the `creator` mapping — every \
+             DM sender would otherwise become Owner. Got role {role:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_group_creator_still_maps_to_owner() {
+        // Companion to the DM regression test above: in a real group
+        // chat (chat_id != user_id) the `creator` token is the
+        // legitimate group owner and the existing mapping must keep
+        // working unchanged.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("creator"))),
+            calls: calls.clone(),
+        };
+        let group_sender = SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "tg-alice".to_string(),
+            chat_id: Some("-100123456".to_string()),
+            display_name: "Alice".to_string(),
+            is_group: true,
+            ..Default::default()
+        };
+        let role = mgr
+            .resolve_role_for_sender(&group_sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(role, UserRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn telegram_dm_administrator_unaffected_by_dm_guard() {
+        // The DM guard targets the `creator` escalation specifically.
+        // Other status tokens should still translate normally — if
+        // for some reason the platform returns `administrator` in a
+        // DM context, the configured mapping should win.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("administrator"))),
+            calls: calls.clone(),
+        };
+        let dm_sender = telegram_sender("tg-bob", "tg-bob");
+        let role = mgr
+            .resolve_role_for_sender(&dm_sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(role, UserRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn reload_clears_role_cache_so_mapping_edits_take_effect() {
+        // Cache-staleness regression test (PR #3202 follow-up, issue
+        // #2): `AuthManager::reload()` previously cleared `users` and
+        // `channel_index` but not `role_cache`. After an operator
+        // edited `[channel_role_mapping]` (e.g. demoted
+        // `creator_role` from `owner` to `user`) and triggered a hot
+        // reload, any sender whose role had already been resolved
+        // this session would keep the stale (often elevated) role
+        // from the cache until the daemon restarted.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("creator"))),
+            calls: calls.clone(),
+        };
+        // Use a group sender so the DM guard from the other fix above
+        // doesn't suppress the `creator` translation we want to
+        // observe being cached.
+        let sender = SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "tg-alice".to_string(),
+            chat_id: Some("-100777".to_string()),
+            display_name: "Alice".to_string(),
+            is_group: true,
+            ..Default::default()
+        };
+
+        // 1. First resolution under `creator_role = "owner"` — caches Owner.
+        let role_v1 = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(role_v1, UserRole::Owner);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 2. Sanity check the cache is populated: a second call with
+        //    the same mapping must NOT re-query the platform.
+        let role_v1_cached = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(role_v1_cached, UserRole::Owner);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call should hit the role cache, not the platform"
+        );
+
+        // 3. Operator edits config: `creator_role` is no longer
+        //    "owner" — they only want explicit-bound users to ever be
+        //    owners, so they remove the channel mapping entirely.
+        //    `reload()` is called to apply the change.
+        mgr.reload(&[], &[]);
+
+        // 4. Resolve again. If `role_cache` was not cleared, this
+        //    returns the stale Owner from before. With the fix, the
+        //    cache is empty, the platform is re-queried, and the new
+        //    (empty) mapping resolves to default-deny Viewer.
+        let demoted_mapping = ChannelRoleMapping::default();
+        let role_v2 = mgr
+            .resolve_role_for_sender(&sender, &demoted_mapping, Some(&query))
+            .await;
+        assert_eq!(
+            role_v2,
+            UserRole::Viewer,
+            "after reload(), role_cache must be cleared so mapping edits \
+             take effect on the next resolution. Got role {role_v2:?} — \
+             the old Owner survived the reload."
         );
     }
 }

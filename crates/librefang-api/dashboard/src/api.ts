@@ -3597,6 +3597,26 @@ export async function importUsers(
 }
 
 // ---------------------------------------------------------------------------
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6)
+//
+// Owner-only. Returns the new plaintext key in the response — that is the
+// only time the server exposes it; we never log, persist, or re-derive it.
+// ---------------------------------------------------------------------------
+
+export interface RotateUserKeyResponse {
+  status: string;
+  new_api_key: string;
+  sessions_invalidated: number;
+}
+
+export async function rotateUserKey(name: string): Promise<RotateUserKeyResponse> {
+  return post<RotateUserKeyResponse>(
+    `/api/users/${encodeURIComponent(name)}/rotate-key`,
+    {},
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Audit query (RBAC M5 / #3203). Shape mirrors `routes/audit.rs::audit_query`
 // — keep field names in lockstep, the server returns raw `serde_json::Value`
 // so a drift here is silently wrong wire-format on the page.
