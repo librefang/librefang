@@ -9818,6 +9818,15 @@ system_prompt = "You are a helpful assistant."
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
+                HotAction::ReloadAuth => {
+                    info!(
+                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups)",
+                        new_config.users.len(),
+                        new_config.tool_policy.groups.len(),
+                    );
+                    self.auth
+                        .reload(&new_config.users, &new_config.tool_policy.groups);
+                }
                 HotAction::ReloadLogLevel(level) => match self.log_reloader.get() {
                     Some(reloader) => match reloader.reload(level) {
                         Ok(()) => info!("Hot-reload: log_level updated to {level}"),
@@ -14878,14 +14887,31 @@ impl KernelHandle for LibreFangKernel {
             .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        if !self.auth.is_enabled() {
+            return None;
+        }
+        let user_id = self.auth.resolve_user(sender_id, channel)?;
+        self.auth.memory_acl_for(user_id)
+    }
+
     fn resolve_user_tool_decision(
         &self,
         tool_name: &str,
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> librefang_types::user_policy::UserToolGate {
+        // Treat the documented "system" channel sentinel as a system-internal
+        // call (cron fires, fork turns, internal events). Direct user
+        // invocations all carry a real `(channel, sender_id)` pair.
+        let system_call = matches!(channel, Some("cron") | Some("system") | Some("internal"))
+            || (sender_id.is_none() && channel.is_none());
         self.auth
-            .resolve_user_tool_decision(tool_name, sender_id, channel)
+            .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
     }
 
     async fn request_approval(
@@ -15039,16 +15065,27 @@ impl KernelHandle for LibreFangKernel {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
-                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                    info!(
-                        agent_id,
-                        tool_name, "Auto-approved for hand agent (non-blocking)"
-                    );
-                    return Ok(ToolApprovalSubmission::AutoApproved);
+        // EXCEPTION (RBAC M3, #3054): when the per-user policy demanded approval
+        // (`force_human=true`), the carve-out MUST NOT fire — otherwise a Viewer/User
+        // chatting with a hand-tagged agent silently inherits the agent's full
+        // tool surface, defeating user-level RBAC entirely.
+        if !deferred.force_human {
+            if let Ok(aid) = agent_id.parse::<AgentId>() {
+                if let Some(entry) = self.registry.get(aid) {
+                    if entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                        info!(
+                            agent_id,
+                            tool_name, "Auto-approved for hand agent (non-blocking)"
+                        );
+                        return Ok(ToolApprovalSubmission::AutoApproved);
+                    }
                 }
             }
+        } else {
+            debug!(
+                agent_id,
+                tool_name, "Hand-agent auto-approval skipped because user policy demanded approval"
+            );
         }
 
         let policy = self.approval_manager.policy();

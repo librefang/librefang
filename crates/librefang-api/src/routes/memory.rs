@@ -149,6 +149,48 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
     ApiErrorResponse::internal("Internal server error").into_json_tuple()
 }
 
+/// Build a [`MemoryNamespaceGuard`] for the current request from the
+/// authenticated user's RBAC profile (RBAC M3, #3054 Phase 2).
+///
+/// Resolution order:
+/// 1. `axum::Extension<AuthenticatedApiUser>` set by the auth middleware
+///    when a per-user API key matched — look up that user by name in the
+///    kernel's `AuthManager` and use their resolved `UserMemoryAccess`.
+/// 2. No authenticated user (loopback dev / single-user mode) → return an
+///    "owner-equivalent" guard so the existing dashboard read paths keep
+///    working unchanged. This preserves the M2 contract.
+fn guard_for_request(
+    state: &AppState,
+    extensions: &axum::http::Extensions,
+) -> librefang_memory::namespace_acl::MemoryNamespaceGuard {
+    use librefang_memory::namespace_acl::MemoryNamespaceGuard;
+    use librefang_types::user_policy::UserMemoryAccess;
+
+    if let Some(api_user) = extensions.get::<crate::middleware::AuthenticatedApiUser>() {
+        let user_id = librefang_types::agent::UserId::from_name(&api_user.name);
+        if let Some(acl) = state.kernel.auth_manager().memory_acl_for(user_id) {
+            return MemoryNamespaceGuard::new(acl);
+        }
+    }
+    // Fall back to owner-equivalent access (read/write everything,
+    // including PII). Single-user / loopback flows hit this path.
+    MemoryNamespaceGuard::new(UserMemoryAccess {
+        readable_namespaces: vec!["*".into()],
+        writable_namespaces: vec!["*".into()],
+        pii_access: true,
+        export_allowed: true,
+        delete_allowed: true,
+    })
+}
+
+/// Convert an `AuthDenied` error to a 403 JSON response.
+fn auth_denied(reason: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"error": reason.to_string()})),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/memory/search?q=...&limit=10
 // ---------------------------------------------------------------------------
@@ -167,19 +209,22 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemorySearchQuery>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
+    let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     // Search across ALL agents so the dashboard shows all memories
-    match store.search_all(&params.q, limit).await {
+    match store.search_all_with_guard(&params.q, limit, &guard).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
         Err(e) => internal_error(e),
     }
 }
@@ -207,6 +252,7 @@ pub async fn memory_search(
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemoryListQuery>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     // Graceful degradation: proactive memory disabled → empty list, not 500.
     let Some(store) = state.kernel.proactive_memory_store().cloned() else {
@@ -222,11 +268,15 @@ pub async fn memory_list(
         );
     };
 
+    let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
 
     // List across ALL agents so the dashboard shows all memories
-    match store.list_all(params.category.as_deref()).await {
+    match store
+        .list_all_with_guard(params.category.as_deref(), &guard)
+        .await
+    {
         Ok(items) => {
             let total = items.len();
             let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
@@ -241,6 +291,7 @@ pub async fn memory_list(
                 })),
             )
         }
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
         Err(e) => internal_error(e),
     }
 }
@@ -260,17 +311,20 @@ pub async fn memory_list(
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
-    match store.get(&user_id).await {
+    let guard = guard_for_request(&state, request.extensions());
+    match store.get_with_guard(&user_id, &guard).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
         Err(e) => internal_error(e),
     }
 }
@@ -613,16 +667,21 @@ pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
     Query(params): Query<MemoryListQuery>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
+    let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    match store.list(&agent_id, params.category.as_deref()).await {
+    match store
+        .list_with_guard(&agent_id, params.category.as_deref(), &guard)
+        .await
+    {
         Ok(items) => {
             let total = items.len();
             let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
@@ -636,6 +695,7 @@ pub async fn memory_list_agent(
                 })),
             )
         }
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
         Err(e) => internal_error(e),
     }
 }
@@ -660,18 +720,24 @@ pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
     Query(params): Query<MemorySearchQuery>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
     };
 
+    let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
-    match store.search(&params.q, &agent_id, limit).await {
+    match store
+        .search_with_guard(&params.q, &agent_id, limit, &guard)
+        .await
+    {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
         Err(e) => internal_error(e),
     }
 }

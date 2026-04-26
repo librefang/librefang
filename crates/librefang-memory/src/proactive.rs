@@ -1622,6 +1622,72 @@ impl ProactiveMemoryStore {
         }
         <Self as librefang_types::memory::ProactiveMemory>::add(self, messages, user_id).await
     }
+
+    /// Cross-agent dashboard search wrapper. Same gating as
+    /// [`Self::search_with_guard`] (read access to `proactive` + PII
+    /// redaction). Used by the API `/memory/search` endpoint.
+    pub async fn search_all_with_guard(
+        &self,
+        query: &str,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut items = self.search_all(query, limit).await?;
+        guard.redact_all(&mut items);
+        Ok(items)
+    }
+
+    /// Cross-agent dashboard listing wrapper. Same gating as
+    /// [`Self::search_with_guard`].
+    pub async fn list_all_with_guard(
+        &self,
+        category: Option<&str>,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut items = self.list_all(category).await?;
+        guard.redact_all(&mut items);
+        Ok(items)
+    }
+
+    /// Per-user list wrapper used by `/memory/user/{user_id}` and the
+    /// dashboard. Reads memory items for `user_id` and applies PII
+    /// redaction when the guard forbids it.
+    pub async fn get_with_guard(
+        &self,
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut items =
+            <Self as librefang_types::memory::ProactiveMemory>::get(self, user_id).await?;
+        guard.redact_all(&mut items);
+        Ok(items)
+    }
+
+    /// Per-agent list wrapper.
+    pub async fn list_with_guard(
+        &self,
+        agent_id: &str,
+        category: Option<&str>,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut items =
+            <Self as librefang_types::memory::ProactiveMemory>::list(self, agent_id, category)
+                .await?;
+        guard.redact_all(&mut items);
+        Ok(items)
+    }
 }
 
 /// A flat, JSON-serializable representation of a memory for import/export.
@@ -3041,5 +3107,98 @@ mod tests {
         assert!(candidates.contains(&"Alice".to_string()));
         assert!(candidates.contains(&"Rust".to_string()));
         assert!(candidates.contains(&"alice".to_string())); // normalized
+    }
+
+    /// RBAC M3 (#3054) regression: when the user's `UserMemoryAccess`
+    /// denies the `proactive` namespace, `search_all_with_guard` MUST
+    /// return `AuthDenied` rather than leaking fragments back to the
+    /// dashboard. Mirror test for `list_all_with_guard`.
+    #[tokio::test]
+    async fn search_all_with_guard_denies_unauthorised_read() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "topsecret"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Guard with NO read access at all.
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess::default());
+        let err = store.search_all_with_guard("topsecret", 10, &guard).await;
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
+        let err = store.list_all_with_guard(None, &guard).await;
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
+        // Guard WITH read access lets the same query through.
+        let allow = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            ..Default::default()
+        });
+        let ok = store
+            .search_all_with_guard("topsecret", 10, &allow)
+            .await
+            .unwrap();
+        assert!(!ok.is_empty());
+    }
+
+    /// PII redaction MUST replace fields when the guard's `pii_access=false`.
+    /// Tests the cross-agent search path; `search_with_guard` is covered
+    /// independently via the `namespace_acl` module's own redaction tests.
+    #[tokio::test]
+    async fn search_all_with_guard_redacts_pii() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+        store
+            .add(
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "Reach me at alice@example.com or 555-123-4567"
+                })],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            pii_access: false,
+            ..Default::default()
+        });
+        let items = store
+            .search_all_with_guard("alice", 10, &guard)
+            .await
+            .unwrap();
+        for item in items {
+            assert!(
+                !item.content.contains("alice@example.com"),
+                "raw email leaked into search response: {}",
+                item.content
+            );
+            assert!(
+                !item.content.contains("555-123-4567"),
+                "raw phone leaked into search response: {}",
+                item.content
+            );
+        }
     }
 }

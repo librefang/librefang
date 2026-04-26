@@ -142,9 +142,11 @@ impl MemoryNamespaceGuard {
             }
         }
         if redacted {
+            // Use insert (not or_insert_with) so the redaction signal is
+            // authoritative even if a stale "redacted: false" was already
+            // attached upstream.
             item.metadata
-                .entry("redacted".to_string())
-                .or_insert_with(|| serde_json::Value::Bool(true));
+                .insert("redacted".to_string(), serde_json::Value::Bool(true));
         }
         redacted
     }
