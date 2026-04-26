@@ -510,10 +510,6 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/init` | Quick-init wizard (called by `librefang setup --quick`) |
 | **Dashboard auth** | | |
 | POST | `/auth/logout` | Clear the dashboard session cookie |
-| **API meta / introspection** | | |
-| GET | `/api/versions` | API version discovery (versioned vs unversioned route map) |
-| GET | `/api/profiles` | List tool profiles (named tool sets used in templates) |
-| GET | `/api/profiles/{name}` | Get one tool profile by name |
 | **Prompt versioning & A/B testing** (when `[prompt_intelligence] enabled = true`) | | |
 | GET | `/agents/{agent_id}/prompts/versions` | List prompt versions for an agent |
 | POST | `/agents/{agent_id}/prompts/versions` | Save a new prompt version |
