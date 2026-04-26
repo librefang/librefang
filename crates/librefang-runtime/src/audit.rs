@@ -778,12 +778,16 @@ impl AuditLog {
         let first_survivor_seq = if drop_count < total {
             entries[drop_count].seq
         } else {
-            // Edge case: caller asked us to drop everything. Keep the
-            // most recent entry to preserve a non-empty chain (so the
-            // self-audit `RetentionTrim` row has somewhere to anchor
-            // against). This shouldn't be reachable given pass-2 stops
-            // at the first survivor, but guard anyway.
-            entries[total - 1].seq
+            // Reachable when every action has a per-action retention
+            // rule and every entry is older than its window. Drop the
+            // tail row from the DB too so the on-disk view matches the
+            // empty in-memory log; otherwise a restart would load an
+            // orphan row whose `prev_hash` points at a hash no `with_db`
+            // anchor recovery can reconstruct, and `verify_integrity`
+            // would fail on the next boot. The next `record()` call
+            // (typically the self-audit `RetentionTrim` written by the
+            // caller) re-anchors against the chain_anchor we set below.
+            entries[total - 1].seq + 1
         };
         if let Some(ref db) = self.db {
             if let Ok(conn) = db.lock() {
@@ -1671,6 +1675,113 @@ mod tests {
         assert!(
             log2.verify_integrity().is_ok(),
             "verify_integrity must succeed after restart with anchor recovered"
+        );
+    }
+
+    #[test]
+    fn test_trim_drops_all_persists_consistently_across_restart() {
+        // Regression: when every entry in the log has a per-action
+        // retention rule and is older than its window, pass-2 advances
+        // drop_count all the way to total. The DB delete must remove
+        // every row (matching the empty in-memory state) — leaving the
+        // tail behind would orphan a row whose prev_hash points at a
+        // dropped predecessor, breaking verify_integrity on the next
+        // boot. The next record() (typically the self-audit
+        // RetentionTrim row) re-anchors against chain_anchor.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(30);
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        for i in 0..4 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("noise {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Re-sync the back-dated rows into the DB (push_aged_entry
+        // mutates in-memory only).
+        {
+            let entries = log.entries.lock().unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM audit_entries", []).unwrap();
+            for e in entries.iter() {
+                conn.execute(
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        e.seq as i64,
+                        &e.timestamp,
+                        &e.agent_id,
+                        e.action.to_string(),
+                        &e.detail,
+                        &e.outcome,
+                        e.user_id.map(|u| u.to_string()),
+                        e.channel.as_deref(),
+                        &e.prev_hash,
+                        &e.hash,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 1);
+
+        // Every entry is ToolInvoke, every entry is 30 days old, rule
+        // is 1 day -> pass-2 drops all four.
+        let report = log.trim(&policy, now);
+        assert_eq!(report.total_dropped, 4);
+        assert_eq!(log.len(), 0);
+
+        // No orphan row left in the DB.
+        let db_count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            db_count, 0,
+            "drop-everything trim must clear DB, not leave the tail row behind"
+        );
+
+        // Caller records the self-audit row — the kernel periodic task
+        // does this after every non-empty trim.
+        log.record("system", AuditAction::RetentionTrim, "all", "ok");
+        assert!(log.verify_integrity().is_ok());
+        drop(log);
+
+        // Restart: only the RetentionTrim row exists. Anchor must be
+        // recovered from its prev_hash so verify_integrity walks
+        // cleanly across the trim boundary.
+        let log2 = AuditLog::with_db(Arc::clone(&db));
+        assert_eq!(log2.len(), 1);
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "verify_integrity must succeed after restart when trim dropped every prior entry"
         );
     }
 
