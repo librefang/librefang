@@ -352,9 +352,18 @@ async fn dashboard_login(
             }
 
             // Store the session token so the auth middleware can validate it.
+            // Attach the dashboard credential identity so the middleware can
+            // attribute follow-up requests to an Owner-level principal — without
+            // this, the session matches but the request stays anonymous and
+            // RBAC-gated handlers (audit/query, per-user budget writes) reject
+            // the dashboard caller as `None`. dashboard_pass is a single
+            // operator-level credential, so Owner is the right ceiling.
+            let mut session = token.clone();
+            session.user_name = Some(cfg_user.clone());
+            session.user_role = Some("owner".to_string());
             {
                 let mut sessions = state.active_sessions.write().await;
-                sessions.insert(token.token.clone(), token.clone());
+                sessions.insert(session.token.clone(), session);
                 // Persist so sessions survive daemon restarts.
                 save_sessions(state.kernel.home_dir(), &sessions);
             }

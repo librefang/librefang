@@ -391,6 +391,31 @@ pub async fn auth(
             .unwrap_or(false);
         if is_loopback {
             if let Some(token_str) = extract_request_token(&request) {
+                // First try user_api_keys (Argon2 verify against api_key_hash).
+                // Fall back to active dashboard sessions (random hex token
+                // exact match) — without this, a loopback caller carrying a
+                // dashboard_login session (the most common shape: the SPA
+                // proxied through Vite at 127.0.0.1) would lose its role
+                // attribution at the very first middleware hop and audit
+                // would still 403 the dashboard user.
+                let session_attribution = {
+                    let sessions = auth_state.active_sessions.read().await;
+                    sessions.get(&token_str).cloned()
+                };
+                if let Some(session) = session_attribution {
+                    if let (Some(name), Some(role_str)) =
+                        (session.user_name, session.user_role)
+                    {
+                        let role = UserRole::from_str_role(&role_str);
+                        let user_id = UserId::from_name(&name);
+                        request.extensions_mut().insert(AuthenticatedApiUser {
+                            name,
+                            role,
+                            user_id,
+                        });
+                    }
+                    return next.run(request).await;
+                }
                 if let Some(user) = auth_state
                     .user_api_keys
                     .iter()
@@ -699,8 +724,26 @@ pub async fn auth(
                 crate::password_hash::DEFAULT_SESSION_TTL_SECS,
             )
         });
-        if sessions.contains_key(token_str) {
+        if let Some(session) = sessions.get(token_str).cloned() {
             drop(sessions);
+            // If the session was issued by a credential flow that carried
+            // identity (dashboard_login attaches `user_name` + `user_role`),
+            // rebuild the AuthenticatedApiUser extension so RBAC-gated
+            // handlers (audit/query, per-user budget writes) can see the
+            // role. Legacy sessions persisted before attribution was added
+            // load with both fields `None` and continue through as
+            // trusted-anonymous — preserves the pre-fix behaviour for any
+            // session sitting in `~/.librefang/sessions.json` from older
+            // builds.
+            if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
+                let role = UserRole::from_str_role(&role_str);
+                let user_id = UserId::from_name(&name);
+                request.extensions_mut().insert(AuthenticatedApiUser {
+                    name,
+                    role,
+                    user_id,
+                });
+            }
             return next.run(request).await;
         }
         drop(sessions);
