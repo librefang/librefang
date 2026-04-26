@@ -2508,3 +2508,316 @@ async fn test_memory_stats_includes_proactive_enabled_when_enabled() {
     // couple to a specific empty-database snapshot.
     assert!(json["total"].is_number() || json["total"].is_null());
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// RBAC M5 — admin-only audit/budget endpoints
+//
+// These pin the contract for the four new HTTP endpoints
+// (`/api/audit/query`, `/api/audit/export`, `/api/budget/users`,
+// `/api/budget/users/{id}`):
+//
+//   1. Anonymous callers (loopback / `LIBREFANG_ALLOW_NO_AUTH=1`) MUST be
+//      rejected — even on a no-auth deployment, the audit chain is too
+//      sensitive to expose without an admin api_key.
+//   2. Sub-Admin authenticated callers MUST be rejected by the in-handler
+//      `require_admin` gate. Middleware lets every authenticated GET
+//      through regardless of role; the in-handler check is the only thing
+//      stopping a Viewer from reading the chain. This test exists so a
+//      future refactor that drops the in-handler gate surfaces as a
+//      failure rather than as silent privacy exposure.
+//   3. CSV export MUST emit the documented `Content-Type` and
+//      `Content-Disposition` so the dashboard download flow keeps working.
+//   4. `/api/budget/users/{id}` MUST surface `enforced: false` so the M6
+//      dashboard can warn users that `alert_breach` is informational
+//      until the M5-followup per-user budget enforcement lands.
+// ───────────────────────────────────────────────────────────────────────
+
+use librefang_kernel::auth::UserRole as KernelUserRole;
+use librefang_types::config::UserConfig;
+
+/// Build a test server with RBAC users wired into both `KernelConfig.users`
+/// and `AuthState.user_api_keys`, plus the audit + budget routes from
+/// `routes::audit::router()` / `routes::budget::router()`.
+///
+/// Each tuple is `(name, role_str, api_key)`. The api_key hash is
+/// computed via `librefang_api::password_hash::hash_password` so the
+/// auth middleware accepts the corresponding `Bearer` header.
+///
+/// Audit log handle is plumbed into `AuthState.audit_log` so denials
+/// from the in-handler `require_admin` are recorded — same as
+/// production (`server.rs::build_router`).
+async fn start_test_server_with_rbac_users(
+    api_key: &str,
+    users: Vec<(&str, &str, &str)>,
+) -> TestServer {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
+    let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
+    for (name, role_str, key) in &users {
+        let hash =
+            librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
+        user_configs.push(UserConfig {
+            name: (*name).to_string(),
+            role: (*role_str).to_string(),
+            channel_bindings: std::collections::HashMap::new(),
+            api_key_hash: Some(hash.clone()),
+            ..Default::default()
+        });
+        api_user_records.push(middleware::ApiUserAuth {
+            name: (*name).to_string(),
+            role: KernelUserRole::from_str_role(role_str),
+            api_key_hash: hash,
+            user_id: librefang_types::agent::UserId::from_name(name),
+        });
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        users: user_configs,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
+        kernel.config_ref().api_key.clone(),
+    ));
+
+    let audit_log = kernel.audit().clone();
+
+    let state = Arc::new(AppState {
+        kernel,
+        started_at: Instant::now(),
+        peer_registry: None,
+        bridge_manager: tokio::sync::Mutex::new(None),
+        channels_config: tokio::sync::RwLock::new(Default::default()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        skillhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: api_key_lock.clone(),
+        provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let api_key_state = middleware::AuthState {
+        api_key_lock,
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: Arc::new(api_user_records),
+        require_auth_for_reads: false,
+        // Anonymous-rejection tests rely on this — we synthesize requests
+        // without a Bearer header and need them to flow through to the
+        // in-handler `require_admin` gate (where they get 403'd). Without
+        // `allow_no_auth = true` the middleware would 401 first.
+        allow_no_auth: true,
+        audit_log: Some(audit_log),
+    };
+
+    let app = Router::new()
+        // Wire ONLY the M5 routes under `/api/` — sufficient for these
+        // tests. Other RBAC layers (channel bindings, tool policy) are
+        // exercised by the kernel-level tests.
+        .nest("/api", routes::audit::router())
+        .nest("/api", routes::budget::router())
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn(middleware::request_logging))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    TestServer {
+        base_url: format!("http://{}", addr),
+        config_path,
+        state,
+        _tmp: tmp,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_query_rejects_anonymous_403() {
+    // Anonymous (no Bearer header) callers MUST be denied even when the
+    // server runs in `allow_no_auth = true` mode — the audit chain is
+    // too sensitive to leak via loopback. Documented contract from the
+    // `require_admin` doc-comment in `routes/audit.rs`.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "anonymous /api/audit/query must be rejected with 403"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("Admin"),
+        "403 body must mention Admin role: got {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_query_rejects_viewer_admin_returns_200() {
+    // Pins the in-handler `require_admin` gate. The middleware lets a
+    // Viewer GET through (`user_role_allows_request` returns true for
+    // every GET); only the handler-side `require_admin` stops it. A
+    // refactor that drops that gate must be caught here, NOT in
+    // production.
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "admin", "alice-admin-key"),
+            ("Eve", "viewer", "eve-viewer-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Viewer → 403
+    let viewer = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        viewer.status(),
+        403,
+        "Viewer must be denied at the in-handler require_admin gate"
+    );
+
+    // Admin → 200 with valid JSON shape
+    let admin = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), 200, "Admin must be allowed");
+    let body: serde_json::Value = admin.json().await.unwrap();
+    // Shape contract: `entries` array, `count`, `limit` fields all
+    // present even on an empty audit log.
+    assert!(body["entries"].is_array(), "response must carry entries[]");
+    assert!(body["count"].is_number(), "response must carry count");
+    assert!(body["limit"].is_number(), "response must carry limit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_export_csv_emits_documented_headers() {
+    // The dashboard download flow keys off `Content-Type: text/csv` and
+    // a filename in `Content-Disposition`. Pin both so a future refactor
+    // of `stream_csv` doesn't silently break the download.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/audit/export?format=csv", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Admin CSV export must succeed");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/csv"),
+        "CSV export must set text/csv; got {ct:?}"
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cd.contains("attachment") && cd.contains("audit.csv"),
+        "Content-Disposition must trigger an `audit.csv` download; got {cd:?}"
+    );
+    // First line must be the documented header row, regardless of how
+    // many entries the chain holds.
+    let text = resp.text().await.unwrap();
+    let first_line = text.lines().next().unwrap_or("");
+    assert_eq!(
+        first_line, "seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash",
+        "CSV header row schema must remain stable for downstream parsers"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_detail_includes_enforced_false() {
+    // M6 dashboard contract: `/api/budget/users/{id}` must surface
+    // `enforced: false` so the UI can warn users that `alert_breach` is
+    // informational until per-user budget enforcement (the M5-followup
+    // arm in `kernel/mod.rs::execute_llm_agent`) ships. Flip to `true`
+    // only when that wiring lands.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["enforced"],
+        serde_json::json!(false),
+        "enforced flag must remain `false` until per-user budget \
+         enforcement lands — flipping prematurely would mislead the UI"
+    );
+    // Defensive: the spend numerics must also be present so the
+    // dashboard can render even on an empty database.
+    assert!(body["hourly"]["spend"].is_number());
+    assert!(body["daily"]["spend"].is_number());
+    assert!(body["monthly"]["spend"].is_number());
+    assert!(body["alert_breach"].is_boolean());
+}
