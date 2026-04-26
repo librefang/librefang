@@ -3114,7 +3114,7 @@ pub async fn stop_session(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid session id"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
             )
         }
     };

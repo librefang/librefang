@@ -8658,6 +8658,18 @@ system_prompt = "You are a helpful assistant."
     /// Returns `true` when at least one session was stopped, `false` when
     /// the agent had no active loops. Callers that need session-scoped
     /// stop should use [`Self::stop_session_run`] instead.
+    ///
+    /// **Snapshot semantics:** session keys are collected into a `Vec` first,
+    /// then iterated to remove. A session that finishes between the snapshot
+    /// and the removal is silently absent from the count (already gone, so
+    /// the removal is a no-op). A session inserted **after** the snapshot is
+    /// not aborted by this call — `stop_agent_run` is best-effort against the
+    /// instant it observes. Concurrent dispatches that race with stop are
+    /// expected to either be aborted or to start cleanly afterward; partial
+    /// abort of a half-spawned loop would be more surprising than missing
+    /// it. Callers that need a strict "freeze, then abort" should suspend
+    /// the agent first via [`Self::suspend_agent`] (which itself fans out
+    /// through this method).
     pub fn stop_agent_run(&self, agent_id: AgentId) -> KernelResult<bool> {
         let sessions: Vec<SessionId> = self
             .running_tasks

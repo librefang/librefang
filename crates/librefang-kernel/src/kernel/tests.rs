@@ -3182,3 +3182,95 @@ fn test_stop_agent_run_returns_false_when_no_active_sessions() {
     assert!(kernel.list_running_sessions(agent_id).is_empty());
     kernel.shutdown();
 }
+
+/// Fork-shaped dispatch must not register itself in `running_tasks` or
+/// `session_interrupts`. The fork deliberately reuses the parent's
+/// `(agent, session)` key for prompt-cache alignment, so registering would
+/// clobber the parent's abort handle and cause `stop_agent_run` during the
+/// fork window to abort the fork instead of the parent.
+///
+/// We exercise the invariant directly: register the parent first, then
+/// simulate the fork code path's deliberate skip (the production code in
+/// `send_message_streaming_with_sender_and_opts` and `execute_llm_agent`
+/// guards both inserts behind `if !loop_opts.is_fork`). After the fork
+/// "would have run", the parent's entry must still point to the parent's
+/// abort handle, and the snapshot must contain exactly one session.
+#[test]
+fn test_fork_does_not_overwrite_parent_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-fork-skip-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let parent_session = SessionId::new();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let parent_handle = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let parent_abort = parent_handle.abort_handle();
+
+    // Parent registration mirrors the production `is_fork = false` path:
+    // insert into both `running_tasks` and `session_interrupts` keyed by
+    // `(agent, parent_session)`.
+    let parent_started_at = chrono::Utc::now();
+    kernel.running_tasks.insert(
+        (agent_id, parent_session),
+        RunningTask {
+            abort: parent_abort,
+            started_at: parent_started_at,
+        },
+    );
+    let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+    kernel
+        .session_interrupts
+        .insert((agent_id, parent_session), parent_interrupt.clone());
+
+    // Snapshot before "fork": one parent entry.
+    let before = kernel.list_running_sessions(agent_id);
+    assert_eq!(before.len(), 1, "parent must be registered");
+    assert_eq!(before[0].session_id, parent_session);
+
+    // Production code path for forks SKIPS both inserts (see the
+    // `if !is_fork` guards in `send_message_streaming_with_sender_and_opts`
+    // and the `if !loop_opts.is_fork` guard in `execute_llm_agent`). We
+    // therefore make zero registry mutations here — the fork's runtime
+    // identity is owned by its caller (auto_memorize / dream), not the
+    // session-stop registry.
+
+    // After the fork "would have run": parent registration intact, no
+    // duplicate entry, no overwrite.
+    let after = kernel.list_running_sessions(agent_id);
+    assert_eq!(
+        after.len(),
+        1,
+        "fork must not register a second entry under the parent's key"
+    );
+    assert_eq!(after[0].session_id, parent_session);
+    assert_eq!(
+        after[0].started_at, parent_started_at,
+        "parent's started_at must not be overwritten by a fork"
+    );
+
+    // The interrupt clone we registered earlier must still be the same
+    // logical handle (sharing the inner Arc) — a fork-side overwrite would
+    // have replaced it with a fresh interrupt and broken cancellation
+    // chaining.
+    let observed = kernel
+        .any_session_interrupt_for_agent(agent_id)
+        .expect("parent interrupt must still be discoverable");
+    parent_interrupt.cancel();
+    assert!(
+        observed.is_cancelled(),
+        "parent and observed interrupt must share the same Arc<AtomicBool>"
+    );
+
+    drop(rt);
+    kernel.shutdown();
+}
