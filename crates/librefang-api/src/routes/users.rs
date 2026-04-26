@@ -998,11 +998,11 @@ pub async fn update_user_policy(
         Ok(v) => v,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
-    let tool_categories_update =
-        match decode_field::<UserToolCategories>("tool_categories", &body) {
-            Ok(v) => v,
-            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
-        };
+    let tool_categories_update = match decode_field::<UserToolCategories>("tool_categories", &body)
+    {
+        Ok(v) => v,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
     let memory_access_update = match decode_field::<UserMemoryAccess>("memory_access", &body) {
         Ok(v) => v,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),

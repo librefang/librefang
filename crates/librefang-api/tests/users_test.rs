@@ -779,10 +779,7 @@ async fn users_policy_put_validates_no_empty_tool_strings() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("empty"),
+        body["error"].as_str().unwrap_or("").contains("empty"),
         "error must mention the empty entry: {body:?}"
     );
 }
