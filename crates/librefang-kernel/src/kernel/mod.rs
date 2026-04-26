@@ -1528,7 +1528,9 @@ impl LibreFangKernel {
                     "max_concurrent_invocations > 1 ignored — session_mode = \
                      \"persistent\" cannot run parallel invocations safely; \
                      clamped to 1. Set session_mode = \"new\" on the manifest \
-                     (or per-trigger) to enable parallel fires.",
+                     to enable parallel fires (per-trigger overrides cannot \
+                     escape the clamp — the per-agent semaphore is sized once \
+                     from the manifest default).",
                 );
                 1
             }

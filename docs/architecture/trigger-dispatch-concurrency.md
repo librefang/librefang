@@ -80,9 +80,17 @@ deep into a config rollout:
 ```
 WARN max_concurrent_invocations > 1 ignored — session_mode = "persistent"
      cannot run parallel invocations safely; clamped to 1.
-     Set session_mode = "new" on the manifest (or per-trigger) to enable
-     parallel fires.
+     Set session_mode = "new" on the manifest to enable parallel fires.
 ```
+
+The clamp is gated on the **manifest** `session_mode` only. A
+per-trigger `session_mode_override = "new"` does NOT unlock the cap:
+the per-agent semaphore is sized once on first dispatch from the
+manifest default, and the dispatcher does not rescan triggers when
+acquiring the per-agent permit. To run a `New`-mode workload in
+parallel, set `session_mode = "new"` on the manifest itself; per-trigger
+overrides are useful for one-off `New` fires but cannot escape an
+already-clamped semaphore.
 
 To run an agent in parallel, set:
 
