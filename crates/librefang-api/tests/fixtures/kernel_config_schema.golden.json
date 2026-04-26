@@ -10039,8 +10039,8 @@
         },
         "default_per_agent": {
           "default": 1,
-          "description": "Default per-agent invocation cap when an agent's manifest does not set `max_concurrent_invocations`. `1` reproduces the legacy per-agent-mutex serialization that pre-existed this knob — change deliberately. `0` is rewritten to `1` by validation.",
-          "format": "uint32",
+          "description": "Default per-agent invocation cap when an agent's manifest does not set `max_concurrent_invocations`. `1` reproduces the legacy per-agent-mutex serialization that pre-existed this knob — change deliberately. `0` is rewritten to `1` by validation. Typed `usize` to match the sibling lane fields and to feed `Semaphore::new` without a cast.",
+          "format": "uint",
           "minimum": 0.0,
           "type": "integer"
         },

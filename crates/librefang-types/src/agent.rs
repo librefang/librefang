@@ -872,18 +872,23 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
-    /// Per-agent cap on concurrent invocations from the trigger dispatcher
-    /// and `agent_send`. `None` means inherit from
-    /// `KernelConfig.queue.concurrency.default_per_agent` (today: 1).
-    /// `Some(1)` is identical to the legacy per-agent serialization
-    /// behavior.
+    /// Per-agent cap on concurrent **trigger-dispatch** invocations
+    /// (event triggers like `TaskPosted` / `MessageReceived`). `None`
+    /// means inherit from `KernelConfig.queue.concurrency.default_per_agent`
+    /// (today: 1). `Some(1)` is identical to the legacy per-agent
+    /// serialization behavior. `Some(0)` is treated as `Some(1)` (the
+    /// resolver floors at 1 — `0` would deadlock the agent).
+    ///
+    /// Scope: this cap **only** governs the kernel's trigger dispatch
+    /// loop. Channel messages, cron jobs, and `agent_send` continue to
+    /// serialize at the existing per-agent / per-session locks inside
+    /// `send_message_full` and are not throttled by this knob.
     ///
     /// Concurrent fires only make sense when each fire runs in its own
-    /// session — the runtime requires `session_mode = "new"` (or a
-    /// per-trigger / per-cron `session_mode` override) for caps `> 1`.
-    /// `persistent` + `max_concurrent_invocations > 1` is auto-clamped
-    /// to 1 with a warning log because parallel writes to a single
-    /// session's message history are undefined.
+    /// session — caps `> 1` are auto-clamped to `1` with a `WARN` log
+    /// unless `session_mode = "new"` is set on the manifest (or via a
+    /// per-trigger / per-cron `session_mode` override). Parallel writes
+    /// to a single persistent session's history are undefined.
     #[serde(default)]
     pub max_concurrent_invocations: Option<u32>,
     /// If true, the agent's `context.md` is read once at session start and

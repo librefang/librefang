@@ -1,7 +1,10 @@
 # Trigger dispatch concurrency
 
-How event triggers (`TaskPosted`, `MessageReceived`, …) and `agent_send`
-fan out to agents under bounded concurrency.
+How event triggers (`TaskPosted`, `MessageReceived`, …) fan out to agents
+under bounded concurrency. Scope is **the trigger dispatcher only** —
+`agent_send`, channel bridges, and cron all serialize on the existing
+`agent_msg_locks` / `session_msg_locks` inside `send_message_full` and
+are not throttled by the per-agent cap.
 
 ## The three layered caps
 
@@ -43,6 +46,14 @@ on task exit. The lane permit is acquired with `acquire_owned()` so it
 moves into the spawned `tokio::spawn` task and releases on completion
 regardless of success/failure.
 
+**Tuning note.** Both permits are held for the full agent-loop duration
+(seconds for short replies, minutes for tool-heavy turns). If a slow
+trigger fire occupies one of the 8 default lane permits, fast triggers
+queue behind it. Operators with mixed fast/slow trigger workloads should
+either (a) raise `trigger_lane` proportionally to expected slow-fire
+ratio, or (b) split the slow workload onto a separate agent so its
+per-agent cap absorbs the contention instead of the global lane.
+
 ## Resolution order — per-agent cap
 
 ```
@@ -53,14 +64,18 @@ manifest.max_concurrent_invocations         (Some(n) wins)
                    └─ rewritten to 1 if 0 (validation)
 ```
 
-`max(1)` floor is enforced at resolution time — `0` would deadlock the
-agent.
+`max(1)` floor is enforced at resolution time so a manifest typo of
+`max_concurrent_invocations = 0` is silently treated as `1` (a 0-permit
+semaphore would deadlock the agent). The same floor applies to
+`default_per_agent` after `validation.rs` rewrites a TOML `0` to `1`.
 
 ## Persistent + cap > 1 is auto-clamped
 
 Concurrent invocations against a single persistent session would race on
-the message-history append. The resolver detects this combination and
-clamps the cap to 1 with a `WARN` log:
+the message-history append. The resolver auto-clamps this combination
+to 1 (with a `WARN` log) instead of refusing to start — operators see
+the warning at first dispatch rather than discovering a hard error
+deep into a config rollout:
 
 ```
 WARN max_concurrent_invocations > 1 ignored — session_mode = "persistent"
@@ -79,23 +94,29 @@ max_concurrent_invocations = 4
 
 ## What honors `session_mode = "new"` for parallelism
 
-| Path | Materializes session_id? | Effect on per-agent lock |
-|---|---|---|
-| Event trigger dispatch (this doc) | yes — `SessionId::new()` per fire | bypassed; per-session mutex applies |
-| Cron with `job.session_mode = New` | yes — `SessionId::for_cron_run(agent, run_key)` | bypassed; deterministic session id |
-| `agent_send` | yes (when receiver manifest = New) | bypassed |
-| Channel messages (Telegram, Slack, …) | no — always `SessionId::for_channel(agent, ch:chat)` | per-channel session, bypassed at the lock level but not parallel per chat |
-| Forks | no — forced `Persistent` to preserve prompt cache | per-agent serialization |
+| Path | Materializes session_id? | Per-agent cap applies? | Effect on locks |
+|---|---|---|---|
+| Event trigger dispatch (this doc) | yes — `SessionId::new()` per fire | **yes** | per-session mutex; agent cap throttles parallelism |
+| Cron with `job.session_mode = New` | yes — `SessionId::for_cron_run(agent, run_key)` | no | deterministic session id; serializes via per-session mutex |
+| `agent_send` | yes (when receiver manifest = New) | no | per-session mutex; not throttled by per-agent cap — see scope note above |
+| Channel messages (Telegram, Slack, …) | no — always `SessionId::for_channel(agent, ch:chat)` | no | per-channel session; serial per chat |
+| Forks | no — forced `Persistent` to preserve prompt cache | no | per-agent serialization |
 
 ## Lifecycle
 
 - The per-agent semaphore is created lazily on first dispatch.
-- It is removed by the periodic registry GC pass when the agent is
-  killed/removed.
-- It is **not** invalidated on manifest hot-reload. Operators changing
-  `max_concurrent_invocations` should reactivate the agent (or the
-  hand) for the new capacity to take effect — this avoids a permit-loss
-  race during live config reloads.
+- It is removed by `gc_sweep` when the agent leaves the registry —
+  i.e. on `agent kill` / despawn, **not** on a status flip.
+- It is **not** invalidated on `manifest_swap` hot-reload. To pick up
+  a new `max_concurrent_invocations` operators must:
+  1. Kill the agent (`agent kill <id>` / API equivalent) and let it
+     respawn from the updated manifest, or
+  2. Restart the daemon.
+
+  An in-place "reactivate" / status flip that keeps the agent in the
+  registry will silently retain the old capacity. The lazy-init design
+  trades hot-reload immediacy for the simplicity of avoiding a
+  permit-loss race during live config reloads.
 
 ## Observability
 

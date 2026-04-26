@@ -446,12 +446,15 @@ pub struct LibreFangKernel {
     /// supplies an explicit `session_id_override`. Allows concurrent messages to
     /// different sessions of the same agent (multi-tab / multi-session UIs).
     session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
-    /// Per-agent invocation semaphore — caps concurrent trigger / `agent_send`
-    /// dispatches to a single agent. Capacity is resolved lazily on first use
-    /// from `AgentManifest.max_concurrent_invocations`, falling back to
-    /// `KernelConfig.queue.concurrency.default_per_agent`. Permits are
-    /// acquired in addition to (and AFTER) the global trigger lane permit,
-    /// so a hot agent throttles itself without starving the kernel.
+    /// Per-agent invocation semaphore — caps concurrent **trigger
+    /// dispatch** fires to a single agent. Capacity is resolved lazily
+    /// on first use from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`.
+    /// Permits are acquired in addition to (and AFTER) the global
+    /// trigger lane permit, so a hot agent throttles itself without
+    /// starving the kernel. NOT acquired by `agent_send`, channel
+    /// bridges, or cron — those paths still serialize at the existing
+    /// `agent_msg_locks` / `session_msg_locks` inside `send_message_full`.
     agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
@@ -1431,27 +1434,31 @@ impl LibreFangKernel {
     /// Resolve the per-agent concurrency semaphore, lazily creating it on
     /// first use. Capacity comes from `AgentManifest.max_concurrent_invocations`,
     /// falling back to `KernelConfig.queue.concurrency.default_per_agent`,
-    /// floored at 1. The returned `Arc<Semaphore>` is cheap to clone and
-    /// safe to move into a spawned task via `acquire_owned()`.
+    /// floored at 1 (covers a manifest typo of `Some(0)`). The returned
+    /// `Arc<Semaphore>` is cheap to clone and safe to move into a
+    /// spawned task via `acquire_owned()`.
     ///
-    /// The semaphore is invalidated when an agent is killed (see the
-    /// cleanup pass in the gc loop). It is NOT invalidated on manifest
-    /// hot-reload — operators changing the cap should reactivate the
-    /// agent (or the hand) for the new capacity to take effect. This
-    /// avoids a permit-loss race during live config reloads.
+    /// The semaphore is removed by `gc_sweep` only when the agent leaves
+    /// the registry (kill / despawn). It is NOT invalidated on
+    /// `manifest_swap` hot-reload — to pick up a new cap operators must
+    /// kill the agent and let it respawn (or restart the daemon). An
+    /// in-place activate / status flip that keeps the agent in the
+    /// registry will silently retain the old capacity. This avoids a
+    /// permit-loss race during live config reloads.
     pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
         if let Some(existing) = self.agent_concurrency.get(&agent_id) {
             return existing.clone();
         }
-        let entry = self.registry.get(agent_id);
-        let manifest_cap = entry
-            .as_ref()
-            .and_then(|e| e.manifest.max_concurrent_invocations)
-            .map(|n| n as usize);
-        let session_mode = entry
-            .as_ref()
-            .map(|e| e.manifest.session_mode)
-            .unwrap_or_default();
+        // Single registry read so cap and session_mode come from the
+        // same manifest snapshot — avoids a TOCTOU window where two
+        // separate gets see manifests on either side of a swap.
+        let (manifest_cap, session_mode) = match self.registry.get(agent_id) {
+            Some(e) => (
+                e.manifest.max_concurrent_invocations.map(|n| n as usize),
+                e.manifest.session_mode,
+            ),
+            None => (None, librefang_types::agent::SessionMode::default()),
+        };
         // Clamp `persistent` agents to 1: parallel writes to the same
         // session's message history are undefined. Emit a warn so a
         // misconfigured manifest is visible at boot rather than silently
@@ -1471,7 +1478,7 @@ impl LibreFangKernel {
                 1
             }
             (_, Some(n)) => n,
-            (_, None) => self.config.load().queue.concurrency.default_per_agent as usize,
+            (_, None) => self.config.load().queue.concurrency.default_per_agent,
         }
         .max(1);
         self.agent_concurrency
@@ -10008,7 +10015,7 @@ system_prompt = "You are a helpful assistant."
                     librefang_types::agent::SessionMode::Persistent => None,
                 };
 
-                let trigger_lane = kernel
+                let trigger_sem = kernel
                     .command_queue
                     .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
                 let agent_sem = kernel.agent_concurrency_for(aid);
@@ -10017,7 +10024,7 @@ system_prompt = "You are a helpful assistant."
                     // (1) Global trigger lane permit. `acquire_owned` so the
                     //     permit moves into the spawned task and drops at
                     //     task exit.
-                    let _lane_permit = match trigger_lane.acquire_owned().await {
+                    let _lane_permit = match trigger_sem.acquire_owned().await {
                         Ok(p) => p,
                         Err(_) => return, // lane closed during shutdown
                     };

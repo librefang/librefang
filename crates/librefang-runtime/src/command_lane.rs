@@ -254,6 +254,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_semaphore_for_lane_routes_each_variant() {
+        // Distinct capacities per lane → semaphore_for_lane must return
+        // the matching one. Catches a copy-paste bug in the match arm
+        // (e.g. Lane::Trigger accidentally aliasing main_sem).
+        let queue = CommandQueue::with_capacities(2, 4, 6, 5);
+        assert_eq!(queue.semaphore_for_lane(Lane::Main).available_permits(), 2);
+        assert_eq!(queue.semaphore_for_lane(Lane::Cron).available_permits(), 4);
+        assert_eq!(
+            queue.semaphore_for_lane(Lane::Subagent).available_permits(),
+            6
+        );
+        assert_eq!(
+            queue.semaphore_for_lane(Lane::Trigger).available_permits(),
+            5
+        );
+    }
+
+    #[tokio::test]
     async fn test_try_submit_when_full() {
         let queue = CommandQueue::with_capacities(1, 1, 1, 1);
 
