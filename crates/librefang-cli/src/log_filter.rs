@@ -223,9 +223,9 @@ mod tests {
             ],
         );
 
-        reload_log_level("error").expect("error reload");
-        assert_eq!(current_max_level(), Some(LevelFilter::ERROR));
-
+        // Raising the level above the baseline (debug/trace > warn) — the
+        // overall max_level_hint is dominated by the user-requested level
+        // and the baseline doesn't move it.
         reload_log_level("debug").expect("debug reload");
         assert_eq!(current_max_level(), Some(LevelFilter::DEBUG));
 
@@ -235,7 +235,7 @@ mod tests {
         // Baseline survival check (regression for Codex P2-1 #3200): even
         // though the user reloaded to `trace`, the kernel/runtime overrides
         // installed at boot must still be present in the live filter, or
-        // the dashboard "give me debug" toggle would silently flood with
+        // the dashboard "give me trace" toggle would silently flood with
         // noise that boot had specifically masked.
         let repr = current_filter_repr();
         assert!(
@@ -245,6 +245,18 @@ mod tests {
         assert!(
             repr.contains("librefang_runtime=warn"),
             "baseline directive lost after reload: {repr}"
+        );
+
+        // Lowering below the baseline — `error < warn`, but the baseline
+        // pins kernel/runtime at WARN, so the global max_level_hint is
+        // WARN (not ERROR). This is the *positive* baseline-presence test:
+        // if reload had wiped the baseline, max_level would collapse to
+        // ERROR. Asserting WARN here proves the baseline is being applied.
+        reload_log_level("error").expect("error reload");
+        assert_eq!(
+            current_max_level(),
+            Some(LevelFilter::WARN),
+            "baseline (warn) must dominate when user level (error) is lower"
         );
 
         // Invalid directives surface as `Err` and must leave the live
@@ -257,7 +269,7 @@ mod tests {
         );
         assert_eq!(
             current_max_level(),
-            Some(LevelFilter::TRACE),
+            Some(LevelFilter::WARN),
             "failed reload must not mutate the live filter"
         );
         assert!(

@@ -91,6 +91,42 @@ pub async fn list_models(
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
+    // Pre-compute the live-discovered model ID set per local provider so we
+    // can hide static catalog entries whose IDs aren't actually exposed by
+    // the user's running daemon. Issue #3191: a user pointing the `ollama`
+    // provider slot at Lemonade Server saw `gemma4` (a real Ollama tag, but
+    // not on Lemonade) listed in the Models page, picked it, and got
+    // "model not found" from the chat call. The catalog still ships static
+    // entries for upstream-known Ollama models — those are correct for an
+    // actual Ollama install, but wrong for any other OpenAI-compatible
+    // server that happens to be configured under the same provider slot.
+    //
+    // Policy:
+    //   - probe cache hit + reachable + non-empty discovered list → only
+    //     keep catalog entries whose ID matches a discovered name.
+    //   - probe failed / cache miss → keep all static entries (don't make
+    //     things worse than the pre-fix state when we can't see live).
+    //   - Custom-tier models (user-added via /api/models/custom) always pass
+    //     through — they're explicit user intent, not catalog inheritance.
+    use std::collections::HashSet;
+    let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
+        .list_providers()
+        .iter()
+        .filter(|p| librefang_runtime::provider_health::is_local_provider(&p.id))
+        .filter_map(|p| {
+            let probe = state.provider_probe_cache.get(&p.id)?;
+            if !probe.reachable || probe.discovered_models.is_empty() {
+                return None;
+            }
+            let set: HashSet<String> = probe
+                .discovered_models
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            Some((p.id.to_lowercase(), set))
+        })
+        .collect();
+
     let models: Vec<serde_json::Value> = catalog
         .list_models()
         .iter()
@@ -109,6 +145,14 @@ pub async fn list_models(
                 let provider = catalog.get_provider(&m.provider);
                 if let Some(p) = provider {
                     if !p.auth_status.is_available() {
+                        return false;
+                    }
+                }
+            }
+            // Live-discovered filter for local providers (see comment above).
+            if m.tier != librefang_types::model_catalog::ModelTier::Custom {
+                if let Some(live_set) = live_models_per_provider.get(&m.provider.to_lowercase()) {
+                    if !live_set.contains(&m.id.to_lowercase()) {
                         return false;
                     }
                 }

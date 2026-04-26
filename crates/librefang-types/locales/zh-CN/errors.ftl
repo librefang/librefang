@@ -4,6 +4,7 @@
 api-error-agent-not-found = 未找到智能体
 api-error-agent-spawn-failed = 创建智能体失败
 api-error-agent-invalid-id = 无效的智能体 ID
+api-error-session-invalid-id = 无效的会话 ID
 api-error-agent-already-exists = 智能体已存在
 
 # Message errors

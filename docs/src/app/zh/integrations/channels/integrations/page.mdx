@@ -627,6 +627,19 @@ default_agent = "assistant"
 
 Webhook 适配器提供通用的双向 HTTP 集成。传入消息以 HTTP POST 请求形式发送到 LibreFang 的 webhook 端点，通过共享密钥的 HMAC-SHA256 进行验证。响应以 HTTP POST 负载形式送达配置的 URL，同样使用 HMAC-SHA256 签名。
 
+### `deliver_only` 透传模式
+
+Webhook 通道还可以跑成零 LLM 透传:入站 payload 完全绕过 agent 循环(无 sanitiser、无限流、无 agent 查找),直接转发到目标通道。适合推送通知和带外告警 —— 你只想让消息落到 Telegram / Slack 之类的地方。
+
+```toml
+[channels.webhook]
+enabled = true
+deliver_only = true
+deliver = "telegram:123456789"     # deliver_only = true 时必填
+```
+
+`deliver_only = true` 但 `deliver` 未设时,librefang 启动时打 `warn`,webhook 保持不激活。完整的 `__deliver_only__` / `__deliver_target__` 内部 metadata 信号化机制见 channels overview 的 [Webhook `deliver_only` 模式](/zh/integrations/channels#webhook-deliver_only-mode)。
+
 ---
 
 ## Voice（语音）

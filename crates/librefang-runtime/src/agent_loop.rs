@@ -1855,6 +1855,11 @@ struct RecallSetupContext<'a> {
     proactive_memory: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&'a dyn ContextEngine>,
     sender_user_id: Option<&'a str>,
+    sender_channel: Option<&'a str>,
+    /// Optional kernel handle used to resolve the per-user memory ACL
+    /// (RBAC M3, #3054). When `None` the auto-retrieve path runs without
+    /// a guard — preserving pre-M3 single-user behaviour.
+    kernel: Option<&'a Arc<dyn KernelHandle>>,
     stable_prefix_mode: bool,
     streaming: bool,
     opts: &'a LoopOptions,
@@ -2084,10 +2089,39 @@ async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
     if !ctx.stable_prefix_mode && !ctx.opts.is_fork {
         if let Some(pm_store_arc) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
-            match pm_store_arc
-                .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
-                .await
-            {
+            // RBAC M3 (#3054): build a memory namespace guard from the
+            // attributed end user (resolved by the kernel via channel
+            // bindings). When the guard denies "proactive" reads we skip
+            // the retrieval rather than letting the fragments leak into
+            // the LLM prompt. PII redaction is applied to the returned
+            // items as well.
+            let guard = ctx.kernel.and_then(|kh| {
+                kh.memory_acl_for_sender(ctx.sender_user_id, ctx.sender_channel)
+                    .map(librefang_memory::namespace_acl::MemoryNamespaceGuard::new)
+            });
+            let auto_retrieve_result = match guard.as_ref() {
+                Some(g) => match g.check_read("proactive") {
+                    librefang_memory::namespace_acl::NamespaceGate::Allow => {
+                        let mut items = pm_store_arc
+                            .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                            .await;
+                        if let Ok(ref mut its) = items {
+                            g.redact_all(its);
+                        }
+                        items
+                    }
+                    librefang_memory::namespace_acl::NamespaceGate::Deny(reason) => {
+                        debug!("Skipping proactive memory auto_retrieve: {reason}",);
+                        Ok(Vec::new())
+                    }
+                },
+                None => {
+                    pm_store_arc
+                        .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                        .await
+                }
+            };
+            match auto_retrieve_result {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
                     if ctx.streaming {
                         debug!(
@@ -2853,6 +2887,8 @@ pub async fn run_agent_loop(
         proactive_memory: proactive_memory.as_ref(),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
+        sender_channel: sender_channel.as_deref(),
+        kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
         opts,
@@ -4204,6 +4240,8 @@ pub async fn run_agent_loop_streaming(
         proactive_memory: proactive_memory.as_ref(),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
+        sender_channel: sender_channel.as_deref(),
+        kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: true,
         opts,

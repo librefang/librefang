@@ -477,3 +477,486 @@ cron_session_max_messages = 100
 
 `session_mode = "new"` 时**跳过**裁切——那种触发本身就拿全新 session，不会带旧状态。两个上限同时生效（哪个先触发哪个裁更多）。
 
+---
+
+### `[rate_limit]`
+
+API 与 WebSocket 限流配置。HTTP 路径用每 IP GCRA 令牌桶,WS 路径还加 idle 超时和按消息 debounce,避免流式 UI 把下游连接打爆。
+
+```toml
+[rate_limit]
+api_requests_per_minute = 500
+retry_after_secs = 60
+max_ws_per_ip = 5
+ws_messages_per_minute = 10
+ws_terminal_messages_per_minute = 3600
+ws_idle_timeout_secs = 1800
+ws_debounce_ms = 100
+ws_debounce_chars = 200
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `api_requests_per_minute` | u32 | `500` | HTTP 每 IP 每分钟令牌额度(GCRA)。 |
+| `retry_after_secs` | u64 | `60` | 429 时返回 `Retry-After` 的秒数。 |
+| `max_ws_per_ip` | usize | `5` | 每 IP 允许并发 WS 连接数。 |
+| `ws_messages_per_minute` | u32 | `10` | 单连接 chat WS 每分钟消息数。 |
+| `ws_terminal_messages_per_minute` | u32 | `3600` | 终端 WS 每按键预算(60/s ≈ 720 WPM)。 |
+| `ws_idle_timeout_secs` | u64 | `1800` | 空闲 N 秒后自动关闭。 |
+| `ws_debounce_ms` | u64 | `100` | 文本 delta 在此毫秒内合并后再 flush。 |
+| `ws_debounce_chars` | usize | `200` | 缓冲达此字符数时强制 flush。 |
+
+终端额度比 chat 高两个数量级是有原因的: 用 chat 的 `ws_messages_per_minute = 10` 时,在 vim 里敲 `:wq` 就把额度耗光了。除非你刻意要节流 PTY,否则别把 `ws_terminal_messages_per_minute` 调到 600 以下。
+
+---
+
+### `[sanitize]`
+
+入站消息清洗 / prompt-injection 检测。默认关。开启后,超长或匹配规则的入站文本在到达 LLM 前被阻断或告警。
+
+```toml
+[sanitize]
+mode = "off"            # "off" | "warn" | "block"
+max_message_length = 32768
+custom_block_patterns = [
+  "(?i)ignore previous instructions",
+]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"off"` = 透传; `"warn"` = 记日志但接受; `"block"` = 拒绝。 |
+| `max_message_length` | usize | `32768` | 入站消息字节硬上限。 |
+| `custom_block_patterns` | `Vec<string>` | `[]` | 在内置 prompt-injection 规则之上追加的正则。 |
+
+`block` 模式下,channel 适配器返回清洗器拒绝提示, 不消耗任何 LLM token。配合 `[privacy]` 做防御纵深。
+
+---
+
+### `[privacy]`
+
+LLM prompt 上的 PII 脱敏或假名化。默认关。脱敏器跑在每次出站 prompt 上,包括历史 replay。
+
+```toml
+[privacy]
+mode = "off"            # "off" | "redact" | "pseudonymize"
+redact_patterns = [
+  "\\b[A-Z]{2}\\d{6,8}\\b",   # 在内置规则之上追加
+]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"redact"` 把匹配替换为 `[REDACTED]`;`"pseudonymize"` 替换成确定性 token(同输入 → 同假名),让 LLM 仍能围绕"身份"推理。 |
+| `redact_patterns` | `Vec<string>` | `[]` | 追加在内置 PII 集(邮箱、电话、信用卡、IP)之上的正则。 |
+
+`pseudonymize` 的替换映射只存在内存中 —— 重启 daemon 后映射表清零。
+
+---
+
+### `[telemetry]`
+
+OpenTelemetry tracing + Prometheus 指标。自带 Tempo/Grafana 栈从这里读;外部 collector 也行 —— 把 `otlp_endpoint` 指向它。
+
+```toml
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+service_name = "librefang"
+sample_rate = 1.0
+prometheus_enabled = true
+auto_start_observability_stack = false
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `true` | OTLP trace 导出主开关。 |
+| `otlp_endpoint` | string | `"http://localhost:4317"` | OTel collector 的 gRPC 端点。 |
+| `service_name` | string | `"librefang"` | 上报为 `service.name` resource attribute。 |
+| `sample_rate` | f64 | `1.0` | 0.0 ~ 1.0 — trace 采样比例。 |
+| `prometheus_enabled` | bool | `true` | 暴露 `/api/metrics` 供抓取。 |
+| `auto_start_observability_stack` | bool | `false` | `true` 时 `librefang start` 会拉起捆绑的 Grafana/Prometheus/Tempo Docker 栈。默认关 —— 多数运维不希望"启动 daemon"附带四个容器副作用。 |
+
+---
+
+### `[heartbeat]`
+
+常驻(autonomous)agent 的心跳监测器。Agent 在 `default_timeout_secs` 内没心跳,监测器把它标记为无响应。
+
+```toml
+[heartbeat]
+check_interval_secs = 30
+default_timeout_secs = 60
+keep_recent = 10
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `check_interval_secs` | u64 | `30` | 心跳扫描运行频率。 |
+| `default_timeout_secs` | u64 | `60` | 多少秒没心跳就视为无响应。 |
+| `keep_recent` | usize | `10` | 裁剪 session 上下文时,保留多少条最近的心跳轮次。 |
+
+心跳路径还兼任崩溃环防护 —— 连续 N 次同样错误的 agent 会被暂停为 `auth_status: "crashed"`,而不是无限重试。
+
+---
+
+### `[compaction]`
+
+基于 LLM 的历史摘要。session 越过消息数门槛或 token 比例门槛后,daemon 启一个后台轮把前半部分历史按用户对话语言摘要,替换为摘要 + 最近 N 轮。
+
+```toml
+[compaction]
+threshold_messages = 30
+keep_recent = 10
+max_summary_tokens = 1024
+token_threshold_ratio = 0.7
+max_chunk_chars = 80000
+max_retries = 3
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `threshold_messages` | usize | `30` | 历史达此消息数时触发。 |
+| `keep_recent` | usize | `10` | 边界处保留这些数量的最近消息。 |
+| `max_summary_tokens` | usize | `1024` | 摘要输出 token 上限。 |
+| `token_threshold_ratio` | f64 | `0.7` | 估算 token 越过模型上下文窗的此比例时也触发。 |
+| `max_chunk_chars` | usize | `80000` | 摘要 prompt 自身溢出时,按此大小切块。 |
+| `max_retries` | u32 | `3` | 摘要 LLM 失败时的重试次数, 之后跳过本轮。 |
+
+Per-agent 覆盖:`agent.toml` 里 `max_history_messages` 锁该 agent 的 trim 上限。配置低于全局默认时,compaction 提前触发。
+
+---
+
+### `[tool_invoke]`
+
+直接工具调用 REST 端点的允许列表(`POST /api/tools/{name}/invoke`)。默认锁死 —— 两个字段都填了才解锁,否则一切请求 403。
+
+```toml
+[tool_invoke]
+enabled = true
+allowlist = ["web_search", "web_fetch", "file_read"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 主开关 —— `false` 时无视允许列表全拒。 |
+| `allowlist` | `Vec<string>` | `[]` | 调用方可以触发的工具名 glob 模式(`web_*`、`file_*`、`mcp__github__*` 等)。空列表全拒。 |
+
+Glob 语义同 agent capability 授权 —— `*` 是通配。这个配置是给窄场景用的(CI worker 直调 `web_fetch`),不是给一般客户端 API 访问用。
+
+---
+
+### `[parallel_tools]`(扩展)
+
+Agent 循环的并行工具分发器(catchup wave 引入)。默认关 —— runtime 仍序列化跑工具调用,直到分发器全量上线。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 主开关。 |
+| `max_concurrent` | u32 | `4` | 单桶并发上限(`0` = 不封顶)。 |
+| `mcp_default_safety` | string | `"write_shared"` | 没标注的 MCP 工具的默认安全等级 —— `"read_only"` 或 `"write_shared"`。 |
+| `mcp_readonly_allowlist` | `Vec<string>` | `[]` | 全限定 MCP 工具名(`mcp__server__name`),无视 `mcp_default_safety` 当 read-only 处理。 |
+
+`write_shared` 让没标注的 MCP 工具严格序列化, 是安全默认值。审核过单个 server 后再把它们调成 `read_only`。
+
+---
+
+### 资源限制与边界(顶层字段)
+
+全局安全网,封顶入站 payload 大小和 agent 间递归深度。所有字段都有内置默认值 —— 知道自己在干什么再覆盖。
+
+```toml
+[kernel]
+max_upload_size_bytes      = 10485760     # 10 MiB
+max_request_body_bytes     = 16777216     # 16 MiB
+max_concurrent_bg_llm      = 8
+max_agent_call_depth       = 5
+local_probe_interval_secs  = 60
+strict_config              = false
+update_channel             = "stable"     # "stable" | "beta" | "rc"
+trusted_hosts              = []
+trusted_manifest_signers   = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `max_upload_size_bytes` | usize | `10485760`(10 MiB) | 单文件上传上限。 |
+| `max_request_body_bytes` | usize | `16777216`(16 MiB) | 整个 HTTP 请求体上限。 |
+| `max_concurrent_bg_llm` | usize | `8` | 后台 LLM 调用并发数(compaction、summarise、dream 等)。 |
+| `max_agent_call_depth` | u32 | `5` | Agent 间调用深度(防 `agent_send` 递归炸弹)。 |
+| `local_probe_interval_secs` | u64 | `60` | 本地 provider(Ollama / vLLM / LM Studio)的复探周期。 |
+| `strict_config` | bool | `false` | `true` 时配置里有未知字段就启动失败(否则 warn 后继续)。 |
+| `update_channel` | enum | `"stable"` | `librefang upgrade` 看哪个发布通道。 |
+| `trusted_hosts` | `Vec<string>` | `[]` | 允许在 MCP 鉴权流里驱动 OAuth `redirect_uri` 的主机名。防止针对 dashboard 的开放重定向。 |
+| `trusted_manifest_signers` | `Vec<string>` | `[]` | 允许签名 agent manifest 的 Ed25519 公钥。安全模式要求验签时,非这些 key 签的 manifest 被拒。 |
+
+---
+
+### Dashboard 鉴权(顶层字段)
+
+从非 loopback 地址访问 dashboard?设用户名密码,首次启动时 LibreFang 自动把密码哈希成 Argon2id。
+
+```toml
+[kernel]
+dashboard_user = "admin"
+dashboard_pass = "vault:DASHBOARD_PASS"   # 也可以 plain string 或 env var
+# dashboard_pass_hash 自动填入,不要手动改
+require_auth_for_reads = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `dashboard_user` | string | `""` | 用户名。空 = 关闭 dashboard 鉴权(只在 loopback 用)。 |
+| `dashboard_pass` | string | `""` | 明文密码、`vault:KEY` 或 `env:VAR`。启动时就地哈希 —— 磁盘上只留 hash。 |
+| `dashboard_pass_hash` | string | 自动 | Argon2id hash, 自动写入。**不要手动设**这个字段 —— 用 `librefang hash-password` 生成。 |
+| `require_auth_for_reads` | bool \| null | `null` | 覆盖读端点鉴权允许列表。`null` 走默认(loopback 上不鉴权,其他地址鉴权)。 |
+
+---
+
+### `[skills]`
+
+用户安装的 skill 加载与禁用列表。Bundled skill(daemon 自带的约 60 个)总是加载;`[skills]` 只控制用户放在 `~/.librefang/skills/` 和额外路径下的那些。
+
+```toml
+[skills]
+load_user = true
+extra_dirs = ["/srv/librefang/team-skills"]
+disabled = ["legacy-research"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `load_user` | bool | `true` | 加载 `~/.librefang/skills/` 下的用户 skill。`false` 完全跳过用户 skill(如复现 bundled-only 的 bug)。 |
+| `extra_dirs` | `Vec<PathBuf>` | `[]` | 额外的 skill 目录。每个必须是绝对路径。在主 skill 目录之后只读扫描;**同名时本地 skill 胜出**。 |
+| `disabled` | `Vec<string>` | `[]` | 加载时跳过的 skill 名。临时禁用某个进化或市场安装的 skill 不用删目录。按 manifest 的 `name` 大小写敏感匹配。 |
+
+---
+
+### `[notification]`
+
+approval 请求和任务状态告警发到哪。默认空 = approval 只显示在 dashboard 收件箱 —— 设了 channel 才会同时推送 Telegram / Slack / email 等。
+
+```toml
+[notification]
+# 所有 approval 同时扇出到 Telegram 和 Slack
+approval_channels = [
+  { kind = "telegram", target = "123456789" },
+  { kind = "slack", target = "C0123456" },
+]
+# 失败告警只到 email
+alert_channels = [
+  { kind = "email", target = "ops@example.com" },
+]
+
+# Per-agent 覆盖 — research-bot 的 approval 改发研究负责人
+[[notification.agent_rules]]
+agent = "research-bot"
+targets = [{ kind = "telegram", target = "987654321" }]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `approval_channels` | `Vec<NotificationTarget>` | `[]` | 待 approval 扇出到哪。每个 target 有 `kind`(`telegram`、`slack`、`discord`、`email`、`webhook`、`feishu`、`dingtalk` 等)和 `target` 字符串(chat ID、channel ID、邮箱、URL 等)。 |
+| `alert_channels` | `Vec<NotificationTarget>` | `[]` | 任务完成 / 失败告警发到哪。结构同 `approval_channels`。 |
+| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | per-agent 覆盖 —— 列 `{agent, targets}` 把单个 agent 的 approval 重定向到非全局 channel。 |
+
+按工具路由(如"shell_exec approval 给 oncall,file_write approval 给开发组")用 `[approval] routing`,不是 `[notification]`。
+
+---
+
+### `[triggers]`
+
+事件驱动 trigger 系统的安全闸门。封顶 trigger 触发频率、单事件最多触发数,以及 trigger 调 trigger 的链深度。
+
+```toml
+[triggers]
+cooldown_secs = 5
+max_per_event = 10
+max_depth = 5
+max_workflow_secs = 3600
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cooldown_secs` | u64 | `5` | 同一 trigger 两次触发的最小间隔秒数。防止啰嗦的 trigger 把 agent 循环打满。 |
+| `max_per_event` | usize | `10` | 单个事件最多触发多少 trigger。超量 warn 并丢弃。 |
+| `max_depth` | usize | `5` | 最大递归深度 —— trigger 触发另一 trigger 时深度 +1。超过 `max_depth` 链中止并 warn。 |
+| `max_workflow_secs` | u64 | `3600` | trigger spawn 出的 workflow 单次墙钟上限。 |
+
+cron 和 agent manifest 上的 `[[trigger]]` 共享这些上限。生产环境不希望 trigger 链就把 `max_depth` 调成 1。
+
+---
+
+### `[task_board]`
+
+共享任务队列的安全闸门。Task board 是 agent 拉 `pending` 工作的持久化队列;worker 认领任务后崩溃没完成的话,sweeper 在 `claim_ttl_secs` 后把它重置为 `pending`,让别的 worker 接手。
+
+```toml
+[task_board]
+claim_ttl_secs = 600        # 10 分钟
+sweep_interval_secs = 30
+max_retries = 0             # 0 = 无限重试
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `claim_ttl_secs` | u64 | `600` | `in_progress` 任务最多被认领多久,sweeper 之后重置。`0` 完全关闭 sweep。 |
+| `sweep_interval_secs` | u64 | `30` | sweeper 扫描卡住任务的频率。 |
+| `max_retries` | u32 | `0` | 卡住任务被自动重置多少次后标 `failed`。`0` = 无限重试(幂等任务的安全默认;有副作用的任务调低)。 |
+
+`claim_ttl_secs` 调到约 2× 最慢任务的预期时长。调太低,健康长任务会被从 worker 手里抢走;太高,崩溃恢复慢。
+
+---
+
+### `[registry]`
+
+Skill / plugin / 模板注册表同步。注册表镜像在本地 `~/.librefang/registry-cache/`,缓存过期后重新下载。
+
+```toml
+[registry]
+cache_ttl_secs = 86400            # 24 小时
+registry_mirror = "https://ghproxy.cn"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `cache_ttl_secs` | u64 | `86400` | 本地注册表缓存的 TTL。 |
+| `registry_mirror` | string | `""` | **所有出站 GitHub URL** 的镜像/代理前缀(tarball、git clone、raw 内容)。设了之后 `https://github.com/...` 变成 `<mirror>/https://github.com/...`。中国大陆访问慢/被屏蔽时有用。 |
+
+常见 mirror 值:`https://ghproxy.cn`、`https://gh-proxy.com`、内部企业代理。留空直连 GitHub。
+
+---
+
+### `[azure_openai]`
+
+Azure OpenAI 部署的 provider 专属配置块。Azure 用的 URL 格式和鉴权头都跟标准 OpenAI 不同,所以 platform 驱动有自己的 config 段。三个字段都退到环境变量 —— 看哪种密钥管理风格更顺手。
+
+```toml
+[azure_openai]
+endpoint = "https://my-resource.openai.azure.com"
+deployment = "gpt-4o"
+api_version = "2024-02-01"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `endpoint` | string \| null | env `AZURE_OPENAI_ENDPOINT` | Azure 资源 URL(`https://<resource>.openai.azure.com`)。 |
+| `api_version` | string \| null | env `AZURE_OPENAI_API_VERSION` 或 `"2024-02-01"` | Azure REST API 版本。 |
+| `deployment` | string \| null | env `AZURE_OPENAI_DEPLOYMENT`,然后 `default_model.model` | Azure 部署名。不设就用 `default_model.model` 的值。 |
+
+鉴权用 `AZURE_OPENAI_API_KEY`(头是 `api-key`,不是 `Authorization: Bearer`)。完整设置见 [Azure OpenAI provider 条目](/zh/configuration/providers/platforms#azure-openai)。
+
+---
+
+### 顶层字段(运维路径与 per-provider HTTP)
+
+5 个额外的顶层字段,影响 daemon I/O 和 per-provider 网络。所有可选,默认 `None` 除非另注。
+
+```toml
+[kernel]
+config_version = 1
+log_dir = "/var/log/librefang"
+qwen_code_path = "/home/user/.local/bin/qwen"
+
+# Per-provider HTTP knob(不在子段下)
+[provider_proxy_urls]
+openai = "http://corp-proxy.local:8080"
+anthropic = "http://corp-proxy.local:8080"
+ollama = ""    # 显式"不走代理"覆盖
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `config_version` | u32 | `1` | 配置 schema 版本。给 auto-migrator 用,知道 daemon 启动时是否要升级你的配置。**不要手动设** —— `librefang upgrade` 写。 |
+| `log_dir` | PathBuf \| null | `null`(= `~/.librefang/`) | 自定义日志目录。home 目录在慢盘上、想把日志放本地 SSD 时用。 |
+| `qwen_code_path` | string \| null | `null`(到 `PATH` 找 `qwen`) | Qwen Code CLI 的绝对路径。daemon 作为 service 跑、没继承用户完整 PATH 时必填。等同于设 `provider_urls.qwen-code`。 |
+| `provider_proxy_urls` | `HashMap<string, string>` | `{}` | per-provider 代理 URL 覆盖。空字符串 `""` 显式让某 provider 绕过代理(全局 `[proxy]` 设了但希望某 provider 直连时用,如 `ollama`)。 |
+| `provider_request_timeout_secs` | `HashMap<string, u64>` | `{}` | per-provider HTTP 读超时秒数覆盖。已在前面 `[provider_request_timeout_secs]` 文档过;此处作为完整性列出。 |
+
+---
+
+### 其他配置段(附录)
+
+这些段在代码里有 schema,但通常保持默认即可。这里的设置只在高级运维场景需要动 —— 列出来,知道字段名时能找到。
+
+```toml
+# 工具超时 —— 全局默认 + 按工具覆盖
+tool_timeout_secs = 60
+[tool_timeouts]
+"shell_exec" = 300
+"web_*"      = 30
+
+# Fallback LLM provider(主 provider 失败时按顺序尝试)
+[[fallback_providers]]
+provider = "groq"
+model    = "llama-3.3-70b-versatile"
+
+# 启动时加载的静态 MCP server
+[[mcp_servers]]
+name = "github"
+url  = "https://api.example.com/mcp"
+
+# Webhook 触发 —— 外部系统把事件推进 LibreFang
+[webhook_triggers]
+enabled = true
+secret_env = "WEBHOOK_TRIGGERS_SECRET"
+
+# Extensions / MCP 集成 —— 自动重连旋钮
+[extensions]
+auto_reconnect = true
+reconnect_max_attempts = 10
+reconnect_max_backoff_secs = 300
+health_check_interval_secs = 60
+
+# 配置热加载(文件 watcher)
+[reload]
+enabled = true
+debounce_ms = 500
+
+# 入站消息的 auto-reply 后台引擎
+[auto_reply]
+enabled = false
+# (provider 专属调优 —— 见 librefang-runtime::auto_reply)
+
+# 广播路由(多收件人投递)
+[broadcast]
+enabled = false
+max_fanout = 100
+
+# A2UI canvas 工具
+[canvas]
+enabled = false
+max_html_bytes = 524288
+allowed_tags = []   # 空 = 所有安全标签
+
+# A2A 协议配置(跨实例 agent-to-agent)
+[a2a]
+listen_path = "/a2a"
+trust_anchors = []
+
+# 设备配对
+[pairing]
+enabled = true
+ttl_secs = 600
+
+# 全局 exec policy(可被 per-agent 或 per-tool 覆盖)
+[exec_policy]
+allow_shell = true
+shell_allowlist = ["git", "cargo", "npm"]
+```
+
+| 段 | 用途 | 何时动它 |
+|---|---|---|
+| `tool_timeout_secs` / `[tool_timeouts]` | 工具执行的全局默认 + 按工具墙钟上限。支持 glob(`web_*`),最长匹配胜出。 | 慢工具(长 shell build、大 embedding 请求)调高;便宜的 web fetch 调低。 |
+| `[[fallback_providers]]` | 有序的 `(provider, model)` 列表,主 provider 5xx 或限流时 agent loop 按序回退。 | 把昂贵的 frontier 模型配一个便宜快的 fallback。 |
+| `[[mcp_servers]]` | 启动时加载的静态 MCP server 配置。(动态加用 `/api/mcp/servers`。) | 写死一个公司内永远要连的 MCP server。 |
+| `[webhook_triggers]` | 外部事件注入 —— 把 `{event_type, payload}` 推到 daemon,匹配的 `[[trigger]]` 块就触发。 | 外部 CI / 监控系统需要唤醒 agent 时。 |
+| `[extensions]` | **MCP 集成**专用的重连 / 健康检查旋钮。 | 不稳定 MCP server 调退避。 |
+| `[reload]` | `~/.librefang/config.toml` 热加载 watcher。 | 网络文件系统 inotify 不可靠时禁掉。 |
+| `[auto_reply]` | 后台引擎,对某些入站模式直接回复,不走完整 agent 轮次。 | 默认关 —— 高频客服通道才开。 |
+| `[broadcast]` | 多收件人消息扇出(对比单播)。 | Agent 需要一次推 ≥10 个 channel 时启用。 |
+| `[canvas]` | A2UI 工具,在 dashboard 渲染 agent 写的 HTML。出于安全默认关。 | 启用前审核 `allowed_tags`。 |
+| `[a2a]` | A2A 协议监听路径 + 跨实例鉴权的可信发行者列表。 | 联邦多个 LibreFang 实例时设置。 |
+| `[pairing]` | 设备配对 TTL 与主开关。 | 单用户场景禁掉。 |
+| `[exec_policy]` | 全局默认 shell/exec 允许列表;`agent.toml` 里的 per-agent `[exec_policy]` 覆盖给那个 agent。 | 锁死 daemon 默认,选择性给可信 agent 更宽访问。 |
+

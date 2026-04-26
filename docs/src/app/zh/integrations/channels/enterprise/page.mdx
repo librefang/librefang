@@ -195,6 +195,14 @@ default_agent = "assistant"
 
 飞书适配器使用开放平台 webhook 协议接收消息事件。它使用应用凭证获取 tenant access token，然后通过飞书 REST API 发送消息回复。事件负载通过应用的验证令牌进行校验。
 
+### 处理状态反应（Reactions）
+
+飞书通过给用户消息加 `Typing` reaction 显示"我在处理"反馈,回复发出后再移除。两个调用都是 fire-and-forget —— API 失败 `warn!` 但永远不阻塞消息处理。详见 channels overview 的 [Reactions and Processing State](/zh/integrations/channels#reactions-and-processing-state)。
+
+### @ 提及保留
+
+飞书适配器把每个 `@_user_N` 占位符替换成 `@<display-name>`(从 mention payload 解析,name 缺省时退回 `open_id`),把 `@_all` 改写成 `@all`。Agent 看到的是原本的对话语气 ——"@alice 你看下这个" —— 而不是光秃秃的标点。详见 [Feishu @Mention Preservation](/zh/integrations/channels#feishu-mention-preservation)。
+
 ---
 
 ## Rocket.Chat

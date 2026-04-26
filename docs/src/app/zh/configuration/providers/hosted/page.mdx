@@ -15,12 +15,12 @@
 - Fireworks AI
 - Perplexity AI
 - Cohere
-- AI21 Labs
 - Cerebras
 - SambaNova
 - Hugging Face
 - xAI
 - Alibaba Coding Plan
+- Moonshot (Kimi)
 - Novita AI
 - AWS Bedrock
 
@@ -316,29 +316,6 @@
 
 ---
 
-## AI21 Labs
-
-| | |
-|---|---|
-| **显示名称** | AI21 Labs |
-| **驱动** | OpenAI 兼容 |
-| **环境变量** | `AI21_API_KEY` |
-| **基础 URL** | `https://api.ai21.com/studio/v1` |
-| **需要密钥** | 是 |
-| **免费额度** | 有（有限额度） |
-| **认证方式** | `Authorization: Bearer` 请求头 |
-| **模型数** | 1 |
-
-**可用模型：**
-- `jamba-1.5-large` (智能)
-
-**设置：**
-1. 在 [studio.ai21.com](https://studio.ai21.com) 注册账号
-2. 创建 API 密钥
-3. `export AI21_API_KEY="..."`
-
----
-
 ## Cerebras
 
 | | |
@@ -477,6 +454,38 @@
 - 通过阿里云控制台监控请求配额
 - 不适用于自动化脚本或批量 API 调用 — 仅限编码工具
 - 更多信息：[官方文档](https://www.alibabacloud.com/help/en/model-studio/coding-plan)
+
+---
+
+## Moonshot (Kimi)
+
+| | |
+|---|---|
+| **显示名称** | Moonshot / Kimi |
+| **Provider ID** | `moonshot`（别名 `kimi`、`kimi2`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `MOONSHOT_API_KEY` |
+| **基础 URL** | `https://api.moonshot.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在 [Moonshot 平台](https://platform.moonshot.cn)(国内) 或 [Moonshot AI](https://platform.moonshot.ai)(海外) 注册
+2. 在控制台创建 API key
+3. `export MOONSHOT_API_KEY="sk-..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "moonshot"
+model = "moonshot-v1-128k"
+```
+
+**能力:** 聊天补全、tool use、vision(在 `kimi-latest` / 视觉模型上)、最大 128K 上下文。支持 `/files` 端点上传文件做多文档 RAG。
+
+**说明:** Kimi 模型由 Moonshot AI 运营。配置短一点可用 `kimi` 别名。
 
 ---
 

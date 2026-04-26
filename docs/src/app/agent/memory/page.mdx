@@ -450,24 +450,116 @@ librefang cost export --format csv
 
 ### Knowledge Graph
 
+The knowledge graph lives **per-agent**, not as a global REST surface. Use the per-agent endpoints:
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/memory/kg/entities` | GET | List entities |
-| `/api/memory/kg/relations` | GET | List relations |
-| `/api/memory/kg/query` | POST | Query graph |
+| `/api/memory/agents/{id}/relations` | GET | Query the agent's knowledge graph (entities + relations) |
+| `/api/memory/agents/{id}/relations` | POST | Store new relations on the agent's graph |
+
+Agents can also build the graph from inside the loop with the [`knowledge_add_entity` / `knowledge_add_relation` / `knowledge_query` tools](/agent/tools#knowledge-graph). The earlier `/api/memory/kg/*` endpoints in older documentation never shipped — those paths return 404.
 
 ### Proactive Memory
 
-Proactive memory allows agents to autonomously surface, consolidate, and recall long-term knowledge without explicit tool calls.
+Proactive memory lets agents autonomously surface, consolidate, and recall long-term knowledge without explicit tool calls. Each entry is stored three ways simultaneously — semantic store (text + embedding), structured KV store (`memory:{id}`), and knowledge graph (extracted entity / relation triples) — so agents can recall a memory by similarity, by ID, or by traversing the graph from a known entity.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/memory/proactive` | GET | List all proactive memory entries |
-| `/api/memory/proactive` | POST | Create a proactive memory entry |
-| `/api/memory/proactive/{id}` | GET | Get a proactive memory entry |
-| `/api/memory/proactive/{id}` | DELETE | Delete a proactive memory entry |
-| `/api/memory/proactive/search` | GET | Semantic search over proactive memories |
-| `/api/memory/proactive/consolidate` | POST | Trigger consolidation of recent memories |
+#### Entry schema
+
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | UUID | Unique memory identifier |
+| `agent_id` | UUID | Owning agent — entries are **scoped per agent**, no cross-agent leakage |
+| `content` | text | The memory text/fact |
+| `source` | enum | How created: `auto_memorize`, `manual_add`, … |
+| `scope` | enum | Level: `user_memory`, `session_memory`, `agent_memory` |
+| `confidence` | f64 (0.0–1.0) | Relevance score; decays over time |
+| `metadata` | JSON | Free-form KV; includes `category` (see below) |
+| `created_at` | RFC3339 timestamp | Creation time |
+| `accessed_at` | RFC3339 timestamp | Last access — drives decay |
+| `access_count` | int | Times this memory was recalled |
+| `deleted` | bool | Soft-delete flag |
+| `embedding` | vector (separate table) | For cosine similarity search |
+
+#### Scopes
+
+| Scope | Lifetime | Use |
+|---|---|---|
+| `user_memory` | Persistent across sessions | User-level facts and preferences (may be shared across this user's agents). |
+| `session_memory` | Auto-deleted after `session_ttl_hours` (default `24`) | Working notes for the current conversation. |
+| `agent_memory` | Per-agent persistent | Agent-learned behaviour and skills, isolated. |
+
+#### Categories
+
+Categories live on `metadata.category`. The defaults extracted by `auto_memorize` are: `communication_style`, `preference`, `expertise`, `work_style`, `project_context`, `personal_detail`, `frustration`. The category list is configurable.
+
+#### Auto-consolidation
+
+Triggered automatically every **10** `auto_memorize` calls per agent (no explicit cron / no user action needed). The consolidator:
+
+1. Finds duplicate or near-duplicate memories using a tiered similarity ladder:
+   - **Substring containment** (exact / superset / subset)
+   - **Vector cosine** (when embeddings stored)
+   - **Jaccard word overlap** (fallback)
+2. **Keeps the most recently created** of each duplicate cluster.
+3. Soft-deletes the rest and logs the merge count for audit.
+
+The consolidator only scans the most recent **100** entries to keep the dedup pass O(n²)-safe on a hot loop. Run a manual `POST /api/memory/agents/{id}/consolidate` to scan the full history.
+
+#### Decay
+
+For memories not accessed for more than 1 day:
+
+```
+decayed_conf = original_conf × e^(-decay_rate × days_since_access)
+final_conf   = min(decayed_conf × (1 + log2(access_count)), 1.0)
+```
+
+The decay sweep is **rate-limited to once per hour** (checked at the top of `auto_retrieve`). Defaults: `confidence_decay_rate = 0.01` (very slow — halves in roughly 70 days), `session_ttl_hours = 24`. A memory is "stale" when (a) untouched for more than a day, **or** (b) its scope is `session_memory` and the TTL has elapsed.
+
+#### Per-agent vs cross-agent
+
+All entries except `user_memory` are strictly per-agent. Search, consolidate, and eviction all filter on `agent_id` — there is no path for one agent to read another's `agent_memory` or `session_memory`. The per-agent cap defaults to **1000** entries; when exceeded the oldest / lowest-confidence entries are evicted.
+
+#### API endpoints
+
+The proactive-memory endpoints live under two roots — global and per-agent. (KV memory at `/api/memory/agents/{id}/kv/*` is a separate subsystem; not listed here.)
+
+**Global / cross-agent:**
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/memory` | List all proactive memories (paginated, optional `?category=`) |
+| POST | `/api/memory` | Add a memory entry |
+| GET | `/api/memory/search?q=&limit=` | Semantic search across all entries |
+| GET | `/api/memory/stats` | Global stats |
+| GET | `/api/memory/config` | Get memory config |
+| PATCH | `/api/memory/config` | Update memory config |
+| POST | `/api/memory/cleanup` | Manual session-TTL cleanup pass |
+| POST | `/api/memory/decay` | Manual confidence-decay pass |
+| POST | `/api/memory/bulk-delete` | Delete multiple entries |
+| PUT | `/api/memory/items/{id}` | Update a single memory |
+| DELETE | `/api/memory/items/{id}` | Delete a single memory |
+| GET | `/api/memory/items/{id}/history` | Memory edit history |
+| GET | `/api/memory/user/{user_id}` | User-level memories across all agents |
+
+**Per-agent:**
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/memory/agents/{id}` | List the agent's memories |
+| DELETE | `/api/memory/agents/{id}` | Reset (clear all of) the agent's memories |
+| GET | `/api/memory/agents/{id}/search?q=` | Agent-scoped semantic search |
+| GET | `/api/memory/agents/{id}/stats` | Per-agent stats |
+| DELETE | `/api/memory/agents/{id}/level/{level}` | Clear by scope (`session`, `agent`, `user`) |
+| GET | `/api/memory/agents/{id}/duplicates` | Find near-duplicates without deleting |
+| POST | `/api/memory/agents/{id}/consolidate` | Trigger consolidation on the full history |
+| GET | `/api/memory/agents/{id}/count` | Memory count |
+| GET | `/api/memory/agents/{id}/relations` | Query the agent's knowledge graph |
+| POST | `/api/memory/agents/{id}/relations` | Store relations |
+| GET | `/api/memory/agents/{id}/export` | Export the agent's memories (JSON) |
+| POST | `/api/memory/agents/{id}/import` | Import memories (JSON) |
+
+The earlier `/api/memory/proactive/*` namespace was a draft surface that never shipped — use the endpoints above. If your client still calls the old paths, expect 404.
 
 ---
 

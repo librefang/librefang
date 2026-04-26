@@ -340,6 +340,10 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/model", id), Some(data), &[]).await
     }
 
+    pub async fn list_agent_runtime(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/runtime", id), None, &[]).await
+    }
+
     pub async fn get_agent_session(&self, id: &str, session_id: Option<&str>) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/session", id), None, &[("session_id", session_id)]).await
     }
@@ -370,6 +374,10 @@ impl AgentsResource {
 
     pub async fn export_session(&self, id: &str, session_id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/sessions/{}/export", id, session_id), None, &[]).await
+    }
+
+    pub async fn stop_session(&self, id: &str, session_id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/sessions/{}/stop", id, session_id), None, &[]).await
     }
 
     pub fn attach_session_stream(&self, id: &str, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
@@ -790,6 +798,10 @@ impl McpResource {
 
     pub async fn reconnect_mcp_server_handler(&self, name: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/mcp/servers/{}/reconnect", name), None, &[]).await
+    }
+
+    pub async fn list_mcp_taint_rules(&self) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/mcp/taint-rules".to_string(), None, &[]).await
     }
 }
 
