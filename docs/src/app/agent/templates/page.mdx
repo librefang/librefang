@@ -264,6 +264,31 @@ The kernel creates the directories on spawn and injects their resolved paths int
 
 **Modes**: `rw` (read-write, default) or `r` (read-only). Paths are relative to `workspaces_dir` and must not be absolute or contain `..`.
 
+#### External mounts (`mount`)
+
+Use `mount` instead of `path` to expose a directory that already exists outside `workspaces_dir` — for example an Obsidian vault or a project tree:
+
+```toml
+# agent.toml
+[workspaces]
+vault = { mount = "/Users/me/Documents/Obsidian", mode = "r" }
+```
+
+Constraints:
+
+- `mount` must be an absolute path that already exists. The kernel never creates host directories on the agent's behalf.
+- The path must canonicalize to a prefix of one of the entries in `config.toml`'s top-level `allowed_mount_roots`. Without that whitelist, every `mount` is rejected at boot — the safe default.
+- `path` and `mount` are mutually exclusive within a single declaration.
+
+```toml
+# config.toml — required to enable the example above
+allowed_mount_roots = [
+  "/Users/me/Documents",
+]
+```
+
+`readonly` mode (`mode = "r"`) is enforced for mounts the same way as for shared workspaces: write tool calls are rejected by the kernel.
+
 ### Live Context (`context.md`)
 
 If a `context.md` file is present in the agent's workspace, it is re-read **on every agent turn** and injected into the system prompt as a `## Live Context` section. This lets external tools (cron jobs, scripts, dashboards) push fresh data — market prices, project state, on-call rosters — into an agent without restarting it.

@@ -2240,6 +2240,21 @@ pub struct KernelConfig {
     /// hostnames without port, e.g. `"dash.example.com"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_hosts: Vec<String>,
+    /// Host directories under which `agent.toml: [workspaces].<name>.mount`
+    /// declarations may resolve. Each declared mount is canonicalized at
+    /// boot and must be a path prefix of one of these (also canonicalized)
+    /// roots; otherwise it is rejected with a warning. Empty (default)
+    /// denies all external mounts — the safe default. See issue #3230.
+    ///
+    /// Example:
+    /// ```toml
+    /// allowed_mount_roots = [
+    ///   "/Users/alice/Documents",
+    ///   "/data/shared",
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_mount_roots: Vec<PathBuf>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
     /// Operator override for the agent-loop iteration cap. When set, any
@@ -4389,6 +4404,7 @@ impl Default for KernelConfig {
             registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
+            allowed_mount_roots: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,

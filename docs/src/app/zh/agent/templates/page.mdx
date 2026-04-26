@@ -264,6 +264,31 @@ library = { path = "shared/library", mode = "r" }   # 只读
 
 **访问模式**：`rw`（读写，默认）或 `r`（只读）。路径相对于 `workspaces_dir`，不能是绝对路径或包含 `..`。
 
+#### 外部挂载（`mount`）
+
+用 `mount` 替代 `path`，可以挂载 `workspaces_dir` 外已经存在的目录——比如 Obsidian vault 或某个项目树：
+
+```toml
+# agent.toml
+[workspaces]
+vault = { mount = "/Users/me/Documents/Obsidian", mode = "r" }
+```
+
+约束：
+
+- `mount` 必须是已存在的绝对路径。内核**不会**替 agent 创建外部目录。
+- 路径 canonicalize 后必须是 `config.toml` 顶层 `allowed_mount_roots` 中某条目的前缀。**白名单为空（默认）时所有 `mount` 都会被拒绝**——安全的默认行为。
+- 同一条声明里 `path` 与 `mount` 互斥。
+
+```toml
+# config.toml —— 启用上面示例所需
+allowed_mount_roots = [
+  "/Users/me/Documents",
+]
+```
+
+只读模式（`mode = "r"`）对挂载点的执行方式与共享 workspace 一致：写工具调用会被内核拒绝。
+
 ### 实时上下文（`context.md`）
 
 如果 agent workspace 里有 `context.md` 文件，**每个 agent 回合都会重新读取**，并以 `## Live Context` section 注入 system prompt。这让外部工具（cron 任务、脚本、dashboard）能把新数据 — 行情、项目状态、值班表 — 推给 agent，无需重启。
