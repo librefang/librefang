@@ -286,14 +286,18 @@ pub struct UserMemoryAccess {
 }
 
 /// Memory namespaces are colon- and slash-delimited identifiers
-/// (`kv:user_alice`, `shared:scope/foo`). A `..` segment in a candidate
-/// namespace is a path-traversal attempt and is rejected before any glob
-/// pattern is consulted — the LLM-facing memory tools never need it, and
-/// allowing it would let `kv:user_*` admit `kv:user_../admin`.
+/// (`kv:user_alice`, `shared:scope/foo`). Any segment containing `..`
+/// is a path-traversal candidate and is rejected before any glob pattern
+/// is consulted — the LLM-facing memory tools never need `..` for
+/// legitimate purposes, and a substring check defends against both the
+/// canonical `kv:user_alice/../bob` form (segment is exactly `..`) and
+/// the prefix-bypass form `kv:user_../admin` where the `..` is glued to
+/// a longer segment (`user_..`) and would slip past a `seg == ".."`
+/// check.
 fn has_path_traversal(namespace: &str) -> bool {
     namespace
         .split(|c: char| c == '/' || c == ':' || c.is_whitespace())
-        .any(|seg| seg == "..")
+        .any(|seg| seg.contains(".."))
 }
 
 /// Namespace-aware variant of [`crate::capability::glob_matches`].
