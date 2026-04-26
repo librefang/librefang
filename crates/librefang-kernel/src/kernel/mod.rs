@@ -11551,6 +11551,26 @@ system_prompt = "You are a helpful assistant."
                                 }),
                             );
                             kernel.event_bus.publish(event).await;
+
+                            // Fan out to operator notification channels
+                            // (notification.alert_channels and matching
+                            // notification.agent_rules) so the same delivery
+                            // path that handles tool_failure / task_failed
+                            // also surfaces unresponsive-agent alerts. Routing
+                            // and event-type matching live in
+                            // push_notification; the event_type to use in
+                            // agent_rules.events is "health_check_failed".
+                            let msg = format!(
+                                "Agent \"{}\" is unresponsive (inactive for {}s)",
+                                status.name, status.inactive_secs,
+                            );
+                            kernel
+                                .push_notification(
+                                    &status.agent_id.to_string(),
+                                    "health_check_failed",
+                                    &msg,
+                                )
+                                .await;
                         }
                     } else {
                         // Agent recovered — remove from known-unresponsive set
@@ -14446,7 +14466,7 @@ impl LibreFangKernel {
             // Fallback to global channels based on event type
             match event_type {
                 "approval_requested" => cfg.notification.approval_channels.clone(),
-                "task_completed" | "task_failed" | "tool_failure" => {
+                "task_completed" | "task_failed" | "tool_failure" | "health_check_failed" => {
                     cfg.notification.alert_channels.clone()
                 }
                 _ => Vec::new(),
