@@ -115,27 +115,30 @@ async function downloadExport(
   setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
-const ACTION_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "(any)" },
-  { value: "ToolInvoke", label: "ToolInvoke" },
-  { value: "ShellExec", label: "ShellExec" },
-  { value: "UserLogin", label: "UserLogin" },
-  { value: "RoleChange", label: "RoleChange" },
-  { value: "PermissionDenied", label: "PermissionDenied" },
-  { value: "BudgetExceeded", label: "BudgetExceeded" },
-  { value: "ConfigChange", label: "ConfigChange" },
-  { value: "AgentSpawn", label: "AgentSpawn" },
-  { value: "AgentKill", label: "AgentKill" },
-  { value: "AgentMessage", label: "AgentMessage" },
-  { value: "MemoryAccess", label: "MemoryAccess" },
-  { value: "FileAccess", label: "FileAccess" },
-  { value: "NetworkAccess", label: "NetworkAccess" },
-  { value: "AuthAttempt", label: "AuthAttempt" },
-  { value: "WireConnect", label: "WireConnect" },
-  { value: "CapabilityCheck", label: "CapabilityCheck" },
-  { value: "DreamConsolidation", label: "DreamConsolidation" },
-  { value: "RetentionTrim", label: "RetentionTrim" },
-];
+// Action enum identifiers — these are the literal `AuditAction` variant
+// names the server expects in the URL query, so the *values* are not
+// translatable. The `(any)` label for the empty option *is* — see the
+// `actionOptions` memo inside the component.
+const ACTION_VALUES = [
+  "ToolInvoke",
+  "ShellExec",
+  "UserLogin",
+  "RoleChange",
+  "PermissionDenied",
+  "BudgetExceeded",
+  "ConfigChange",
+  "AgentSpawn",
+  "AgentKill",
+  "AgentMessage",
+  "MemoryAccess",
+  "FileAccess",
+  "NetworkAccess",
+  "AuthAttempt",
+  "WireConnect",
+  "CapabilityCheck",
+  "DreamConsolidation",
+  "RetentionTrim",
+] as const;
 
 // Visual mapping for the action column. Keep this exhaustive on the
 // known variants — the server's `AuditAction` enum is append-only and a
@@ -211,17 +214,19 @@ function truncateUuid(s: string): string {
 // Bucket label for grouping rows under a date header. "Today" /
 // "Yesterday" use the local clock; older days use the locale's date
 // short format. Pure function of the row's RFC-3339 timestamp; falls
-// back to "Unknown" if parsing fails (kept as its own bucket so the
-// operator notices a corrupt timestamp instead of silent absorption
-// into Today).
-function dateBucketLabel(timestamp: string): string {
+// back to a localised "Unknown" if parsing fails (kept as its own
+// bucket so the operator notices a corrupt timestamp instead of silent
+// absorption into Today). `t` is passed through so the function stays
+// pure / testable rather than reaching into a hook from the helper.
+type Translator = (key: string) => string;
+function dateBucketLabel(timestamp: string, t: Translator): string {
   const d = new Date(timestamp);
-  if (Number.isNaN(d.getTime())) return "Unknown";
+  if (Number.isNaN(d.getTime())) return t("audit.unknown_date");
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfYesterday = new Date(startOfToday.getTime() - 86_400_000);
-  if (d >= startOfToday) return "Today";
-  if (d >= startOfYesterday) return "Yesterday";
+  if (d >= startOfToday) return t("audit.today");
+  if (d >= startOfYesterday) return t("audit.yesterday");
   return d.toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
@@ -235,10 +240,11 @@ function dateBucketLabel(timestamp: string): string {
 // buckets, so the visual reads top-down chronologically.
 function groupByDate(
   entries: AuditQueryEntry[],
+  t: Translator,
 ): { label: string; rows: AuditQueryEntry[] }[] {
   const groups: { label: string; rows: AuditQueryEntry[] }[] = [];
   for (const e of entries) {
-    const label = dateBucketLabel(e.timestamp);
+    const label = dateBucketLabel(e.timestamp, t);
     const last = groups[groups.length - 1];
     if (last && last.label === label) {
       last.rows.push(e);
@@ -310,6 +316,8 @@ const DATE_PRESETS: DatePreset[] = [
   },
   {
     key: "today",
+    // Translated at render via the `audit.today` key — the literal
+    // here is only the fallback / readable identifier for the preset.
     label: "Today",
     since: () => {
       const d = new Date();
@@ -372,6 +380,18 @@ export function AuditPage() {
       return next;
     });
   };
+
+  // Action options for the Select — the empty-value "(any)" gets the
+  // localised label; the rest are pinned to their server-side enum
+  // names. Memo'd because Select shallow-compares its `options` prop
+  // and we don't want to re-render the children every keystroke.
+  const actionOptions = useMemo(
+    () => [
+      { value: "", label: t("audit.any") },
+      ...ACTION_VALUES.map((v) => ({ value: v, label: v })),
+    ],
+    [t],
+  );
 
   // Datetime-preset click. Sets `from` to now-N, clears `to`, applies
   // immediately so the operator sees the result without a second click.
@@ -441,12 +461,12 @@ export function AuditPage() {
   // size).
   const activeFilterEntries = useMemo(() => {
     const entries: { key: keyof AuditQueryFilters; label: string; value: string }[] = [];
-    if (active.user) entries.push({ key: "user", label: t("audit.f_user", "User"), value: active.user });
-    if (active.action) entries.push({ key: "action", label: t("audit.f_action", "Action"), value: active.action });
-    if (active.agent) entries.push({ key: "agent", label: t("audit.f_agent", "Agent"), value: active.agent });
-    if (active.channel) entries.push({ key: "channel", label: t("audit.f_channel", "Channel"), value: active.channel });
-    if (active.from) entries.push({ key: "from", label: t("audit.f_from", "From"), value: active.from });
-    if (active.to) entries.push({ key: "to", label: t("audit.f_to", "To"), value: active.to });
+    if (active.user) entries.push({ key: "user", label: t("audit.f_user"), value: active.user });
+    if (active.action) entries.push({ key: "action", label: t("audit.f_action"), value: active.action });
+    if (active.agent) entries.push({ key: "agent", label: t("audit.f_agent"), value: active.agent });
+    if (active.channel) entries.push({ key: "channel", label: t("audit.f_channel"), value: active.channel });
+    if (active.from) entries.push({ key: "from", label: t("audit.f_from"), value: active.from });
+    if (active.to) entries.push({ key: "to", label: t("audit.f_to"), value: active.to });
     return entries;
   }, [active, t]);
 
@@ -463,7 +483,7 @@ export function AuditPage() {
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
         icon={<ScrollText className="h-4 w-4" />}
-        title={t("audit.title", "Audit trail")}
+        title={t("audit.title")}
         subtitle={t(
           "audit.subtitle",
           "Searchable, filterable audit log across users / actions / agents.",
@@ -489,8 +509,8 @@ export function AuditPage() {
               disabled={exporting || isForbidden}
             >
               {exporting
-                ? t("audit.exporting", "Exporting…")
-                : t("audit.export_csv", "Export CSV")}
+                ? t("audit.exporting")
+                : t("audit.export_csv")}
             </Button>
           </div>
         }
@@ -502,7 +522,7 @@ export function AuditPage() {
             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
               <p className="font-bold text-xs uppercase tracking-wider">
-                {t("audit.export_error_title", "Export failed")}
+                {t("audit.export_error_title")}
               </p>
               <p className="mt-1 text-xs font-mono break-all">{exportError}</p>
             </div>
@@ -531,7 +551,7 @@ export function AuditPage() {
             aria-expanded={filtersOpen}
           >
             <Filter className="h-3.5 w-3.5" />
-            {t("audit.filters", "Filters")}
+            {t("audit.filters")}
             {activeFilterEntries.length > 0 && (
               <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-black text-white">
                 {activeFilterEntries.length}
@@ -557,7 +577,7 @@ export function AuditPage() {
               className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-text-dim hover:text-error transition-colors"
             >
               <RotateCcw className="h-3 w-3" />
-              {t("audit.clear_all", "Clear all")}
+              {t("audit.clear_all")}
             </button>
           )}
         </div>
@@ -569,7 +589,7 @@ export function AuditPage() {
                 for the common "everything in the last hour/day" case. */}
             <div className="flex items-center gap-2 flex-wrap mt-4 pb-3 border-b border-border-subtle">
               <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("audit.quick_range", "Quick range")}
+                {t("audit.quick_range")}
               </span>
               {DATE_PRESETS.map((p) => (
                 <button
@@ -579,22 +599,22 @@ export function AuditPage() {
                   className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-main/40 px-2 py-1 text-[10px] font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
                 >
                   <Clock className="h-3 w-3" />
-                  {p.label}
+                  {p.key === "today" ? t("audit.today") : p.label}
                 </button>
               ))}
             </div>
           <form onSubmit={onApply} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
             <Input
-              label={t("audit.f_user", "User")}
+              label={t("audit.f_user")}
               value={draft.user ?? ""}
               onChange={(e) =>
                 setDraft((d) => ({ ...d, user: e.target.value || undefined }))
               }
-              placeholder={t("audit.f_user_placeholder", "UUID or name")}
+              placeholder={t("audit.f_user_placeholder")}
               leftIcon={<Users className="h-3.5 w-3.5" />}
             />
             <Select
-              label={t("audit.f_action", "Action")}
+              label={t("audit.f_action")}
               value={draft.action ?? ""}
               onChange={(e) =>
                 setDraft((d) => ({
@@ -602,19 +622,19 @@ export function AuditPage() {
                   action: e.target.value || undefined,
                 }))
               }
-              options={ACTION_OPTIONS}
+              options={actionOptions}
             />
             <Input
-              label={t("audit.f_agent", "Agent")}
+              label={t("audit.f_agent")}
               value={draft.agent ?? ""}
               onChange={(e) =>
                 setDraft((d) => ({ ...d, agent: e.target.value || undefined }))
               }
-              placeholder={t("audit.f_agent_placeholder", "agent id")}
+              placeholder={t("audit.f_agent_placeholder")}
               leftIcon={<Activity className="h-3.5 w-3.5" />}
             />
             <Input
-              label={t("audit.f_channel", "Channel")}
+              label={t("audit.f_channel")}
               value={draft.channel ?? ""}
               onChange={(e) =>
                 setDraft((d) => ({
@@ -622,11 +642,11 @@ export function AuditPage() {
                   channel: e.target.value || undefined,
                 }))
               }
-              placeholder={t("audit.f_channel_placeholder", "api / telegram / …")}
+              placeholder={t("audit.f_channel_placeholder")}
               leftIcon={<Plug className="h-3.5 w-3.5" />}
             />
             <Input
-              label={t("audit.f_from", "From")}
+              label={t("audit.f_from")}
               type="datetime-local"
               value={draft.from ?? ""}
               onChange={(e) =>
@@ -638,7 +658,7 @@ export function AuditPage() {
               leftIcon={<Clock className="h-3.5 w-3.5" />}
             />
             <Input
-              label={t("audit.f_to", "To")}
+              label={t("audit.f_to")}
               type="datetime-local"
               value={draft.to ?? ""}
               onChange={(e) =>
@@ -654,10 +674,10 @@ export function AuditPage() {
                 onClick={onClearAll}
                 disabled={activeFilterEntries.length === 0}
               >
-                {t("audit.reset", "Reset")}
+                {t("audit.reset")}
               </Button>
               <Button type="submit" size="sm" leftIcon={<Search className="h-3.5 w-3.5" />}>
-                {t("audit.apply", "Apply filters")}
+                {t("audit.apply")}
               </Button>
             </div>
           </form>
@@ -674,7 +694,7 @@ export function AuditPage() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-black tracking-tight">
-                {t("audit.forbidden_title", "Admin role required")}
+                {t("audit.forbidden_title")}
               </p>
               <p className="mt-1 text-xs text-text-dim leading-relaxed">
                 {t(
@@ -695,7 +715,7 @@ export function AuditPage() {
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-black tracking-tight">
-                {t("audit.error_title", "Failed to load audit log")}
+                {t("audit.error_title")}
               </p>
               <p className="mt-1 text-xs text-text-dim font-mono break-all">
                 {String(query.error)}
@@ -710,7 +730,7 @@ export function AuditPage() {
       ) : query.data && query.data.entries.length === 0 ? (
         <EmptyState
           icon={<ScrollText className="h-7 w-7" />}
-          title={t("audit.empty_title", "No matching audit entries")}
+          title={t("audit.empty_title")}
           description={
             activeFilterEntries.length > 0
               ? t(
@@ -725,14 +745,14 @@ export function AuditPage() {
           action={
             activeFilterEntries.length > 0 ? (
               <Button variant="secondary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={onClearAll}>
-                {t("audit.clear_all", "Clear all")}
+                {t("audit.clear_all")}
               </Button>
             ) : undefined
           }
         />
       ) : query.data ? (
         <div className="flex flex-col gap-4">
-          {groupByDate(query.data.entries).map((group) => {
+          {groupByDate(query.data.entries, t).map((group) => {
             const tally = outcomeBreakdown(group.rows);
             return (
             <section key={group.label} className="flex flex-col gap-2">
@@ -785,7 +805,7 @@ export function AuditPage() {
                         type="button"
                         onClick={() => drillFilter("action", e.action)}
                         className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider hover:opacity-80 transition-opacity ${actionChipClass(e.outcome)}`}
-                        title={t("audit.filter_by_action", { action: e.action, defaultValue: `Filter by ${e.action}` })}
+                        title={t("audit.filter_by_action", { action: e.action })}
                       >
                         {actionIcon(e.action)}
                         <span className="hidden sm:inline">{e.action}</span>
@@ -803,7 +823,7 @@ export function AuditPage() {
                               type="button"
                               onClick={() => drillFilter("user", e.user_id!)}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
-                              title={t("audit.filter_by_user", { defaultValue: "Filter by this user" })}
+                              title={t("audit.filter_by_user")}
                             >
                               <Users className="h-3 w-3" />
                               <span className="font-mono">{truncateUuid(e.user_id)}</span>
@@ -814,7 +834,7 @@ export function AuditPage() {
                               type="button"
                               onClick={() => drillFilter("channel", e.channel!)}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
-                              title={t("audit.filter_by_channel", { defaultValue: "Filter by this channel" })}
+                              title={t("audit.filter_by_channel")}
                             >
                               <Plug className="h-3 w-3" />
                               {e.channel}
@@ -825,7 +845,7 @@ export function AuditPage() {
                               type="button"
                               onClick={() => drillFilter("agent", e.agent_id)}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
-                              title={t("audit.filter_by_agent", { defaultValue: "Filter by this agent" })}
+                              title={t("audit.filter_by_agent")}
                             >
                               <Activity className="h-3 w-3" />
                               <span className="font-mono">{truncateUuid(e.agent_id)}</span>
@@ -833,7 +853,7 @@ export function AuditPage() {
                           )}
                           <span
                             className="inline-flex items-center gap-1 text-[10px] text-text-dim/70 font-mono"
-                            title={t("audit.hash_tooltip", { hash: e.hash, defaultValue: `chain hash ${e.hash}` })}
+                            title={t("audit.hash_tooltip", { hash: e.hash })}
                           >
                             #{e.seq}
                           </span>
@@ -864,12 +884,12 @@ export function AuditPage() {
                                 {isExpanded ? (
                                   <>
                                     <ChevronUp className="h-3 w-3" />
-                                    {t("audit.show_less", "Show less")}
+                                    {t("audit.show_less")}
                                   </>
                                 ) : (
                                   <>
                                     <ChevronDown className="h-3 w-3" />
-                                    {t("audit.show_more", "Show more")}
+                                    {t("audit.show_more")}
                                   </>
                                 )}
                               </button>
