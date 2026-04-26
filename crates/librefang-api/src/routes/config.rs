@@ -1187,6 +1187,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "main_lane": config.queue.concurrency.main_lane,
                 "cron_lane": config.queue.concurrency.cron_lane,
                 "subagent_lane": config.queue.concurrency.subagent_lane,
+                "trigger_lane": config.queue.concurrency.trigger_lane,
+                "default_per_agent": config.queue.concurrency.default_per_agent,
             }),
         );
     }

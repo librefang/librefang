@@ -468,6 +468,16 @@ pub struct LibreFangKernel {
     /// supplies an explicit `session_id_override`. Allows concurrent messages to
     /// different sessions of the same agent (multi-tab / multi-session UIs).
     session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent invocation semaphore — caps concurrent **trigger
+    /// dispatch** fires to a single agent. Capacity is resolved lazily
+    /// on first use from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`.
+    /// Permits are acquired in addition to (and AFTER) the global
+    /// trigger lane permit, so a hot agent throttles itself without
+    /// starving the kernel. NOT acquired by `agent_send`, channel
+    /// bridges, or cron — those paths still serialize at the existing
+    /// `agent_msg_locks` / `session_msg_locks` inside `send_message_full`.
+    agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
@@ -1476,6 +1486,64 @@ impl LibreFangKernel {
         &self.command_queue
     }
 
+    /// Resolve the per-agent concurrency semaphore, lazily creating it on
+    /// first use. Capacity comes from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`,
+    /// floored at 1 (covers a manifest typo of `Some(0)`). The returned
+    /// `Arc<Semaphore>` is cheap to clone and safe to move into a
+    /// spawned task via `acquire_owned()`.
+    ///
+    /// The semaphore is removed by `gc_sweep` only when the agent leaves
+    /// the registry (kill / despawn). It is NOT invalidated on
+    /// `manifest_swap` hot-reload — to pick up a new cap operators must
+    /// kill the agent and let it respawn (or restart the daemon). An
+    /// in-place activate / status flip that keeps the agent in the
+    /// registry will silently retain the old capacity. This avoids a
+    /// permit-loss race during live config reloads.
+    pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
+        if let Some(existing) = self.agent_concurrency.get(&agent_id) {
+            return existing.clone();
+        }
+        // Single registry read so cap and session_mode come from the
+        // same manifest snapshot — avoids a TOCTOU window where two
+        // separate gets see manifests on either side of a swap.
+        let (manifest_cap, session_mode) = match self.registry.get(agent_id) {
+            Some(e) => (
+                e.manifest.max_concurrent_invocations.map(|n| n as usize),
+                e.manifest.session_mode,
+            ),
+            None => (None, librefang_types::agent::SessionMode::default()),
+        };
+        // Clamp `persistent` agents to 1: parallel writes to the same
+        // session's message history are undefined. Emit a warn so a
+        // misconfigured manifest is visible at boot rather than silently
+        // ignored. The check lives here (the resolver) instead of a
+        // dedicated validator because the rule is structural to the
+        // dispatch path, not a TOML-time concern.
+        let resolved_cap = match (session_mode, manifest_cap) {
+            (librefang_types::agent::SessionMode::Persistent, Some(n)) if n > 1 => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    requested = n,
+                    "max_concurrent_invocations > 1 ignored — session_mode = \
+                     \"persistent\" cannot run parallel invocations safely; \
+                     clamped to 1. Set session_mode = \"new\" on the manifest \
+                     to enable parallel fires (per-trigger overrides cannot \
+                     escape the clamp — the per-agent semaphore is sized once \
+                     from the manifest default).",
+                );
+                1
+            }
+            (_, Some(n)) => n,
+            (_, None) => self.config.load().queue.concurrency.default_per_agent,
+        }
+        .max(1);
+        self.agent_concurrency
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(resolved_cap)))
+            .clone()
+    }
+
     /// Persistent process manager.
     #[inline]
     pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
@@ -1610,6 +1678,22 @@ impl LibreFangKernel {
             total_removed += stale.len();
             for id in stale {
                 self.agent_msg_locks.remove(&id);
+            }
+        }
+
+        // 3b. agent_concurrency — remove per-agent invocation semaphores
+        // for dead agents. Mirrors the agent_msg_locks pass above; lazy
+        // re-init on next dispatch will pick up any updated manifest cap.
+        {
+            let stale: Vec<AgentId> = self
+                .agent_concurrency
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.agent_concurrency.remove(&id);
             }
         }
 
@@ -2238,8 +2322,10 @@ impl LibreFangKernel {
         let wasm_sandbox = WasmSandbox::new()
             .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
-        // Initialize RBAC authentication manager
-        let auth = AuthManager::new(&config.users);
+        // Initialize RBAC authentication manager. Tool groups are passed
+        // through so per-user `tool_categories` (RBAC M3) can resolve
+        // group names to their tool patterns.
+        let auth = AuthManager::with_tool_groups(&config.users, &config.tool_policy.groups);
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
@@ -2711,6 +2797,7 @@ impl LibreFangKernel {
             config.queue.concurrency.main_lane as u32,
             config.queue.concurrency.cron_lane as u32,
             config.queue.concurrency.subagent_lane as u32,
+            config.queue.concurrency.trigger_lane as u32,
         );
 
         // Build the pluggable context engine from config
@@ -2841,6 +2928,7 @@ impl LibreFangKernel {
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             session_msg_locks: dashmap::DashMap::new(),
+            agent_concurrency: dashmap::DashMap::new(),
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
@@ -4141,42 +4229,6 @@ system_prompt = "You are a helpful assistant."
             content_blocks,
             None,
             None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// Send a message with a session mode override.
-    ///
-    /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
-    /// without changing the public `send_message` signature.
-    ///
-    /// When the target agent has a configured **home channel** (a channel whose
-    /// `default_agent` matches this agent), a synthetic `SenderContext` is
-    /// attached so that downstream channel routing (prompt hints, the
-    /// `channel_send` tool account-id fallback, the `delivery.last_channel`
-    /// memory key, …) targets that home channel instead of the first channel
-    /// in the config array. See issue #2872.
-    async fn send_message_with_session_mode(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        session_mode_override: Option<librefang_types::agent::SessionMode>,
-    ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
-        let home_channel = self.resolve_agent_home_channel(agent_id);
-        self.send_message_full(
-            agent_id,
-            message,
-            handle,
-            None,
-            home_channel.as_ref(),
-            session_mode_override,
             None,
             None,
         )
@@ -10342,6 +10394,15 @@ system_prompt = "You are a helpful assistant."
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
+                HotAction::ReloadAuth => {
+                    info!(
+                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups)",
+                        new_config.users.len(),
+                        new_config.tool_policy.groups.len(),
+                    );
+                    self.auth
+                        .reload(&new_config.users, &new_config.tool_policy.groups);
+                }
                 HotAction::ReloadTaintRules => {
                     // Actual swap is performed by the caller (`reload_config`)
                     // after this match completes — this arm is informational
@@ -10456,22 +10517,95 @@ system_prompt = "You are a helpful assistant."
         // Publish to the event bus
         self.event_bus.publish(event).await;
 
-        // Actually dispatch triggered messages to agents
+        // Actually dispatch triggered messages to agents.
+        //
+        // Concurrency model — three layered semaphores, in order:
+        //   1. Global Lane::Trigger (config: queue.concurrency.trigger_lane).
+        //      Caps total in-flight trigger dispatches kernel-wide so a
+        //      runaway producer (50× task_post in a tight loop) can't spawn
+        //      unbounded tokio tasks racing for everyone else's mutexes.
+        //   2. Per-agent semaphore (config: manifest.max_concurrent_invocations
+        //      → fallback queue.concurrency.default_per_agent → 1).
+        //      Caps how many of THIS agent's fires run in parallel.
+        //   3. Per-session mutex (existing session_msg_locks at
+        //      send_message_full).  Reached only when we materialize a
+        //      `session_id_override` here for `session_mode = "new"`
+        //      effective mode — otherwise the inner code path falls back
+        //      to the per-agent lock and blocks parallelism inside
+        //      send_message_full regardless of how many permits we hold.
+        //
+        // Resolution order for effective session mode:
+        //   trigger_match.session_mode_override → manifest.session_mode.
+        // We materialize `SessionId::new()` only when the resolved mode is
+        // `New`; persistent fires reuse the canonical session and must
+        // serialize at the per-agent mutex, so we leave session_id_override
+        // = None for them.
         if let Some(weak) = self.self_handle.get() {
             for trigger_match in &triggered {
-                if let Some(kernel) = weak.upgrade() {
-                    let aid = trigger_match.agent_id;
-                    let msg = trigger_match.message.clone();
-                    let mode_override = trigger_match.session_mode_override;
-                    tokio::spawn(async move {
-                        if let Err(e) = kernel
-                            .send_message_with_session_mode(aid, &msg, mode_override)
-                            .await
-                        {
-                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
-                        }
-                    });
-                }
+                let kernel = match weak.upgrade() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let aid = trigger_match.agent_id;
+                let msg = trigger_match.message.clone();
+                let mode_override = trigger_match.session_mode_override;
+
+                // Resolve the effective session mode now so we can decide
+                // whether to materialize a fresh session id. Skip dispatch
+                // if the agent has been deleted between trigger evaluation
+                // and dispatch — preserves prior behavior.
+                let manifest_mode = match kernel.registry.get(aid) {
+                    Some(entry) => entry.manifest.session_mode,
+                    None => continue,
+                };
+                let effective_mode = mode_override.unwrap_or(manifest_mode);
+                let session_id_override = match effective_mode {
+                    librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                    librefang_types::agent::SessionMode::Persistent => None,
+                };
+
+                let trigger_sem = kernel
+                    .command_queue
+                    .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
+                let agent_sem = kernel.agent_concurrency_for(aid);
+
+                tokio::spawn(async move {
+                    // (1) Global trigger lane permit. `acquire_owned` so the
+                    //     permit moves into the spawned task and drops at
+                    //     task exit.
+                    let _lane_permit = match trigger_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return, // lane closed during shutdown
+                    };
+                    // (2) Per-agent permit.
+                    let _agent_permit = match agent_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    // (3) Inner per-session mutex applies inside
+                    //     send_message_full when session_id_override is Some.
+                    let handle: Option<Arc<dyn KernelHandle>> = kernel
+                        .self_handle
+                        .get()
+                        .and_then(|w| w.upgrade())
+                        .map(|arc| arc as Arc<dyn KernelHandle>);
+                    let home_channel = kernel.resolve_agent_home_channel(aid);
+                    if let Err(e) = kernel
+                        .send_message_full(
+                            aid,
+                            &msg,
+                            handle,
+                            None,
+                            home_channel.as_ref(),
+                            mode_override,
+                            None,
+                            session_id_override,
+                        )
+                        .await
+                    {
+                        warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                    }
+                });
             }
         }
 
@@ -15473,6 +15607,43 @@ impl KernelHandle for LibreFangKernel {
             .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        if !self.auth.is_enabled() {
+            return None;
+        }
+        let user_id = self.auth.resolve_user(sender_id, channel)?;
+        self.auth.memory_acl_for(user_id)
+    }
+
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        // Only the synthetic `"cron"` channel is treated as a system-
+        // internal call. The cron dispatcher synthesises
+        // `SenderContext{channel:"cron"}` (see kernel/mod.rs ~10876)
+        // before fanning out to agents; everything else MUST carry a
+        // real `(channel, sender_id)` tuple.
+        //
+        // Earlier drafts also matched `"system"` / `"internal"` and
+        // treated `(None, None)` as system, but neither sentinel is
+        // synthesised anywhere in the codebase, and the `(None, None)`
+        // shortcut silently re-opened the H7 fail-open at the trait
+        // boundary the AuthManager unit tests were written to close
+        // (PR #3205 review item #1). Both have been removed: an
+        // unattributed inbound now goes through the guest gate so
+        // RBAC fails closed end-to-end.
+        let system_call = matches!(channel, Some("cron"));
+        self.auth
+            .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,
@@ -15624,16 +15795,27 @@ impl KernelHandle for LibreFangKernel {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
-                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                    info!(
-                        agent_id,
-                        tool_name, "Auto-approved for hand agent (non-blocking)"
-                    );
-                    return Ok(ToolApprovalSubmission::AutoApproved);
+        // EXCEPTION (RBAC M3, #3054): when the per-user policy demanded approval
+        // (`force_human=true`), the carve-out MUST NOT fire — otherwise a Viewer/User
+        // chatting with a hand-tagged agent silently inherits the agent's full
+        // tool surface, defeating user-level RBAC entirely.
+        if !deferred.force_human {
+            if let Ok(aid) = agent_id.parse::<AgentId>() {
+                if let Some(entry) = self.registry.get(aid) {
+                    if entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                        info!(
+                            agent_id,
+                            tool_name, "Auto-approved for hand agent (non-blocking)"
+                        );
+                        return Ok(ToolApprovalSubmission::AutoApproved);
+                    }
                 }
             }
+        } else {
+            debug!(
+                agent_id,
+                tool_name, "Hand-agent auto-approval skipped because user policy demanded approval"
+            );
         }
 
         let policy = self.approval_manager.policy();

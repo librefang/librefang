@@ -153,6 +153,20 @@ pub struct DeferredToolExecution {
     pub sender_id: Option<String>,
     pub channel: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
+    /// `true` when the approval was demanded by the per-user RBAC gate
+    /// (`UserToolGate::NeedsApproval`) rather than the standard
+    /// `require_approval` list. The kernel's `submit_tool_approval` MUST
+    /// honour this flag — even hand-tagged "trusted" agents that normally
+    /// auto-approve must surface the approval to a human, otherwise a
+    /// Viewer/User chatting with a hand-agent gains the agent's full
+    /// tool surface (RBAC M3, issue #3054 Phase 2).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub force_human: bool,
+}
+
+#[inline]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Outcome of submitting a deferred tool for approval.
@@ -1108,6 +1122,7 @@ mod tests {
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
+            force_human: false,
         };
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();

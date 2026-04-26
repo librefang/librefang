@@ -352,6 +352,26 @@ pub struct UserConfig {
     /// Optional API key hash for API authentication.
     #[serde(default)]
     pub api_key_hash: Option<String>,
+    /// Per-user tool allow/deny lists. Layered ON TOP of the per-agent
+    /// `ToolPolicy` and any channel rules in `ApprovalPolicy`.
+    /// `None` means "no per-user policy — defer to other layers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<crate::user_policy::UserToolPolicy>,
+    /// Bulk allow/deny by `ToolGroup` category (groups are declared in
+    /// `KernelConfig.tool_policy.groups`). Lets admins say
+    /// `denied_groups = ["dangerous"]` without listing each tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_categories: Option<crate::user_policy::UserToolCategories>,
+    /// Memory namespace ACL — controls reads/writes to memory scopes
+    /// (`proactive`, `kv:*`, etc.) and PII redaction. `None` means
+    /// "use the role default ACL".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_access: Option<crate::user_policy::UserMemoryAccess>,
+    /// Per-channel tool overrides for THIS user. Keyed by channel adapter
+    /// name (e.g. `"telegram"`, `"discord"`). Layers on top of the global
+    /// `ApprovalPolicy.channel_rules` — both must agree to allow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
 }
 
 fn default_role() -> String {
@@ -1844,6 +1864,8 @@ impl Default for QueueConfig {
 /// main_lane = 3
 /// cron_lane = 2
 /// subagent_lane = 3
+/// trigger_lane = 8
+/// default_per_agent = 1
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -1854,6 +1876,19 @@ pub struct QueueConcurrencyConfig {
     pub cron_lane: usize,
     /// Subagent lane concurrent limit (child agents).
     pub subagent_lane: usize,
+    /// Trigger lane concurrent limit — global cap on event-trigger
+    /// (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the
+    /// same time, across all agents. Acquired BEFORE the per-agent
+    /// semaphore so a single hot agent cannot starve the kernel.
+    /// Default `8`. `0` is rewritten to `1` by validation.
+    pub trigger_lane: usize,
+    /// Default per-agent invocation cap when an agent's manifest does
+    /// not set `max_concurrent_invocations`. `1` reproduces the
+    /// legacy per-agent-mutex serialization that pre-existed this
+    /// knob — change deliberately. `0` is rewritten to `1` by
+    /// validation. Typed `usize` to match the sibling lane fields and
+    /// to feed `Semaphore::new` without a cast.
+    pub default_per_agent: usize,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -1862,6 +1897,8 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+            trigger_lane: 8,
+            default_per_agent: 1,
         }
     }
 }

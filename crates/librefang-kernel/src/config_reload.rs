@@ -64,6 +64,14 @@ pub enum HotAction {
     /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
     /// since the kernel doesn't keep the parsed filter around.
     ReloadLogLevel(String),
+    /// `[[users]]` or `[tool_policy.groups]` changed — rebuild the RBAC
+    /// `AuthManager` so per-user `tool_policy` / `memory_access` /
+    /// `channel_tool_rules` edits take effect on the next tool call
+    /// (RBAC M3, #3054). Without this action, design decision #7
+    /// ("invalidate per-user permission cache on config reload") is
+    /// silently violated — the dashboard reports "applied" while the
+    /// previous policy is still being enforced.
+    ReloadAuth,
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +346,18 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.tool_policy, &new.tool_policy) {
         plan.hot_actions.push(HotAction::UpdateToolPolicy);
+    }
+
+    // RBAC M3 (#3054): invalidate the AuthManager when any field that
+    // feeds it changes — `[[users]]` (role / channel_bindings /
+    // tool_policy / channel_tool_rules / tool_categories /
+    // memory_access) or the tool group catalogue used for category
+    // resolution. Without this, a `/api/config/reload` after a policy
+    // edit is a silent no-op.
+    if field_changed(&old.users, &new.users)
+        || field_changed(&old.tool_policy.groups, &new.tool_policy.groups)
+    {
+        plan.hot_actions.push(HotAction::ReloadAuth);
     }
 
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
