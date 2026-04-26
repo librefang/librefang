@@ -198,9 +198,13 @@ pub async fn check(
         .into_response();
     }
 
-    let user_id_str = user_id.to_string();
-    let gate =
-        auth.resolve_user_tool_decision(&q.action, Some(&user_id_str), q.channel.as_deref(), false);
+    // We already have the canonical UserId — call the user-direct
+    // resolver instead of the sender/channel-keyed entry point. The
+    // latter requires a channel-bound sender lookup that the diagnostic
+    // surface doesn't have, and would silently fall back to the guest
+    // gate (returning `needs_approval`) for users whose policy actually
+    // hard-denies the action.
+    let gate = auth.resolve_decision_for_user(user_id, &q.action, q.channel.as_deref());
 
     let (decision, allowed, reason) = match gate {
         UserToolGate::Allow => ("allow", true, None),
