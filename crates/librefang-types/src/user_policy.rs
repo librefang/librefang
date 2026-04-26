@@ -108,15 +108,27 @@ impl ChannelToolPolicy {
     /// * `Some(false)` — explicitly denied
     /// * `Some(true)`  — explicitly allowed
     /// * `None`        — no opinion (rule does not apply)
+    ///
+    /// Matching is **case-insensitive** (ASCII): `denied_tools = ["shell_exec"]`
+    /// catches a hallucinated invocation of `SHELL_EXEC` or `Shell_Exec`.
+    /// Tool registries today store canonical lowercase identifiers, but
+    /// LLM output is unreliable and downstream MCP / skill providers may
+    /// accept their own case-insensitive aliases, so we normalise here
+    /// rather than trusting every dispatcher to canonicalise upstream.
     pub fn check_tool(&self, tool_name: &str) -> Option<bool> {
-        if self.denied_tools.iter().any(|p| glob_matches(p, tool_name)) {
+        let needle = tool_name.to_ascii_lowercase();
+        if self
+            .denied_tools
+            .iter()
+            .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle))
+        {
             return Some(false);
         }
         if !self.allowed_tools.is_empty() {
             return Some(
                 self.allowed_tools
                     .iter()
-                    .any(|p| glob_matches(p, tool_name)),
+                    .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle)),
             );
         }
         None
@@ -148,15 +160,25 @@ impl UserToolPolicy {
     /// Order: `denied_tools` first (deny-wins), then `allowed_tools`. If
     /// neither has an opinion, returns [`UserToolDecision::NeedsRoleEscalation`]
     /// so the caller can decide whether to escalate.
+    ///
+    /// Matching is **case-insensitive** (ASCII) so that a deny rule for
+    /// `shell_exec` still bites when the LLM emits `SHELL_EXEC` or any
+    /// other case variant. See [`ChannelToolPolicy::check_tool`] for the
+    /// rationale.
     pub fn check_tool(&self, tool_name: &str) -> UserToolDecision {
-        if self.denied_tools.iter().any(|p| glob_matches(p, tool_name)) {
+        let needle = tool_name.to_ascii_lowercase();
+        if self
+            .denied_tools
+            .iter()
+            .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle))
+        {
             return UserToolDecision::Deny;
         }
         if !self.allowed_tools.is_empty() {
             if self
                 .allowed_tools
                 .iter()
-                .any(|p| glob_matches(p, tool_name))
+                .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle))
             {
                 return UserToolDecision::Allow;
             }
@@ -192,11 +214,19 @@ impl UserToolCategories {
     /// * `Some(false)` — tool belongs to a denied group
     /// * `Some(true)`  — tool belongs to an allowed group (when allow-list is set)
     /// * `None`        — categories have no opinion
+    ///
+    /// Tool name matching is **case-insensitive** (ASCII); see
+    /// [`UserToolPolicy::check_tool`] for rationale.
     pub fn check_tool(&self, tool_name: &str, groups: &[ToolGroup]) -> Option<bool> {
+        let needle = tool_name.to_ascii_lowercase();
         // denied_groups wins: any group match denies.
         for group_name in &self.denied_groups {
             if let Some(group) = groups.iter().find(|g| &g.name == group_name) {
-                if group.tools.iter().any(|p| glob_matches(p, tool_name)) {
+                if group
+                    .tools
+                    .iter()
+                    .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle))
+                {
                     return Some(false);
                 }
             }
@@ -204,7 +234,11 @@ impl UserToolCategories {
         if !self.allowed_groups.is_empty() {
             for group_name in &self.allowed_groups {
                 if let Some(group) = groups.iter().find(|g| &g.name == group_name) {
-                    if group.tools.iter().any(|p| glob_matches(p, tool_name)) {
+                    if group
+                        .tools
+                        .iter()
+                        .any(|p| glob_matches(&p.to_ascii_lowercase(), &needle))
+                    {
                         return Some(true);
                     }
                 }
@@ -251,11 +285,98 @@ pub struct UserMemoryAccess {
     pub delete_allowed: bool,
 }
 
+/// Memory namespaces are colon- and slash-delimited identifiers
+/// (`kv:user_alice`, `shared:scope/foo`). A `..` segment in a candidate
+/// namespace is a path-traversal attempt and is rejected before any glob
+/// pattern is consulted — the LLM-facing memory tools never need it, and
+/// allowing it would let `kv:user_*` admit `kv:user_../admin`.
+fn has_path_traversal(namespace: &str) -> bool {
+    namespace
+        .split(|c: char| c == '/' || c == ':' || c.is_whitespace())
+        .any(|seg| seg == "..")
+}
+
+/// Namespace-aware variant of [`crate::capability::glob_matches`].
+///
+/// Differences from the generic matcher:
+///
+/// - `"*"` still matches anything (subject to the traversal guard the
+///   caller applies separately). This preserves the "owner / admin
+///   sees everything" UX.
+/// - A `*` embedded in a longer pattern (e.g. `kv:user_*`, `shared:*:foo`)
+///   may NOT cross a namespace separator (`:` or `/`). So `kv:user_*`
+///   matches `kv:user_alice` but not `kv:user_evil/etc/passwd` and not
+///   `kv:user_../admin` (the candidate is rejected before reaching this
+///   matcher anyway, but the separator constraint is the structural
+///   property; the traversal check is defense in depth).
+///
+/// This is intentionally separate from [`crate::capability::glob_matches`]
+/// because that one is used for tool names and capability strings where
+/// `*` collapsing across separators is desirable (e.g. `file_*` matching
+/// `file_read`). Don't unify them — namespace ACL is the only place where
+/// the strict semantics belong.
+fn namespace_glob_matches(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if pattern == value {
+        return true;
+    }
+
+    let component = |s: &str| !s.contains(':') && !s.contains('/');
+
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        // "*foo" — `value` must end with `foo` and the prefix it captures
+        // must not span a separator.
+        if !value.ends_with(suffix) {
+            return false;
+        }
+        let head = &value[..value.len() - suffix.len()];
+        return component(head);
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        // "foo*" — `value` must start with `foo` and the suffix it
+        // captures must not span a separator.
+        if !value.starts_with(prefix) {
+            return false;
+        }
+        let tail = &value[prefix.len()..];
+        return component(tail);
+    }
+    if let Some(star_pos) = pattern.find('*') {
+        // "foo*bar" — middle wildcard, captured middle must not span a
+        // separator.
+        let prefix = &pattern[..star_pos];
+        let suffix = &pattern[star_pos + 1..];
+        if !value.starts_with(prefix) || !value.ends_with(suffix) {
+            return false;
+        }
+        if value.len() < prefix.len() + suffix.len() {
+            return false;
+        }
+        let mid = &value[prefix.len()..value.len() - suffix.len()];
+        return component(mid);
+    }
+    false
+}
+
 impl UserMemoryAccess {
-    /// Wildcard pattern matching against `readable_namespaces`. The
-    /// special pattern `"*"` allows any namespace; otherwise an exact
-    /// match or single-`*` glob is required (see
-    /// [`crate::capability::glob_matches`] for the semantics).
+    /// Wildcard pattern matching against `readable_namespaces`.
+    ///
+    /// Uses [`namespace_glob_matches`] — a stricter variant of the generic
+    /// [`crate::capability::glob_matches`] that:
+    ///
+    /// 1. **Rejects path-traversal candidates outright.** Any namespace
+    ///    containing a `..` segment (delimited by `/`, `:`, or whitespace)
+    ///    is denied — even if a configured pattern would otherwise match.
+    ///    Without this, `kv:user_*` would match `kv:user_../admin` because
+    ///    `*` greedily eats `../admin` as plain text.
+    /// 2. **Bounds `*` to a single namespace component.** A pattern like
+    ///    `kv:user_*` only matches strings whose substring after `kv:user_`
+    ///    contains no `/` or `:` — so `kv:user_alice` matches but
+    ///    `kv:user_../admin` and `kv:user_/etc/passwd` do not.
+    ///
+    /// `"*"` still matches any non-traversing namespace as before.
     ///
     /// An empty `readable_namespaces` deny-all by default, **except**
     /// when no other restriction is configured at all (`pii_access=false`,
@@ -263,16 +384,25 @@ impl UserMemoryAccess {
     /// — that's an "unconfigured" sentinel and the caller (kernel) treats
     /// it as "no opinion, defer to role-default".
     pub fn can_read(&self, namespace: &str) -> bool {
+        if has_path_traversal(namespace) {
+            return false;
+        }
         self.readable_namespaces
             .iter()
-            .any(|p| glob_matches(p, namespace))
+            .any(|p| namespace_glob_matches(p, namespace))
     }
 
     /// Wildcard match against `writable_namespaces`.
+    ///
+    /// Uses the same separator-aware, traversal-rejecting matcher as
+    /// [`Self::can_read`] — see that method's docs for details.
     pub fn can_write(&self, namespace: &str) -> bool {
+        if has_path_traversal(namespace) {
+            return false;
+        }
         self.writable_namespaces
             .iter()
-            .any(|p| glob_matches(p, namespace))
+            .any(|p| namespace_glob_matches(p, namespace))
     }
 
     /// Returns true when no fields have been customised — i.e. the
@@ -477,6 +607,73 @@ mod tests {
         assert!(!acl.can_write("kv:internal"));
     }
 
+    /// Reviewer claim (PR #3205 follow-up #7): the namespace matcher
+    /// uses the generic [`crate::capability::glob_matches`] which lets
+    /// `*` greedily eat path separators, so `kv:user_*` would match
+    /// `kv:user_../admin` or `kv:user_evil/etc/passwd` and let a memory
+    /// tool cross into another user's bucket. The fix:
+    ///
+    /// 1. Reject any namespace candidate containing a `..` segment
+    ///    (delimited by `/`, `:`, or whitespace).
+    /// 2. Require `*` in patterns to stay within a single namespace
+    ///    component — no `/` or `:` allowed inside the captured span.
+    ///
+    /// Both legs are exercised here so a regression on either is caught.
+    #[test]
+    fn memory_access_namespace_blocks_path_traversal() {
+        let acl = UserMemoryAccess {
+            readable_namespaces: vec!["kv:user_*".into()],
+            writable_namespaces: vec!["kv:user_*".into()],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        };
+
+        // Positive control: legitimate per-user namespace still matches.
+        assert!(acl.can_read("kv:user_alice"));
+        assert!(acl.can_write("kv:user_alice"));
+
+        // Path-traversal candidates rejected.
+        assert!(
+            !acl.can_read("kv:user_../admin"),
+            "`..` segment must be rejected even when the prefix matches"
+        );
+        assert!(!acl.can_write("kv:user_../admin"));
+        assert!(
+            !acl.can_read("kv:user_alice/../bob"),
+            "embedded `..` between separators must be rejected"
+        );
+
+        // Separator-crossing wildcards rejected.
+        assert!(
+            !acl.can_read("kv:user_evil/etc/passwd"),
+            "`*` must not match across `/` separators"
+        );
+        assert!(
+            !acl.can_read("kv:user_a:b"),
+            "`*` must not match across `:` separators"
+        );
+    }
+
+    /// `"*"` retains its "match anything" semantics for the
+    /// owner / admin role, but still rejects traversal candidates so
+    /// even a maximally-permissive ACL can't be tricked into reading a
+    /// `..`-bearing namespace.
+    #[test]
+    fn memory_access_star_pattern_still_rejects_traversal() {
+        let acl = UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        };
+        assert!(acl.can_read("kv:anything"));
+        assert!(acl.can_read("shared:scope/foo"));
+        assert!(!acl.can_read("kv:user_../admin"));
+        assert!(!acl.can_write("kv:user_alice/../bob"));
+    }
+
     #[test]
     fn memory_access_unconfigured_sentinel() {
         assert!(UserMemoryAccess::default().is_unconfigured());
@@ -549,6 +746,50 @@ mod tests {
             policy.evaluate("anything", None, &[]),
             UserToolDecision::NeedsRoleEscalation
         );
+    }
+
+    // ---- #3205 follow-up: ASCII case-insensitive deny matching ----
+
+    /// Reviewer claim (PR #3205 follow-up #8a): a deny rule for
+    /// `shell_exec` would be silently bypassed by a different-case
+    /// invocation like `SHELL_EXEC`. Built-in tool dispatch matches case
+    /// exactly so the call would have failed downstream anyway, but
+    /// MCP / skill providers may accept their own case variants — and
+    /// the deny list is supposed to be the authoritative gate. Pin
+    /// case-insensitive matching so a future refactor can't quietly flip
+    /// us back to case-sensitive.
+    #[test]
+    fn user_deny_is_case_insensitive() {
+        let p = UserToolPolicy {
+            allowed_tools: vec![],
+            denied_tools: vec!["shell_exec".into()],
+        };
+        assert_eq!(p.check_tool("shell_exec"), UserToolDecision::Deny);
+        assert_eq!(p.check_tool("SHELL_EXEC"), UserToolDecision::Deny);
+        assert_eq!(p.check_tool("Shell_Exec"), UserToolDecision::Deny);
+    }
+
+    #[test]
+    fn channel_deny_is_case_insensitive() {
+        let p = ChannelToolPolicy {
+            allowed_tools: vec!["*".into()],
+            denied_tools: vec!["shell_exec".into()],
+        };
+        assert_eq!(p.check_tool("SHELL_EXEC"), Some(false));
+        assert_eq!(p.check_tool("shell_exec"), Some(false));
+        // Allow-list still matches non-denied tools regardless of case.
+        assert_eq!(p.check_tool("FILE_READ"), Some(true));
+    }
+
+    #[test]
+    fn categories_deny_is_case_insensitive() {
+        let groups = vec![group("shell_tools", &["shell_exec"])];
+        let cats = UserToolCategories {
+            allowed_groups: vec![],
+            denied_groups: vec!["shell_tools".into()],
+        };
+        assert_eq!(cats.check_tool("SHELL_EXEC", &groups), Some(false));
+        assert_eq!(cats.check_tool("shell_exec", &groups), Some(false));
     }
 
     /// Precedence regression (PR #3205 review feedback): when the user-level
