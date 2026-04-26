@@ -7727,6 +7727,42 @@
         }
       }
     },
+    "/api/users/{name}/rotate-key": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Rotate a user's API key.",
+        "description": "Generates a fresh 32-byte random plaintext key, hashes it with Argon2id,\nstores the hash in `config.toml`, and **swaps the live in-memory snapshot\nthe auth middleware reads from** so the next request that presents the\nold plaintext token immediately fails authentication. Without the live\nswap a leaked key could only be revoked by restarting the daemon — which\ndefeats the point of rotation. See the `user_api_keys` field on\n[`AppState`] for the shared `Arc<RwLock<…>>` that makes this work.\n\nOwner-only, gated by `is_owner_only_write` in `middleware.rs` — same\nblast radius as user create/delete. The request takes no body; the new\nplaintext key is returned in the response and is **never written to the\naudit log or echoed again**.\n\nDashboard sessions (`AppState.active_sessions`) are intentionally NOT\ninvalidated here. The active-sessions store is keyed by an opaque token\nand the stored [`crate::password_hash::SessionToken`] does not carry a\n`user_id` — it tracks the single shared dashboard credential pair\n(`dashboard_user` / `dashboard_pass`), not the per-user API keys this\nendpoint rotates. The two auth surfaces are independent: a per-user\nbearer-token caller never lands in `active_sessions` at all (see\n`middleware.rs:618`), so the per-user key swap completes the kill on\nits own. If a future change ties dashboard sessions to a `UserId`, we\ncan extend `sessions_invalidated` to include those evictions; today\nthe count reflects the per-user-bearer-token kill, which is the actual\nrevocation that matters for this surface.",
+        "operationId": "rotate_user_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key rotated. `new_api_key` is the only time the plaintext is exposed — the server cannot reproduce it later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateKeyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -8670,6 +8706,27 @@
               "null"
             ],
             "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
+          }
+        }
+      },
+      "RotateKeyResponse": {
+        "type": "object",
+        "description": "Response payload for `POST /api/users/{name}/rotate-key`.\n\n`new_api_key` is the **plaintext** rotated key — this is the only time\nthe server will surface it. Operators must copy and store it now;\nnothing else (audit log included) records the plaintext.\n\n`sessions_invalidated` reports how many in-memory per-user API key\nrecords were swapped — typically `1`. See the doc-comment on\n[`rotate_user_key`] for why dashboard sessions are NOT included in\nthis count.",
+        "required": [
+          "status",
+          "new_api_key",
+          "sessions_invalidated"
+        ],
+        "properties": {
+          "new_api_key": {
+            "type": "string"
+          },
+          "sessions_invalidated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
           }
         }
       },
