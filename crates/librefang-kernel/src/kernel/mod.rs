@@ -9725,15 +9725,33 @@ system_prompt = "You are a helpful assistant."
                 .or(previous.web_search_augmentation),
         };
 
-        if let (Some(model), Some(provider)) = (merged.model.clone(), merged.provider.clone()) {
+        if merged.model.is_some()
+            || merged.provider.is_some()
+            || merged.api_key_env.is_some()
+            || merged.base_url.is_some()
+        {
+            let entry = self.registry.get(agent_id).ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+            })?;
+            let model = merged
+                .model
+                .clone()
+                .unwrap_or_else(|| entry.manifest.model.model.clone());
+            let provider = merged
+                .provider
+                .clone()
+                .unwrap_or_else(|| entry.manifest.model.provider.clone());
+            let api_key_env = merged
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| entry.manifest.model.api_key_env.clone());
+            let base_url = merged
+                .base_url
+                .clone()
+                .unwrap_or_else(|| entry.manifest.model.base_url.clone());
+
             self.registry
-                .update_model_provider_config(
-                    agent_id,
-                    model,
-                    provider,
-                    merged.api_key_env.clone().flatten(),
-                    merged.base_url.clone().flatten(),
-                )
+                .update_model_provider_config(agent_id, model, provider, api_key_env, base_url)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(max_tokens) = merged.max_tokens {

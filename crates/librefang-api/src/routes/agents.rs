@@ -4365,8 +4365,14 @@ pub async fn patch_hand_agent_runtime_config(
     // - `max_tokens` / `temperature` / `web_search_augmentation`: pass
     //   through as-is; `None` means "do not change".
     let override_config = librefang_hands::HandAgentRuntimeOverride {
-        model: req.model.filter(|v| !v.is_empty()),
-        provider: req.provider.filter(|v| !v.is_empty()),
+        model: req
+            .model
+            .map(|s| s.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        provider: req
+            .provider
+            .map(|s| s.trim().to_string())
+            .filter(|v| !v.is_empty()),
         api_key_env: hand_override_nullable_string(req.api_key_env),
         base_url: hand_override_nullable_string(req.base_url),
         max_tokens: req.max_tokens,
