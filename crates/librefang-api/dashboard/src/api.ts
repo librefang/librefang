@@ -523,12 +523,21 @@ export interface QueueLaneStatus {
   capacity?: number;
 }
 
+export interface QueueConcurrencyConfig {
+  main_lane?: number;
+  cron_lane?: number;
+  subagent_lane?: number;
+  trigger_lane?: number;
+  default_per_agent?: number;
+}
+
 export interface QueueStatusResponse {
   lanes?: QueueLaneStatus[];
   config?: {
     max_depth_per_agent?: number;
     max_depth_global?: number;
     task_ttl_secs?: number;
+    concurrency?: QueueConcurrencyConfig;
   };
 }
 

@@ -10141,11 +10141,18 @@
       "type": "object"
     },
     "QueueConcurrencyConfig": {
-      "description": "Per-lane concurrency limits for the command queue.\n\nConfigure in config.toml: ```toml [queue.concurrency] main_lane = 3 cron_lane = 2 subagent_lane = 3 ```",
+      "description": "Per-lane concurrency limits for the command queue.\n\nConfigure in config.toml: ```toml [queue.concurrency] main_lane = 3 cron_lane = 2 subagent_lane = 3 trigger_lane = 8 default_per_agent = 1 ```",
       "properties": {
         "cron_lane": {
           "default": 2,
           "description": "Cron lane concurrent limit (scheduled jobs).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "default_per_agent": {
+          "default": 1,
+          "description": "Default per-agent invocation cap when an agent's manifest does not set `max_concurrent_invocations`. `1` reproduces the legacy per-agent-mutex serialization that pre-existed this knob — change deliberately. `0` is rewritten to `1` by validation. Typed `usize` to match the sibling lane fields and to feed `Semaphore::new` without a cast.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -10160,6 +10167,13 @@
         "subagent_lane": {
           "default": 3,
           "description": "Subagent lane concurrent limit (child agents).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger_lane": {
+          "default": 8,
+          "description": "Trigger lane concurrent limit — global cap on event-trigger (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the same time, across all agents. Acquired BEFORE the per-agent semaphore so a single hot agent cannot starve the kernel. Default `8`. `0` is rewritten to `1` by validation.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -10178,8 +10192,10 @@
           ],
           "default": {
             "cron_lane": 2,
+            "default_per_agent": 1,
             "main_lane": 3,
-            "subagent_lane": 3
+            "subagent_lane": 3,
+            "trigger_lane": 8
           },
           "description": "Per-lane concurrency limits."
         },
@@ -14313,8 +14329,10 @@
       "default": {
         "concurrency": {
           "cron_lane": 2,
+          "default_per_agent": 1,
           "main_lane": 3,
-          "subagent_lane": 3
+          "subagent_lane": 3,
+          "trigger_lane": 8
         },
         "max_depth_global": 0,
         "max_depth_per_agent": 0,
