@@ -432,7 +432,7 @@ Retry-After: 60
 | POST | `/api/approvals/totp/setup` | 生成 TOTP 注册密钥 |
 | POST | `/api/approvals/totp/confirm` | 确认 TOTP 注册 |
 | GET | `/api/approvals/totp/status` | 查询 TOTP 注册状态 |
-| DELETE | `/api/approvals/totp` | 撤销 TOTP 注册 |
+| POST | `/api/approvals/totp/revoke` | 撤销 TOTP 注册 |
 | **绑定和命令** | | |
 | GET | `/api/bindings` | 列出 UI 绑定 |
 | POST | `/api/bindings` | 添加绑定 |
