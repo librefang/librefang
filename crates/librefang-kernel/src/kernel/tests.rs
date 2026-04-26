@@ -4332,3 +4332,99 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// approval_agent_display
+// ---------------------------------------------------------------------------
+
+fn boot_kernel_for_display_tests() -> LibreFangKernel {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // Leak the tempdir so the kernel keeps a valid home for the rest of the
+    // test — the kernel is shut down before the test returns, but we don't
+    // need to delete files between assertions.
+    std::mem::forget(dir);
+    LibreFangKernel::boot_with_config(config).expect("Kernel should boot")
+}
+
+fn register_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
+    let id = AgentId::new();
+    let entry = AgentEntry {
+        id,
+        name: name.to_string(),
+        manifest: test_manifest(name, "test agent", vec![]),
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: SessionId::new(),
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel.registry.register(entry).unwrap();
+    id
+}
+
+#[test]
+fn approval_display_registered_agent_returns_name_and_short_id() {
+    let kernel = boot_kernel_for_display_tests();
+    let id = register_test_agent(&kernel, "jarvis");
+    let id_str = id.to_string();
+
+    let rendered = kernel.approval_agent_display(&id_str);
+
+    let expected_short = &id_str[..8];
+    assert_eq!(rendered, format!("\"jarvis\" ({})", expected_short));
+
+    kernel.shutdown();
+}
+
+#[test]
+fn approval_display_unknown_uuid_falls_back_to_raw_quoted() {
+    let kernel = boot_kernel_for_display_tests();
+    let unknown = AgentId::new().to_string();
+
+    let rendered = kernel.approval_agent_display(&unknown);
+
+    assert_eq!(rendered, format!("\"{}\"", unknown));
+
+    kernel.shutdown();
+}
+
+#[test]
+fn approval_display_non_uuid_string_falls_back_verbatim() {
+    let kernel = boot_kernel_for_display_tests();
+
+    let rendered = kernel.approval_agent_display("not-a-uuid");
+
+    assert_eq!(rendered, "\"not-a-uuid\"");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn approval_display_escapes_quote_in_agent_name() {
+    let kernel = boot_kernel_for_display_tests();
+    let id = register_test_agent(&kernel, "jar\"vis");
+    let id_str = id.to_string();
+
+    let rendered = kernel.approval_agent_display(&id_str);
+
+    let expected_short = &id_str[..8];
+    assert_eq!(rendered, format!("\"jar\\\"vis\" ({})", expected_short));
+
+    kernel.shutdown();
+}

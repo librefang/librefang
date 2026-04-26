@@ -17141,11 +17141,23 @@ impl KernelHandle for LibreFangKernel {
 impl LibreFangKernel {
     /// Render an agent identifier for human-facing messages: `"name" (short-id)`
     /// when the agent is in the registry, otherwise the raw id verbatim.
+    ///
+    /// Do not use this for audit detail strings or any field that downstream
+    /// queries filter on — those need the canonical UUID so that
+    /// `/api/audit/query?agent=<uuid>` keeps working. This helper is for
+    /// operator-facing copy (push notifications, channel messages,
+    /// human-readable descriptions) only.
     fn approval_agent_display(&self, agent_id: &str) -> String {
         if let Ok(aid) = agent_id.parse::<AgentId>() {
             if let Some(entry) = self.registry.get(aid) {
                 let short = agent_id.get(..8).unwrap_or(agent_id);
-                return format!("\"{}\" ({})", entry.name, short);
+                // Names are user-configured free text. Escape embedded `"` so
+                // adapters that interpret the surrounding context (Telegram
+                // MarkdownV2, Discord, etc.) don't see a malformed message
+                // that fails to render — operators can't approve what they
+                // can't see.
+                let safe_name = entry.name.replace('"', "\\\"");
+                return format!("\"{}\" ({})", safe_name, short);
             }
         }
         format!("\"{}\"", agent_id)
