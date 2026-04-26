@@ -137,6 +137,7 @@ use crate::types;
         routes::get_mcp_catalog_entry,
         routes::mcp_health_handler,
         routes::reload_mcp_handler,
+        routes::list_mcp_taint_rules,
 
         // ── Extensions (dashboard-friendly aliases over MCP store) ──
         routes::list_extensions,
