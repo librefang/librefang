@@ -13594,6 +13594,13 @@
         "null"
       ]
     },
+    "allowed_mount_roots": {
+      "description": "Host directories under which `agent.toml: [workspaces].<name>.mount` declarations may resolve. Each declared mount is canonicalized at boot and must be a path prefix of one of these (also canonicalized) roots; otherwise it is rejected with a warning. Empty (default) denies all external mounts — the safe default. See issue #3230.\n\nExample: ```toml allowed_mount_roots = [ \"/Users/alice/Documents\", \"/data/shared\", ] ```",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "api_key": {
       "default": "",
       "description": "API authentication key. When set, all API endpoints (except /api/health) require a `Authorization: Bearer <key>` header. If empty, the API is unauthenticated (local development only).",
