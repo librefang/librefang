@@ -702,6 +702,27 @@ impl AuthManager {
             return guest_gate(tool_name);
         };
 
+        self.resolve_decision_for_user(user_id, tool_name, channel)
+    }
+
+    /// Evaluate the per-user RBAC gate for an already-resolved [`UserId`].
+    ///
+    /// Used by diagnostic surfaces (`/api/authz/check`) that already know
+    /// the canonical user — they skip the channel-keyed sender lookup
+    /// done in [`Self::resolve_user_tool_decision`] but otherwise share
+    /// the identical Layer A → Layer B walk so the answer can't drift
+    /// from the runtime gate path.
+    ///
+    /// Returns [`UserToolGate::Allow`] when `user_id` is unknown — same
+    /// as the inlined behaviour in `resolve_user_tool_decision`. Callers
+    /// that need to surface unknown users (e.g. as 404) must check
+    /// existence themselves before dispatching.
+    pub fn resolve_decision_for_user(
+        &self,
+        user_id: UserId,
+        tool_name: &str,
+        channel: Option<&str>,
+    ) -> UserToolGate {
         let groups = self.tool_groups();
         let Some(identity) = self.get_user(user_id) else {
             return UserToolGate::Allow;
