@@ -544,6 +544,14 @@ func (r *BudgetResource) UpdateAgentBudget(id string, data map[string]interface{
 	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data, nil)
 }
 
+func (r *BudgetResource) UserBudgetRanking(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/budget/users", nil, query)
+}
+
+func (r *BudgetResource) UserBudgetDetail(user_id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
+}
+
 func (r *BudgetResource) UsageStats() (interface{}, error) {
 	return r.client.request("GET", "/api/usage", nil, nil)
 }
@@ -1051,6 +1059,14 @@ func (r *SkillsResource) GetTool(name string) (interface{}, error) {
 // ── System Resource
 
 type SystemResource struct{ client *Client }
+
+func (r *SystemResource) AuditExport(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/audit/export", nil, query)
+}
+
+func (r *SystemResource) AuditQuery(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/audit/query", nil, query)
+}
 
 func (r *SystemResource) AuditRecent() (interface{}, error) {
 	return r.client.request("GET", "/api/audit/recent", nil, nil)

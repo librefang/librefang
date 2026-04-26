@@ -560,6 +560,14 @@ impl BudgetResource {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/budget/agents/{}", id), Some(data), &[]).await
     }
 
+    pub async fn user_budget_ranking(&self, limit: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/budget/users".to_string(), None, &[("limit", limit)]).await
+    }
+
+    pub async fn user_budget_detail(&self, user_id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/budget/users/{}", user_id), None, &[]).await
+    }
+
     pub async fn usage_stats(&self) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/usage".to_string(), None, &[]).await
     }
@@ -1186,6 +1194,14 @@ pub struct SystemResource {
 impl SystemResource {
     fn new(base_url: String, client: Client) -> Self {
         Self { base_url, client }
+    }
+
+    pub async fn audit_export(&self, format: Option<&str>, user: Option<&str>, action: Option<&str>, agent: Option<&str>, channel: Option<&str>, from: Option<&str>, to: Option<&str>, limit: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/audit/export".to_string(), None, &[("format", format), ("user", user), ("action", action), ("agent", agent), ("channel", channel), ("from", from), ("to", to), ("limit", limit)]).await
+    }
+
+    pub async fn audit_query(&self, user: Option<&str>, action: Option<&str>, agent: Option<&str>, channel: Option<&str>, from: Option<&str>, to: Option<&str>, limit: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/audit/query".to_string(), None, &[("user", user), ("action", action), ("agent", agent), ("channel", channel), ("from", from), ("to", to), ("limit", limit)]).await
     }
 
     pub async fn audit_recent(&self) -> Result<Value> {

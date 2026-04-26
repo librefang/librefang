@@ -215,6 +215,8 @@ use crate::types;
         routes::agent_budget_status,
         routes::agent_budget_ranking,
         routes::update_agent_budget,
+        routes::user_budget_ranking,
+        routes::user_budget_detail,
         routes::usage_stats,
         routes::usage_summary,
         routes::usage_by_model,
@@ -257,6 +259,8 @@ use crate::types;
         // ── Audit / Logs ──
         routes::audit_recent,
         routes::audit_verify,
+        routes::audit_query,
+        routes::audit_export,
         routes::logs_stream,
 
         // ── Approvals ──

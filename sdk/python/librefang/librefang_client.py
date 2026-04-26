@@ -359,6 +359,12 @@ class _BudgetResource(_Resource):
     def update_agent_budget(self, id: str, **data):
         return self._c._request("PUT", f"/api/budget/agents/{id}", data)
 
+    def user_budget_ranking(self, limit: Any = None):
+        return self._c._request("GET", "/api/budget/users", None, query={"limit": limit})
+
+    def user_budget_detail(self, user_id: str):
+        return self._c._request("GET", f"/api/budget/users/{user_id}")
+
     def usage_stats(self):
         return self._c._request("GET", "/api/usage")
 
@@ -763,6 +769,12 @@ class _SkillsResource(_Resource):
 # ── System Resource ────────────────────────────────────────────
 
 class _SystemResource(_Resource):
+
+    def audit_export(self, format: Any = None, user: Any = None, action: Any = None, agent: Any = None, channel: Any = None, from_: Any = None, to: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/audit/export", None, query={"format": format, "user": user, "action": action, "agent": agent, "channel": channel, "from": from_, "to": to, "limit": limit})
+
+    def audit_query(self, user: Any = None, action: Any = None, agent: Any = None, channel: Any = None, from_: Any = None, to: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/audit/query", None, query={"user": user, "action": action, "agent": agent, "channel": channel, "from": from_, "to": to, "limit": limit})
 
     def audit_recent(self):
         return self._c._request("GET", "/api/audit/recent")

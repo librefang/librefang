@@ -23,12 +23,20 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/budget/agents/{id}",
             axum::routing::get(agent_budget_status).put(update_agent_budget),
         )
+        // RBAC M5: per-user budget endpoints (admin-only, gated in-handler).
+        .route("/budget/users", axum::routing::get(user_budget_ranking))
+        .route(
+            "/budget/users/{user_id}",
+            axum::routing::get(user_budget_detail),
+        )
 }
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_types::agent::AgentId;
+use librefang_kernel::auth::UserRole;
+use librefang_types::agent::{AgentId, UserId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -433,4 +441,223 @@ pub async fn update_agent_budget(
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// RBAC M5 — per-user budget endpoints
+// ---------------------------------------------------------------------------
+
+/// Reject the request unless the caller is at least `Admin`. Loopback /
+/// unauthenticated callers (no `AuthenticatedApiUser` extension) are
+/// trusted as Owner — same trust level the dirty middleware already
+/// applies to `/api/config/set`.
+fn require_admin_for_user_budget(
+    state: &AppState,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+) -> Option<Response> {
+    let role = api_user.map(|u| u.role).unwrap_or(UserRole::Owner);
+    if role < UserRole::Admin {
+        let user_id = api_user.map(|u| u.user_id);
+        state.kernel.audit().record_with_context(
+            "system",
+            librefang_runtime::audit::AuditAction::PermissionDenied,
+            format!("user budget endpoint denied for role {role}"),
+            "denied",
+            user_id,
+            Some("api".to_string()),
+        );
+        return Some(
+            ApiErrorResponse::forbidden("Admin role required for user budget access")
+                .into_response(),
+        );
+    }
+    None
+}
+
+/// 5-second freshness window for the per-user spend cache.
+///
+/// Per design decision #7: per-user spend is cached so dashboard polling
+/// doesn't pummel SQLite, but stays fresh enough to spot a mid-burn alert
+/// breach. The cache lives on `AppState` via the existing `DashMap`
+/// pattern used by `clawhub_cache` etc., except for budget queries we
+/// reach into the kernel each time — SQLite query time is in the low
+/// millisecond range for indexed reads on a single user's rows. The
+/// 5-second contract is documented; if the dashboard hot-reloads we can
+/// lift this into an explicit cache later.
+const _USER_SPEND_FRESHNESS_SECS: u64 = 5;
+
+/// GET /api/budget/users — admin-only per-user spend ranking.
+///
+/// Query params:
+///   - `limit` (default 25, hard cap 1000) — max rows returned.
+///
+/// Response: `{ "users": [...], "total": N }`. Each row carries the
+/// rolled-up hourly / daily / monthly cost plus the per-user budget
+/// limits (when configured) so the dashboard can render % bars without
+/// a follow-up call.
+#[utoipa::path(
+    get,
+    path = "/api/budget/users",
+    tag = "budget",
+    params(("limit" = Option<u32>, Query, description = "Top N users (default 25, cap 1000)")),
+    responses((status = 200, description = "Per-user cost ranking", body = serde_json::Value))
+)]
+pub async fn user_budget_ranking(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(25)
+        .clamp(1, 1000);
+
+    let usage_store = state.kernel.memory_substrate().usage();
+    let ranking = match usage_store.query_user_ranking(Some(limit)) {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to query user spend: {e}"))
+                .into_response();
+        }
+    };
+
+    // Resolve display names + per-user budgets (when configured) so the
+    // dashboard does not need a second round-trip.
+    let cfg = state.kernel.config_snapshot();
+    let user_budgets: HashMap<String, librefang_types::config::UserBudgetConfig> = cfg
+        .users
+        .iter()
+        .filter_map(|u| {
+            u.budget
+                .as_ref()
+                .map(|b| (UserId::from_name(&u.name).to_string(), b.clone()))
+        })
+        .collect();
+    let user_names: HashMap<String, String> = cfg
+        .users
+        .iter()
+        .map(|u| (UserId::from_name(&u.name).to_string(), u.name.clone()))
+        .collect();
+
+    let users: Vec<serde_json::Value> = ranking
+        .iter()
+        .map(|row| {
+            let budget = user_budgets.get(&row.user_id);
+            serde_json::json!({
+                "user_id": row.user_id,
+                "name": user_names.get(&row.user_id),
+                "hourly_cost_usd": row.hourly_cost_usd,
+                "daily_cost_usd": row.daily_cost_usd,
+                "monthly_cost_usd": row.monthly_cost_usd,
+                "call_count": row.call_count,
+                "limits": budget.map(|b| serde_json::json!({
+                    "max_hourly_usd": b.max_hourly_usd,
+                    "max_daily_usd": b.max_daily_usd,
+                    "max_monthly_usd": b.max_monthly_usd,
+                    "alert_threshold": b.alert_threshold,
+                })),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "users": users,
+        "total": users.len(),
+        "limit": limit,
+    }))
+    .into_response()
+}
+
+/// GET /api/budget/users/{user_id} — admin-only single-user budget detail.
+///
+/// `user_id` accepts either a UUID (the canonical `UserId` form) or the
+/// raw configured name (re-derived via `UserId::from_name`) so operators
+/// can paste a name from `config.toml` directly into the URL.
+#[utoipa::path(
+    get,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses((status = 200, description = "Single user budget detail", body = serde_json::Value))
+)]
+pub async fn user_budget_detail(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    // Resolve to a canonical UserId. Try parse-as-uuid first; if that
+    // fails fall back to from_name, which always succeeds.
+    let user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    let cfg = state.kernel.config_snapshot();
+    let user_cfg = cfg
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == user_id);
+    let display_name = user_cfg.map(|u| u.name.clone());
+    let role = user_cfg.map(|u| u.role.clone());
+    let budget = user_cfg.and_then(|u| u.budget.clone());
+
+    let usage_store = state.kernel.memory_substrate().usage();
+    let hourly = usage_store.query_user_hourly(user_id).unwrap_or(0.0);
+    let daily = usage_store.query_user_daily(user_id).unwrap_or(0.0);
+    let monthly = usage_store.query_user_monthly(user_id).unwrap_or(0.0);
+
+    // Compute alert breach against the user's configured budget. When no
+    // limit is set the percentage is 0 and `alert_breach` is false — the
+    // dashboard can still render the spend numbers without budget bars.
+    let pct = |spend: f64, limit: f64| -> f64 {
+        if limit > 0.0 {
+            spend / limit
+        } else {
+            0.0
+        }
+    };
+    let alert_threshold = budget.as_ref().map(|b| b.alert_threshold).unwrap_or(0.8);
+    let limits = budget.as_ref();
+    let hourly_pct = limits.map(|b| pct(hourly, b.max_hourly_usd)).unwrap_or(0.0);
+    let daily_pct = limits.map(|b| pct(daily, b.max_daily_usd)).unwrap_or(0.0);
+    let monthly_pct = limits
+        .map(|b| pct(monthly, b.max_monthly_usd))
+        .unwrap_or(0.0);
+    let alert_breach = hourly_pct >= alert_threshold
+        || daily_pct >= alert_threshold
+        || monthly_pct >= alert_threshold;
+
+    Json(serde_json::json!({
+        "user_id": user_id.to_string(),
+        "name": display_name,
+        "role": role,
+        "hourly": {
+            "spend": hourly,
+            "limit": limits.map(|b| b.max_hourly_usd).unwrap_or(0.0),
+            "pct": hourly_pct,
+        },
+        "daily": {
+            "spend": daily,
+            "limit": limits.map(|b| b.max_daily_usd).unwrap_or(0.0),
+            "pct": daily_pct,
+        },
+        "monthly": {
+            "spend": monthly,
+            "limit": limits.map(|b| b.max_monthly_usd).unwrap_or(0.0),
+            "pct": monthly_pct,
+        },
+        "alert_threshold": alert_threshold,
+        "alert_breach": alert_breach,
+    }))
+    .into_response()
 }

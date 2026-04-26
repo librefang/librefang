@@ -420,6 +420,14 @@ class BudgetResource {
     return this._c._request("PUT", `/api/budget/agents/${id}`, data, undefined);
   }
 
+  async userBudgetRanking(query) {
+    return this._c._request("GET", "/api/budget/users", undefined, query);
+  }
+
+  async userBudgetDetail(user_id) {
+    return this._c._request("GET", `/api/budget/users/${user_id}`);
+  }
+
   async usageStats() {
     return this._c._request("GET", "/api/usage");
   }
@@ -951,6 +959,14 @@ class SkillsResource {
 
 class SystemResource {
   constructor(client) { this._c = client; }
+
+  async auditExport(query) {
+    return this._c._request("GET", "/api/audit/export", undefined, query);
+  }
+
+  async auditQuery(query) {
+    return this._c._request("GET", "/api/audit/query", undefined, query);
+  }
 
   async auditRecent() {
     return this._c._request("GET", "/api/audit/recent");
