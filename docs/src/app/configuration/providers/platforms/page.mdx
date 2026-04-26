@@ -6,14 +6,18 @@ This page covers providers that route through a platform-specific gateway, enter
 
 - Replicate
 - NVIDIA NIM
-- Voyage AI
-- Anyscale
 - DeepInfra
 - Azure OpenAI
-- Amazon Bedrock
 - Qwen (DashScope)
 - MiniMax
+- Qianfan (Baidu)
+- VolcEngine (Doubao)
+- Zhipu (GLM)
+- Zhipu Coding (CodeGeex)
+- Z.ai
 - Vertex AI
+
+> **Note on Bedrock:** AWS Bedrock is documented in [Hosted APIs](/configuration/providers/hosted#aws-bedrock) since the current driver authenticates via a long-lived bearer token (`AWS_BEARER_TOKEN_BEDROCK`) rather than per-request SigV4 signing. The older SigV4 entry that used to live on this page has been removed.
 
 ---
 
@@ -60,48 +64,6 @@ This page covers providers that route through a platform-specific gateway, enter
 
 ---
 
-## Voyage AI
-
-| | |
-|---|---|
-| **Display Name** | Voyage AI |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `VOYAGE_API_KEY` |
-| **Base URL** | `https://api.voyageai.com/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | Embedding and reranking models |
-
-**Notes:** Voyage AI specializes in embedding and reranking models used for semantic search and RAG pipelines.
-
-**Setup:**
-1. Sign up at [voyageai.com](https://www.voyageai.com)
-2. Create an API key
-3. `export VOYAGE_API_KEY="pa-..."`
-
----
-
-## Anyscale
-
-| | |
-|---|---|
-| **Display Name** | Anyscale |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `ANYSCALE_API_KEY` |
-| **Base URL** | `https://api.endpoints.anyscale.com/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | Open-source models (Llama, Mistral, etc.) |
-
-**Setup:**
-1. Sign up at [anyscale.com](https://www.anyscale.com)
-2. Create an API key
-3. `export ANYSCALE_API_KEY="esecret_..."`
-
----
-
 ## DeepInfra
 
 | | |
@@ -142,30 +104,6 @@ This page covers providers that route through a platform-specific gateway, enter
    ```bash
    export AZURE_OPENAI_API_KEY="..."
    export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
-   ```
-
----
-
-## Amazon Bedrock
-
-| | |
-|---|---|
-| **Display Name** | Amazon Bedrock |
-| **Driver** | OpenAI-compatible (via Bedrock Converse API) |
-| **Env Var** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
-| **Base URL** | AWS regional endpoint |
-| **Key Required** | Yes (AWS credentials) |
-| **Free Tier** | No |
-| **Auth** | AWS Signature v4 |
-| **Models** | Claude, Llama, Titan, Mistral via Bedrock |
-
-**Setup:**
-1. Enable model access in the [AWS Bedrock console](https://console.aws.amazon.com/bedrock)
-2. Configure AWS credentials:
-   ```bash
-   export AWS_ACCESS_KEY_ID="AKIA..."
-   export AWS_SECRET_ACCESS_KEY="..."
-   export AWS_REGION="us-east-1"
    ```
 
 ---
@@ -249,6 +187,155 @@ This page covers providers that route through a platform-specific gateway, enter
 These are accessed via `/api/media/*` endpoints or through the `image_generate`, `video_generate`, `music_generate`, `text_to_speech` tools.
 
 **Notes:** MiniMax international (`minimax.io`) and China (`minimaxi.com`) use separate API keys. When selecting the `china` region, LibreFang automatically reads from `MINIMAX_CN_API_KEY` instead of `MINIMAX_API_KEY`.
+
+---
+
+## Qianfan (Baidu)
+
+| | |
+|---|---|
+| **Display Name** | Qianfan |
+| **Provider ID** | `qianfan` (alias: `baidu`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `QIANFAN_API_KEY` |
+| **Base URL** | `https://qianfan.baidubce.com/v2` |
+| **Key Required** | Yes |
+| **Free Tier** | Limited credits on signup |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at the [Baidu Qianfan console](https://console.bce.baidu.com/qianfan)
+2. Create an API key under the IAM panel
+3. `export QIANFAN_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "qianfan"
+model = "ernie-4.0-8k"
+```
+
+**Notes:** Qianfan is Baidu's LLM platform; the `ernie-4.0`, `ernie-4.0-turbo`, and `ernie-speed` families are exposed via the OpenAI-compatible v2 endpoint. Tools and function calling are supported on `ernie-4.0+`.
+
+---
+
+## VolcEngine (Doubao)
+
+| | |
+|---|---|
+| **Display Name** | VolcEngine / Doubao |
+| **Provider ID** | `volcengine` (alias: `doubao`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `VOLCENGINE_API_KEY` |
+| **Base URL** | `https://ark.cn-beijing.volces.com/api/v3` |
+| **Key Required** | Yes |
+| **Free Tier** | Free credits on signup |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at the [VolcEngine console](https://console.volcengine.com)
+2. Create an inference endpoint in **Ark > Endpoints** and note its model ID (`ep-...`)
+3. Generate an API key under **Ark > API Keys**
+4. `export VOLCENGINE_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "volcengine"
+model = "ep-20240101120000-abcde"   # endpoint ID, not the model name
+```
+
+**Notes:** Doubao is ByteDance's LLM product, exposed via VolcEngine's Ark inference platform. Unlike most providers, the `model` field must be the **endpoint ID** (`ep-...`), not the model family name. Vision and tools are supported on Doubao 1.5 / 1.6 endpoints.
+
+---
+
+## Zhipu (GLM)
+
+| | |
+|---|---|
+| **Display Name** | Zhipu GLM |
+| **Provider ID** | `zhipu` (alias: `glm`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ZHIPU_API_KEY` |
+| **Base URL** | `https://open.bigmodel.cn/api/paas/v4` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (per-month free quota) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at the [Zhipu open platform](https://open.bigmodel.cn)
+2. Generate an API key under **Account > API Keys**
+3. `export ZHIPU_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "zhipu"
+model = "glm-4-plus"
+```
+
+**Notes:** Zhipu develops the GLM (General Language Model) family. Tools, vision, and embeddings supported. The same `ZHIPU_API_KEY` is reused for `zhipu-coding` and `z.ai` (below) — register once, use across endpoints.
+
+---
+
+## Zhipu Coding (CodeGeex)
+
+| | |
+|---|---|
+| **Display Name** | CodeGeex |
+| **Provider ID** | `zhipu-coding` (alias: `codegeex`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ZHIPU_API_KEY` (shares key with Zhipu) |
+| **Base URL** | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (counted against the same Zhipu quota) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Use the same Zhipu API key from above
+2. `export ZHIPU_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "zhipu-coding"
+model = "codegeex-4"
+```
+
+**Notes:** Coding-specialized endpoint serving CodeGeex models. Same auth as Zhipu/GLM but different base URL — use this provider when you want fill-in-the-middle / repo-aware coding completions instead of generic chat.
+
+---
+
+## Z.ai
+
+| | |
+|---|---|
+| **Display Name** | Z.ai |
+| **Provider ID** | `z.ai` |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ZHIPU_API_KEY` (shares key with Zhipu) |
+| **Base URL** | `https://api.z.ai/api/paas/v4` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (counted against the same Zhipu quota) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Use the same Zhipu API key
+2. `export ZHIPU_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "z.ai"
+model = "glm-4-plus"
+```
+
+**Notes:** Branded Z.ai endpoint — same Zhipu backend, different routing for international traffic. A coding variant is available at `https://api.z.ai/api/coding/paas/v4` if you set the base URL explicitly via `[provider_urls]`.
 
 ---
 
