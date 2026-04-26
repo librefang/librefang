@@ -48,6 +48,7 @@ import { useAuditQuery } from "../lib/queries/audit";
 import { ApiError } from "../lib/http/errors";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
+import type { AuditQueryEntry } from "../api";
 
 // `<input type="datetime-local">` produces "YYYY-MM-DDTHH:MM" with no
 // timezone. The server parses `from` / `to` as RFC-3339 (offset
@@ -196,6 +197,65 @@ function actionChipClass(outcome: string): string {
   return "bg-brand/10 text-brand border-brand/20";
 }
 
+// 4-pixel left rail tinted by outcome — gives the eye an O(1) scan
+// signal across a long list of mostly-same rows.
+function outcomeRailClass(outcome: string): string {
+  if (outcome === "denied") return "border-l-4 border-l-error";
+  if (outcome === "error") return "border-l-4 border-l-warning";
+  if (outcome === "ok") return "border-l-4 border-l-success";
+  return "border-l-4 border-l-text-dim/20";
+}
+
+// UserId / agent_id are full UUIDs — `f47ac10b-58cc-4372-a567-0e02b2c3d479`
+// is 36 chars and dominates the secondary metadata line. Render as
+// first 8 + last 4, which keeps the entropy operators actually use to
+// disambiguate while halving the visual weight.
+function truncateUuid(s: string): string {
+  if (s.length <= 16) return s;
+  return `${s.slice(0, 8)}…${s.slice(-4)}`;
+}
+
+// Bucket label for grouping rows under a date header. "Today" /
+// "Yesterday" use the local clock; older days use the locale's date
+// short format. Pure function of the row's RFC-3339 timestamp; falls
+// back to "Unknown" if parsing fails (kept as its own bucket so the
+// operator notices a corrupt timestamp instead of silent absorption
+// into Today).
+function dateBucketLabel(timestamp: string): string {
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfYesterday = new Date(startOfToday.getTime() - 86_400_000);
+  if (d >= startOfToday) return "Today";
+  if (d >= startOfYesterday) return "Yesterday";
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+// Group rows into [bucket, entries[]] pairs while preserving the
+// server-side ordering (newest first). Stable: a contiguous run of
+// rows for the same bucket becomes one group; we never reorder across
+// buckets, so the visual reads top-down chronologically.
+function groupByDate(
+  entries: AuditQueryEntry[],
+): { label: string; rows: AuditQueryEntry[] }[] {
+  const groups: { label: string; rows: AuditQueryEntry[] }[] = [];
+  for (const e of entries) {
+    const label = dateBucketLabel(e.timestamp);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) {
+      last.rows.push(e);
+    } else {
+      groups.push({ label, rows: [e] });
+    }
+  }
+  return groups;
+}
+
 // Active-filter chips for the collapsed-but-active state: shows what the
 // operator is currently filtering by without forcing the form open. Each
 // chip strips its own field on click.
@@ -241,6 +301,18 @@ export function AuditPage() {
     const reset: AuditQueryFilters = { limit: 200 };
     setDraft(reset);
     setActive(reset);
+  };
+
+  // Click-to-filter from inside a row. The chip handlers feed this so
+  // an operator chasing a thread (`who's the user behind this denial?`,
+  // `what else did this agent touch?`) can refine without retyping.
+  // Mirrors the active-filter chip semantics — the drilled-in value
+  // becomes both the active filter (so the next refetch applies it)
+  // and the draft (so the form, when expanded, reflects reality).
+  const drillFilter = (key: keyof AuditQueryFilters, value: string) => {
+    const next = { ...active, [key]: value };
+    setActive(next);
+    setDraft(next);
   };
 
   const onExport = async () => {
@@ -537,72 +609,107 @@ export function AuditPage() {
           }
         />
       ) : query.data ? (
-        <div className="space-y-2 stagger-children">
-          {query.data.entries.map((e) => {
-            const variant = outcomeVariant(e.outcome);
-            const fullTimestamp = e.timestamp;
-            const relTime = formatRelativeTime(e.timestamp);
-            return (
-              <div
-                key={`${e.seq}-${e.hash}`}
-                className="flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
-              >
-                {/* Action chip */}
-                <div
-                  className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${actionChipClass(e.outcome)}`}
-                  title={e.action}
-                >
-                  {actionIcon(e.action)}
-                  <span className="hidden sm:inline">{e.action}</span>
-                </div>
-
-                {/* Body */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="sm:hidden text-xs font-bold">{e.action}</span>
-                    <Badge variant={variant} dot>
-                      {e.outcome}
-                    </Badge>
-                    {e.user_id && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-text-dim">
-                        <Users className="h-3 w-3" />
-                        <span className="font-mono">{e.user_id}</span>
-                      </span>
-                    )}
-                    {e.channel && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-text-dim">
-                        <Plug className="h-3 w-3" />
-                        {e.channel}
-                      </span>
-                    )}
-                    {e.agent_id && e.agent_id !== "system" && (
-                      <span className="inline-flex items-center gap-1 text-[10px] text-text-dim">
-                        <Activity className="h-3 w-3" />
-                        <span className="font-mono">{e.agent_id}</span>
-                      </span>
-                    )}
-                    <span className="inline-flex items-center gap-1 text-[10px] text-text-dim/70 font-mono">
-                      #{e.seq}
-                    </span>
-                  </div>
-                  {e.detail && (
-                    <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
-                      {e.detail}
-                    </p>
-                  )}
-                </div>
-
-                {/* Timestamp */}
-                <div
-                  className="shrink-0 flex items-center gap-1 text-[10px] text-text-dim font-mono"
-                  title={fullTimestamp}
-                >
-                  <Clock className="h-3 w-3" />
-                  {relTime}
-                </div>
+        <div className="flex flex-col gap-4">
+          {groupByDate(query.data.entries).map((group) => (
+            <section key={group.label} className="flex flex-col gap-2">
+              <div className="flex items-center gap-3 px-1">
+                <h2 className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                  {group.label}
+                </h2>
+                <div className="flex-1 h-px bg-border-subtle/60" />
+                <span className="text-[10px] font-bold text-text-dim/70">
+                  {group.rows.length}
+                </span>
               </div>
-            );
-          })}
+              <div className="space-y-2 stagger-children">
+                {group.rows.map((e) => {
+                  const variant = outcomeVariant(e.outcome);
+                  const fullTimestamp = e.timestamp;
+                  const relTime = formatRelativeTime(e.timestamp);
+                  return (
+                    <div
+                      key={`${e.seq}-${e.hash}`}
+                      className={`flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm ${outcomeRailClass(e.outcome)}`}
+                    >
+                      {/* Action chip — click filters by this action */}
+                      <button
+                        type="button"
+                        onClick={() => drillFilter("action", e.action)}
+                        className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider hover:opacity-80 transition-opacity ${actionChipClass(e.outcome)}`}
+                        title={t("audit.filter_by_action", { action: e.action, defaultValue: `Filter by ${e.action}` })}
+                      >
+                        {actionIcon(e.action)}
+                        <span className="hidden sm:inline">{e.action}</span>
+                      </button>
+
+                      {/* Body */}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="sm:hidden text-xs font-bold">{e.action}</span>
+                          <Badge variant={variant} dot>
+                            {e.outcome}
+                          </Badge>
+                          {e.user_id && (
+                            <button
+                              type="button"
+                              onClick={() => drillFilter("user", e.user_id!)}
+                              className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
+                              title={t("audit.filter_by_user", { defaultValue: "Filter by this user" })}
+                            >
+                              <Users className="h-3 w-3" />
+                              <span className="font-mono">{truncateUuid(e.user_id)}</span>
+                            </button>
+                          )}
+                          {e.channel && (
+                            <button
+                              type="button"
+                              onClick={() => drillFilter("channel", e.channel!)}
+                              className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
+                              title={t("audit.filter_by_channel", { defaultValue: "Filter by this channel" })}
+                            >
+                              <Plug className="h-3 w-3" />
+                              {e.channel}
+                            </button>
+                          )}
+                          {e.agent_id && e.agent_id !== "system" && (
+                            <button
+                              type="button"
+                              onClick={() => drillFilter("agent", e.agent_id)}
+                              className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
+                              title={t("audit.filter_by_agent", { defaultValue: "Filter by this agent" })}
+                            >
+                              <Activity className="h-3 w-3" />
+                              <span className="font-mono">{truncateUuid(e.agent_id)}</span>
+                            </button>
+                          )}
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] text-text-dim/70 font-mono"
+                            title={t("audit.hash_tooltip", { hash: e.hash, defaultValue: `chain hash ${e.hash}` })}
+                          >
+                            #{e.seq}
+                          </span>
+                        </div>
+                        {e.detail && (
+                          <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
+                            {e.detail}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Timestamp */}
+                      <div
+                        className="shrink-0 flex items-center gap-1 text-[10px] text-text-dim font-mono"
+                        title={fullTimestamp}
+                      >
+                        <Clock className="h-3 w-3" />
+                        {relTime}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
         </div>
       ) : null}
     </div>
