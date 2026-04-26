@@ -2589,7 +2589,8 @@
     "taint_remove_path": "Remove path exemption",
     "taint_no_paths": "No path exemptions. The full rule set applies to every argument.",
     "taint_default_skip_hint": "default = skip — argument paths below are ignored because scanning is bypassed for this tool.",
-    "taint_rule_sets_placeholder": "comma-separated names from [[taint_rules]]"
+    "taint_rule_sets_placeholder": "comma-separated names from [[taint_rules]]",
+    "taint_rule_sets_overlap_hint": "When sets overlap on the same rule, the most permissive action wins (log > warn > block) — an audit-only set will silently neutralise a block set on the shared rule."
   },
   "toml_viewer": {
     "tab_toml": "TOML",

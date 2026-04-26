@@ -49,9 +49,18 @@ type DraftTools = Record<string, McpTaintToolPolicy>;
  * Issue #3050: granular taint-policy tree editor.
  *
  * Renders a server → tool → path tree editable in place. Saves through the
- * existing PUT `/api/mcp/servers/{id}` endpoint via `useUpdateMcpTaintPolicy`,
- * which invalidates the matching query keys so the underlying card refreshes
- * without a full config reload.
+ * dedicated PATCH `/api/mcp/servers/{id}/taint` endpoint via
+ * `useUpdateMcpTaintPolicy`, which invalidates the matching query keys so
+ * the underlying card refreshes without a full config reload. The PATCH
+ * endpoint is preferred over the generic PUT so unrelated `McpServerConfig`
+ * fields aren't revalidated on every taint edit.
+ *
+ * NOTE on rule_set overlap: when a tool references multiple `[[taint_rules]]`
+ * sets that all cover the same rule, the *most permissive* action wins
+ * (`log` > `warn` > `block`). Adding an `audit_only` rule set with
+ * `action = "log"` will silently neutralise any `block` set that overlaps
+ * on the same rule — this is by design, but counter-intuitive. See the hint
+ * shown next to the `rule_sets` field.
  */
 export function TaintPolicyEditor({
   server,
@@ -333,25 +342,35 @@ function ToolPolicyRow({
       </div>
 
       {/* Rule sets reference */}
-      <div className="flex items-center gap-2 text-xs">
-        <span className="text-text-dim font-bold w-20">rule_sets</span>
-        <Input
-          value={ruleSetsText}
-          onChange={(e) => setRuleSetsText(e.target.value)}
-          onBlur={() =>
-            onChangeRuleSets(
-              ruleSetsText
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            )
-          }
-          placeholder={t(
-            "mcp.taint_rule_sets_placeholder",
-            "comma-separated names from [[taint_rules]]",
-          )}
-          className="text-xs font-mono"
-        />
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-text-dim font-bold w-20">rule_sets</span>
+          <Input
+            value={ruleSetsText}
+            onChange={(e) => setRuleSetsText(e.target.value)}
+            onBlur={() =>
+              onChangeRuleSets(
+                ruleSetsText
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              )
+            }
+            placeholder={t(
+              "mcp.taint_rule_sets_placeholder",
+              "comma-separated names from [[taint_rules]]",
+            )}
+            className="text-xs font-mono"
+          />
+        </div>
+        {ruleSetsText.trim().length > 0 && (
+          <p className="text-[11px] italic text-text-dim pl-22">
+            {t(
+              "mcp.taint_rule_sets_overlap_hint",
+              "When sets overlap on the same rule, the most permissive action wins (log > warn > block) — an audit-only set will silently neutralise a block set on the shared rule.",
+            )}
+          </p>
+        )}
       </div>
 
       {/* Paths */}

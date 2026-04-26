@@ -3787,6 +3787,16 @@ pub struct McpTaintPolicy {
 
 /// Severity action for a [`NamedTaintRuleSet`] when one of its rules fires
 /// during MCP argument scanning.
+///
+/// **Overlap resolution: most permissive wins.** When a tool's `rule_sets`
+/// list references multiple sets that all cover the same `TaintRuleId`,
+/// the scanner applies the *most permissive* action — `Log` > `Warn` >
+/// `Block`. This is intentional (it lets a narrow `audit_only` set carve
+/// out exceptions to a broad `Block` set without rewriting the broad set),
+/// but it means **adding an audit-only set with `action = log` will
+/// silently neutralise any `block` set that overlaps on the same rule**.
+/// The dashboard surfaces a hint next to the `rule_sets` field; operators
+/// authoring config by hand should keep this in mind.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
 )]

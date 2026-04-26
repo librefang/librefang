@@ -2555,7 +2555,8 @@
     "taint_remove_path": "移除路径豁免",
     "taint_no_paths": "无路径豁免，完整规则集合将作用于所有参数。",
     "taint_default_skip_hint": "default = skip — 该工具已绕过扫描，下方路径配置将被忽略。",
-    "taint_rule_sets_placeholder": "[[taint_rules]] 中定义的名称，逗号分隔"
+    "taint_rule_sets_placeholder": "[[taint_rules]] 中定义的名称，逗号分隔",
+    "taint_rule_sets_overlap_hint": "多个集合覆盖同一规则时，最宽松的动作生效（log > warn > block）——仅审计的集合会静默使同规则上的 block 失效。"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
