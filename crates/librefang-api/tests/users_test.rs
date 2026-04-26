@@ -295,3 +295,88 @@ async fn users_import_commit_persists_rows() {
     assert!(names.contains(&"Gina"));
     assert!(names.contains(&"Hank"));
 }
+
+/// PR #3209 review item — the wire `api_key_hash` must be a valid
+/// Argon2id PHC string. Without this check an Owner could paste an
+/// arbitrary value (constant, exfiltrated hash, empty-after-trim) into
+/// `api_key_hash` and silently grant whoever knows that hash's preimage
+/// a working API key.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_create_rejects_invalid_api_key_hash() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({
+            "name": "Mallory",
+            "role": "user",
+            "api_key_hash": "not-a-real-hash"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("Argon2"),
+        "error must mention Argon2 PHC requirement: {body:?}"
+    );
+
+    // A genuine Argon2id hash IS accepted.
+    let real_hash = librefang_api::password_hash::hash_password("supersecret").expect("hash");
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({
+            "name": "Mallory",
+            "role": "user",
+            "api_key_hash": real_hash,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+/// PR #3209 review item — `persist_users` MUST refuse to overwrite a
+/// corrupt `config.toml` rather than silently replacing it with a doc
+/// containing only `[[users]]` (which would erase the operator's
+/// agents / providers / taint rules etc.).
+#[tokio::test(flavor = "multi_thread")]
+async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
+    let h = boot().await;
+
+    // Corrupt the on-disk config file — kernel still has the previous
+    // good copy in memory, but the next `persist_users` call has to
+    // round-trip through the file.
+    let config_path = h._tmp.path().join("config.toml");
+    std::fs::write(&config_path, "this is not [[ valid TOML\nbroken = =\n")
+        .expect("seed corrupt config");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({
+            "name": "Postcorrupt",
+            "role": "user",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "expected 500 on corrupt config, got: {body:?}"
+    );
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("config.toml"),
+        "error should mention config.toml: {body:?}"
+    );
+
+    // The corrupt file must still be on disk verbatim — we have NOT
+    // silently replaced it with a stub document.
+    let on_disk = std::fs::read_to_string(&config_path).expect("read");
+    assert!(
+        on_disk.contains("this is not [[ valid TOML"),
+        "config.toml was overwritten despite parse failure: {on_disk}"
+    );
+}

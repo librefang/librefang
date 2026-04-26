@@ -4,12 +4,15 @@
 //! plus a bulk-import endpoint used by the dashboard CSV-import wizard.
 //!
 //! Auth: NOT in the public allowlist — every request goes through the
-//! authenticated middleware path. Loopback / configured api_key / dashboard
-//! session all satisfy that. We deliberately do NOT layer a second
-//! `UserRole`-based check here: the M3 per-user-policy slice (#3205) will
-//! introduce dashboard-session-aware role propagation; until then the
-//! existing api_key gate is the single source of truth and the closed-by-
-//! default middleware is what protects this surface.
+//! authenticated middleware path. Mutating calls (`POST` / `PUT` /
+//! `DELETE` under `/api/users*`) are additionally gated to `Owner` via
+//! `middleware::is_owner_only_write` because they map to
+//! `Action::ManageUsers` in the kernel — without that gate an Admin
+//! per-user API key could `POST /api/users` to create a `role: "owner"`
+//! user with a chosen `api_key_hash` and self-promote. `GET` stays
+//! Admin-or-above so the permission simulator's user list keeps working.
+//! Static api_key / dashboard session callers bypass the per-user role
+//! check by design (they are owner-equivalent shared secrets).
 //!
 //! Persistence model: we read the live `KernelConfig`, mutate the `users`
 //! vector, then rewrite the `[[users]]` array-of-tables in `config.toml`
@@ -144,6 +147,36 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject anything that isn't a parseable Argon2id PHC string.
+///
+/// The dashboard hashes locally before sending so the daemon never sees
+/// the plaintext, but the wire shape is still `String` — without this
+/// check an Owner could paste an arbitrary value (a hash exfiltrated
+/// from a different database, a constant, an empty-after-trim string)
+/// into `api_key_hash` and silently grant whoever knows that hash's
+/// preimage a working API key. `password_hash::PasswordHash::new` parses
+/// the PHC structure (algorithm / params / salt / hash segments) without
+/// running the verifier, so we get format validation for free.
+///
+/// `None` and trim-empty strings are treated as "clear the existing hash"
+/// and accepted unchanged.
+fn validate_api_key_hash(hash: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = hash else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    argon2::password_hash::PasswordHash::new(trimmed).map_err(|e| {
+        format!(
+            "api_key_hash is not a valid Argon2 PHC string: {e} \
+             (expected `$argon2id$v=19$m=…,t=…,p=…$<salt>$<hash>`)"
+        )
+    })?;
+    Ok(Some(trimmed.to_string()))
+}
+
 fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (
         status,
@@ -213,12 +246,16 @@ pub async fn create_user(
         Ok(r) => r,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
+    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
 
     let new_cfg = UserConfig {
         name: req.name.trim().to_string(),
         role,
         channel_bindings: req.channel_bindings,
-        api_key_hash: req.api_key_hash.filter(|s| !s.trim().is_empty()),
+        api_key_hash,
     };
 
     // Pre-check duplicates so we can map them to 409 cleanly. The persist
@@ -284,6 +321,11 @@ pub async fn update_user(
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
 
+    let api_key_hash = match validate_api_key_hash(req.api_key_hash.as_deref()) {
+        Ok(h) => h,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+
     // The PUT body's `name` is treated as the desired final name; the URL
     // path identifies the user being updated. Allow rename so the dashboard
     // can edit the display name without a delete-and-recreate dance.
@@ -292,7 +334,7 @@ pub async fn update_user(
         name: renamed_to.clone(),
         role,
         channel_bindings: req.channel_bindings,
-        api_key_hash: req.api_key_hash.filter(|s| !s.trim().is_empty()),
+        api_key_hash,
     };
 
     let target_existing = name.clone();
@@ -382,11 +424,12 @@ pub async fn import_users(
         let prepared_row = (|| -> Result<UserConfig, String> {
             validate_name(&row.name)?;
             let role = validate_role(&row.role)?;
+            let api_key_hash = validate_api_key_hash(row.api_key_hash.as_deref())?;
             Ok(UserConfig {
                 name: row.name.trim().to_string(),
                 role,
                 channel_bindings: row.channel_bindings.clone(),
-                api_key_hash: row.api_key_hash.clone().filter(|s| !s.trim().is_empty()),
+                api_key_hash,
             })
         })();
         prepared.push((i, prepared_row));
@@ -556,12 +599,28 @@ where
         ));
     }
 
+    // Read the existing file. A read failure on an existing file (permission
+    // denied, hardware fault, …) MUST abort — falling back to "" would
+    // silently drop every other section in `config.toml` (agents, providers,
+    // taint rules, etc.) on the next write. The caller's
+    // `backups/config.toml.prev` from the previous successful write is the
+    // recovery point of last resort.
     let raw = if config_path.exists() {
-        std::fs::read_to_string(&config_path).unwrap_or_default()
+        std::fs::read_to_string(&config_path).map_err(|e| {
+            PersistError::Internal(format!("could not read existing config.toml: {e}"))
+        })?
     } else {
         String::new()
     };
-    let mut doc: toml_edit::DocumentMut = raw.parse().unwrap_or_default();
+    // Parse with `toml_edit` so we preserve comments / formatting / unrelated
+    // sections. A parse failure means the on-disk file is already corrupt;
+    // refuse to write rather than overwriting with an empty document, which
+    // would clobber every other section the operator is hand-editing.
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
+        PersistError::Internal(format!(
+            "config.toml is not valid TOML — refusing to overwrite: {e}"
+        ))
+    })?;
 
     // Replace the entire `users` key with a freshly built array-of-tables
     // (or remove it when the vector is empty so we don't leave a stranded
