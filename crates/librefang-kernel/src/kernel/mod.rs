@@ -42,6 +42,18 @@ use librefang_types::tool::{AgentLoopSignal, ToolApprovalSubmission, ToolDefinit
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
+
+/// Synthetic `SenderContext.channel` value the cron dispatcher uses for
+/// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
+/// to bypass per-user RBAC the same way the `system_call=true` flag does
+/// — daemon-driven calls have no user to attribute to.
+pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
+
+/// Synthetic `SenderContext.channel` value the autonomous-loop dispatcher
+/// uses for agents whose manifest declares `[autonomous]`. Same RBAC
+/// carve-out as [`SYSTEM_CHANNEL_CRON`] — both are kernel-internal and
+/// have no user to attribute to. Issue #3243.
+pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -11948,9 +11960,9 @@ system_prompt = "You are a helpful assistant."
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 let cron_sender = SenderContext {
-                                    channel: "cron".to_string(),
+                                    channel: SYSTEM_CHANNEL_CRON.to_string(),
                                     user_id: job.peer_id.clone().unwrap_or_default(),
-                                    display_name: "cron".to_string(),
+                                    display_name: SYSTEM_CHANNEL_CRON.to_string(),
                                     is_group: false,
                                     was_mentioned: false,
                                     thread_id: None,
@@ -12422,9 +12434,9 @@ system_prompt = "You are a helpful assistant."
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
                     let sender = SenderContext {
-                        channel: "autonomous".to_string(),
+                        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
                         user_id: aid.to_string(),
-                        display_name: "autonomous".to_string(),
+                        display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
                         is_group: false,
                         was_mentioned: false,
                         thread_id: None,
@@ -16040,7 +16052,10 @@ impl KernelHandle for LibreFangKernel {
         // (PR #3205 review item #1). Both have been removed: an
         // unattributed inbound now goes through the guest gate so
         // RBAC fails closed end-to-end.
-        let system_call = matches!(channel, Some("cron") | Some("autonomous"));
+        let system_call = matches!(
+            channel,
+            Some(c) if c == SYSTEM_CHANNEL_CRON || c == SYSTEM_CHANNEL_AUTONOMOUS
+        );
         self.auth
             .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
     }

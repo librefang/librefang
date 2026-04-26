@@ -4297,7 +4297,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
             kernel.as_ref(),
             "shell_exec",
             None,
-            Some("cron"),
+            Some(super::SYSTEM_CHANNEL_CRON),
         ),
         UserToolGate::Allow,
         "cron carve-out must continue to bypass RBAC for autonomous-class calls"
@@ -4309,7 +4309,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
             kernel.as_ref(),
             "shell_exec",
             None,
-            Some("autonomous"),
+            Some(super::SYSTEM_CHANNEL_AUTONOMOUS),
         ),
         UserToolGate::Allow,
         "autonomous-tick tool calls must bypass RBAC — without this, RBAC + autonomous \
