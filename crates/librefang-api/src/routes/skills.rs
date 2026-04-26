@@ -194,6 +194,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         // Health + reload (covers all configured servers)
         .route("/mcp/health", axum::routing::get(mcp_health_handler))
         .route("/mcp/reload", axum::routing::post(reload_mcp_handler))
+        // Read-only registry of named `[[taint_rules]]` for dashboard
+        // validation (issue #3050 follow-up — typo'd rule_set names
+        // would otherwise be silent no-ops in scanner).
+        .route("/mcp/taint-rules", axum::routing::get(list_mcp_taint_rules))
         // Extensions — kept as dashboard-friendly aliases over the unified store.
         .route("/extensions", axum::routing::get(list_extensions))
         .route(
@@ -3304,6 +3308,41 @@ fn serialize_mcp_transport(
             })
         }
     }
+}
+
+/// GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.
+///
+/// Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references
+/// rule-set names by free-form string. Without this read-only endpoint,
+/// the editor cannot tell the operator that a typed name doesn't match
+/// any registered set — and the scanner silently treats unknown names
+/// as no-ops (one-shot WARN in
+/// `librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard
+/// uses this list to render an inline validation hint next to the
+/// `rule_sets` field.
+#[utoipa::path(
+    get,
+    path = "/api/mcp/taint-rules",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "List configured named taint rule sets", body = serde_json::Value)
+    )
+)]
+pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let payload: Vec<serde_json::Value> = state
+        .kernel
+        .config_ref()
+        .taint_rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "action": r.action,
+                "rule_count": r.rules.len(),
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(payload))
 }
 
 /// GET /api/mcp/servers — List configured MCP servers and their tools.

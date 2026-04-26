@@ -69,6 +69,20 @@ fn is_sensitive_key_name(key: &str) -> bool {
 /// - `$.a.*`   — any direct child of `$.a`
 /// - `$.a[*]`  — any array element of `$.a`
 /// - `$.*`     — any top-level property
+///
+/// # Limitation: object keys containing `.` or `[`
+///
+/// Both the pattern parser ([`split_jsonpath`]) and the walker that
+/// builds runtime paths concatenate segments with a literal `.` and do
+/// not escape special characters in JSON object keys. As a result a
+/// JSON key such as `"content-type"` works (no special chars) but keys
+/// like `"a.b"`, `"items[0]"`, or any name containing `.`/`[` cannot
+/// be addressed precisely — the matcher will treat the `.`/`[` as
+/// segment delimiters and likely miss the intended path. Quoted
+/// JSONPath segments (e.g. `$.headers."content-type"`) are also not
+/// supported. In practice MCP tool argument schemas almost never use
+/// such keys, but if you hit one, write a broader pattern (`$.*` or
+/// `$.headers.*`) or fall through to the default rule set.
 fn jsonpath_matches(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
@@ -146,6 +160,32 @@ fn resolve_skip_rules(
     skip
 }
 
+/// Per-process dedup set of rule-set names we've already warned about.
+/// Hit by [`lookup_rule_set_action`] when an `McpTaintToolPolicy.rule_sets`
+/// entry doesn't match any registered `[[taint_rules]]` set — the first
+/// scan that observes a missing name logs a WARN, all subsequent scans
+/// stay silent so a noisy tool doesn't flood logs.
+static UNKNOWN_RULE_SET_WARNED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+fn warn_unknown_rule_set_once(set_name: &str, tool_name: &str) {
+    let cell = UNKNOWN_RULE_SET_WARNED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut warned = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(set_name.to_string()) {
+        warn!(
+            target: "librefang_runtime_mcp::taint",
+            rule_set = %set_name,
+            tool = %tool_name,
+            "MCP taint policy references unknown rule_set name — check \
+             `[[taint_rules]]` in config.toml for typos. The reference is \
+             a silent no-op until the name is registered. This warning is \
+             emitted once per process per missing name."
+        );
+    }
+}
+
 /// Look up the [`McpTaintRuleSetAction`] (and rule set name) for a rule fired
 /// during scanning. Returns the *most permissive* action across all rule sets
 /// referenced by `tool_name` that contain `rule`, in order: `Log` > `Warn` >
@@ -155,6 +195,11 @@ fn resolve_skip_rules(
 ///
 /// Returns `None` when no referenced rule set covers the rule, in which case
 /// the caller should block (default scanner behaviour).
+///
+/// Names listed in `tool_policy.rule_sets` that don't match any registered
+/// `[[taint_rules]]` set are skipped (treated as no-op) but trigger a
+/// one-shot WARN via [`warn_unknown_rule_set_once`] so operator typos
+/// don't sit silent in production.
 fn lookup_rule_set_action<'a>(
     policy: Option<&McpTaintPolicy>,
     tool_name: &str,
@@ -168,6 +213,7 @@ fn lookup_rule_set_action<'a>(
     let mut best: Option<(McpTaintRuleSetAction, &str)> = None;
     for set_name in &tool_policy.rule_sets {
         let Some(set) = registry.iter().find(|s| &s.name == set_name) else {
+            warn_unknown_rule_set_once(set_name, tool_name);
             continue;
         };
         if !set.rules.contains(rule) {
@@ -2722,6 +2768,82 @@ mod tests {
         // `$.*` — any top-level property.
         assert!(jsonpath_matches("$.*", "$.alpha"));
         assert!(!jsonpath_matches("$.*", "$.alpha.beta"));
+    }
+
+    /// Documents the known limitation: object keys containing `.` or `[`
+    /// can't be addressed precisely because the matcher splits patterns on
+    /// `.` and treats `[` as the start of array notation. The matcher MUST
+    /// fail closed (no false positive skip) when the limitation bites, so
+    /// the scanner errs toward blocking rather than letting a payload slip
+    /// past via path mismatch.
+    #[test]
+    fn test_jsonpath_dotted_keys_are_known_limitation() {
+        // Naive intent: skip on header `content-type` only.
+        // The pattern parses as `["$","headers","content-type"]` and the
+        // walker also produces `"content-type"` as a single segment, so
+        // simple kebab-case keys actually work.
+        assert!(jsonpath_matches(
+            "$.headers.content-type",
+            "$.headers.content-type"
+        ));
+
+        // Intent: address a key literally containing a `.` (e.g. a config
+        // entry `"a.b"`). The matcher cannot represent this — pattern is
+        // split into segments `["$","a","b"]`, never matching the
+        // walker-produced `["$","a.b"]` path. There is no quoted-segment
+        // syntax. Operators must use a broader pattern (`$.*`).
+        assert!(!jsonpath_matches("$.\"a.b\"", "$.a.b"));
+
+        // Quoted-segment forms in the pattern are not parsed; the matcher
+        // sees them as literal characters and fails to match either form.
+        assert!(!jsonpath_matches("$.headers.\"x.y\"", "$.headers.x.y"));
+    }
+
+    #[test]
+    fn test_lookup_rule_set_action_unknown_name_returns_none() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Tool references "audit_typo" but registry only has "audit".
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "noisy_tool".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["audit_typo".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "audit".to_string(),
+            action: McpTaintRuleSetAction::Log,
+            rules: vec![TaintRuleId::PiiEmail],
+        }];
+
+        // Unknown name is silently skipped (returns None so caller blocks
+        // on the default path) and triggers a one-shot WARN — not exposed
+        // through the return value but verified to not panic / mutate state
+        // beyond the dedup set.
+        let action = lookup_rule_set_action(
+            Some(&policy),
+            "noisy_tool",
+            &TaintRuleId::PiiEmail,
+            &registry,
+        );
+        assert_eq!(action, None);
+
+        // Calling twice for the same name is also a no-op (the dedup
+        // guard means the second call doesn't re-warn but the return
+        // shape stays consistent).
+        let action2 = lookup_rule_set_action(
+            Some(&policy),
+            "noisy_tool",
+            &TaintRuleId::PiiEmail,
+            &registry,
+        );
+        assert_eq!(action2, None);
     }
 
     #[test]
