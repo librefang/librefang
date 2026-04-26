@@ -3818,7 +3818,11 @@ pub enum McpTaintRuleSetAction {
 /// [mcp_servers.camofox.taint_policy.tools.navigate]
 /// rule_sets = ["browser_handles"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// `PartialEq + Eq` are derived so the kernel's reload-plan diff can
+/// detect `[[taint_rules]]` changes and emit
+/// `HotAction::ReloadTaintRules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NamedTaintRuleSet {
     /// Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be
     /// unique within a [`KernelConfig`]; duplicate names are resolved by

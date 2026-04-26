@@ -9605,6 +9605,11 @@ system_prompt = "You are a helpful assistant."
             // Order: taint_rules first, then config — that way no scanner
             // sees a window where `self.config.load().taint_rules` and the
             // `taint_rules_swap` snapshot disagree.
+            //
+            // The reload-plan diff (`build_reload_plan`) emits
+            // `HotAction::ReloadTaintRules` whenever `[[taint_rules]]`
+            // changes, so `should_apply_hot` reaches this branch on those
+            // edits even when no other hot action fires.
             self.taint_rules_swap
                 .store(std::sync::Arc::new(new_config.taint_rules.clone()));
             self.config.store(std::sync::Arc::new(new_config));
@@ -9830,6 +9835,16 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
+                }
+                HotAction::ReloadTaintRules => {
+                    // Actual swap is performed by the caller (`reload_config`)
+                    // after this match completes — this arm is informational
+                    // only. Logging here keeps the action visible alongside
+                    // every other hot reload in the audit trail.
+                    info!(
+                        "Hot-reload: [[taint_rules]] registry updated — \
+                         next MCP scan will see new rule sets without reconnect"
+                    );
                 }
             }
         }
