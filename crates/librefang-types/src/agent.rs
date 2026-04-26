@@ -903,6 +903,34 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
+    /// Trigger-dispatch-only: cap on concurrent invocations from the
+    /// kernel's event-trigger fan-out (`TaskPosted` / `MessageReceived`
+    /// / …). Channel messages, cron jobs, and `agent_send` are NOT
+    /// throttled by this knob — they continue to serialize at the
+    /// existing per-agent / per-session locks inside `send_message_full`.
+    /// Despite the unqualified field name, the scope is intentionally
+    /// narrow.
+    ///
+    /// `None` means inherit from `KernelConfig.queue.concurrency.default_per_agent`
+    /// (today: 1). `Some(1)` is identical to the legacy per-agent
+    /// serialization behavior. `Some(0)` is treated as `Some(1)` (the
+    /// resolver floors at 1 — `0` would deadlock the agent).
+    ///
+    /// Concurrent fires only make sense when each fire runs in its own
+    /// session, so caps `> 1` require `session_mode = "new"` on the
+    /// **manifest** (per-trigger `session_mode` overrides do NOT unlock
+    /// the cap — the per-agent semaphore is sized once from the
+    /// manifest default). `persistent` + cap `> 1` is auto-clamped to
+    /// `1` with a `WARN` log; parallel writes to a single persistent
+    /// session's history are undefined.
+    ///
+    /// Hot-reload: the per-agent semaphore is sized on first dispatch
+    /// and is NOT invalidated by `manifest_swap`. To pick up a new cap
+    /// the agent must be killed and respawned (or the daemon restarted);
+    /// an in-place activate / status flip silently retains the old
+    /// capacity.
+    #[serde(default)]
+    pub max_concurrent_invocations: Option<u32>,
     /// If true, the agent's `context.md` is read once at session start and
     /// reused. Default is `false`: the runtime re-reads `context.md` before
     /// every turn so external writers (cron jobs, integrations) reach the LLM
@@ -983,6 +1011,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,

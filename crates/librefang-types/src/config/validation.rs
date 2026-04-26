@@ -793,6 +793,12 @@ impl KernelConfig {
         if self.queue.concurrency.subagent_lane == 0 {
             self.queue.concurrency.subagent_lane = 1;
         }
+        if self.queue.concurrency.trigger_lane == 0 {
+            self.queue.concurrency.trigger_lane = 1;
+        }
+        if self.queue.concurrency.default_per_agent == 0 {
+            self.queue.concurrency.default_per_agent = 1;
+        }
 
         // Triggers: max_per_event must be >= 1 (0 would prevent any trigger from firing)
         if self.triggers.max_per_event == 0 {

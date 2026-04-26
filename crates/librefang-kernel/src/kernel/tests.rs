@@ -3274,3 +3274,179 @@ fn test_fork_does_not_overwrite_parent_registration() {
     drop(rt);
     kernel.shutdown();
 }
+
+/// `agent_concurrency_for` resolves a `New`-mode manifest with
+/// `max_concurrent_invocations = 4` to a 4-permit semaphore — the
+/// happy path for parallel trigger fires.
+#[test]
+fn test_agent_concurrency_for_resolves_new_mode_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-new-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "parallel-trigger-agent".to_string(),
+                description: "new-mode agent allowed to fan out".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(4),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(
+        sem.available_permits(),
+        4,
+        "New + cap=4 must resolve to a 4-permit semaphore"
+    );
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` clamps `Persistent` + cap > 1 to a 1-permit
+/// semaphore. Regression cover: the clamp lives in the resolver, not in
+/// validation, because it is structural to the dispatch path.
+#[test]
+fn test_agent_concurrency_for_clamps_persistent_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-persistent-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "misconfigured-persistent-agent".to_string(),
+                description: "persistent + cap=4 must clamp".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::Persistent,
+                max_concurrent_invocations: Some(4),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(
+        sem.available_permits(),
+        1,
+        "Persistent + cap > 1 must clamp to 1 (parallel writes to a single \
+         session's history are undefined)"
+    );
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` floors `Some(0)` to 1 — a 0-permit
+/// semaphore would deadlock the agent on first dispatch.
+#[test]
+fn test_agent_concurrency_for_floors_zero_to_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-zero-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "typo-zero-agent".to_string(),
+                description: "Some(0) must floor to 1".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(0),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let sem = kernel.agent_concurrency_for(aid);
+    assert_eq!(sem.available_permits(), 1);
+
+    kernel.shutdown();
+}
+
+/// `agent_concurrency_for` caches the resolved semaphore — a second
+/// call returns the same `Arc`, so permits acquired by an in-flight
+/// dispatch are observed by subsequent dispatches (and not silently
+/// reset by a re-resolution).
+#[test]
+fn test_agent_concurrency_for_returns_cached_semaphore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-conc-cache-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let aid = kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: "cache-test-agent".to_string(),
+                description: "second resolve returns same Arc".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                session_mode: librefang_types::agent::SessionMode::New,
+                max_concurrent_invocations: Some(2),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("agent should spawn");
+
+    let first = kernel.agent_concurrency_for(aid);
+    let permit = first
+        .clone()
+        .try_acquire_owned()
+        .expect("first permit available");
+    let second = kernel.agent_concurrency_for(aid);
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "second resolve must return the cached Arc, not a fresh semaphore"
+    );
+    assert_eq!(
+        second.available_permits(),
+        1,
+        "second handle must observe the permit held by the first call"
+    );
+    drop(permit);
+
+    kernel.shutdown();
+}
