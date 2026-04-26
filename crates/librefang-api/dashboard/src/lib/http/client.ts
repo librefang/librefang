@@ -283,6 +283,7 @@ export {
   updateUser,
   deleteUser,
   importUsers,
+  rotateUserKey,
   // per-user policy (M3 #3205)
   updateUserPolicy,
   // per-user budget (RBAC M5)
@@ -331,6 +332,7 @@ export type {
   UserRoleName,
   BulkImportRow,
   BulkImportResult,
+  RotateUserKeyResponse,
   // audit / per-user budget / policy
   AuditQueryEntry,
   AuditQueryFilters,
