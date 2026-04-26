@@ -164,6 +164,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/mcp/servers/{name}/reconnect",
             axum::routing::post(reconnect_mcp_server_handler),
         )
+        .route(
+            "/mcp/servers/{name}/taint",
+            axum::routing::patch(patch_mcp_server_taint),
+        )
         // MCP OAuth auth endpoints (existing, unchanged)
         .route(
             "/mcp/servers/{name}/auth/status",
@@ -3749,6 +3753,123 @@ pub async fn update_mcp_server(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server updated: {name}"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "name": name,
+            "reload": reload_status,
+        })),
+    )
+}
+
+/// PATCH /api/mcp/servers/{name}/taint — Partial update of taint settings.
+///
+/// Accepts a body of `{ "taint_scanning"?: bool, "taint_policy"?: McpTaintPolicy }`
+/// and merges it into the existing entry. Unlike PUT this does NOT require
+/// the caller to round-trip every other server field (transport, env, etc.) —
+/// the dashboard taint editor in particular needs only these two fields and
+/// shouldn't risk silently dropping unrelated fields it doesn't render.
+// `McpTaintPolicy` (in `librefang-types`) doesn't carry `utoipa::ToSchema`,
+// so deriving `ToSchema` here would fail. The OpenAPI annotation uses
+// `serde_json::Value` for the body schema, which keeps the spec accurate
+// without forcing a downstream derive.
+#[derive(serde::Deserialize)]
+pub(crate) struct PatchMcpTaintRequest {
+    /// When supplied, replaces `taint_scanning` on the existing entry.
+    #[serde(default)]
+    pub taint_scanning: Option<bool>,
+    /// When supplied, replaces `taint_policy` on the existing entry.
+    /// Pass `{}` (empty object) to clear all per-tool policies; pass `null`
+    /// (or omit) to leave existing policies untouched.
+    #[serde(default)]
+    pub taint_policy: Option<librefang_types::config::McpTaintPolicy>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/mcp/servers/{name}/taint",
+    tag = "mcp",
+    params(("name" = String, Path, description = "Server name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Taint settings updated", body = serde_json::Value),
+        (status = 404, description = "Server not found", body = serde_json::Value),
+    )
+)]
+#[allow(private_interfaces)]
+pub async fn patch_mcp_server_taint(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<PatchMcpTaintRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Locate and clone the existing entry so we mutate a fresh copy that's
+    // safe to pass to upsert_mcp_server_config without touching the live
+    // config until persistence succeeds.
+    let mut entry = match state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+    {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(
+                t.t_args("api-error-mcp-not-found", &[("name", &name)]),
+            )
+            .into_json_tuple();
+        }
+    };
+
+    if let Some(scanning) = body.taint_scanning {
+        entry.taint_scanning = scanning;
+    }
+    if let Some(policy) = body.taint_policy {
+        entry.taint_policy = Some(policy);
+    }
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-config-write-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
+    }
+    // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
+    // be held across an async suspension point.
+    drop(t);
+
+    let reload_status = match state.kernel.reload_config().await {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    };
+
+    // Reconnect so the new taint_policy snapshot reaches the live
+    // `McpServerConfig.taint_policy` field. The shared `taint_rules_swap`
+    // already updates via `reload_config` without a reconnect.
+    state.kernel.disconnect_mcp_server(&name).await;
+    let kernel = std::sync::Arc::clone(&state.kernel);
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+
+    state.kernel.audit().record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("mcp_server taint updated: {name}"),
         "completed",
     );
 

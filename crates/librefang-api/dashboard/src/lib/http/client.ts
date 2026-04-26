@@ -191,6 +191,7 @@ export {
   // mcp
   addMcpServer,
   updateMcpServer,
+  patchMcpServerTaint,
   deleteMcpServer,
   reconnectMcpServer,
   reloadMcp,

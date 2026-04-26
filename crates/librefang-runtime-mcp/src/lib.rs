@@ -8,6 +8,7 @@
 
 pub mod mcp_oauth;
 
+use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
@@ -405,6 +406,32 @@ fn walk_taint(
 // Configuration types
 // ---------------------------------------------------------------------------
 
+/// Shared, atomically-swappable handle to the kernel's named taint rule sets.
+///
+/// One [`ArcSwap`] per kernel; cloned (via the outer [`Arc`]) into every
+/// connected [`McpServerConfig`]. The kernel updates by calling
+/// `handle.store(Arc::new(new_rules))`; readers take a `.load()` snapshot at
+/// scan time which stays stable for the duration of that scan.
+pub type TaintRuleSetsHandle = std::sync::Arc<ArcSwap<Vec<NamedTaintRuleSet>>>;
+
+/// Construct an empty rule-set handle. Used as the [`serde::Deserialize`]
+/// default for [`McpServerConfig::taint_rule_sets`] (the field is `serde(skip)`)
+/// and as the canonical "no rule sets configured" value for tests and
+/// stand-alone callers that don't go through the kernel.
+pub fn empty_taint_rule_sets_handle() -> TaintRuleSetsHandle {
+    std::sync::Arc::new(ArcSwap::from_pointee(Vec::new()))
+}
+
+/// Construct a rule-set handle from a static, never-changing list.
+/// Useful for tests and callers that don't need hot-reload semantics.
+pub fn static_taint_rule_sets_handle(rules: Vec<NamedTaintRuleSet>) -> TaintRuleSetsHandle {
+    std::sync::Arc::new(ArcSwap::from_pointee(rules))
+}
+
+fn default_taint_rule_sets_handle() -> TaintRuleSetsHandle {
+    empty_taint_rule_sets_handle()
+}
+
 /// Configuration for an MCP server connection.
 #[derive(Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -455,16 +482,24 @@ pub struct McpServerConfig {
     /// Ignored when `taint_scanning = false`.
     #[serde(default)]
     pub taint_policy: Option<McpTaintPolicy>,
-    /// Snapshot of the kernel's named taint rule sets, propagated at boot
-    /// so the scanner can downgrade `Block` to `Warn` / `Log` for rules
-    /// covered by sets referenced from this server's
-    /// [`McpTaintPolicy::tools`] entries.
+    /// Live handle to the kernel's named taint rule sets, used by the
+    /// scanner to downgrade `Block` to `Warn` / `Log` for rules covered by
+    /// sets referenced from this server's [`McpTaintPolicy::tools`] entries.
     ///
-    /// Empty by default; the kernel populates this from
-    /// [`librefang_types::config::KernelConfig::taint_rules`] before
-    /// installing the server.
-    #[serde(default)]
-    pub taint_rule_sets: Vec<NamedTaintRuleSet>,
+    /// **Hot-reload contract:** the kernel owns a single
+    /// [`ArcSwap`] for the workspace and clones the same outer [`Arc`] into
+    /// every connected server. When `[[taint_rules]]` is edited and config
+    /// is reloaded, the kernel calls `.store(Arc::new(new_rules))` on the
+    /// shared swap; the next [`McpConnection::call`] picks up the new
+    /// rules without restarting the server. A `.load()` taken at the start
+    /// of a single scan stays stable for the entire argument-tree walk —
+    /// rules cannot change underneath an in-flight tool call.
+    ///
+    /// `#[serde(skip)]`: the swap is constructed at runtime, never
+    /// serialised. Deserialised callers default to an empty registry —
+    /// scanner behaviour is identical to setting `[[taint_rules]] = []`.
+    #[serde(skip, default = "default_taint_rule_sets_handle")]
+    pub taint_rule_sets: TaintRuleSetsHandle,
     /// Root directories advertised to this MCP server via the MCP Roots capability.
     ///
     /// Each entry is an absolute path (e.g. `/home/user/project`).  librefang
@@ -1523,10 +1558,14 @@ impl McpConnection {
         // disable specific rules for known-safe fields.
         if self.config.taint_scanning {
             let policy = self.config.taint_policy.as_ref();
+            // Take a `.load()` snapshot at scan start so config reloads
+            // mid-walk can't change the rule set under us. The snapshot
+            // is dropped when the borrow ends.
+            let rule_sets_guard = self.config.taint_rule_sets.load();
             if let Some(violation) = scan_mcp_arguments_for_taint_with_policy(
                 arguments,
                 policy,
-                &self.config.taint_rule_sets,
+                rule_sets_guard.as_slice(),
                 &raw_name,
             ) {
                 // `violation` is already a redacted rule description from
@@ -2870,7 +2909,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
-            taint_rule_sets: vec![],
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
 
@@ -2903,7 +2942,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
-            taint_rule_sets: vec![],
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&sse_config).unwrap();
@@ -2940,7 +2979,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
-            taint_rule_sets: vec![],
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
@@ -2972,7 +3011,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
-            taint_rule_sets: vec![],
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&http_config).unwrap();
@@ -3020,7 +3059,7 @@ mod tests {
                 oauth_config: None,
                 taint_scanning: true,
                 taint_policy: None,
-                taint_rule_sets: vec![],
+                taint_rule_sets: empty_taint_rule_sets_handle(),
                 roots: vec![],
             },
             tools: Vec::new(),
@@ -3189,7 +3228,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
-            taint_rule_sets: vec![],
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         })
         .await

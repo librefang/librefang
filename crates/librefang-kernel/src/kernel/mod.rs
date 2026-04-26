@@ -521,6 +521,16 @@ pub struct LibreFangKernel {
     /// directory could not be resolved at boot.
     pub(crate) checkpoint_manager:
         Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
+    /// Live, atomically-swappable handle to `KernelConfig.taint_rules`.
+    ///
+    /// The kernel mirrors `config.load().taint_rules` into this swap on boot
+    /// and on every config reload (see [`Self::reload_config`]). Each
+    /// connected MCP server holds an [`Arc::clone`] of this same swap as its
+    /// `taint_rule_sets` field, so reading via `.load()` at scan time always
+    /// returns the latest registry — without restarting the server. The
+    /// scanner takes a single `.load()` per call so a mid-call reload can't
+    /// change the rule set under an in-flight tool invocation.
+    pub(crate) taint_rules_swap: librefang_runtime::mcp::TaintRuleSetsHandle,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -713,15 +723,14 @@ impl LibreFangKernel {
         roots
     }
 
-    /// Snapshot the kernel's `[[taint_rules]]` registry for a fresh
-    /// `McpServerConfig`. Each connected MCP server captures the current
-    /// rule sets at install/reload time; subsequent edits to
-    /// `KernelConfig.taint_rules` only take effect for that server when the
-    /// server itself is reloaded (drop + reconnect or
-    /// `reload_mcp_server_config`). Snapshotting keeps the scanner's view
-    /// stable across the lifetime of a single tool call.
-    fn snapshot_taint_rules(&self) -> Vec<librefang_types::config::NamedTaintRuleSet> {
-        self.config.load().taint_rules.clone()
+    /// Hand out an [`Arc::clone`] of the kernel's live taint-rules swap to a
+    /// fresh `McpServerConfig`. All connected servers share the same swap,
+    /// so `[[taint_rules]]` edits applied via [`Self::reload_config`]
+    /// immediately reach every server's next scan call. The scanner takes a
+    /// single `.load()` per tool call to keep the rule view stable across a
+    /// single argument-tree walk.
+    fn snapshot_taint_rules(&self) -> librefang_runtime::mcp::TaintRuleSetsHandle {
+        std::sync::Arc::clone(&self.taint_rules_swap)
     }
 
     /// Build the default list of root directories to advertise to MCP servers
@@ -2710,6 +2719,13 @@ impl LibreFangKernel {
             None => config.data_dir.join("audit.anchor"),
         };
         let hooks_dir = config.home_dir.join("hooks");
+        // Snapshot the initial taint rule registry into a shared
+        // `Arc<ArcSwap<...>>`. This swap is the single source of truth read
+        // by every connected MCP server's scanner — `Self::reload_config`
+        // calls `.store(...)` on it so config edits propagate without
+        // restarting servers.
+        let initial_taint_rules =
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config.taint_rules.clone()));
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -2812,6 +2828,7 @@ impl LibreFangKernel {
                     librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
                 ))
             },
+            taint_rules_swap: initial_taint_rules,
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -9581,6 +9598,15 @@ system_prompt = "You are a helpful assistant."
         if should_apply_hot(old_cfg.reload.mode, &plan) {
             let _write_guard = self.config_reload_lock.write().await;
             self.apply_hot_actions_inner(&plan, &new_config);
+            // Push the new `[[taint_rules]]` registry into the shared swap
+            // BEFORE swapping `self.config`. Connected MCP servers read from
+            // this swap on every scan; updating it now means the next tool
+            // call inherits the new rules without restarting the server.
+            // Order: taint_rules first, then config — that way no scanner
+            // sees a window where `self.config.load().taint_rules` and the
+            // `taint_rules_swap` snapshot disagree.
+            self.taint_rules_swap
+                .store(std::sync::Arc::new(new_config.taint_rules.clone()));
             self.config.store(std::sync::Arc::new(new_config));
         }
 

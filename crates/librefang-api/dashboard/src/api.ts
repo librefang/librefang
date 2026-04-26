@@ -3135,6 +3135,21 @@ export async function updateMcpServer(
   return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
+export interface PatchMcpTaintRequest {
+  taint_scanning?: boolean;
+  taint_policy?: McpTaintPolicy;
+}
+
+export async function patchMcpServerTaint(
+  id: string,
+  body: PatchMcpTaintRequest,
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/taint`,
+    body,
+  );
+}
+
 export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
 }

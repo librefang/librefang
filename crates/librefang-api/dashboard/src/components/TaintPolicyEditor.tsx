@@ -117,9 +117,12 @@ export function TaintPolicyEditor({
     const policy: McpTaintPolicy | undefined = Object.keys(cleaned).length
       ? { tools: cleaned }
       : undefined;
+    const id =
+      (server as unknown as { id?: string; name?: string }).id ??
+      (server as unknown as { name: string }).name;
     mutation.mutate(
       {
-        existing: server as unknown as { id?: string; name: string; [k: string]: unknown },
+        id,
         taint_scanning: scanning,
         taint_policy: policy,
       },
