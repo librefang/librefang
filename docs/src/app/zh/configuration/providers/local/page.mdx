@@ -82,3 +82,39 @@
 2. 通过内置模型浏览器下载模型
 3. 从 "Local Server" 标签页启动本地服务器
 4. 无需设置环境变量
+
+---
+
+## Embedding 自动检测
+
+embeddings 驱动设为 `provider = "auto"` 时，LibreFang 按优先级列表选第一个可达的 embeddings 后端。云 API key 优先；本地服务器在后。当前顺序：
+
+1. `OPENAI_API_KEY`
+2. `COHERE_API_KEY`
+3. `JINA_API_KEY`
+4. `VOYAGE_API_KEY`
+5. `MIXEDBREAD_API_KEY`
+6. `MISTRAL_API_KEY`
+7. `OLLAMA_HOST`（本地）
+8. `VLLM_BASE_URL`（本地）
+9. `LMSTUDIO_BASE_URL`（本地）
+
+把 `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` 任意一个设成可达的 URL 就够了——本地条目不需要 API key。`create_embedding_driver` 用同一优先级，所以 `auto` 启动时挑的跟显式 `provider = "vllm"` 构造的一致。
+
+---
+
+## 能力检测（Ollama 元数据流水线）
+
+对 Ollama，LibreFang 在启动时和定期 provider 刷新时探测 `/api/tags`，从返回的 metadata 推导每个模型的能力：
+
+| 能力 | 推导方式 |
+|---|---|
+| `vision` | model card 声明 image 输入 modality，或 family 在已知视觉列表里（`llava`、`bakllava`、`clip` 等） |
+| `embedding` | model card 声明 embedding 专用架构（`nomic-embed-text`、`bge-m3`、`mxbai-embed-large` 等） |
+| `tools` | model card 声明 tool-use 支持（较新的 Llama / Qwen / Mistral instruct 系列） |
+| `parameter_size` | 从 Ollama tag 原样取（如 `7.6B`、`14.8B`） |
+| `quantization_level` | 原样取（如 `Q4_K_M`、`F16`） |
+
+dashboard 的 "Models" tab 和模型切换下拉里给每个模型显示这些 badge，它们也接进 `model_catalog` 的 `Modality` enum（`Text` / `Image` / `Audio`）——查询 image-generation 模型的调用方可以干净过滤，不用硬编码列表。
+
+vLLM 和 LM Studio 通过它们的 OpenAI 兼容 `/models` 端点接同一探针，但 Ollama 路径填得最全，因为上游 API 暴露的数据最多。

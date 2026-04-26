@@ -45,6 +45,28 @@ supports_vision = false
 
 Files in `~/.librefang/providers/` are loaded at startup and merged into the catalog alongside the builtin providers.
 
+### Custom Image-Generation Providers
+
+A media driver name not in the builtin list (`openai`, `gemini`, `elevenlabs`, `minimax`, `google_tts`) used to fail with `"Unknown media provider"`. Custom providers with a configured URL now fall through to a generic OpenAI-compatible image driver:
+
+```toml
+# config.toml
+[provider_urls]
+volcengine = "https://open.volcengineapi.com/v1"
+tongyi     = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+```
+
+```bash
+export VOLCENGINE_API_KEY="sk-..."
+export TONGYI_API_KEY="sk-..."
+```
+
+The driver expects standard OpenAI Images API request/response shape (`/images/generations` endpoint, `b64_json` or `url` returned). Set `[media] image_provider = "volcengine"` (or whichever id you used in `[provider_urls]`) to route image-generation calls there.
+
+### Driver-side File Upload
+
+The Moonshot (Kimi) driver uploads attachments to `/v1/files` before forwarding the request to `/v1/chat/completions`, so messages with image / PDF / text attachments work end-to-end without you wiring per-attachment marshalling. Files are written to `std::env::temp_dir()`, content-type validated, size-limited, and filename-sanitised before upload. This is transparent — no extra config; just attach files via `POST /api/agents/{id}/upload` or the dashboard chat as usual.
+
 ### Provider Regions
 
 Some providers offer region-specific endpoints. Regions are defined in registry TOML files with an optional `api_key_env` override:

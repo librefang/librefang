@@ -82,3 +82,39 @@ This page covers providers that run on your machine, inside your network, or beh
 2. Download a model from the built-in model browser
 3. Start the local server from the "Local Server" tab
 4. No env var needed
+
+---
+
+## Embedding auto-detection
+
+When the embeddings driver is set to `provider = "auto"`, LibreFang walks a priority list to pick the first reachable embeddings backend. Cloud API keys win first; local servers come after. The current order:
+
+1. `OPENAI_API_KEY`
+2. `COHERE_API_KEY`
+3. `JINA_API_KEY`
+4. `VOYAGE_API_KEY`
+5. `MIXEDBREAD_API_KEY`
+6. `MISTRAL_API_KEY`
+7. `OLLAMA_HOST` (local)
+8. `VLLM_BASE_URL` (local)
+9. `LMSTUDIO_BASE_URL` (local)
+
+Setting any of `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` to a reachable URL is enough — no API key needed for the local entries. The same priority is applied by `create_embedding_driver`, so what `auto` picks at startup matches what an explicit `provider = "vllm"` would build.
+
+---
+
+## Capability detection (Ollama metadata pipeline)
+
+For Ollama, LibreFang probes `/api/tags` at startup and on the periodic provider refresh, then derives each model's capabilities from the metadata it returns:
+
+| Capability | How it's inferred |
+|---|---|
+| `vision` | Model card declares an image-input modality, or the family is in the known-vision list (`llava`, `bakllava`, `clip`, …) |
+| `embedding` | Model card declares an embedding-only architecture (`nomic-embed-text`, `bge-m3`, `mxbai-embed-large`, …) |
+| `tools` | Model card declares tool-use support (newer Llama / Qwen / Mistral instruct families) |
+| `parameter_size` | Lifted verbatim from the Ollama tag (e.g. `7.6B`, `14.8B`) |
+| `quantization_level` | Lifted verbatim (e.g. `Q4_K_M`, `F16`) |
+
+The dashboard's "Models" tab and the model-switcher dropdown show these badges per model, and they feed into the `model_catalog`'s `Modality` enum (`Text` / `Image` / `Audio`) — a caller asking for image-generation models filters cleanly without a hard-coded list.
+
+vLLM and LM Studio receive the same probe via their OpenAI-compat `/models` endpoint, but the Ollama path populates the most fields because the upstream API exposes the richest data.

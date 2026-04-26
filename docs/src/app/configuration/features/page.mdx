@@ -954,6 +954,8 @@ Compression happens automatically — there is no configuration required to enab
 
 Summary messages are stored in the session history as regular `assistant` turns with a special internal tag. On subsequent compression passes, an existing summary is included in the material to be re-summarized rather than preserved verbatim. This means long-running sessions undergo iterative refinement — older summaries are folded into newer, more compact ones over time.
 
+The compactor system prompt now instructs the LLM to **write summaries in the same language the user was using** in the conversation. A Chinese conversation produces a Chinese summary; an Arabic conversation produces an Arabic summary. The instruction is applied to both the single-pass `summarize_messages` path and the merge step of `summarize_in_chunks` so chunked compaction is covered too — no surprise English-language insertions on long non-English sessions.
+
 #### Pluggable `ContextEngine`
 
 The compression algorithm is implemented behind a `ContextEngine` trait. The current implementation uses an LLM-based summarizer. Future versions of LibreFang will allow configuring alternative compression algorithms — including DAG-based compression and LCM (Latent Context Modeling) — once those implementations stabilize.
