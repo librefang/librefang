@@ -4504,6 +4504,7 @@ dependencies = [
 name = "librefang-runtime-mcp"
 version = "2026.4.24-beta5"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "http",

@@ -56,6 +56,10 @@ pub enum HotAction {
     ReloadProxy,
     /// Dashboard credentials (user/pass/hash) changed — config swap is sufficient.
     UpdateDashboardCredentials,
+    /// `[[taint_rules]]` registry changed — push the new rule sets into
+    /// the kernel's shared `taint_rules_swap` so connected MCP servers see
+    /// them on the next scan call without a reconnect.
+    ReloadTaintRules,
     /// `log_level` changed — swap the live tracing `EnvFilter`. Carries the
     /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
     /// since the kernel doesn't keep the parsed filter around.
@@ -309,6 +313,13 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.mcp_servers, &new.mcp_servers) {
         plan.hot_actions.push(HotAction::ReloadMcpServers);
+    }
+
+    // Top-level [[taint_rules]] registry — hot-reloadable via the shared
+    // `taint_rules_swap`. Tracked separately from `mcp_servers` because
+    // operators commonly tune rule sets without touching MCP server config.
+    if old.taint_rules != new.taint_rules {
+        plan.hot_actions.push(HotAction::ReloadTaintRules);
     }
 
     if field_changed(&old.a2a, &new.a2a) {

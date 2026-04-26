@@ -61,6 +61,7 @@ export {
   getMcpCatalogEntry,
   getMcpHealth,
   getMcpAuthStatus,
+  listMcpTaintRules,
   // memory
   listMemories,
   searchMemories,
@@ -191,6 +192,7 @@ export {
   // mcp
   addMcpServer,
   updateMcpServer,
+  patchMcpServerTaint,
   deleteMcpServer,
   reconnectMcpServer,
   reloadMcp,

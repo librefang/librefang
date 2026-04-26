@@ -4361,7 +4361,7 @@
       "type": "object"
     },
     "McpTaintPathPolicy": {
-      "description": "Taint skip rules for a single argument path within a tool.",
+      "description": "Taint skip rules for a single argument path within a tool.\n\nThe policy key is a minimal JSONPath expression matched by the runtime scanner. Supported wildcard syntax:\n\n- `$.foo`      — exact property at any depth specified literally. - `$.foo.*`    — any direct child of `$.foo` (single segment, non-array). - `$.foo[*]`   — any array element of `$.foo` (e.g. `$.foo[0]`, `$.foo[42]`). - `$.*`        — any top-level property.\n\nWildcards do NOT span multiple segments: `$.foo.*` matches `$.foo.bar` but not `$.foo.bar.baz`. Use exact paths plus rule_sets for deep exemptions across many paths.",
       "properties": {
         "skip_rules": {
           "default": [],
@@ -4375,7 +4375,7 @@
       "type": "object"
     },
     "McpTaintPolicy": {
-      "description": "Per-server taint policy that lets operators disable specific taint rules for known-safe fields rather than turning off all scanning.\n\nExample config.toml: ```toml [mcp_servers.my_firefox.taint_policy.tools.navigate.paths] \"$.tabId\"     = { skip_rules = [\"opaque_token\"] } \"$.sessionId\" = { skip_rules = [\"opaque_token\"] } ```",
+      "description": "Per-server taint policy that lets operators disable specific taint rules for known-safe fields rather than turning off all scanning.\n\nExample config.toml: ```toml [mcp_servers.my_firefox.taint_policy.tools.navigate] default = \"skip\"   # bypass scanning entirely for `navigate`\n\n[mcp_servers.my_firefox.taint_policy.tools.read_file.paths] \"$.content\"   = { skip_rules = [\"opaque_token\"] } \"$.metadata.*\" = { skip_rules = [\"sensitive_key_name\"] } ```",
       "properties": {
         "tools": {
           "additionalProperties": {
@@ -4388,16 +4388,77 @@
       },
       "type": "object"
     },
+    "McpTaintRuleSetAction": {
+      "description": "Severity action for a [`NamedTaintRuleSet`] when one of its rules fires during MCP argument scanning.\n\n**Overlap resolution: most permissive wins.** When a tool's `rule_sets` list references multiple sets that all cover the same `TaintRuleId`, the scanner applies the *most permissive* action — `Log` > `Warn` > `Block`. This is intentional (it lets a narrow `audit_only` set carve out exceptions to a broad `Block` set without rewriting the broad set), but it means **adding an audit-only set with `action = log` will silently neutralise any `block` set that overlaps on the same rule**. The dashboard surfaces a hint next to the `rule_sets` field; operators authoring config by hand should keep this in mind.",
+      "oneOf": [
+        {
+          "description": "Abort the MCP tool call and surface a violation error to the LLM (current scanner default).",
+          "enum": [
+            "block"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Allow the call through, but emit a structured WARN-level tracing event so operators can see exemptions firing.",
+          "enum": [
+            "warn"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Allow the call through and emit at INFO level. Useful for building an exemption baseline before flipping a rule set to `block`.",
+          "enum": [
+            "log"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "McpTaintToolAction": {
+      "description": "What the scanner does for a tool's argument paths NOT matched by any entry in [`McpTaintToolPolicy::paths`].",
+      "oneOf": [
+        {
+          "description": "Apply the full taint rule set to every argument leaf (current behaviour).",
+          "enum": [
+            "scan"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bypass scanning entirely for this tool. Even sensitive object keys are allowed through. Use as a tool-level kill switch when a tool's arguments are by-design opaque (browser tab handles, DB session IDs, etc.).",
+          "enum": [
+            "skip"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "McpTaintToolPolicy": {
       "description": "Per-tool taint policy for an MCP server.",
       "properties": {
+        "default": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpTaintToolAction"
+            }
+          ],
+          "default": "scan",
+          "description": "What to do for argument paths not matched by `paths`. Defaults to [`McpTaintToolAction::Scan`] (current behaviour).\n\nSet to [`McpTaintToolAction::Skip`] to bypass scanning for the whole tool with one line, instead of enumerating every argument path."
+        },
         "paths": {
           "additionalProperties": {
             "$ref": "#/definitions/McpTaintPathPolicy"
           },
           "default": {},
-          "description": "Per-path exemptions.  The key is a minimal JSONPath expression (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not listed here have all rules applied.",
+          "description": "Per-path exemptions.  The key is a minimal JSONPath expression (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not listed here have all rules applied (subject to `default`).",
           "type": "object"
+        },
+        "rule_sets": {
+          "description": "Names of top-level `[[taint_rules]]` rule sets to apply to every argument leaf of this tool. Each referenced set's `action` controls whether the listed rules block, warn, or log when they fire.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -4862,6 +4923,36 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "NamedTaintRuleSet": {
+      "description": "A reusable, named group of taint rules with an associated severity action.\n\nDefined as `[[taint_rules]]` in `config.toml` and referenced by [`McpTaintToolPolicy::rule_sets`]:\n\n```toml [[taint_rules]] name = \"browser_handles\" action = \"warn\" rules = [\"opaque_token\"]\n\n[mcp_servers.camofox.taint_policy.tools.navigate] rule_sets = [\"browser_handles\"] ```\n\n`PartialEq + Eq` are derived so the kernel's reload-plan diff can detect `[[taint_rules]]` changes and emit `HotAction::ReloadTaintRules`.",
+      "properties": {
+        "action": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpTaintRuleSetAction"
+            }
+          ],
+          "default": "block",
+          "description": "What happens when one of `rules` fires during scanning."
+        },
+        "name": {
+          "description": "Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be unique within a [`KernelConfig`]; duplicate names are resolved by last-wins ordering.",
+          "type": "string"
+        },
+        "rules": {
+          "default": [],
+          "description": "`TaintRuleId` variants this set covers.",
+          "items": {
+            "$ref": "#/definitions/TaintRuleId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
       "type": "object"
     },
     "NetworkConfig": {
@@ -14226,6 +14317,13 @@
       "default": false,
       "description": "Strict config mode: when `true`, the daemon refuses to start if the config file contains unknown or unrecognised fields. When `false` (the default), unknown fields are logged as warnings but the daemon boots normally. This is the \"tolerant mode\" toggle.",
       "type": "boolean"
+    },
+    "taint_rules": {
+      "description": "Reusable named taint rule sets referenced by [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of taint rules with a severity action (block / warn / log) that the MCP scanner applies to every tool that opts in.\n\n**Hot-reload caveat:** the kernel snapshots this list onto each connected MCP server at install / reload time. Edits to `[[taint_rules]]` followed by a config reload do NOT propagate to already-connected MCP servers until the server itself is reloaded (e.g. via `reload_mcp_server_config` or a daemon restart). The snapshot keeps the scanner's view stable for the lifetime of a single tool call.",
+      "items": {
+        "$ref": "#/definitions/NamedTaintRuleSet"
+      },
+      "type": "array"
     },
     "task_board": {
       "allOf": [
