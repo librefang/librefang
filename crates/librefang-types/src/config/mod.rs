@@ -206,7 +206,7 @@ mod tests {
         // TOML roundtrip
         let tomls = toml::to_string(&uc).unwrap();
         let back2: UserConfig = toml::from_str(&tomls).unwrap();
-        assert_eq!(back2.memory_access.as_ref().unwrap().delete_allowed, true);
+        assert!(back2.memory_access.as_ref().unwrap().delete_allowed);
         assert!(back2
             .channel_tool_rules
             .get("telegram")

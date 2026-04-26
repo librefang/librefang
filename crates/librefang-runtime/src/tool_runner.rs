@@ -1056,8 +1056,31 @@ pub async fn execute_tool(
             };
         }
 
+        // Per-user RBAC gate (RBAC M3, issue #3054 Phase 2). Layered on
+        // top of the existing channel deny: an explicit `Deny` here
+        // hard-blocks the call; `NeedsApproval` flips the call into
+        // approval-required mode regardless of the global require list;
+        // `Allow` defers to the existing approval logic.
+        let user_gate = kh.resolve_user_tool_decision(tool_name, sender_id, channel);
+        let force_approval = match &user_gate {
+            librefang_types::user_policy::UserToolGate::Allow => false,
+            librefang_types::user_policy::UserToolGate::Deny { reason } => {
+                warn!(tool_name, channel, %reason, "Execution denied by per-user policy");
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Execution denied: {reason}"),
+                    is_error: true,
+                    ..Default::default()
+                };
+            }
+            librefang_types::user_policy::UserToolGate::NeedsApproval { reason } => {
+                debug!(tool_name, %reason, "Per-user policy escalating to approval");
+                true
+            }
+        };
+
         if !skip_approval_for_full_exec
-            && kh.requires_approval_with_context(tool_name, sender_id, channel)
+            && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
         {
             let agent_id_str = caller_agent_id.unwrap_or("unknown");
             let input_str = input.to_string();
@@ -6061,6 +6084,7 @@ mod tests {
     async fn test_tool_a2a_send_blocks_secret_in_message() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "agent_url": "https://example.com/a2a",
@@ -6079,6 +6103,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_text_message() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -6098,6 +6123,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -6118,6 +6144,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -6136,6 +6163,10 @@ mod tests {
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,
+        /// RBAC M3 — overrides what `resolve_user_tool_decision` returns
+        /// for every call. `None` keeps the default-impl behaviour
+        /// (`UserToolGate::Allow`) so pre-RBAC tests are unaffected.
+        user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
     }
 
     #[async_trait]
@@ -6288,6 +6319,17 @@ mod tests {
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
                 request_id: uuid::Uuid::new_v4(),
             })
+        }
+
+        fn resolve_user_tool_decision(
+            &self,
+            _tool_name: &str,
+            _sender_id: Option<&str>,
+            _channel: Option<&str>,
+        ) -> librefang_types::user_policy::UserToolGate {
+            self.user_gate_override
+                .clone()
+                .unwrap_or(librefang_types::user_policy::UserToolGate::Allow)
         }
     }
 
@@ -7326,6 +7368,7 @@ mod tests {
         let approval_requests = Arc::new(AtomicUsize::new(0));
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
         });
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Full,
@@ -7377,6 +7420,7 @@ mod tests {
         let approval_requests = Arc::new(AtomicUsize::new(0));
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
         });
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Allowlist,
@@ -7422,6 +7466,173 @@ mod tests {
             "content should mention approval requirement, got: {}",
             result.content
         );
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval
+        );
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    // ---- RBAC M3 — per-user tool policy gate (#3054) ----
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_deny_returns_hard_error() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::Deny {
+                reason: "user 'Bob' (role: user) is not permitted to invoke 'shell_exec'"
+                    .to_string(),
+            }),
+        });
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_error, "user-policy deny must produce an error");
+        assert!(
+            result.content.contains("Execution denied"),
+            "content should announce the deny: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("user 'Bob'"),
+            "deny reason must surface to the model: {}",
+            result.content
+        );
+        // No approval was requested — the deny short-circuits.
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            // file_write is NOT in the default require_approval list (which
+            // would already gate it). The point of this test is to prove the
+            // user gate flips it into approval-required mode regardless of
+            // the global policy.
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+                reason: "tool 'file_write' requires admin approval for user 'Bob'".to_string(),
+            }),
+        });
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({"path": "scratch.txt", "content": "hi"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            Some(workspace.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // User gate forced approval — the tool is deferred (NotBlocked).
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval,
+            "expected WaitingApproval status, got content: {}",
+            result.content
+        );
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() {
+        // user_gate_override = Allow → behaviour matches the pre-RBAC
+        // approval flow. shell_exec is in the default require_approval
+        // list and ApprovalKernel.requires_approval() returns true for it,
+        // so we still expect WaitingApproval — proving Allow is a true
+        // pass-through, not a bypass.
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::Allow),
+        });
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alice"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
         assert_eq!(
             result.status,
             librefang_types::tool::ToolExecutionStatus::WaitingApproval

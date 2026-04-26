@@ -46,6 +46,26 @@ pub enum UserToolDecision {
     NeedsRoleEscalation,
 }
 
+/// Runtime-facing gate decision returned by the kernel after combining
+/// per-user policy with role-aware approval escalation.
+///
+/// This is what the tool dispatcher (`librefang-runtime::tool_runner`)
+/// sees: a single typed verdict it can act on without knowing anything
+/// about roles, channels, or category groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserToolGate {
+    /// No per-user objection. Continue with the existing approval gate.
+    Allow,
+    /// Hard deny. The dispatcher MUST refuse the call without prompting
+    /// for approval. `reason` is shown back to the model verbatim so it
+    /// can self-correct on the next turn.
+    Deny { reason: String },
+    /// User's role would block this tool, but a higher role (admin/owner)
+    /// could authorise it. The dispatcher MUST route the call through the
+    /// approval queue regardless of `ApprovalPolicy.require_approval`.
+    NeedsApproval { reason: String },
+}
+
 /// Per-user, per-channel allow/deny lists.
 ///
 /// This is a strictly more permissive variant of

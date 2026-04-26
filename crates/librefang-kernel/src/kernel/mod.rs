@@ -2173,8 +2173,10 @@ impl LibreFangKernel {
         let wasm_sandbox = WasmSandbox::new()
             .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
-        // Initialize RBAC authentication manager
-        let auth = AuthManager::new(&config.users);
+        // Initialize RBAC authentication manager. Tool groups are passed
+        // through so per-user `tool_categories` (RBAC M3) can resolve
+        // group names to their tool patterns.
+        let auth = AuthManager::with_tool_groups(&config.users, &config.tool_policy.groups);
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
@@ -14841,6 +14843,16 @@ impl KernelHandle for LibreFangKernel {
     ) -> bool {
         self.approval_manager
             .is_tool_denied_with_context(tool_name, sender_id, channel)
+    }
+
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        self.auth
+            .resolve_user_tool_decision(tool_name, sender_id, channel)
     }
 
     async fn request_approval(

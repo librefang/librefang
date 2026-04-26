@@ -199,6 +199,31 @@ pub trait KernelHandle: Send + Sync {
         false
     }
 
+    /// Resolve the per-user RBAC gate for a tool invocation (RBAC M3,
+    /// issue #3054 Phase 2).
+    ///
+    /// Combines the user's `UserToolPolicy`, `channel_tool_rules`,
+    /// `tool_categories`, and role-based approval escalation into a single
+    /// runtime-facing verdict. Returns:
+    ///
+    /// * `Allow` — no per-user objection; continue with the existing
+    ///   approval/capability gates.
+    /// * `Deny` — hard deny; the dispatcher refuses without prompting.
+    /// * `NeedsApproval` — user's own role would block, but a higher role
+    ///   could authorise; route through the approval queue.
+    ///
+    /// Default impl returns `Allow` so installations without registered
+    /// users (the M2 single-user mode) keep their pre-M3 behaviour.
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        let _ = (tool_name, sender_id, channel);
+        librefang_types::user_policy::UserToolGate::Allow
+    }
+
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
     async fn request_approval(
         &self,
