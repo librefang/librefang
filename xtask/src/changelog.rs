@@ -128,7 +128,6 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
     let conv_re = Regex::new(r"^(\w+)(?:\([^)]*\))?[!]?:\s*(.*)").unwrap();
     let mut categories: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
-    let mut authors: Vec<String> = Vec::new();
 
     for pr in prs {
         let title = pr.title.trim();
@@ -136,9 +135,11 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
             continue;
         }
 
-        if !pr.author.is_empty() && !authors.iter().any(|a| a == &pr.author) {
-            authors.push(pr.author.clone());
-        }
+        let credit = if pr.author.is_empty() {
+            String::new()
+        } else {
+            format!(" (@{})", pr.author)
+        };
 
         let (category, desc) = if let Some(caps) = conv_re.captures(title) {
             let prefix = caps.get(1).unwrap().as_str().to_lowercase();
@@ -163,7 +164,7 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
         categories
             .entry(category)
             .or_default()
-            .push(format!("{} (#{})", desc, pr.number));
+            .push(format!("{} (#{}){}", desc, pr.number, credit));
     }
 
     let mut output = String::new();
@@ -191,14 +192,6 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
         output.push_str("<details>\n<summary>Documentation, maintenance, and other internal changes</summary>\n\n");
         output.push_str(&secondary);
         output.push_str("</details>\n\n");
-    }
-
-    if !authors.is_empty() {
-        output.push_str("### Contributors\n\n");
-        output.push_str("Thanks to ");
-        let mentions: Vec<String> = authors.iter().map(|a| format!("@{}", a)).collect();
-        output.push_str(&mentions.join(", "));
-        output.push_str(" for the contributions in this release.\n\n");
     }
 
     output
