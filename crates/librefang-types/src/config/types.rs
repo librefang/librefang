@@ -383,6 +383,28 @@ fn default_role() -> String {
     "user".to_string()
 }
 
+impl Default for UserConfig {
+    fn default() -> Self {
+        // Mirrors the per-field `#[serde(default)]` attributes above so a
+        // hand-built `UserConfig::default()` matches what
+        // `serde::from_str("name = \"x\"")` would produce. Tests use
+        // `UserConfig { name: ..., role: ..., api_key_hash: ...,
+        // ..Default::default() }` to avoid restating every optional
+        // RBAC field at every fixture site.
+        Self {
+            name: String::new(),
+            role: default_role(),
+            channel_bindings: HashMap::new(),
+            api_key_hash: None,
+            budget: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: HashMap::new(),
+        }
+    }
+}
+
 /// RBAC M5: per-user spending budget.
 ///
 /// Mirrors the global [`BudgetConfig`] window structure (hourly / daily /
