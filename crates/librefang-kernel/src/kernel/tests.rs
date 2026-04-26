@@ -4251,3 +4251,84 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
 
     kernel.shutdown();
 }
+
+/// Issue #3243 regression — RBAC enabled (`[[users]]` configured) must
+/// not gate **autonomous-loop tool calls** through the user policy /
+/// approval queue. Without the carve-out, every autonomous tick that
+/// invoked a non-safe-list tool (e.g. `shell_exec`) would fall into
+/// `guest_gate` → `NeedsApproval` because autonomous calls have no
+/// inbound `(sender_id, channel)` tuple to resolve a user from. The
+/// kernel synthesises `SenderContext { channel: "autonomous", .. }` at
+/// the dispatch site (`start_continuous_autonomous_loop`) and
+/// [`KernelHandle::resolve_user_tool_decision`] matches that sentinel
+/// alongside the existing `"cron"` carve-out.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
+    use kernel_handle::KernelHandle;
+    use librefang_types::config::UserConfig;
+    use librefang_types::user_policy::UserToolGate;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // Configure a single Owner user with NO `tool_policy` allowlist.
+    // The mere presence of `[[users]]` enables RBAC; without the
+    // carve-out, every autonomous tool call would be denied because
+    // the autonomous loop carries no sender_id to resolve to "Owner".
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        users: vec![UserConfig {
+            name: "Owner".to_string(),
+            role: "owner".to_string(),
+            ..Default::default()
+        }],
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    // Cron channel — the existing carve-out (must remain Allow).
+    assert_eq!(
+        KernelHandle::resolve_user_tool_decision(
+            kernel.as_ref(),
+            "shell_exec",
+            None,
+            Some("cron"),
+        ),
+        UserToolGate::Allow,
+        "cron carve-out must continue to bypass RBAC for autonomous-class calls"
+    );
+
+    // Autonomous channel — the new carve-out (issue #3243).
+    assert_eq!(
+        KernelHandle::resolve_user_tool_decision(
+            kernel.as_ref(),
+            "shell_exec",
+            None,
+            Some("autonomous"),
+        ),
+        UserToolGate::Allow,
+        "autonomous-tick tool calls must bypass RBAC — without this, RBAC + autonomous \
+         hand agents are unusable (issue #3243)"
+    );
+
+    // A real inbound channel WITHOUT a registered sender must still
+    // hit the guest gate — proves the carve-out is targeted, not a
+    // blanket fail-open.
+    let guest_decision = KernelHandle::resolve_user_tool_decision(
+        kernel.as_ref(),
+        "shell_exec",
+        Some("999999"),
+        Some("telegram"),
+    );
+    assert!(
+        !matches!(guest_decision, UserToolGate::Allow),
+        "unknown sender on a real channel must NOT bypass RBAC: got {guest_decision:?}"
+    );
+
+    kernel.shutdown();
+}
