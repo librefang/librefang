@@ -205,6 +205,39 @@ List all available tools that agents can use.
 
 Get detailed information about a specific tool including its input schema.
 
+### POST /api/tools/&lbrace;name&rbrace;/invoke
+
+Invoke a kernel tool directly, without going through an agent loop. Intended for MCP bridges, automation scripts, and out-of-band integrations.
+
+**Fail-closed**: every request is rejected unless `[tool_invoke] enabled = true` and the tool name appears in `[tool_invoke] allowlist`. Approval-gated tools additionally require `?agent_id=<uuid>` so the approval callback can resolve back to a real agent — without an `agent_id` such tools are rejected to avoid orphaned deferred executions.
+
+**Request:** JSON body is the tool's `input` object (validated against the tool's schema).
+
+**Query parameters:**
+
+- `agent_id` (optional, must be a well-formed UUID): caller agent for approval-gated tools and audit attribution.
+
+**Response statuses:**
+
+- `200` — tool executed; body is the tool's result JSON.
+- `400` — input failed schema validation, or an approval-gated tool was invoked without `agent_id`.
+- `403` — endpoint disabled or tool not in the allowlist.
+- `404` — tool not registered.
+
+```toml
+# config.toml
+[tool_invoke]
+enabled = true
+allowlist = ["http_get", "shell_exec"]   # exact tool names
+```
+
+```bash
+curl -X POST 'http://127.0.0.1:4545/api/tools/http_get/invoke?agent_id=11111111-1111-1111-1111-111111111111' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'
+```
+
 ### GET /api/metrics
 
 Prometheus-format metrics endpoint for integration with Grafana, Prometheus, or compatible monitoring stacks.

@@ -74,7 +74,9 @@ impl McpOAuthProvider for TrackingOAuthProvider {
 /// not silently `None`.
 #[tokio::test]
 async fn test_http_connect_calls_oauth_provider_load_token() {
-    use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+    use librefang_runtime::mcp::{
+        empty_taint_rule_sets_handle, McpConnection, McpServerConfig, McpTransport,
+    };
 
     let provider = Arc::new(TrackingOAuthProvider::new());
 
@@ -90,6 +92,7 @@ async fn test_http_connect_calls_oauth_provider_load_token() {
         oauth_config: None,
         taint_scanning: true,
         taint_policy: None,
+        taint_rule_sets: empty_taint_rule_sets_handle(),
         roots: vec![],
     };
 

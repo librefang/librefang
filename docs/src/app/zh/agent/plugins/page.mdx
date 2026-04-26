@@ -259,6 +259,79 @@ context 窗口压力过大时触发，用自定义策略压缩历史消息。
 
 ---
 
+### `transform_tool_result` hook
+
+工具运行后、LLM 看到结果前重写工具输出。让插件不用改工具本身就能截断、脱敏、屏蔽路径或完全替换工具结果。
+
+**在 agent loop 里的位置:**
+
+```
+工具执行
+  ↓
+after_tool_call hook(只观察)
+  ↓
+transform_tool_result hook  ← 重写发生在这里
+  ↓
+sanitize + 应用上下文预算
+  ↓
+结果落到对话历史
+```
+
+**Trait 签名**(Rust 插件)—— 也作为 stdin/stdout JSON 请求暴露给子进程插件:
+
+```rust
+fn transform(&self, ctx: &HookContext) -> Result<Option<String>, String>
+```
+
+`HookContext` 携带:
+
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `agent_name` | `&str` | Agent 显示名 |
+| `agent_id` | `&str` | Agent ID |
+| `event` | `HookEvent::TransformToolResult` | 此 hook 永远是这个 variant |
+| `data` | `serde_json::Value` | `{ tool_name, args, result, is_error }` |
+
+**请求**(子进程版):
+
+```json
+{
+  "type": "transform_tool_result",
+  "tool_name": "shell_exec",
+  "args": { "command": "cat /etc/passwd" },
+  "result": "root:x:0:0:root:/root:/bin/bash\n...",
+  "is_error": false
+}
+```
+
+**响应形状:**
+
+| 回复 | 含义 |
+|---|---|
+| `{"type": "transformed", "result": "<new>"}` | **首匹配胜出。** 替换工具结果并停止。后续插件不会再被调到。 |
+| `{"type": "skip"}`(Rust 里 `Ok(None)`) | 透传。栈中下一个插件得到机会。 |
+| 非 0 退出 + stderr(Rust 里 `Err(reason)`) | `warn` 级别记日志。跳过此插件。链继续 —— fail-open。 |
+
+**语义:**
+
+- **首匹配胜出,顺序执行。** 插件按注册顺序跑;第一个返回 transformed 结果的插件胜出,链终止。
+- **Fail-open。** 报错的插件被跳过;如果所有插件都 skip 或 error,原始工具结果保持不变。
+- **本身不限大小**。但 transformed 结果之后仍要过全局上下文预算 sanitiser,所以爆大的输出仍可能在下游被截断。
+- **Rust 插件的 panic 不会被捕获** —— `transform()` 里的 panic 会终止 agent 这一轮。源头不可信时用 `std::panic::catch_unwind` 包一层。
+
+**典型用例:**
+
+- **截断** —— 保留 `shell_exec` 输出的前 200 行,后面替换为 `"... (N more lines truncated)"`。
+- **脱敏** —— 用正则一遍剥掉所有工具结果里的 API key / 密码 / token。
+- **路径屏蔽** —— 把绝对的 home 目录路径改写成 `~/...`,让模型不要记住本地布局。
+- **格式转换** —— 把 JSON 工具结果转成对模型更友好的 markdown 表格。
+- **内容过滤** —— 从 web-fetch 结果里去掉模板/广告横幅。
+- **审计透传** —— 返回 `Ok(None)` 但把调用回声到外部系统做合规日志。
+
+此 hook 在同一个 `Plugin` trait 里,跟 `ingest` / `assemble` / `compact` / `after_turn` 一起。一个插件可以实现任意子集。
+
+---
+
 ### 错误
 
 以非 0 退出码结束，并把错误写到 stderr。LibreFang 会把 stderr 以 `warn` 级别记日志，然后回退到默认 context engine 的结果，当前这一轮继续。
@@ -429,6 +502,7 @@ def main():
         print(json.dumps({"type": "ingest_result", "memories": []}))
         return
 
+    # Open the per-plugin DB and read anything keyed to this peer.
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS prefs (peer_id TEXT, fact TEXT)")
     rows = conn.execute(

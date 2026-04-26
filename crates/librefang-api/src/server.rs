@@ -47,6 +47,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(routes::config::router())
         .merge(routes::agents::router())
+        .merge(routes::audit::router())
+        .merge(routes::authz::router())
         .merge(routes::channels::router())
         .merge(routes::system::router())
         .merge(routes::memory::router())
@@ -62,6 +64,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::media::router())
         .merge(routes::prompts::routes())
         .merge(routes::terminal::router())
+        .merge(routes::users::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
@@ -208,6 +211,7 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
                 name: user.name.clone(),
                 role: librefang_kernel::auth::UserRole::from_str_role(&user.role),
                 api_key_hash: api_key_hash.to_string(),
+                user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
         })
         .collect()
@@ -348,9 +352,18 @@ async fn dashboard_login(
             }
 
             // Store the session token so the auth middleware can validate it.
+            // Attach the dashboard credential identity so the middleware can
+            // attribute follow-up requests to an Owner-level principal — without
+            // this, the session matches but the request stays anonymous and
+            // RBAC-gated handlers (audit/query, per-user budget writes) reject
+            // the dashboard caller as `None`. dashboard_pass is a single
+            // operator-level credential, so Owner is the right ceiling.
+            let mut session = token.clone();
+            session.user_name = Some(cfg_user.clone());
+            session.user_role = Some("owner".to_string());
             {
                 let mut sessions = state.active_sessions.write().await;
-                sessions.insert(token.token.clone(), token.clone());
+                sessions.insert(session.token.clone(), session);
                 // Persist so sessions survive daemon restarts.
                 save_sessions(state.kernel.home_dir(), &sessions);
             }
@@ -792,6 +805,14 @@ pub async fn build_router(
     // Create api_key_lock before AppState so both AppState and AuthState share the same Arc.
     let api_key = valid_api_tokens(kernel.as_ref()).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
+    // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
+    // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
+    // both AppState (mutator) and AuthState (reader) share the same Arc, so
+    // the next request after rotation sees the new hash and the old plaintext
+    // bearer token immediately fails authentication.
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(configured_user_api_keys(
+        kernel.as_ref(),
+    )));
 
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
@@ -809,6 +830,7 @@ pub async fn build_router(
         ),
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
@@ -852,11 +874,13 @@ pub async fn build_router(
             .allow_headers(tower_http::cors::Any)
     };
 
-    // AuthState shares api_key_lock with AppState so change_password can update it live.
-    let user_api_keys_vec = configured_user_api_keys(state.kernel.as_ref());
+    // AuthState shares api_key_lock + user_api_keys with AppState so
+    // change_password / rotate-key can update them live without a daemon
+    // restart.
+    let user_api_keys_initial_len = state.user_api_keys.read().await.len();
     let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
     let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
-    let any_auth = api_key_set || !user_api_keys_vec.is_empty() || dashboard_auth_enabled;
+    let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
 
     // Resolve the effective value of `require_auth_for_reads`.
     // - Explicit `Some(true)`  → operators are forcing the allowlist
@@ -923,9 +947,12 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         active_sessions: active_sessions.clone(),
         dashboard_auth_enabled,
-        user_api_keys: Arc::new(user_api_keys_vec),
+        user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads,
         allow_no_auth,
+        // RBAC M5: hand the audit log to the auth layer so role-denial
+        // events land in the same hash chain as everything else.
+        audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
     let gcra_limiter = rate_limiter::GcraState {

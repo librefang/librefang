@@ -352,10 +352,185 @@ pub struct UserConfig {
     /// Optional API key hash for API authentication.
     #[serde(default)]
     pub api_key_hash: Option<String>,
+    /// RBAC M5: per-user spend caps. `None` means "no per-user cap" — the
+    /// user is still bounded by global / per-agent / per-provider budgets.
+    /// See [`UserBudgetConfig`] for the supported windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<UserBudgetConfig>,
+    /// Per-user tool allow/deny lists. Layered ON TOP of the per-agent
+    /// `ToolPolicy` and any channel rules in `ApprovalPolicy`.
+    /// `None` means "no per-user policy — defer to other layers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<crate::user_policy::UserToolPolicy>,
+    /// Bulk allow/deny by `ToolGroup` category (groups are declared in
+    /// `KernelConfig.tool_policy.groups`). Lets admins say
+    /// `denied_groups = ["dangerous"]` without listing each tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_categories: Option<crate::user_policy::UserToolCategories>,
+    /// Memory namespace ACL — controls reads/writes to memory scopes
+    /// (`proactive`, `kv:*`, etc.) and PII redaction. `None` means
+    /// "use the role default ACL".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_access: Option<crate::user_policy::UserMemoryAccess>,
+    /// Per-channel tool overrides for THIS user. Keyed by channel adapter
+    /// name (e.g. `"telegram"`, `"discord"`). Layers on top of the global
+    /// `ApprovalPolicy.channel_rules` — both must agree to allow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
 }
 
 fn default_role() -> String {
     "user".to_string()
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        // Mirrors the per-field `#[serde(default)]` attributes above so a
+        // hand-built `UserConfig::default()` matches what
+        // `serde::from_str("name = \"x\"")` would produce. Tests use
+        // `UserConfig { name: ..., role: ..., api_key_hash: ...,
+        // ..Default::default() }` to avoid restating every optional
+        // RBAC field at every fixture site.
+        Self {
+            name: String::new(),
+            role: default_role(),
+            channel_bindings: HashMap::new(),
+            api_key_hash: None,
+            budget: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: HashMap::new(),
+        }
+    }
+}
+
+/// RBAC M5: per-user spending budget.
+///
+/// Mirrors the global [`BudgetConfig`] window structure (hourly / daily /
+/// monthly) so the same cost-attribution pipeline can enforce both. Set
+/// any limit to `0.0` for "unlimited on that window". `alert_threshold`
+/// is the fraction of any limit at which the metering layer should emit
+/// a `BudgetExceeded` audit pre-warning (default 0.8, clamped to 0..=1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct UserBudgetConfig {
+    /// Maximum cost in USD per hour for this user (0.0 = unlimited).
+    pub max_hourly_usd: f64,
+    /// Maximum cost in USD per day for this user (0.0 = unlimited).
+    pub max_daily_usd: f64,
+    /// Maximum cost in USD per month for this user (0.0 = unlimited).
+    pub max_monthly_usd: f64,
+    /// Alert threshold (0..=1). Metering surfaces a BudgetExceeded audit
+    /// when *any* window reaches this fraction of its limit. Defaults to
+    /// 0.8 — same default as the global budget — for consistency.
+    pub alert_threshold: f64,
+}
+
+impl Default for UserBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_hourly_usd: 0.0,
+            max_daily_usd: 0.0,
+            max_monthly_usd: 0.0,
+            alert_threshold: 0.8,
+        }
+    }
+}
+
+/// Maps platform-native group/server roles (Telegram admin, Discord guild role,
+/// Slack workspace owner, etc.) to LibreFang `UserRole` values.
+///
+/// Resolution order in `AuthManager::resolve_role_for_sender` is:
+/// 1. Explicit `UserConfig.role` for a registered user — wins outright.
+/// 2. Channel-derived role from this mapping — applied when the user is
+///    recognised on a platform but has no explicit `UserConfig` role.
+/// 3. Default-deny — fall through to `guest`.
+///
+/// All sub-tables are optional — a missing channel just means "no
+/// channel-derived role" for that platform. Each per-channel struct keeps
+/// platform-shaped fields rather than a single uniform schema because the
+/// underlying APIs disagree about role granularity (Telegram has 3 fixed
+/// statuses, Discord has named guild roles, Slack collapses to
+/// owner/admin/member/guest).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ChannelRoleMapping {
+    /// Telegram chat-status → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramRoleMapping>,
+    /// Discord guild-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordRoleMapping>,
+    /// Slack workspace-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackRoleMapping>,
+}
+
+impl ChannelRoleMapping {
+    /// Returns true when no platform mapping is configured.
+    pub fn is_empty(&self) -> bool {
+        self.telegram.is_none() && self.discord.is_none() && self.slack.is_none()
+    }
+}
+
+/// Telegram-side mapping. Telegram exposes three statuses for a member of a
+/// chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/
+/// `kicked` which we collapse into "no derived role").
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TelegramRoleMapping {
+    /// LibreFang role assigned when Telegram reports `status = "administrator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "creator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "member"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+}
+
+/// Discord-side mapping. A user may hold any number of guild roles
+/// simultaneously; the resolver walks **every** role the user has,
+/// looks each one up in `role_map`, and picks the **highest-privilege**
+/// match (`Owner` > `Admin` > `User` > `Viewer`). Declaration order
+/// in `config.toml` is irrelevant — the privilege ordering on the
+/// LibreFang side decides the winner. This protects against Discord-
+/// side role ordering (which is outside our control) deciding the
+/// effective LibreFang permissions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DiscordRoleMapping {
+    /// Discord role name → LibreFang role string (`owner` / `admin` /
+    /// `user` / `viewer` / `guest`). Iteration order is irrelevant —
+    /// the translator scans every match the user holds and returns the
+    /// most privileged. Typo'd LibreFang role strings (e.g. `"admn"`)
+    /// are silently skipped, falling back to default-deny `Viewer`.
+    pub role_map: HashMap<String, String>,
+}
+
+/// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
+/// `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence
+/// (owner > admin > guest > member) is collapsed inside the channel
+/// adapter (`SlackAdapter::parse_users_info_response`) into a single
+/// platform token before this mapping ever sees it; the translator
+/// here is a flat lookup, not a precedence ladder. Each step is
+/// optional — leave a field unset to fall through to default-deny
+/// `Viewer` for that platform tier.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SlackRoleMapping {
+    /// LibreFang role for `is_owner = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_role: Option<String>,
+    /// LibreFang role for `is_admin = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role for regular workspace members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+    /// LibreFang role for single/multi-channel guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_role: Option<String>,
 }
 
 /// Web search provider selection.
@@ -1844,6 +2019,8 @@ impl Default for QueueConfig {
 /// main_lane = 3
 /// cron_lane = 2
 /// subagent_lane = 3
+/// trigger_lane = 8
+/// default_per_agent = 1
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -1854,6 +2031,19 @@ pub struct QueueConcurrencyConfig {
     pub cron_lane: usize,
     /// Subagent lane concurrent limit (child agents).
     pub subagent_lane: usize,
+    /// Trigger lane concurrent limit — global cap on event-trigger
+    /// (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the
+    /// same time, across all agents. Acquired BEFORE the per-agent
+    /// semaphore so a single hot agent cannot starve the kernel.
+    /// Default `8`. `0` is rewritten to `1` by validation.
+    pub trigger_lane: usize,
+    /// Default per-agent invocation cap when an agent's manifest does
+    /// not set `max_concurrent_invocations`. `1` reproduces the
+    /// legacy per-agent-mutex serialization that pre-existed this
+    /// knob — change deliberately. `0` is rewritten to `1` by
+    /// validation. Typed `usize` to match the sibling lane fields and
+    /// to feed `Semaphore::new` without a cast.
+    pub default_per_agent: usize,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -1862,6 +2052,8 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+            trigger_lane: 8,
+            default_per_agent: 1,
         }
     }
 }
@@ -2048,6 +2240,21 @@ pub struct KernelConfig {
     /// hostnames without port, e.g. `"dash.example.com"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_hosts: Vec<String>,
+    /// Host directories under which `agent.toml: [workspaces].<name>.mount`
+    /// declarations may resolve. Each declared mount is canonicalized at
+    /// boot and must be a path prefix of one of these (also canonicalized)
+    /// roots; otherwise it is rejected with a warning. Empty (default)
+    /// denies all external mounts — the safe default. See issue #3230.
+    ///
+    /// Example:
+    /// ```toml
+    /// allowed_mount_roots = [
+    ///   "/Users/alice/Documents",
+    ///   "/data/shared",
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_mount_roots: Vec<PathBuf>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
     /// Operator override for the agent-loop iteration cap. When set, any
@@ -2146,9 +2353,29 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
+    /// Maps platform-native channel roles (Telegram admin, Discord guild
+    /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
+    /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
+    /// is consulted (explicit beats channel-derived; both beat default-deny).
+    #[serde(default, skip_serializing_if = "ChannelRoleMapping::is_empty")]
+    pub channel_role_mapping: ChannelRoleMapping,
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
+    /// Reusable named taint rule sets referenced by
+    /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
+    /// taint rules with a severity action (block / warn / log) that the
+    /// MCP scanner applies to every tool that opts in.
+    ///
+    /// **Hot-reload caveat:** the kernel snapshots this list onto each
+    /// connected MCP server at install / reload time. Edits to
+    /// `[[taint_rules]]` followed by a config reload do NOT propagate to
+    /// already-connected MCP servers until the server itself is reloaded
+    /// (e.g. via `reload_mcp_server_config` or a daemon restart). The
+    /// snapshot keeps the scanner's view stable for the lifetime of a
+    /// single tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_rules: Vec<NamedTaintRuleSet>,
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default)]
     pub a2a: Option<A2aConfig>,
@@ -3410,11 +3637,26 @@ fn default_max_request_body_bytes() -> usize {
 /// # paths resolve against `data_dir`. Leave unset for the default
 /// # `data_dir/audit.anchor`.
 /// anchor_path = "/var/log/librefang/audit.anchor"
+///
+/// [audit.retention]
+/// trim_interval_secs = 3600
+/// max_in_memory_entries = 50000
+///
+/// [audit.retention.retention_days_by_action]
+/// ToolInvoke = 14
+/// LlmCompletion = 14
+/// RoleChange = 365
+/// PermissionDenied = 365
+/// BudgetExceeded = 365
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
+    ///
+    /// **Coarse global retention.** This drives the legacy day-based prune
+    /// over the SQLite table. For per-category in-memory retention with
+    /// chain-anchor-preserving trim, see `retention` below.
     pub retention_days: u32,
     /// Optional override for the external Merkle-tip anchor file that
     /// `AuditLog::with_db_anchored` uses to detect full rewrites of
@@ -3428,6 +3670,10 @@ pub struct AuditConfig {
     /// `logger`. Relative paths are resolved against `data_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_path: Option<PathBuf>,
+    /// Per-`AuditAction` retention policy used by the periodic trim job
+    /// over the in-memory audit window. Defaults preserve every entry.
+    #[serde(default)]
+    pub retention: AuditRetentionConfig,
 }
 
 impl Default for AuditConfig {
@@ -3435,8 +3681,44 @@ impl Default for AuditConfig {
         Self {
             retention_days: 90,
             anchor_path: None,
+            retention: AuditRetentionConfig::default(),
         }
     }
+}
+
+/// Per-`AuditAction` retention policy for the in-memory audit window.
+///
+/// The audit log is a Merkle-style hash chain — every entry's hash mixes
+/// the previous entry's hash. Naively dropping a prefix would break
+/// chain verification of the surviving entries because their `prev_hash`
+/// would point at a hash no longer present. The trim implementation
+/// solves this by remembering the last-dropped entry's hash as a
+/// **chain anchor** so verification of the surviving prefix can validate
+/// continuity against the anchor instead of a missing row.
+///
+/// Critical actions (`RoleChange`, `PermissionDenied`, `BudgetExceeded`)
+/// should keep long retention windows; noisy actions (`ToolInvoke`) can
+/// be pruned far more aggressively. Actions absent from the map are
+/// kept forever so operators that don't opt in never silently lose
+/// audit history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct AuditRetentionConfig {
+    /// How often the trim job runs. `None` (or 0) disables periodic trimming.
+    /// Reasonable default for production: 3600 (one hour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_interval_secs: Option<u64>,
+    /// Per-`AuditAction` retention windows in days. Key is the
+    /// `AuditAction` `Display` string (e.g. `"ToolInvoke"`). Missing
+    /// entries mean "keep forever".
+    #[serde(default)]
+    pub retention_days_by_action: HashMap<String, u32>,
+    /// Hard cap on the in-memory audit window — protects against runaway
+    /// growth even when no per-action policy is configured. `None` or 0
+    /// means unlimited. When the cap is exceeded the trim job drops the
+    /// oldest entries down to the cap regardless of their action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_memory_entries: Option<usize>,
 }
 
 /// PII privacy mode for LLM context filtering.
@@ -3693,6 +3975,18 @@ fn default_prompt_caching() -> bool {
 }
 
 /// Taint skip rules for a single argument path within a tool.
+///
+/// The policy key is a minimal JSONPath expression matched by the runtime
+/// scanner. Supported wildcard syntax:
+///
+/// - `$.foo`      — exact property at any depth specified literally.
+/// - `$.foo.*`    — any direct child of `$.foo` (single segment, non-array).
+/// - `$.foo[*]`   — any array element of `$.foo` (e.g. `$.foo[0]`, `$.foo[42]`).
+/// - `$.*`        — any top-level property.
+///
+/// Wildcards do NOT span multiple segments: `$.foo.*` matches `$.foo.bar`
+/// but not `$.foo.bar.baz`. Use exact paths plus rule_sets for deep
+/// exemptions across many paths.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPathPolicy {
     /// Rule IDs to skip when scanning this path.  An empty list means
@@ -3701,14 +3995,42 @@ pub struct McpTaintPathPolicy {
     pub skip_rules: Vec<crate::taint::TaintRuleId>,
 }
 
+/// What the scanner does for a tool's argument paths NOT matched by any
+/// entry in [`McpTaintToolPolicy::paths`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintToolAction {
+    /// Apply the full taint rule set to every argument leaf (current behaviour).
+    #[default]
+    Scan,
+    /// Bypass scanning entirely for this tool. Even sensitive object keys are
+    /// allowed through. Use as a tool-level kill switch when a tool's arguments
+    /// are by-design opaque (browser tab handles, DB session IDs, etc.).
+    Skip,
+}
+
 /// Per-tool taint policy for an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintToolPolicy {
+    /// What to do for argument paths not matched by `paths`.
+    /// Defaults to [`McpTaintToolAction::Scan`] (current behaviour).
+    ///
+    /// Set to [`McpTaintToolAction::Skip`] to bypass scanning for the whole
+    /// tool with one line, instead of enumerating every argument path.
+    #[serde(default)]
+    pub default: McpTaintToolAction,
     /// Per-path exemptions.  The key is a minimal JSONPath expression
     /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
-    /// listed here have all rules applied.
+    /// listed here have all rules applied (subject to `default`).
     #[serde(default)]
     pub paths: HashMap<String, McpTaintPathPolicy>,
+    /// Names of top-level `[[taint_rules]]` rule sets to apply to every
+    /// argument leaf of this tool. Each referenced set's `action` controls
+    /// whether the listed rules block, warn, or log when they fire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_sets: Vec<String>,
 }
 
 /// Per-server taint policy that lets operators disable specific taint
@@ -3716,9 +4038,12 @@ pub struct McpTaintToolPolicy {
 ///
 /// Example config.toml:
 /// ```toml
-/// [mcp_servers.my_firefox.taint_policy.tools.navigate.paths]
-/// "$.tabId"     = { skip_rules = ["opaque_token"] }
-/// "$.sessionId" = { skip_rules = ["opaque_token"] }
+/// [mcp_servers.my_firefox.taint_policy.tools.navigate]
+/// default = "skip"   # bypass scanning entirely for `navigate`
+///
+/// [mcp_servers.my_firefox.taint_policy.tools.read_file.paths]
+/// "$.content"   = { skip_rules = ["opaque_token"] }
+/// "$.metadata.*" = { skip_rules = ["sensitive_key_name"] }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPolicy {
@@ -3726,6 +4051,67 @@ pub struct McpTaintPolicy {
     /// the MCP server's tool list (without the `mcp_<server>_` prefix).
     #[serde(default)]
     pub tools: HashMap<String, McpTaintToolPolicy>,
+}
+
+/// Severity action for a [`NamedTaintRuleSet`] when one of its rules fires
+/// during MCP argument scanning.
+///
+/// **Overlap resolution: most permissive wins.** When a tool's `rule_sets`
+/// list references multiple sets that all cover the same `TaintRuleId`,
+/// the scanner applies the *most permissive* action — `Log` > `Warn` >
+/// `Block`. This is intentional (it lets a narrow `audit_only` set carve
+/// out exceptions to a broad `Block` set without rewriting the broad set),
+/// but it means **adding an audit-only set with `action = log` will
+/// silently neutralise any `block` set that overlaps on the same rule**.
+/// The dashboard surfaces a hint next to the `rule_sets` field; operators
+/// authoring config by hand should keep this in mind.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintRuleSetAction {
+    /// Abort the MCP tool call and surface a violation error to the LLM
+    /// (current scanner default).
+    #[default]
+    Block,
+    /// Allow the call through, but emit a structured WARN-level tracing
+    /// event so operators can see exemptions firing.
+    Warn,
+    /// Allow the call through and emit at INFO level. Useful for building
+    /// an exemption baseline before flipping a rule set to `block`.
+    Log,
+}
+
+/// A reusable, named group of taint rules with an associated severity action.
+///
+/// Defined as `[[taint_rules]]` in `config.toml` and referenced by
+/// [`McpTaintToolPolicy::rule_sets`]:
+///
+/// ```toml
+/// [[taint_rules]]
+/// name = "browser_handles"
+/// action = "warn"
+/// rules = ["opaque_token"]
+///
+/// [mcp_servers.camofox.taint_policy.tools.navigate]
+/// rule_sets = ["browser_handles"]
+/// ```
+///
+/// `PartialEq + Eq` are derived so the kernel's reload-plan diff can
+/// detect `[[taint_rules]]` changes and emit
+/// `HotAction::ReloadTaintRules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NamedTaintRuleSet {
+    /// Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be
+    /// unique within a [`KernelConfig`]; duplicate names are resolved by
+    /// last-wins ordering.
+    pub name: String,
+    /// What happens when one of `rules` fires during scanning.
+    #[serde(default)]
+    pub action: McpTaintRuleSetAction,
+    /// `TaintRuleId` variants this set covers.
+    #[serde(default)]
+    pub rules: Vec<crate::taint::TaintRuleId>,
 }
 
 /// Configuration entry for an MCP server.
@@ -4009,7 +4395,9 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
+            taint_rules: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
             stable_prefix_mode: false,
@@ -4071,6 +4459,7 @@ impl Default for KernelConfig {
             registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
+            allowed_mount_roots: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
@@ -6983,5 +7372,151 @@ max_tokens_per_hour = 500000
         assert_eq!(c.max_concurrent, 4);
         assert_eq!(c.mcp_default_safety, "write_shared");
         assert!(c.mcp_readonly_allowlist.is_empty());
+    }
+
+    // ── Issue #3050: granular MCP taint policy ─────────────────────────────
+
+    #[test]
+    fn mcp_taint_tool_policy_default_is_scan_and_omits_optional_fields() {
+        // Backward compat: a bare `[tool_policy.tools.foo]` table must
+        // deserialise into `default = Scan`, no paths, no rule_sets.
+        let toml_str = "default = \"scan\"\n";
+        let policy: McpTaintToolPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.default, McpTaintToolAction::Scan);
+        assert!(policy.paths.is_empty());
+        assert!(policy.rule_sets.is_empty());
+
+        let empty: McpTaintToolPolicy = toml::from_str("").unwrap();
+        assert_eq!(empty.default, McpTaintToolAction::Scan);
+    }
+
+    #[test]
+    fn mcp_taint_tool_action_skip_round_trips() {
+        let mut tools = HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                default: McpTaintToolAction::Skip,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+
+        // TOML round-trip — primary surface for operators.
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back_toml: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back_toml.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+    }
+
+    #[test]
+    fn mcp_taint_path_policy_round_trips_with_wildcards() {
+        let mut paths = HashMap::new();
+        paths.insert(
+            "$.metadata.*".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::SensitiveKeyName],
+            },
+        );
+        paths.insert(
+            "$.items[*]".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::OpaqueToken],
+            },
+        );
+        let mut tools = HashMap::new();
+        tools.insert(
+            "read_file".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        let read_paths = &back.tools.get("read_file").unwrap().paths;
+        assert!(read_paths.contains_key("$.metadata.*"));
+        assert!(read_paths.contains_key("$.items[*]"));
+    }
+
+    #[test]
+    fn mcp_taint_rule_set_actions_round_trip() {
+        // Inline TOML covers all three severity tiers.
+        let toml_str = r#"
+[[taint_rules]]
+name = "browser_handles"
+action = "warn"
+rules = ["opaque_token"]
+
+[[taint_rules]]
+name = "pii_baseline"
+action = "log"
+rules = ["pii_email", "pii_phone"]
+
+[[taint_rules]]
+name = "strict_default"
+rules = ["authorization_literal"]
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.taint_rules.len(), 3);
+        assert_eq!(cfg.taint_rules[0].name, "browser_handles");
+        assert_eq!(cfg.taint_rules[0].action, McpTaintRuleSetAction::Warn);
+        assert_eq!(cfg.taint_rules[1].action, McpTaintRuleSetAction::Log);
+        // Default action when omitted: Block.
+        assert_eq!(cfg.taint_rules[2].action, McpTaintRuleSetAction::Block);
+    }
+
+    #[test]
+    fn tool_policy_rule_sets_reference_round_trips() {
+        // `McpTaintPolicy` has a single field `tools` — the test deserialises
+        // the policy directly, not the surrounding `[mcp_servers.<name>.taint_policy]`
+        // table. Using the un-prefixed `[tools.<name>]` shape keeps the test
+        // focused on the policy struct.
+        let toml_str = r#"
+[tools.navigate]
+default = "skip"
+rule_sets = ["browser_handles"]
+
+[tools.read_file]
+rule_sets = ["browser_handles", "pii_baseline"]
+
+[tools.read_file.paths]
+"$.content" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Skip);
+        assert_eq!(nav.rule_sets, vec!["browser_handles"]);
+
+        let rf = policy.tools.get("read_file").unwrap();
+        assert_eq!(rf.default, McpTaintToolAction::Scan);
+        assert_eq!(rf.rule_sets.len(), 2);
+        assert!(rf.paths.contains_key("$.content"));
+    }
+
+    #[test]
+    fn legacy_taint_policy_without_new_fields_still_loads() {
+        // Pre-issue #3050 config.toml shape — must continue to deserialise
+        // identically with `default = Scan`, empty `rule_sets`.
+        let toml_str = r#"
+[tools.navigate.paths]
+"$.tabId" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Scan);
+        assert!(nav.rule_sets.is_empty());
+        assert_eq!(nav.paths.len(), 1);
     }
 }

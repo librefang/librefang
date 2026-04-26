@@ -59,6 +59,7 @@ class LibreFang:
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
         self.tools = _ToolsResource(self)
+        self.users = _UsersResource(self)
         self.webhooks = _WebhooksResource(self)
         self.workflows = _WorkflowsResource(self)
 
@@ -192,6 +193,12 @@ class _AgentsResource(_Resource):
     def delete_agent_file(self, id: str, filename: str):
         return self._c._request("DELETE", f"/api/agents/{id}/files/{filename}")
 
+    def delete_hand_agent_runtime_config(self, id: str):
+        return self._c._request("DELETE", f"/api/agents/{id}/hand-runtime-config")
+
+    def patch_hand_agent_runtime_config(self, id: str, **data):
+        return self._c._request("PATCH", f"/api/agents/{id}/hand-runtime-config", data)
+
     def clear_agent_history(self, id: str):
         return self._c._request("DELETE", f"/api/agents/{id}/history")
 
@@ -216,6 +223,9 @@ class _AgentsResource(_Resource):
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
 
+    def list_agent_runtime(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/runtime")
+
     def get_agent_session(self, id: str, session_id: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
 
@@ -239,6 +249,9 @@ class _AgentsResource(_Resource):
 
     def export_session(self, id: str, session_id: str):
         return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/export")
+
+    def stop_session(self, id: str, session_id: str):
+        return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/stop")
 
     def attach_session_stream(self, id: str, session_id: str) -> Generator[Dict, None, None]:
         return self._c._stream("GET", f"/api/agents/{id}/sessions/{session_id}/stream")
@@ -358,6 +371,12 @@ class _BudgetResource(_Resource):
 
     def update_agent_budget(self, id: str, **data):
         return self._c._request("PUT", f"/api/budget/agents/{id}", data)
+
+    def user_budget_ranking(self, limit: Any = None):
+        return self._c._request("GET", "/api/budget/users", None, query={"limit": limit})
+
+    def user_budget_detail(self, user_id: str):
+        return self._c._request("GET", f"/api/budget/users/{user_id}")
 
     def usage_stats(self):
         return self._c._request("GET", "/api/usage")
@@ -504,6 +523,9 @@ class _McpResource(_Resource):
 
     def reconnect_mcp_server_handler(self, name: str):
         return self._c._request("POST", f"/api/mcp/servers/{name}/reconnect")
+
+    def list_mcp_taint_rules(self):
+        return self._c._request("GET", "/api/mcp/taint-rules")
 
 
 # ── Memory Resource ────────────────────────────────────────────
@@ -764,6 +786,12 @@ class _SkillsResource(_Resource):
 
 class _SystemResource(_Resource):
 
+    def audit_export(self, format: Any = None, user: Any = None, action: Any = None, agent: Any = None, channel: Any = None, from_: Any = None, to: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/audit/export", None, query={"format": format, "user": user, "action": action, "agent": agent, "channel": channel, "from": from_, "to": to, "limit": limit})
+
+    def audit_query(self, user: Any = None, action: Any = None, agent: Any = None, channel: Any = None, from_: Any = None, to: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/audit/query", None, query={"user": user, "action": action, "agent": agent, "channel": channel, "from": from_, "to": to, "limit": limit})
+
     def audit_recent(self):
         return self._c._request("GET", "/api/audit/recent")
 
@@ -870,6 +898,32 @@ class _ToolsResource(_Resource):
 
     def invoke_tool(self, name: str, agent_id: Any = None, **data):
         return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
+
+
+# ── Users Resource ─────────────────────────────────────────────
+
+class _UsersResource(_Resource):
+
+    def list_users(self):
+        return self._c._request("GET", "/api/users")
+
+    def create_user(self, **data):
+        return self._c._request("POST", "/api/users", data)
+
+    def import_users(self, **data):
+        return self._c._request("POST", "/api/users/import", data)
+
+    def get_user(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}")
+
+    def update_user(self, name: str, **data):
+        return self._c._request("PUT", f"/api/users/{name}", data)
+
+    def delete_user(self, name: str):
+        return self._c._request("DELETE", f"/api/users/{name}")
+
+    def rotate_user_key(self, name: str):
+        return self._c._request("POST", f"/api/users/{name}/rotate-key")
 
 
 # ── Webhooks Resource ──────────────────────────────────────────

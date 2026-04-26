@@ -1,0 +1,372 @@
+# Cron Scheduler
+
+Scheduled cron jobs are LibreFang's way to run agent turns on a clock. Each job
+belongs to a specific agent and fires either on a fixed interval, a future
+one-shot timestamp, or a 5-field cron expression. This page documents the three
+features that turn the scheduler from "fire and forget the response into one
+channel" into a controllable pipeline:
+
+- **Multi-destination delivery** — fan a single fire out to many channels,
+  webhooks, files, or email recipients with per-target failure isolation.
+- **Pre-scripts** — run a deterministic command before the LLM turn and inject
+  its stdout into the prompt as additional context.
+- **Silent marker** — let the agent decide at runtime that this fire should
+  produce no delivery at all.
+
+## Included Topics
+
+- [CronJob Schema](#cronjob-schema)
+- [Multi-Destination Delivery](#multi-destination-delivery)
+- [SSRF Protection on Webhooks](#ssrf-protection-on-webhooks)
+- [Pre-Scripts](#pre-scripts)
+- [Wake Gate vs Pre-Script](#wake-gate-vs-pre-script)
+- [Silent Marker](#silent-marker)
+- [Limits and Validation](#limits-and-validation)
+
+---
+
+## CronJob Schema
+
+A cron job is persisted as a JSON record under the agent's data directory and
+exposed through the `/api/agents/{id}/cron` endpoints. The same shape can be
+constructed from TOML at the API/test boundary:
+
+```toml
+# Minimal job
+id = "00000000-0000-0000-0000-000000000000"
+agent_id = "research-agent"
+name = "morning-briefing"
+enabled = true
+created_at = "2026-04-25T00:00:00Z"
+
+[schedule]
+kind = "cron"
+expr = "0 9 * * 1-5"
+tz = "America/New_York"
+
+[action]
+kind = "agent_turn"
+message = "Summarize overnight market activity in three bullets."
+timeout_secs = 120
+
+[delivery]
+kind = "channel"
+channel = "telegram"
+to = "123456789"
+```
+
+The fields that matter for the new features are all on `CronAction::AgentTurn`
+(`action.kind = "agent_turn"`) and on the top-level `delivery_targets` list:
+
+| Field | Where | Purpose |
+|---|---|---|
+| `pre_check_script` | `[action]` | Pre-existing wake gate. Last non-empty stdout line of `{"wakeAgent": false}` skips the LLM call. |
+| `pre_script` | `[action]` | Run a script and inject its stdout into the LLM prompt as extra context. |
+| `silent_marker` | `[action]` | Marker string the agent can emit on the last line to suppress delivery. Defaults to `"[SILENT]"`. |
+| `delivery_targets` | top-level | Additional fan-out destinations on top of `delivery`. Empty by default. |
+
+---
+
+## Multi-Destination Delivery
+
+The legacy single `delivery` field still works and remains the primary
+destination. `delivery_targets` is an additive list — each entry produces an
+extra send when the job fires. Targets run concurrently and one failure does
+not abort the others.
+
+```toml
+[action]
+kind = "agent_turn"
+message = "Run the daily ops digest."
+timeout_secs = 180
+
+# Primary destination — same as before.
+[delivery]
+kind = "channel"
+channel = "slack"
+to = "C0OPS"
+
+# Additional fan-out destinations.
+[[delivery_targets]]
+type = "channel"
+channel_type = "telegram"
+recipient = "987654321"
+
+[[delivery_targets]]
+type = "webhook"
+url = "https://ops.example.com/hooks/daily-digest"
+auth_header = "Bearer prod-token-redacted"
+
+[[delivery_targets]]
+type = "local_file"
+path = "reports/daily-digest.md"
+append = true
+
+[[delivery_targets]]
+type = "email"
+to = "ops-team@example.com"
+subject_template = "Daily digest from {job}"
+```
+
+### Target variants
+
+Each entry uses a tagged-union shape with `type` selecting the variant.
+
+| `type` | Required fields | Optional fields | Notes |
+|---|---|---|---|
+| `channel` | `channel_type`, `recipient` | `thread_id`, `account_id` | `channel_type` matches the adapter key in `[channels]` (`"telegram"`, `"slack"`, `"discord"`, …). `account_id` resolves to `<channel>:<account_id>` for multi-account setups. |
+| `webhook` | `url` | `auth_header` | URL must start with `http://` or `https://`. URL length capped at 2048. SSRF-blocked hosts are rejected at validation time (see below). |
+| `local_file` | `path` | `append` (default `false`) | Path must be **workspace-relative** — absolute paths and `..` traversal are rejected. With `append = true` the file is opened for append; with `false` (default) each fire overwrites it. |
+| `email` | `to` | `subject_template` | Routes through the `"email"` channel adapter — that adapter must be registered under `[channels]`. `{job}` placeholder in `subject_template` is replaced with the job name at send time. |
+
+### Failure isolation
+
+When the job fires and the agent produces a response, the dispatcher iterates
+the legacy `delivery` and every `delivery_targets` entry. Each send runs in
+its own task. If the webhook in the example above returns 503, the Slack and
+Telegram messages still go out, the file is still written, and the email is
+still queued. Per-target errors are logged with the job name and target index
+but do not propagate to the next target or mark the job itself as failed —
+the LLM turn already completed successfully.
+
+This isolation is also why `[delivery]` was kept as a separate field instead
+of being merged into `delivery_targets`: legacy single-destination jobs keep
+their existing semantics (the dispatcher's `cron_deliver_response` path) and
+new fan-out targets are layered on top without any migration required.
+
+---
+
+## SSRF Protection on Webhooks
+
+Webhook URLs are validated when the job is created or updated, before they
+are ever fetched. The validator rejects hosts that point at the loopback
+interface, link-local addresses, and the well-known cloud metadata services.
+
+The blocked-host list is checked case-insensitively against the URL's host
+component:
+
+| Pattern | Why it's blocked |
+|---|---|
+| `localhost` | Loopback by name. |
+| `127.*` | IPv4 loopback range. |
+| `[::1]` | IPv6 loopback. |
+| `169.254.*` | IPv4 link-local — covers AWS / Azure / DigitalOcean metadata IP `169.254.169.254`. |
+| `fe80:*` and `[fe80:*` | IPv6 link-local. |
+| `metadata` | Bare hostname used in some metadata endpoints. |
+| `metadata.google.internal` | GCP metadata service. |
+| `metadata.aws.amazon.com` | AWS metadata service hostname. |
+
+Userinfo (`user:pass@host`) and ports are stripped before the check, so
+`http://attacker@127.0.0.1:8080/x` is rejected on its `127.0.0.1` host the
+same way `http://127.0.0.1/x` would be.
+
+If you genuinely need to fan out to a host on the loopback range — for
+example a sidecar process on the same machine — route it through a channel
+adapter or use a `local_file` target instead of a webhook. The webhook path
+is intentionally restricted to non-internal destinations.
+
+---
+
+## Pre-Scripts
+
+A pre-script runs before the LLM turn fires and its stdout becomes part of
+the prompt. Use it to split deterministic data fetching (HTTP scrape,
+diff against a previous state, computation) from the LLM reasoning step —
+the LLM gets fresh data without spending tokens on tool-call overhead, and
+hallucination risk drops because the data is fed in literally rather than
+reconstructed.
+
+```toml
+[action]
+kind = "agent_turn"
+message = "Summarize the new GitHub issues since yesterday in three bullets. If there are none, reply with [SILENT]."
+timeout_secs = 120
+silent_marker = "[SILENT]"
+
+[action.pre_script]
+argv = ["fetch-new-issues.sh", "myorg/myrepo"]
+cwd = "/home/alice/.librefang/scripts"
+
+[action.pre_script.env]
+GITHUB_REPO_FILTER = "is:open"
+```
+
+When the job fires, the dispatcher:
+
+1. Validates `argv[0]` against the `<home_dir>/scripts/` allowlist (see
+   [Path Allowlist](#path-allowlist)).
+2. Spawns the binary directly (no shell — `argv` is split form, no `$VAR`
+   expansion, no piping).
+3. Layers `pre_script.env` on top of the daemon environment and applies
+   `cwd` if set.
+4. Captures stdout under a 60 s tokio timeout. A timed-out child is reaped
+   via `kill_on_drop(true)`.
+5. If stdout is non-empty after trimming, appends it to the prompt as:
+
+   ```
+   {scheduled message}
+
+   --- pre_script output ---
+   {stdout}
+   ```
+
+6. If validation fails, the binary fails to launch, the script exits
+   non-zero, or the timeout fires — the agent **still runs**, just without
+   injected context. Pre-script failures are *additive* and never block the
+   scheduled fire. The wake gate (`pre_check_script`) is the right tool if
+   you want failure to skip the run.
+
+### Path Allowlist
+
+`pre_script.argv[0]` must canonicalize to a path under `<home_dir>/scripts/`,
+where `<home_dir>` is the daemon home (typically `~/.librefang`).
+
+- **Relative paths** are joined onto `<home_dir>/scripts/` first, then
+  canonicalized. A bare `argv = ["fetch.sh"]` resolves to
+  `~/.librefang/scripts/fetch.sh`.
+- **Absolute paths** are canonicalized directly; the result must still be
+  under `<home_dir>/scripts/`. Symlinks are followed, so a symlink inside
+  the allowlist pointing outside is rejected.
+- **`..` traversal** is collapsed by canonicalize and the resulting path is
+  prefix-checked at the **path-component** level — so `<home_dir>/scripts-other`
+  cannot pretend to satisfy `<home_dir>/scripts` even though their string
+  representations share a prefix.
+- **Missing files** fail validation with `NotFound` — the script must exist
+  on disk at validation time.
+
+### Dangerous Environment Keys
+
+`pre_script.env` is merged on top of the daemon environment, but a denylist
+rejects keys that would defeat the path allowlist by hijacking the spawned
+binary's library or path resolution:
+
+| Denied key | Why |
+|---|---|
+| `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` | glibc dynamic-linker injection. |
+| `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH` | Darwin dynamic-linker injection. |
+| `PATH` | The script's own `subprocess.Popen("subcmd")` calls would resolve through an attacker-controlled `PATH`. |
+| `IFS` | POSIX shell field splitter. |
+
+Comparison is ASCII-case-insensitive, so `path` and `Path` are rejected
+the same as `PATH`. Set sensitive values through the encrypted vault
+(`LIBREFANG_VAULT_KEY` / `~/.librefang/vault.enc`) rather than plain
+strings in `pre_script.env`.
+
+---
+
+## Wake Gate vs Pre-Script
+
+`pre_check_script` and `pre_script` look similar but answer different
+questions:
+
+| | `pre_check_script` (wake gate) | `pre_script` (context injection) |
+|---|---|---|
+| Decides | "Should the agent run at all?" | "What extra context does the run get?" |
+| Output protocol | Last non-empty stdout line must be JSON. `{"wakeAgent": false}` skips the LLM call. Anything else wakes. | Stdout is appended to the prompt verbatim when non-empty. |
+| Timeout | 30 s. Timeout wakes the agent (failsafe). | 60 s. Timeout fires the agent without context (failsafe). |
+| Path allowlist | `<home_dir>/scripts/` (canonicalize + component prefix). Path violations wake the agent. | `<home_dir>/scripts/` (canonicalize + component prefix). Validation failure fires the agent without context. |
+| Use case | Skip the LLM call when there's nothing new. Save tokens. | Feed deterministic data into the prompt. Reduce hallucination on numbers/diffs. |
+
+Both can coexist on the same `[action]`. A common pattern is "wake-gate the
+fetch, then inject the fetched data":
+
+```toml
+[action]
+kind = "agent_turn"
+message = "Triage the new issues."
+pre_check_script = "/home/alice/.librefang/scripts/has-new-issues.sh"
+
+[action.pre_script]
+argv = ["fetch-new-issues.sh"]
+```
+
+`has-new-issues.sh` returns `{"wakeAgent": false}` when the issue list is
+empty — the agent is never woken, no LLM tokens are spent. When new issues
+do exist, the wake gate returns silently, then `fetch-new-issues.sh` runs
+and its stdout is injected into the prompt.
+
+---
+
+## Silent Marker
+
+`silent_marker` is the runtime escape hatch on the agent's side: even after
+the LLM turn has run and produced a response, the agent can suppress all
+delivery by ending its response with the marker.
+
+```toml
+[action]
+kind = "agent_turn"
+message = "If there are critical alerts in the log, summarize them. Otherwise reply with exactly [SILENT]."
+silent_marker = "[SILENT]"
+
+[delivery]
+kind = "channel"
+channel = "telegram"
+to = "123456789"
+
+[[delivery_targets]]
+type = "email"
+to = "oncall@example.com"
+```
+
+Behaviour:
+
+- The marker defaults to `"[SILENT]"` when `silent_marker` is unset.
+- Match is **strict last-non-empty-trimmed-line equality**. A response of
+  `"Nothing to report.\n[SILENT]\n\n  "` matches (trailing blanks ignored).
+  A response that mentions `[SILENT]` mid-paragraph does **not** match —
+  the marker has to stand alone on the final line.
+- An empty response does not match the marker. Empty responses fall through
+  to the existing "silent" handling (the `result.silent` flag from the
+  agent loop).
+- When the marker matches, both the legacy `delivery` and every
+  `delivery_targets` entry are suppressed for that fire. The job itself
+  still records as success — the agent intentionally chose to stay quiet
+  this run, that is not an error.
+
+This is the right tool for "noisy no-op" jobs: cron the agent every five
+minutes, but only actually message the team when something interesting
+happened. Combined with `pre_script` to fetch the data, the cost-floor for
+quiet hours is one shell script invocation plus one LLM turn that decides
+to emit `[SILENT]` — no fan-out cost.
+
+---
+
+## Limits and Validation
+
+Hard caps and validation rules enforced at job-create / job-update time:
+
+| Limit | Value |
+|---|---|
+| Jobs per agent | 50 |
+| Job name length | 128 chars (alphanumeric, space, hyphen, underscore) |
+| `every_secs` interval | 60 s – 86 400 s (24 h) |
+| One-shot `at` horizon | up to 1 year in the future |
+| `SystemEvent.text` length | 4096 chars |
+| `AgentTurn.message` length | 16 384 chars |
+| `AgentTurn.timeout_secs` | 10 s – 600 s |
+| Webhook URL length | 2048 chars |
+| Webhook host | not on the SSRF blocklist |
+| `local_file.path` | non-empty, workspace-relative, no `..` |
+| `pre_script.argv[0]` | resolves under `<home_dir>/scripts/` |
+| `pre_script.env` keys | none from the dynamic-linker / `PATH` / `IFS` denylist |
+| Pre-script timeout | 60 s wall-clock |
+| Wake-gate timeout | 30 s wall-clock |
+
+A job that fails validation is rejected with a descriptive error from
+`/api/workflows/cron` — the rule is "first failure wins", so fix the
+reported issue and resubmit. See `crates/librefang-types/src/scheduler.rs`
+for the canonical schema and `crates/librefang-kernel/src/cron_delivery.rs`
+for the dispatcher.
+
+---
+
+## Related
+
+- [Session Auto-Reset](/configuration/features/session-reset) — clears
+  message history on a schedule. Cron jobs share a single `(agent, "cron")`
+  session by default; `session_reset` is what keeps that session's history
+  from growing forever.
+- [Workflows](/agent/workflows) — `session_mode` resolution order and
+  cron-specific caveats. Per-trigger `session_mode = "new"` is the right
+  knob when each cron fire needs full session isolation.

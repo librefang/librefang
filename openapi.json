@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "2026.4.24-beta5"
+    "version": "2026.4.27-beta6"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -868,6 +868,135 @@
         }
       }
     },
+    "/api/agents/{id}/hand-runtime-config": {
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/{id}/hand-runtime-config — Drop all runtime overrides\nfor the hand agent's role, restoring the live manifest to the HAND.toml\ndefaults and persisting the cleared state to `hand_state.json`.",
+        "description": "Returns 204 No Content on success (idempotent — a second call against an\nalready-clean role is also 204).",
+        "operationId": "delete_hand_agent_runtime_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Hand agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Runtime overrides cleared; manifest restored to HAND.toml defaults"
+          },
+          "400": {
+            "description": "Invalid agent id or target agent is not managed by a hand",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Hand role not found for the agent (hand registry inconsistency)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "Internal kernel error",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PATCH /api/agents/{id}/hand-runtime-config — Runtime-only config override for hand agents.",
+        "operationId": "patch_hand_agent_runtime_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Hand agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Runtime override fields. Whitespace is trimmed on all string fields. For `model` and `provider` an empty (or whitespace-only) string is ignored ('leave unchanged'); for the nullable secrets `api_key_env` and `base_url` an empty (or whitespace-only) string clears the override.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchAgentConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Runtime override applied to the live manifest and persisted to hand_state.json",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id or target agent is not managed by a hand",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Hand role not found for the agent (hand registry inconsistency)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "Internal kernel error",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/history": {
       "delete": {
         "tags": [
@@ -1234,6 +1363,37 @@
         }
       }
     },
+    "/api/agents/{id}/runtime": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/runtime — Snapshot of in-flight loops for the agent.",
+        "description": "Returns one entry per `(agent, session)` pair that's currently executing.\nEmpty array when the agent is idle.",
+        "operationId": "list_agent_runtime",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of in-flight sessions for the agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/session": {
       "get": {
         "tags": [
@@ -1537,6 +1697,46 @@
         "responses": {
           "200": {
             "description": "Exported session data",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/{session_id}/stop": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/sessions/{session_id}/stop — Cancel a single\nin-flight `(agent, session)` loop without affecting the agent's other\nconcurrent sessions.",
+        "description": "Returns `{\"status\":\"ok\",\"stopped\":true}` when a loop was running for that\npair, `{\"status\":\"ok\",\"stopped\":false}` when nothing was running (already\nfinished, never started, or the session belongs to a different agent).",
+        "operationId": "stop_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel a single (agent, session) loop",
             "content": {
               "application/json": {
                 "schema": {}
@@ -2096,6 +2296,188 @@
         "responses": {
           "200": {
             "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audit/export": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "audit_export",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "description": "json (default) or csv",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "description": "Filter by user id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Filter by AuditAction variant",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "description": "Filter by agent id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "Filter by channel",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "ISO-8601 lower bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "ISO-8601 upper bound",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows (default 5000, hard cap 50000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit export (JSON or CSV)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audit/query": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/audit/query — admin-only filtered audit log.",
+        "operationId": "audit_query",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "query",
+            "description": "Filter by user id (UUID) or name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Filter by AuditAction variant name (case-insensitive)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agent",
+            "in": "query",
+            "description": "Filter by agent id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "Filter by channel (telegram, api, …)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "ISO-8601 lower bound (inclusive)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "ISO-8601 upper bound (inclusive)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows (default 200, hard cap 5000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered audit log entries",
             "content": {
               "application/json": {
                 "schema": {}
@@ -2692,6 +3074,70 @@
         "responses": {
           "200": {
             "description": "Updated agent budget",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/budget/users": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget/users — admin-only per-user spend ranking.",
+        "description": "Query params:\n  - `limit` (default 25, hard cap 1000) — max rows returned.\n\nResponse: `{ \"users\": [...], \"total\": N }`. Each row carries the\nrolled-up hourly / daily / monthly cost plus the per-user budget\nlimits (when configured) so the dashboard can render % bars without\na follow-up call.",
+        "operationId": "user_budget_ranking",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Top N users (default 25, cap 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-user cost ranking",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/budget/users/{user_id}": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget/users/{user_id} — admin-only single-user budget detail.",
+        "description": "`user_id` accepts either a UUID (the canonical `UserId` form) or the\nraw configured name (re-derived via `UserId::from_name`) so operators\ncan paste a name from `config.toml` directly into the URL.",
+        "operationId": "user_budget_detail",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User UUID or configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Single user budget detail",
             "content": {
               "application/json": {
                 "schema": {}
@@ -4580,6 +5026,26 @@
           },
           "404": {
             "description": "MCP server not configured",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/taint-rules": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.",
+        "description": "Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references\nrule-set names by free-form string. Without this read-only endpoint,\nthe editor cannot tell the operator that a typed name doesn't match\nany registered set — and the scanner silently treats unknown names\nas no-ops (one-shot WARN in\n`librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard\nuses this list to render an inline validation hint next to the\n`rule_sets` field.",
+        "operationId": "list_mcp_taint_rules",
+        "responses": {
+          "200": {
+            "description": "List configured named taint rule sets",
             "content": {
               "application/json": {
                 "schema": {}
@@ -7070,6 +7536,233 @@
         }
       }
     },
+    "/api/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "list_users",
+        "responses": {
+          "200": {
+            "description": "List of registered users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "User created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "409": {
+            "description": "User already exists"
+          }
+        }
+      }
+    },
+    "/api/users/import": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "import_users",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Import result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkImportResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{name}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "update_user",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/users/{name}/rotate-key": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Rotate a user's API key.",
+        "description": "Generates a fresh 32-byte random plaintext key, hashes it with Argon2id,\nstores the hash in `config.toml`, and **swaps the live in-memory snapshot\nthe auth middleware reads from** so the next request that presents the\nold plaintext token immediately fails authentication. Without the live\nswap a leaked key could only be revoked by restarting the daemon — which\ndefeats the point of rotation. See the `user_api_keys` field on\n[`AppState`] for the shared `Arc<RwLock<…>>` that makes this work.\n\nOwner-only, gated by `is_owner_only_write` in `middleware.rs` — same\nblast radius as user create/delete. The request takes no body; the new\nplaintext key is returned in the response and is **never written to the\naudit log or echoed again**.\n\nDashboard sessions (`AppState.active_sessions`) are intentionally NOT\ninvalidated here. The active-sessions store is keyed by an opaque token\nand the stored [`crate::password_hash::SessionToken`] does not carry a\n`user_id` — it tracks the single shared dashboard credential pair\n(`dashboard_user` / `dashboard_pass`), not the per-user API keys this\nendpoint rotates. The two auth surfaces are independent: a per-user\nbearer-token caller never lands in `active_sessions` at all (see\n`middleware.rs:618`), so the per-user key swap completes the kill on\nits own. If a future change ties dashboard sessions to a `UserId`, we\ncan extend `sessions_invalidated` to include those evictions; today\nthe count reflects the per-user-bearer-token kill, which is the actual\nrevocation that matters for this surface.",
+        "operationId": "rotate_user_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key rotated. `new_api_key` is the only time the plaintext is exposed — the server cannot reproduce it later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateKeyResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -7532,6 +8225,80 @@
           }
         }
       },
+      "BulkImportRequest": {
+        "type": "object",
+        "description": "Bulk-import payload. `rows` are pre-parsed by the frontend (drag-drop\nCSV, dialect-aware). `dry_run = true` returns counts without persisting.",
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserUpsert"
+            }
+          }
+        }
+      },
+      "BulkImportResult": {
+        "type": "object",
+        "required": [
+          "created",
+          "updated",
+          "failed",
+          "dry_run",
+          "rows"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkImportRow"
+            }
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "BulkImportRow": {
+        "type": "object",
+        "required": [
+          "index",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "CallbackBody": {
         "type": "object",
         "description": "POST body for the callback (programmatic clients).",
@@ -7942,6 +8709,27 @@
           }
         }
       },
+      "RotateKeyResponse": {
+        "type": "object",
+        "description": "Response payload for `POST /api/users/{name}/rotate-key`.\n\n`new_api_key` is the **plaintext** rotated key — this is the only time\nthe server will surface it. Operators must copy and store it now;\nnothing else (audit log included) records the plaintext.\n\n`sessions_invalidated` reports how many in-memory per-user API key\nrecords were swapped — typically `1`. See the doc-comment on\n[`rotate_user_key`] for why dashboard sessions are NOT included in\nthis count.",
+        "required": [
+          "status",
+          "new_api_key",
+          "sessions_invalidated"
+        ],
+        "properties": {
+          "new_api_key": {
+            "type": "string"
+          },
+          "sessions_invalidated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "SetAgentFileRequest": {
         "type": "object",
         "description": "Request body for writing a workspace identity file.",
@@ -8096,6 +8884,81 @@
             ]
           }
         }
+      },
+      "UserUpsert": {
+        "type": "object",
+        "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "api_key_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel_bindings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      },
+      "UserView": {
+        "type": "object",
+        "description": "Sanitized user view returned over the wire — never echoes the\n`api_key_hash` value, nor the contents of `tool_policy`,\n`memory_access`, `budget`, etc. The list view only needs presence\nflags so the dashboard can show a \"this user is policy-customized\"\nbadge; the per-user detail endpoints already surface the bodies.",
+        "required": [
+          "name",
+          "role",
+          "channel_bindings",
+          "has_api_key",
+          "has_policy",
+          "has_memory_access",
+          "has_budget"
+        ],
+        "properties": {
+          "channel_bindings": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "has_api_key": {
+            "type": "boolean"
+          },
+          "has_budget": {
+            "type": "boolean",
+            "description": "True when the user has a per-user budget cap configured."
+          },
+          "has_memory_access": {
+            "type": "boolean",
+            "description": "True when the user has a custom memory namespace ACL."
+          },
+          "has_policy": {
+            "type": "boolean",
+            "description": "True when the user has any per-user tool policy configured —\neither an allow/deny list, tool-category overrides, or\nper-channel rules. Summary only; the contents stay behind\n`/api/users/{name}/policy`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        }
       }
     }
   },
@@ -8179,6 +9042,10 @@
     {
       "name": "openai",
       "description": "OpenAI-compatible API endpoints"
+    },
+    {
+      "name": "users",
+      "description": "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"
     }
   ]
 }

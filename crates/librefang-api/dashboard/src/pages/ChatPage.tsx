@@ -32,6 +32,7 @@ import {
   useCreateAgentSession,
   useDeleteAgentSession,
   usePatchAgentConfig,
+  usePatchHandAgentRuntimeConfig,
   useResolveApproval,
   useStopAgent,
   useUploadAgentFile,
@@ -1646,11 +1647,18 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
-  agentId: string; onModelChange: () => void;
+  /** Target agent id for the model picker PATCH. */
+  agentId: string;
+  /** True if `agentId` refers to a hand-role agent. Routes the model PATCH
+   *  to /hand-runtime-config so the HAND.toml-driven live manifest stays
+   *  consistent with the override; also fans out `handKeys.details()`
+   *  invalidation via the hook. */
+  isHand?: boolean;
+  onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
   onOpenConfig: () => void;
@@ -1674,7 +1682,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+  // Route by role: hand agents go through the hand-runtime-config endpoint,
+  // everyone else hits the standalone /config route. Both hooks share the
+  // same AgentConfigPatch payload shape.
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const modelConfigMutation = isHand
+    ? patchHandAgentRuntimeConfigMutation
+    : patchAgentConfigMutation;
   const modelsQuery = useModels(
     { available: true },
     {
@@ -1759,7 +1774,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     setPatchPending(true);
     setPatchError(null);
     try {
-      await patchAgentConfigMutation.mutateAsync({
+      await modelConfigMutation.mutateAsync({
         agentId,
         config: { model: model.id, provider: model.provider },
       });
@@ -2206,6 +2221,7 @@ export function ChatPage() {
   // use the endpoint for registry-canonical switching.
   const deleteSessionMutation = useDeleteAgentSession();
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -2664,6 +2680,7 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
+              isHand={selectedAgent?.is_hand}
               onModelChange={() => void agentsQuery.refetch()}
               onOpenConfig={() => navigate({ to: "/config/tools" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
@@ -2672,7 +2689,12 @@ export function ChatPage() {
               attachedEventCount={sessionStream.events.length}
               onWebSearchChange={async (mode) => {
                 try {
-                  await patchAgentConfigMutation.mutateAsync({
+                  // Branch in the caller — only the caller knows from the
+                  // cached agent detail whether this is a hand role.
+                  const mutation = selectedAgent?.is_hand
+                    ? patchHandAgentRuntimeConfigMutation
+                    : patchAgentConfigMutation;
+                  await mutation.mutateAsync({
                     agentId: selectedAgentId,
                     config: { web_search_augmentation: mode },
                   });
@@ -2752,4 +2774,3 @@ export function ChatPage() {
     </div>
   );
 }
-

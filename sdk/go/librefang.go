@@ -51,6 +51,7 @@ type Client struct {
 	Skills *SkillsResource
 	System *SystemResource
 	Tools *ToolsResource
+	Users *UsersResource
 	Webhooks *WebhooksResource
 	Workflows *WorkflowsResource
 }
@@ -82,6 +83,7 @@ func New(baseURL string) *Client {
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
 		c.Tools = &ToolsResource{client: c}
+		c.Users = &UsersResource{client: c}
 		c.Webhooks = &WebhooksResource{client: c}
 		c.Workflows = &WorkflowsResource{client: c}
 	return c
@@ -332,6 +334,14 @@ func (r *AgentsResource) DeleteAgentFile(id string, filename string) (interface{
 	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/files/%s", id, filename), nil, nil)
 }
 
+func (r *AgentsResource) DeleteHandAgentRuntimeConfig(id string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/hand-runtime-config", id), nil, nil)
+}
+
+func (r *AgentsResource) PatchHandAgentRuntimeConfig(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/hand-runtime-config", id), data, nil)
+}
+
 func (r *AgentsResource) ClearAgentHistory(id string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s/history", id), nil, nil)
 }
@@ -364,6 +374,10 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
+func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/runtime", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentSession(id string, query map[string]string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/session", id), nil, query)
 }
@@ -394,6 +408,10 @@ func (r *AgentsResource) ImportSession(id string, data map[string]interface{}) (
 
 func (r *AgentsResource) ExportSession(id string, session_id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/%s/export", id, session_id), nil, nil)
+}
+
+func (r *AgentsResource) StopSession(id string, session_id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/sessions/%s/stop", id, session_id), nil, nil)
 }
 
 func (r *AgentsResource) AttachSessionStream(id string, session_id string) <-chan map[string]interface{} {
@@ -542,6 +560,14 @@ func (r *BudgetResource) AgentBudgetStatus(id string) (interface{}, error) {
 
 func (r *BudgetResource) UpdateAgentBudget(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/budget/agents/%s", id), data, nil)
+}
+
+func (r *BudgetResource) UserBudgetRanking(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/budget/users", nil, query)
+}
+
+func (r *BudgetResource) UserBudgetDetail(user_id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
 }
 
 func (r *BudgetResource) UsageStats() (interface{}, error) {
@@ -726,6 +752,10 @@ func (r *McpResource) DeleteMcpServer(name string) (interface{}, error) {
 
 func (r *McpResource) ReconnectMcpServerHandler(name string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", name), nil, nil)
+}
+
+func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
+	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
 }
 
 // ── Memory Resource
@@ -1052,6 +1082,14 @@ func (r *SkillsResource) GetTool(name string) (interface{}, error) {
 
 type SystemResource struct{ client *Client }
 
+func (r *SystemResource) AuditExport(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/audit/export", nil, query)
+}
+
+func (r *SystemResource) AuditQuery(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/audit/query", nil, query)
+}
+
 func (r *SystemResource) AuditRecent() (interface{}, error) {
 	return r.client.request("GET", "/api/audit/recent", nil, nil)
 }
@@ -1190,6 +1228,38 @@ type ToolsResource struct{ client *Client }
 
 func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
+}
+
+// ── Users Resource
+
+type UsersResource struct{ client *Client }
+
+func (r *UsersResource) ListUsers() (interface{}, error) {
+	return r.client.request("GET", "/api/users", nil, nil)
+}
+
+func (r *UsersResource) CreateUser(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/users", data, nil)
+}
+
+func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/users/import", data, nil)
+}
+
+func (r *UsersResource) GetUser(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/users/%s", name), data, nil)
+}
+
+func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) RotateUserKey(name string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/users/%s/rotate-key", name), nil, nil)
 }
 
 // ── Webhooks Resource

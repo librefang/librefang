@@ -264,6 +264,66 @@ The kernel creates the directories on spawn and injects their resolved paths int
 
 **Modes**: `rw` (read-write, default) or `r` (read-only). Paths are relative to `workspaces_dir` and must not be absolute or contain `..`.
 
+#### External mounts (`mount`)
+
+Use `mount` instead of `path` to expose a directory that already exists outside `workspaces_dir` — for example an Obsidian vault or a project tree:
+
+```toml
+# agent.toml
+[workspaces]
+vault = { mount = "/Users/me/Documents/Obsidian", mode = "r" }
+```
+
+Constraints:
+
+- `mount` must be an absolute path that already exists. The kernel never creates host directories on the agent's behalf.
+- The path must canonicalize to a prefix of one of the entries in `config.toml`'s top-level `allowed_mount_roots`. Without that whitelist, every `mount` is rejected at boot — the safe default.
+- `path` and `mount` are mutually exclusive within a single declaration.
+
+```toml
+# config.toml — required to enable the example above
+allowed_mount_roots = [
+  "/Users/me/Documents",
+]
+```
+
+`readonly` mode (`mode = "r"`) is enforced for mounts the same way as for shared workspaces: write tool calls are rejected by the kernel.
+
+### Live Context (`context.md`)
+
+If a `context.md` file is present in the agent's workspace, it is re-read **on every agent turn** and injected into the system prompt as a `## Live Context` section. This lets external tools (cron jobs, scripts, dashboards) push fresh data — market prices, project state, on-call rosters — into an agent without restarting it.
+
+**Path resolution**: `{workspace}/.identity/context.md` is preferred; `{workspace}/context.md` is used as a fallback for unmigrated workspaces.
+
+**Behavior**:
+- The file is read once per turn, right before the prompt is assembled.
+- Reads are capped at 32 KB; oversized files are truncated with a warning.
+- When a previously-successful read fails (e.g. the file is briefly replaced by an external writer), the most recent cached content is reused so the agent does not lose context mid-conversation.
+- If the file does not exist, no `## Live Context` section is added.
+
+**Opting out**: set `cache_context = true` in `agent.toml` to restore the pre-Apr-2026 behavior, where `context.md` is read once at session start and cached for the lifetime of the session.
+
+```toml
+# agent.toml
+cache_context = true   # default: false (re-read every turn)
+```
+
+### Lazy Tool Loading (`tool_search` / `tool_load`)
+
+A default agent answering "hi" used to ship the JSON schema of every built-in tool in every request — ~75 tools × ~90 tokens each ≈ 6 000 tokens of dead weight per turn. Lazy tool loading shrinks that to the ~19 tools the model actually needs in most turns and exposes the long tail through two meta-tools the LLM calls on demand:
+
+- **`tool_search(query)`** — keyword-match against the catalog (name + description + hint). Returns matching tools with their one-line hints.
+- **`tool_load(name)`** — fetch one tool's full schema. The tool becomes callable on the next turn (the schema is added to the request from then on).
+
+The full catalog is still rendered as a one-line-per-tool hint list in the system prompt, so the model knows what exists without paying for full schemas. **Tools the runtime classifies as "always native"** (file_read, shell_exec, the cron tools, …) keep their full schema in every request — there's no point making the model `tool_load` something it almost certainly will use.
+
+Opt out per agent if a model is bad at `tool_search` chains:
+
+```toml
+# agent.toml — disable lazy loading; ship every tool schema every turn
+lazy_tools = false
+```
+
 ---
 
 ## Spawning Agents
@@ -370,3 +430,85 @@ api_key_env = "GROQ_API_KEY"         # env var holding the API key
 ```
 
 Any agent spawned without an explicit model override will use this default configuration.
+
+---
+
+## Agent Manifest Field Reference
+
+`agent.toml` accepts a number of top-level fields that aren't shown in the standard quick-start templates. Listing the full set so you can find the field name when you need it. All fields are optional unless marked otherwise.
+
+### Tool / skill scoping
+
+```toml
+tool_allowlist = ["web_search", "web_fetch", "file_read", "file_write"]
+tool_blocklist = ["shell_exec"]
+tools_disabled = false             # explicit master kill-switch — overrides everything else
+allowed_plugins = ["truncate", "redact"]   # plugin names; empty = all available plugins
+mcp_servers    = ["github", "linear"]     # MCP server names; empty = all connected servers
+skills_disabled = false            # explicit master kill-switch for skills
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `tool_allowlist` | `Vec<string>` | `[]` (= all tools) | Whitelist of tool names this agent may call. Empty list = unrestricted. |
+| `tool_blocklist` | `Vec<string>` | `[]` | Tools this agent **may not** call. Applied **after** `tool_allowlist` so a name on both lists is denied. |
+| `tools_disabled` | bool | `false` | Master kill-switch — when `true`, the agent has zero tools regardless of allowlist / profile. |
+| `allowed_plugins` | `Vec<string>` | `[]` (= all plugins) | Plugin allowlist for this agent. |
+| `mcp_servers` | `Vec<string>` | `[]` (= all servers) | MCP server allowlist. Useful when one corp server has dangerous tools and you only want a few agents talking to it. |
+| `skills_disabled` | bool | `false` | Master kill-switch for skills. |
+
+### Identity & spawn behaviour
+
+```toml
+generate_identity_files = true     # create SOUL.md / IDENTITY.md / TOOLS.md on first spawn
+inherit_parent_context  = true     # subagents inherit parent context by default
+auto_evolve             = true     # background skill-evolution review after each turn
+is_hand                 = false    # auto-set when spawned by a Hand
+pinned_model            = "anthropic/claude-sonnet-4"   # locks model in Stable kernel mode
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `generate_identity_files` | bool | `true` | Create `SOUL.md` / `IDENTITY.md` / `TOOLS.md` / `USER.md` in `.identity/` on first spawn. Set `false` for ephemeral agents that don't need an evolving identity. |
+| `inherit_parent_context` | bool | `true` | When this agent runs as a subagent of a workflow, inherit the parent's session context. `false` gives a clean context window. |
+| `auto_evolve` | bool | `true` | After each agent turn, run the background skill-evolution review (looks for repeated patterns and proposes new skills). Disable to keep the skill library frozen. |
+| `is_hand` | bool | `false` | Auto-populated when a Hand spawns the agent. Don't set manually. |
+| `pinned_model` | `Option<string>` | `None` | When the kernel is in **Stable** mode, this model is used regardless of the global default. No effect in Normal mode. |
+
+### Channel & exec policy overrides (per-agent)
+
+```toml
+[channel_overrides]
+dm_policy = "always"
+group_policy = "trigger_only"
+group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
+
+[exec_policy]
+shell_allowlist = ["git", "cargo"]
+deny = ["rm -rf"]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `[channel_overrides]` | `Option<ChannelOverrides>` | `None` (inherit channel-level) | Per-agent overrides for `dm_policy` / `group_policy` / `model` / `system_prompt` / etc. Resolution order: agent-level → channel-level → built-in default. See [Channels](/integrations/channels#channel-overrides) for the full schema. |
+| `[exec_policy]` | `Option<ExecPolicy>` | `None` (inherit kernel default) | Per-agent shell / exec policy override. Either a string shorthand (`"strict"` / `"trusted"`) or a full table with `shell_allowlist` / `deny` / `cwd_allowlist`. |
+
+### Response shaping & augmentation
+
+```toml
+show_progress = true
+response_format = "json_object"   # or { type = "json_schema", schema = "..." }
+web_search_augmentation = "auto"  # "off" | "auto" | "always"
+
+[[context_injection]]
+name = "rules"
+content = "Be concise. Never use emoji."
+position = "system"
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `show_progress` | bool | `true` | Surface tool execution progress in channel replies (e.g. "🔧 running shell_exec…"). Disable for production / customer-facing agents. |
+| `response_format` | `Option<ResponseFormat>` | `None` | Constrain LLM output. Options: `"text"`, `"json_object"`, or `{ type = "json_schema", schema = … }`. Provider must support structured output (OpenAI / Gemini / Mistral). |
+| `web_search_augmentation` | enum | provider default | When the model has no built-in tool support, auto-inject web search results into the prompt. `"off"` / `"auto"` / `"always"`. |
+| `[[context_injection]]` | `Vec<ContextInjection>` | `[]` | Static prompt fragments merged into every session start. Each entry has `name`, `content`, `position` (`system` / `before_user` / `after_reset`), optional `condition` expression. |

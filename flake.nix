@@ -53,8 +53,10 @@
           cairo
           gdk-pixbuf
           pango
-          # tray-icon dlopens at runtime, not a link dep — patchelf below
-          # adds it to RPATH so the tray plugin can find it (#3052).
+          # tray-icon dlopens libayatana-appindicator3.so.1 at runtime, not
+          # a link dep. wrapGAppsHook3 + gappsWrapperArgs in the desktop
+          # derivation below puts this lib dir on LD_LIBRARY_PATH so the
+          # dlopen resolves (#3052, #3192).
           libayatana-appindicator
         ]);
 
@@ -144,10 +146,26 @@
           # `copyDesktopItems` is a no-op on darwin; gating the hook on
           # Linux keeps the macOS build path unchanged.
           nativeBuildInputs = nativeBuildInputs
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.copyDesktopItems ];
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.copyDesktopItems
+              # wrapGAppsHook3 injects LD_LIBRARY_PATH (via gappsWrapperArgs
+              # below) and the GTK runtime env (XDG_DATA_DIRS,
+              # GIO_MODULE_DIR, GSETTINGS_SCHEMA_DIR, …) the webview needs.
+              pkgs.wrapGAppsHook3
+            ];
           desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [ librefangDesktopItem ];
-          postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-            patchelf --add-rpath "${pkgs.libayatana-appindicator}/lib" "$out/bin/librefang-desktop"
+          # tray-icon → libappindicator-sys dlopens
+          # `libayatana-appindicator3.so.1` at runtime with no DT_NEEDED
+          # entry. patchelf --add-rpath writes DT_RUNPATH, which ld.so only
+          # consults for DT_NEEDED deps — never for dlopen string lookups —
+          # so the previous RPATH fix (#3052) never actually worked, the
+          # tray icon silently failed to appear on NixOS (#3192). Wrapping
+          # with gappsWrapperArgs prepends the appindicator lib dir to
+          # LD_LIBRARY_PATH so the dlopen call resolves.
+          preFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            gappsWrapperArgs+=(
+              --prefix LD_LIBRARY_PATH : "${pkgs.libayatana-appindicator}/lib"
+            )
           '';
           postInstall =
             let

@@ -14,6 +14,8 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod agents;
+pub mod audit;
+pub mod authz;
 pub mod auto_dream;
 pub mod budget;
 pub mod channels;
@@ -30,6 +32,7 @@ pub mod providers;
 pub mod skills;
 pub mod system;
 pub mod terminal;
+pub mod users;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -43,6 +46,8 @@ pub mod workflows;
 // warning, but `router()` is only accessed via qualified paths (e.g.
 // `routes::agents::router()`), so there is no actual conflict.
 pub use agents::*;
+pub use audit::*;
+pub use authz::*;
 pub use auto_dream::*;
 pub use budget::*;
 pub use channels::*;
@@ -58,6 +63,7 @@ pub use providers::*;
 pub use skills::*;
 pub use system::*;
 pub use terminal::*;
+pub use users::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;
@@ -124,6 +130,11 @@ pub struct AppState {
     /// Shared api_key_lock from the auth middleware — updated on password/api_key change
     /// so the new credentials take effect immediately without restart.
     pub api_key_lock: Arc<tokio::sync::RwLock<String>>,
+    /// Shared per-user API key snapshot — same Arc the auth middleware
+    /// reads from, so swapping the inner Vec via `rotate_user_key` (or any
+    /// future user-mutation endpoint) makes the change visible to the very
+    /// next request without a daemon restart.
+    pub user_api_keys: Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.

@@ -207,7 +207,7 @@
       "type": "object"
     },
     "AuditConfig": {
-      "description": "Audit log configuration.\n\nConfigure in config.toml: ```toml [audit] retention_days = 90 # Optional override for the external tip-anchor path. Relative # paths resolve against `data_dir`. Leave unset for the default # `data_dir/audit.anchor`. anchor_path = \"/var/log/librefang/audit.anchor\" ```",
+      "description": "Audit log configuration.\n\nConfigure in config.toml: ```toml [audit] retention_days = 90 # Optional override for the external tip-anchor path. Relative # paths resolve against `data_dir`. Leave unset for the default # `data_dir/audit.anchor`. anchor_path = \"/var/log/librefang/audit.anchor\"\n\n[audit.retention] trim_interval_secs = 3600 max_in_memory_entries = 50000\n\n[audit.retention.retention_days_by_action] ToolInvoke = 14 LlmCompletion = 14 RoleChange = 365 PermissionDenied = 365 BudgetExceeded = 365 ```",
       "properties": {
         "anchor_path": {
           "description": "Optional override for the external Merkle-tip anchor file that `AuditLog::with_db_anchored` uses to detect full rewrites of `audit_entries`. When unset the daemon writes to `data_dir/audit.anchor`, which catches most casual tampering but sits in the same filesystem namespace as the SQLite file it is meant to verify. Operators who want a stronger boundary can point this at a path the daemon can write to but unprivileged code cannot — a chmod-0400 file owned by a dedicated user, a `systemd ReadOnlyPaths=` mount, an NFS share, or a pipe to `logger`. Relative paths are resolved against `data_dir`.",
@@ -216,12 +216,57 @@
             "null"
           ]
         },
+        "retention": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditRetentionConfig"
+            }
+          ],
+          "default": {
+            "retention_days_by_action": {}
+          },
+          "description": "Per-`AuditAction` retention policy used by the periodic trim job over the in-memory audit window. Defaults preserve every entry."
+        },
         "retention_days": {
           "default": 90,
-          "description": "How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.",
+          "description": "How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.\n\n**Coarse global retention.** This drives the legacy day-based prune over the SQLite table. For per-category in-memory retention with chain-anchor-preserving trim, see `retention` below.",
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "AuditRetentionConfig": {
+      "description": "Per-`AuditAction` retention policy for the in-memory audit window.\n\nThe audit log is a Merkle-style hash chain — every entry's hash mixes the previous entry's hash. Naively dropping a prefix would break chain verification of the surviving entries because their `prev_hash` would point at a hash no longer present. The trim implementation solves this by remembering the last-dropped entry's hash as a **chain anchor** so verification of the surviving prefix can validate continuity against the anchor instead of a missing row.\n\nCritical actions (`RoleChange`, `PermissionDenied`, `BudgetExceeded`) should keep long retention windows; noisy actions (`ToolInvoke`) can be pruned far more aggressively. Actions absent from the map are kept forever so operators that don't opt in never silently lose audit history.",
+      "properties": {
+        "max_in_memory_entries": {
+          "description": "Hard cap on the in-memory audit window — protects against runaway growth even when no per-action policy is configured. `None` or 0 means unlimited. When the cap is exceeded the trim job drops the oldest entries down to the cap regardless of their action.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retention_days_by_action": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Per-`AuditAction` retention windows in days. Key is the `AuditAction` `Display` string (e.g. `\"ToolInvoke\"`). Missing entries mean \"keep forever\".",
+          "type": "object"
+        },
+        "trim_interval_secs": {
+          "description": "How often the trim job runs. `None` (or 0) disables periodic trimming. Reasonable default for production: 3600 (one hour).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -936,6 +981,67 @@
           ],
           "default": null,
           "description": "Usage footer mode override."
+        }
+      },
+      "type": "object"
+    },
+    "ChannelRoleMapping": {
+      "description": "Maps platform-native group/server roles (Telegram admin, Discord guild role, Slack workspace owner, etc.) to LibreFang `UserRole` values.\n\nResolution order in `AuthManager::resolve_role_for_sender` is: 1. Explicit `UserConfig.role` for a registered user — wins outright. 2. Channel-derived role from this mapping — applied when the user is recognised on a platform but has no explicit `UserConfig` role. 3. Default-deny — fall through to `guest`.\n\nAll sub-tables are optional — a missing channel just means \"no channel-derived role\" for that platform. Each per-channel struct keeps platform-shaped fields rather than a single uniform schema because the underlying APIs disagree about role granularity (Telegram has 3 fixed statuses, Discord has named guild roles, Slack collapses to owner/admin/member/guest).",
+      "properties": {
+        "discord": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DiscordRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Discord guild-role → LibreFang role mapping."
+        },
+        "slack": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SlackRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Slack workspace-role → LibreFang role mapping."
+        },
+        "telegram": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TelegramRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Telegram chat-status → LibreFang role mapping."
+        }
+      },
+      "type": "object"
+    },
+    "ChannelToolPolicy": {
+      "description": "Per-user, per-channel allow/deny lists.\n\nThis is a strictly more permissive variant of [`crate::approval::ChannelToolRule`]. The approval channel rule is global to the agent; this one is keyed off the LibreFang user identity resolved from the inbound message's channel binding. It allows statements like \"User Bob may run `shell_*` from his Telegram chat, but only `web_*` from Discord\".\n\nDeny-wins inside one rule (mirrors `ChannelToolRule::check_tool`).",
+      "properties": {
+        "allowed_tools": {
+          "default": [],
+          "description": "Tool patterns explicitly allowed when this user speaks via this channel. Empty = no allow-list (rule is deny-only or no-op).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_tools": {
+          "default": [],
+          "description": "Tool patterns explicitly denied for this user on this channel. Always wins over `allowed_tools`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -2149,6 +2255,20 @@
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        }
+      },
+      "type": "object"
+    },
+    "DiscordRoleMapping": {
+      "description": "Discord-side mapping. A user may hold any number of guild roles simultaneously; the resolver walks **every** role the user has, looks each one up in `role_map`, and picks the **highest-privilege** match (`Owner` > `Admin` > `User` > `Viewer`). Declaration order in `config.toml` is irrelevant — the privilege ordering on the LibreFang side decides the winner. This protects against Discord- side role ordering (which is outside our control) deciding the effective LibreFang permissions.",
+      "properties": {
+        "role_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Discord role name → LibreFang role string (`owner` / `admin` / `user` / `viewer` / `guest`). Iteration order is irrelevant — the translator scans every match the user holds and returns the most privileged. Typo'd LibreFang role strings (e.g. `\"admn\"`) are silently skipped, falling back to default-deny `Viewer`.",
+          "type": "object"
         }
       },
       "type": "object"
@@ -4361,7 +4481,7 @@
       "type": "object"
     },
     "McpTaintPathPolicy": {
-      "description": "Taint skip rules for a single argument path within a tool.",
+      "description": "Taint skip rules for a single argument path within a tool.\n\nThe policy key is a minimal JSONPath expression matched by the runtime scanner. Supported wildcard syntax:\n\n- `$.foo`      — exact property at any depth specified literally. - `$.foo.*`    — any direct child of `$.foo` (single segment, non-array). - `$.foo[*]`   — any array element of `$.foo` (e.g. `$.foo[0]`, `$.foo[42]`). - `$.*`        — any top-level property.\n\nWildcards do NOT span multiple segments: `$.foo.*` matches `$.foo.bar` but not `$.foo.bar.baz`. Use exact paths plus rule_sets for deep exemptions across many paths.",
       "properties": {
         "skip_rules": {
           "default": [],
@@ -4375,7 +4495,7 @@
       "type": "object"
     },
     "McpTaintPolicy": {
-      "description": "Per-server taint policy that lets operators disable specific taint rules for known-safe fields rather than turning off all scanning.\n\nExample config.toml: ```toml [mcp_servers.my_firefox.taint_policy.tools.navigate.paths] \"$.tabId\"     = { skip_rules = [\"opaque_token\"] } \"$.sessionId\" = { skip_rules = [\"opaque_token\"] } ```",
+      "description": "Per-server taint policy that lets operators disable specific taint rules for known-safe fields rather than turning off all scanning.\n\nExample config.toml: ```toml [mcp_servers.my_firefox.taint_policy.tools.navigate] default = \"skip\"   # bypass scanning entirely for `navigate`\n\n[mcp_servers.my_firefox.taint_policy.tools.read_file.paths] \"$.content\"   = { skip_rules = [\"opaque_token\"] } \"$.metadata.*\" = { skip_rules = [\"sensitive_key_name\"] } ```",
       "properties": {
         "tools": {
           "additionalProperties": {
@@ -4388,16 +4508,77 @@
       },
       "type": "object"
     },
+    "McpTaintRuleSetAction": {
+      "description": "Severity action for a [`NamedTaintRuleSet`] when one of its rules fires during MCP argument scanning.\n\n**Overlap resolution: most permissive wins.** When a tool's `rule_sets` list references multiple sets that all cover the same `TaintRuleId`, the scanner applies the *most permissive* action — `Log` > `Warn` > `Block`. This is intentional (it lets a narrow `audit_only` set carve out exceptions to a broad `Block` set without rewriting the broad set), but it means **adding an audit-only set with `action = log` will silently neutralise any `block` set that overlaps on the same rule**. The dashboard surfaces a hint next to the `rule_sets` field; operators authoring config by hand should keep this in mind.",
+      "oneOf": [
+        {
+          "description": "Abort the MCP tool call and surface a violation error to the LLM (current scanner default).",
+          "enum": [
+            "block"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Allow the call through, but emit a structured WARN-level tracing event so operators can see exemptions firing.",
+          "enum": [
+            "warn"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Allow the call through and emit at INFO level. Useful for building an exemption baseline before flipping a rule set to `block`.",
+          "enum": [
+            "log"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "McpTaintToolAction": {
+      "description": "What the scanner does for a tool's argument paths NOT matched by any entry in [`McpTaintToolPolicy::paths`].",
+      "oneOf": [
+        {
+          "description": "Apply the full taint rule set to every argument leaf (current behaviour).",
+          "enum": [
+            "scan"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bypass scanning entirely for this tool. Even sensitive object keys are allowed through. Use as a tool-level kill switch when a tool's arguments are by-design opaque (browser tab handles, DB session IDs, etc.).",
+          "enum": [
+            "skip"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "McpTaintToolPolicy": {
       "description": "Per-tool taint policy for an MCP server.",
       "properties": {
+        "default": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpTaintToolAction"
+            }
+          ],
+          "default": "scan",
+          "description": "What to do for argument paths not matched by `paths`. Defaults to [`McpTaintToolAction::Scan`] (current behaviour).\n\nSet to [`McpTaintToolAction::Skip`] to bypass scanning for the whole tool with one line, instead of enumerating every argument path."
+        },
         "paths": {
           "additionalProperties": {
             "$ref": "#/definitions/McpTaintPathPolicy"
           },
           "default": {},
-          "description": "Per-path exemptions.  The key is a minimal JSONPath expression (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not listed here have all rules applied.",
+          "description": "Per-path exemptions.  The key is a minimal JSONPath expression (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not listed here have all rules applied (subject to `default`).",
           "type": "object"
+        },
+        "rule_sets": {
+          "description": "Names of top-level `[[taint_rules]]` rule sets to apply to every argument leaf of this tool. Each referenced set's `action` controls whether the listed rules block, warn, or log when they fire.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -4862,6 +5043,36 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "NamedTaintRuleSet": {
+      "description": "A reusable, named group of taint rules with an associated severity action.\n\nDefined as `[[taint_rules]]` in `config.toml` and referenced by [`McpTaintToolPolicy::rule_sets`]:\n\n```toml [[taint_rules]] name = \"browser_handles\" action = \"warn\" rules = [\"opaque_token\"]\n\n[mcp_servers.camofox.taint_policy.tools.navigate] rule_sets = [\"browser_handles\"] ```\n\n`PartialEq + Eq` are derived so the kernel's reload-plan diff can detect `[[taint_rules]]` changes and emit `HotAction::ReloadTaintRules`.",
+      "properties": {
+        "action": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpTaintRuleSetAction"
+            }
+          ],
+          "default": "block",
+          "description": "What happens when one of `rules` fires during scanning."
+        },
+        "name": {
+          "description": "Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be unique within a [`KernelConfig`]; duplicate names are resolved by last-wins ordering.",
+          "type": "string"
+        },
+        "rules": {
+          "default": [],
+          "description": "`TaintRuleId` variants this set covers.",
+          "items": {
+            "$ref": "#/definitions/TaintRuleId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
       "type": "object"
     },
     "NetworkConfig": {
@@ -10028,11 +10239,18 @@
       "type": "object"
     },
     "QueueConcurrencyConfig": {
-      "description": "Per-lane concurrency limits for the command queue.\n\nConfigure in config.toml: ```toml [queue.concurrency] main_lane = 3 cron_lane = 2 subagent_lane = 3 ```",
+      "description": "Per-lane concurrency limits for the command queue.\n\nConfigure in config.toml: ```toml [queue.concurrency] main_lane = 3 cron_lane = 2 subagent_lane = 3 trigger_lane = 8 default_per_agent = 1 ```",
       "properties": {
         "cron_lane": {
           "default": 2,
           "description": "Cron lane concurrent limit (scheduled jobs).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "default_per_agent": {
+          "default": 1,
+          "description": "Default per-agent invocation cap when an agent's manifest does not set `max_concurrent_invocations`. `1` reproduces the legacy per-agent-mutex serialization that pre-existed this knob — change deliberately. `0` is rewritten to `1` by validation. Typed `usize` to match the sibling lane fields and to feed `Semaphore::new` without a cast.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -10047,6 +10265,13 @@
         "subagent_lane": {
           "default": 3,
           "description": "Subagent lane concurrent limit (child agents).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger_lane": {
+          "default": 8,
+          "description": "Trigger lane concurrent limit — global cap on event-trigger (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the same time, across all agents. Acquired BEFORE the per-agent semaphore so a single hot agent cannot starve the kernel. Default `8`. `0` is rewritten to `1` by validation.",
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
@@ -10065,8 +10290,10 @@
           ],
           "default": {
             "cron_lane": 2,
+            "default_per_agent": 1,
             "main_lane": 3,
-            "subagent_lane": 3
+            "subagent_lane": 3,
+            "trigger_lane": 8
           },
           "description": "Per-lane concurrency limits."
         },
@@ -11015,6 +11242,40 @@
       },
       "type": "object"
     },
+    "SlackRoleMapping": {
+      "description": "Slack-side mapping. Slack's `users.info` exposes `is_owner` / `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence (owner > admin > guest > member) is collapsed inside the channel adapter (`SlackAdapter::parse_users_info_response`) into a single platform token before this mapping ever sees it; the translator here is a flat lookup, not a precedence ladder. Each step is optional — leave a field unset to fall through to default-deny `Viewer` for that platform tier.",
+      "properties": {
+        "admin_role": {
+          "description": "LibreFang role for `is_admin = true` users.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_role": {
+          "description": "LibreFang role for single/multi-channel guests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "member_role": {
+          "description": "LibreFang role for regular workspace members.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_role": {
+          "description": "LibreFang role for `is_owner = true` users.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TaintRuleId": {
       "description": "Identifies a specific taint detection rule.\n\nUsed by [`check_outbound_text_violation_with_skip`] to let callers opt out of individual rules without touching the main code path.  Per-tool, per-path exemptions in `McpTaintPolicy` map directly to these variants.",
       "oneOf": [
@@ -11332,6 +11593,33 @@
           "default": {},
           "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "TelegramRoleMapping": {
+      "description": "Telegram-side mapping. Telegram exposes three statuses for a member of a chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/ `kicked` which we collapse into \"no derived role\").",
+      "properties": {
+        "admin_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"administrator\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "creator_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"creator\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "member_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"member\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -12090,6 +12378,36 @@
         }
       ]
     },
+    "UserBudgetConfig": {
+      "description": "RBAC M5: per-user spending budget.\n\nMirrors the global [`BudgetConfig`] window structure (hourly / daily / monthly) so the same cost-attribution pipeline can enforce both. Set any limit to `0.0` for \"unlimited on that window\". `alert_threshold` is the fraction of any limit at which the metering layer should emit a `BudgetExceeded` audit pre-warning (default 0.8, clamped to 0..=1).",
+      "properties": {
+        "alert_threshold": {
+          "default": 0.8,
+          "description": "Alert threshold (0..=1). Metering surfaces a BudgetExceeded audit when *any* window reaches this fraction of its limit. Defaults to 0.8 — same default as the global budget — for consistency.",
+          "format": "double",
+          "type": "number"
+        },
+        "max_daily_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per day for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        },
+        "max_hourly_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per hour for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        },
+        "max_monthly_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per month for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "UserConfig": {
       "description": "User configuration for RBAC multi-user support.",
       "properties": {
@@ -12101,6 +12419,17 @@
             "null"
           ]
         },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "RBAC M5: per-user spend caps. `None` means \"no per-user cap\" — the user is still bounded by global / per-agent / per-provider budgets. See [`UserBudgetConfig`] for the supported windows."
+        },
         "channel_bindings": {
           "additionalProperties": {
             "type": "string"
@@ -12108,6 +12437,24 @@
           "default": {},
           "description": "Channel bindings: maps channel platform IDs to this user. e.g., {\"telegram\": \"123456\", \"discord\": \"987654\"}",
           "type": "object"
+        },
+        "channel_tool_rules": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ChannelToolPolicy"
+          },
+          "description": "Per-channel tool overrides for THIS user. Keyed by channel adapter name (e.g. `\"telegram\"`, `\"discord\"`). Layers on top of the global `ApprovalPolicy.channel_rules` — both must agree to allow.",
+          "type": "object"
+        },
+        "memory_access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserMemoryAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Memory namespace ACL — controls reads/writes to memory scopes (`proactive`, `kv:*`, etc.) and PII redaction. `None` means \"use the role default ACL\"."
         },
         "name": {
           "description": "User display name.",
@@ -12117,11 +12464,114 @@
           "default": "user",
           "description": "User role (owner, admin, user, viewer).",
           "type": "string"
+        },
+        "tool_categories": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserToolCategories"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bulk allow/deny by `ToolGroup` category (groups are declared in `KernelConfig.tool_policy.groups`). Lets admins say `denied_groups = [\"dangerous\"]` without listing each tool."
+        },
+        "tool_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserToolPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-user tool allow/deny lists. Layered ON TOP of the per-agent `ToolPolicy` and any channel rules in `ApprovalPolicy`. `None` means \"no per-user policy — defer to other layers\"."
         }
       },
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "UserMemoryAccess": {
+      "description": "Per-user memory namespace ACL.\n\nMemory in LibreFang is partitioned by *namespace* — typically the agent ID for KV / proactive entries, plus a small set of well-known shared scopes (`shared`, `proactive`, `kv`, …). This ACL gates which of those a given user may read or write through the LLM-facing memory tools.\n\nPII handling: when `pii_access` is `false`, fragments tagged with [`TaintLabel::Pii`](crate::taint::TaintLabel::Pii) MUST be redacted before they reach the user. The redaction itself happens at the memory call site (kernel + memory crate); this struct only declares intent.",
+      "properties": {
+        "delete_allowed": {
+          "default": false,
+          "description": "Whether the user may delete memory entries they can otherwise read.",
+          "type": "boolean"
+        },
+        "export_allowed": {
+          "default": false,
+          "description": "Whether the user may export memory in bulk.",
+          "type": "boolean"
+        },
+        "pii_access": {
+          "default": false,
+          "description": "Whether PII-tagged fragments may be returned to this user. When `false`, PII fields are redacted on read.",
+          "type": "boolean"
+        },
+        "readable_namespaces": {
+          "default": [],
+          "description": "Namespaces this user may read. Empty list with `pii_access=false` is a meaningful \"no-read\" deny-all — see [`Self::can_read`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "writable_namespaces": {
+          "default": [],
+          "description": "Namespaces this user may write to. Empty list = no-write (read-only).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UserToolCategories": {
+      "description": "Bulk allow/deny by tool category — references existing `ToolGroup` definitions by name (e.g. `\"web_tools\"`, `\"code_tools\"`). Group definitions live in [`KernelConfig.tool_policy.groups`](crate::tool_policy::ToolPolicy::groups).\n\nCategories let admins say \"this user only gets read-only categories\" without listing every tool individually.",
+      "properties": {
+        "allowed_groups": {
+          "default": [],
+          "description": "Group names whose tools are allowed for this user. Empty = no category-level allow-list.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_groups": {
+          "default": [],
+          "description": "Group names whose tools are denied for this user. Always wins.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UserToolPolicy": {
+      "description": "Per-user allow/deny lists for tool invocations.\n\nThese rules layer on top of the per-agent [`ToolPolicy`](crate::tool_policy::ToolPolicy) and the per-agent channel rules in [`ApprovalPolicy`](crate::approval::ApprovalPolicy). All layers must agree (fail-closed AND) for a call to proceed without approval.",
+      "properties": {
+        "allowed_tools": {
+          "default": [],
+          "description": "Tool name patterns this user may invoke. Empty list means \"no allow-list — defer to other layers\". When non-empty, every invocation must match at least one pattern.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_tools": {
+          "default": [],
+          "description": "Tool name patterns this user must never invoke. Always wins.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "VaultConfig": {
@@ -13189,6 +13639,13 @@
         "null"
       ]
     },
+    "allowed_mount_roots": {
+      "description": "Host directories under which `agent.toml: [workspaces].<name>.mount` declarations may resolve. Each declared mount is canonicalized at boot and must be a path prefix of one of these (also canonicalized) roots; otherwise it is rejected with a warning. Empty (default) denies all external mounts — the safe default. See issue #3230.\n\nExample: ```toml allowed_mount_roots = [ \"/Users/alice/Documents\", \"/data/shared\", ] ```",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "api_key": {
       "default": "",
       "description": "API authentication key. When set, all API endpoints (except /api/health) require a `Authorization: Bearer <key>` header. If empty, the API is unauthenticated (local development only).",
@@ -13234,6 +13691,9 @@
         }
       ],
       "default": {
+        "retention": {
+          "retention_days_by_action": {}
+        },
         "retention_days": 90
       },
       "description": "Audit log configuration."
@@ -13361,6 +13821,14 @@
         "max_html_bytes": 524288
       },
       "description": "Canvas (A2UI) configuration."
+    },
+    "channel_role_mapping": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ChannelRoleMapping"
+        }
+      ],
+      "description": "Maps platform-native channel roles (Telegram admin, Discord guild roles, Slack workspace roles) to LibreFang `UserRole`. Used by `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role` is consulted (explicit beats channel-derived; both beat default-deny)."
     },
     "channels": {
       "allOf": [
@@ -14079,8 +14547,10 @@
       "default": {
         "concurrency": {
           "cron_lane": 2,
+          "default_per_agent": 1,
           "main_lane": 3,
-          "subagent_lane": 3
+          "subagent_lane": 3,
+          "trigger_lane": 8
         },
         "max_depth_global": 0,
         "max_depth_per_agent": 0,
@@ -14208,6 +14678,13 @@
       "default": false,
       "description": "Strict config mode: when `true`, the daemon refuses to start if the config file contains unknown or unrecognised fields. When `false` (the default), unknown fields are logged as warnings but the daemon boots normally. This is the \"tolerant mode\" toggle.",
       "type": "boolean"
+    },
+    "taint_rules": {
+      "description": "Reusable named taint rule sets referenced by [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of taint rules with a severity action (block / warn / log) that the MCP scanner applies to every tool that opts in.\n\n**Hot-reload caveat:** the kernel snapshots this list onto each connected MCP server at install / reload time. Edits to `[[taint_rules]]` followed by a config reload do NOT propagate to already-connected MCP servers until the server itself is reloaded (e.g. via `reload_mcp_server_config` or a daemon restart). The snapshot keeps the scanner's view stable for the lifetime of a single tool call.",
+      "items": {
+        "$ref": "#/definitions/NamedTaintRuleSet"
+      },
+      "type": "array"
     },
     "task_board": {
       "allOf": [

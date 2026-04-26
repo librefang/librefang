@@ -10,14 +10,35 @@ use uuid::Uuid;
 /// Metadata key for stable prefix mode flag.
 pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Stable namespace for deriving deterministic [`UserId`] values from
+/// [`UserConfig::name`]. Generated once and frozen — changing this constant
+/// rotates every existing `UserId` and breaks audit-log correlation across
+/// the whole fleet, so it must never be changed.
+pub const LIBREFANG_USER_NAMESPACE: Uuid =
+    Uuid::from_u128(0x4c46_4147_5f55_5345_525f_4e53_5f76_3501);
+
 /// Unique identifier for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserId(pub Uuid);
 
 impl UserId {
     /// Generate a new random UserId.
+    ///
+    /// Prefer [`UserId::from_name`] for users that come from configuration —
+    /// random UUIDs change on every restart, which makes audit-log
+    /// correlation across daemon restarts impossible.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Derive a stable UserId from a user's configured name.
+    ///
+    /// Uses UUID v5 with [`LIBREFANG_USER_NAMESPACE`] so the same name
+    /// always maps to the same id — across restarts, across config reloads,
+    /// across nodes. Renaming a user produces a new id (intentionally —
+    /// rename = new identity, old audit history stays attached to the old id).
+    pub fn from_name(name: &str) -> Self {
+        Self(Uuid::new_v5(&LIBREFANG_USER_NAMESPACE, name.as_bytes()))
     }
 }
 
@@ -321,6 +342,37 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Snapshot of a single in-flight (agent, session) loop, returned by
+/// `GET /api/agents/{id}/runtime`.
+///
+/// The state field is intentionally a single `Running` variant for now —
+/// fine-grained sub-states (`WaitingLLM` / `ExecutingTool(name)`) require
+/// the agent loop to write back its current step, which is a separate
+/// follow-up. The wire format leaves room for that without a breaking
+/// change: deserialisers should treat unknown variants as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningSessionSnapshot {
+    /// The session that's currently executing.
+    pub session_id: SessionId,
+    /// When the loop was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Coarse-grained execution state.
+    #[serde(default)]
+    pub state: RunningSessionState,
+}
+
+/// Coarse-grained execution state for a `RunningSessionSnapshot`. Only
+/// `Running` is emitted today; the enum exists so callers can pattern-match
+/// instead of hard-coding strings, and so future fine-grained states slot
+/// in without breaking the wire format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningSessionState {
+    /// Loop has been spawned and not yet completed.
+    #[default]
+    Running,
 }
 
 /// How sessions are resolved for non-channel (automated) invocations.
@@ -851,6 +903,34 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
+    /// Trigger-dispatch-only: cap on concurrent invocations from the
+    /// kernel's event-trigger fan-out (`TaskPosted` / `MessageReceived`
+    /// / …). Channel messages, cron jobs, and `agent_send` are NOT
+    /// throttled by this knob — they continue to serialize at the
+    /// existing per-agent / per-session locks inside `send_message_full`.
+    /// Despite the unqualified field name, the scope is intentionally
+    /// narrow.
+    ///
+    /// `None` means inherit from `KernelConfig.queue.concurrency.default_per_agent`
+    /// (today: 1). `Some(1)` is identical to the legacy per-agent
+    /// serialization behavior. `Some(0)` is treated as `Some(1)` (the
+    /// resolver floors at 1 — `0` would deadlock the agent).
+    ///
+    /// Concurrent fires only make sense when each fire runs in its own
+    /// session, so caps `> 1` require `session_mode = "new"` on the
+    /// **manifest** (per-trigger `session_mode` overrides do NOT unlock
+    /// the cap — the per-agent semaphore is sized once from the
+    /// manifest default). `persistent` + cap `> 1` is auto-clamped to
+    /// `1` with a `WARN` log; parallel writes to a single persistent
+    /// session's history are undefined.
+    ///
+    /// Hot-reload: the per-agent semaphore is sized on first dispatch
+    /// and is NOT invalidated by `manifest_swap`. To pick up a new cap
+    /// the agent must be killed and respawned (or the daemon restarted);
+    /// an in-place activate / status flip silently retains the old
+    /// capacity.
+    #[serde(default)]
+    pub max_concurrent_invocations: Option<u32>,
     /// If true, the agent's `context.md` is read once at session start and
     /// reused. Default is `false`: the runtime re-reads `context.md` before
     /// every turn so external writers (cron jobs, integrations) reach the LLM
@@ -873,13 +953,39 @@ pub enum WorkspaceMode {
 }
 
 /// Declaration of a named workspace in `agent.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Exactly one of `path` or `mount` must be set:
+/// * `path` — relative to the configured `workspaces_dir`. The kernel
+///   creates the directory if it does not exist. This is the original
+///   shared-workspace mechanism and is the right choice for directories
+///   that LibreFang owns.
+/// * `mount` — an absolute path to a directory that already exists on
+///   the host (e.g. an Obsidian vault). The kernel never creates the
+///   target. The path must canonicalize to a prefix of one of the
+///   `allowed_mount_roots` entries in `config.toml`; otherwise the
+///   declaration is rejected at boot. See issue #3230.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceDecl {
     /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
-    pub path: PathBuf,
+    /// Mutually exclusive with `mount`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Absolute path to an existing host directory (e.g. an Obsidian
+    /// vault). Mutually exclusive with `path`. Must be whitelisted via
+    /// `config.toml: allowed_mount_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<PathBuf>,
     /// Access mode. Defaults to read-write.
     #[serde(default)]
     pub mode: WorkspaceMode,
+}
+
+impl WorkspaceDecl {
+    /// Whether this declaration targets a directory outside `workspaces_dir`.
+    /// External targets require an entry in `config.toml: allowed_mount_roots`.
+    pub fn is_external_mount(&self) -> bool {
+        self.mount.is_some()
+    }
 }
 
 fn default_true() -> bool {
@@ -931,6 +1037,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,
@@ -1305,6 +1412,28 @@ mod tests {
         let json = serde_json::to_string(&u).unwrap();
         let back: UserId = serde_json::from_str(&json).unwrap();
         assert_eq!(u, back);
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_stable() {
+        // Same name → same id, across calls. This is the contract that lets
+        // audit log entries survive daemon restarts.
+        assert_eq!(UserId::from_name("Alice"), UserId::from_name("Alice"));
+        assert_eq!(UserId::from_name(""), UserId::from_name(""));
+    }
+
+    #[test]
+    fn test_user_id_from_name_differs_per_name() {
+        assert_ne!(UserId::from_name("Alice"), UserId::from_name("Bob"));
+        // Case-sensitive — caller controls normalization.
+        assert_ne!(UserId::from_name("alice"), UserId::from_name("Alice"));
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_v5() {
+        // UUID v5 (SHA-1 + namespace) — version nibble must be 5.
+        let id = UserId::from_name("Alice");
+        assert_eq!(id.0.get_version_num(), 5);
     }
 
     #[test]
@@ -2190,5 +2319,57 @@ model = "llama-3.3-70b-versatile"
         let a = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
         let b = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
         assert_eq!(a, b);
+    }
+
+    // ── WorkspaceDecl: path / mount mutual-exclusion (#3230) ──────────────
+
+    #[test]
+    fn workspace_decl_path_only_deserializes() {
+        let s = r#"path = "shared/library"
+mode = "rw"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.path.as_deref(),
+            Some(std::path::Path::new("shared/library"))
+        );
+        assert!(d.mount.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadWrite);
+        assert!(!d.is_external_mount());
+    }
+
+    #[test]
+    fn workspace_decl_mount_only_deserializes() {
+        let s = r#"mount = "/Users/me/Obsidian"
+mode = "r"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.mount.as_deref(),
+            Some(std::path::Path::new("/Users/me/Obsidian"))
+        );
+        assert!(d.path.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadOnly);
+        assert!(d.is_external_mount());
+    }
+
+    /// Both fields can deserialize together — the kernel rejects the
+    /// combination at boot (see `resolve_workspace_decl`). Schema-level
+    /// rejection would break agent.toml hot-reload from the dashboard
+    /// (the user couldn't even see the validation error in context).
+    #[test]
+    fn workspace_decl_both_fields_deserialize_runtime_rejects() {
+        let s = r#"path = "rel"
+mount = "/abs"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_some() && d.mount.is_some());
+    }
+
+    #[test]
+    fn workspace_decl_neither_field_deserializes() {
+        let s = "mode = \"r\"\n";
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_none() && d.mount.is_none());
     }
 }

@@ -881,7 +881,7 @@ blocked_commands = []
 
 #### 命令策略
 
-每个通道都自带一组内置斜杠命令（`/agent`、`/new`、`/reboot`、`/model`、`/usage` 等），可用于切换 Agent、重置会话、查看用量、触发工作流。在**面向公众的 bot**（客服、社区助手）上暴露这些命令是安全隐患——任何人都可以打 `/agent admin` 切到内部 Agent，`/new` 清空会话，或者 `/model` 换模型。
+每个通道都自带一组内置斜杠命令（`/agent`、`/new`、`/reboot`、`/model`、`/usage` 等），可用于切换 Agent、开启新会话、查看用量、触发工作流。在**面向公众的 bot**（客服、社区助手）上暴露这些命令是安全隐患——任何人都可以打 `/agent admin` 切到内部 Agent，`/new` 开一个新会话（旧会话仍保留并可在通道里恢复），或者 `/model` 换模型。
 
 下面三个字段按通道对内置命令做访问控制。**优先级：** `disable_commands` > `allowed_commands`（白名单） > `blocked_commands`（黑名单）。
 

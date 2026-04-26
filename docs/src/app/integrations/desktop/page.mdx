@@ -81,6 +81,16 @@ After the server shuts down, channel bridges (Telegram, Slack, etc.) are stopped
 
 ## Features
 
+### Connection Screen
+
+When the desktop app can't reach a daemon (first launch, or the bundled daemon failed to come up), it now renders a **dedicated connection screen** instead of a white error page. The screen offers:
+
+- "Try again" — re-attempt the connection.
+- "Open in browser" — fall back to the daemon's web UI when the embedded WebView is the problem.
+- "Uninstall" — full removal from inside the app, useful when the daemon is too broken to reach via the menu bar.
+
+The screen ships as an embedded asset and is rendered via a custom URI scheme (`librefang://connection`) rather than over the daemon's own HTTP — so it works even when the daemon is stopped or the IPC bridge is down. Same path is used on Windows / Linux / macOS.
+
 ### System Tray
 
 The system tray (defined in `src/tray.rs`) provides quick access without bringing up the main window:

@@ -3,9 +3,8 @@
 //! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
 //! approval policy, cron settings, webhook triggers, extensions, tool policy,
 //! api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys,
-//! sanitize, default model, language, mode.
-//!
-//! **No-op** (informational only): log_level (reload handle not yet plumbed).
+//! sanitize, default model, language, mode, log_level (when a
+//! [`crate::log_reload::LogLevelReloader`] is installed by the binary).
 //!
 //! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault.
 
@@ -57,6 +56,23 @@ pub enum HotAction {
     ReloadProxy,
     /// Dashboard credentials (user/pass/hash) changed — config swap is sufficient.
     UpdateDashboardCredentials,
+    /// `[[taint_rules]]` registry changed — push the new rule sets into
+    /// the kernel's shared `taint_rules_swap` so connected MCP servers see
+    /// them on the next scan call without a reconnect.
+    ReloadTaintRules,
+    /// `log_level` changed — swap the live tracing `EnvFilter`. Carries the
+    /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
+    /// since the kernel doesn't keep the parsed filter around.
+    ReloadLogLevel(String),
+    /// `[[users]]` or `[tool_policy.groups]` changed — rebuild the RBAC
+    /// `AuthManager` so per-user `tool_policy` / `memory_access` /
+    /// `channel_tool_rules` edits take effect on the next tool call
+    /// (RBAC M3, #3054). Without this action, design decision #7
+    /// ("invalidate per-user permission cache on config reload") is
+    /// silently violated — the dashboard reports "applied" while the
+    /// previous policy is still being enforced. Supersedes the M6
+    /// `ReloadUsers` action that only rebuilt the channel-binding index.
+    ReloadAuth,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +140,30 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
     old_json != new_json
 }
 
+/// Runtime capabilities the planner needs to know about so it can correctly
+/// classify changes whose hot-reload feasibility depends on which optional
+/// hooks the embedding binary wired up at boot.
+///
+/// Today the only such hook is the log-level reloader (only the CLI daemon
+/// path installs it; embedded callers like the desktop server start the same
+/// kernel without it). Without consulting this struct, `build_reload_plan`
+/// would always mark `log_level` changes as hot-reloadable — and in
+/// embedded contexts the kernel would just warn-and-no-op while the
+/// dashboard reported success. See Codex P2-2 #3200.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReloadCapabilities {
+    /// `true` if a [`crate::log_reload::LogLevelReloader`] has been installed
+    /// on the kernel via `set_log_reloader`. When `false`, `log_level`
+    /// changes are routed to `restart_required` instead of `hot_actions`.
+    pub log_reloader_installed: bool,
+}
+
 /// Diff two configurations and produce a reload plan.
+///
+/// Backward-compatibility wrapper that assumes every optional reloader is
+/// installed — i.e. matches the original CLI daemon path. New call sites
+/// (especially anything embedded that lacks the log reloader) should prefer
+/// [`build_reload_plan_with_caps`].
 ///
 /// The plan categorizes every detected change into one of three buckets:
 ///
@@ -133,6 +172,26 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
 /// 2. **hot_actions** — the change can be applied without restarting.
 /// 3. **noop_changes** — the change is informational; no action needed.
 pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
+    build_reload_plan_with_caps(
+        old,
+        new,
+        ReloadCapabilities {
+            log_reloader_installed: true,
+        },
+    )
+}
+
+/// Diff two configurations against a known set of [`ReloadCapabilities`].
+///
+/// Use this from the kernel hot-reload path so changes whose feasibility
+/// depends on optional hooks (currently `log_level`) get demoted to
+/// `restart_required` when the hook isn't wired — preventing the
+/// dashboard from being told "applied" while the live filter never moved.
+pub fn build_reload_plan_with_caps(
+    old: &KernelConfig,
+    new: &KernelConfig,
+    caps: ReloadCapabilities,
+) -> ReloadPlan {
     let mut plan = ReloadPlan {
         restart_required: false,
         restart_reasons: Vec::new(),
@@ -265,6 +324,13 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.hot_actions.push(HotAction::ReloadMcpServers);
     }
 
+    // Top-level [[taint_rules]] registry — hot-reloadable via the shared
+    // `taint_rules_swap`. Tracked separately from `mcp_servers` because
+    // operators commonly tune rule sets without touching MCP server config.
+    if old.taint_rules != new.taint_rules {
+        plan.hot_actions.push(HotAction::ReloadTaintRules);
+    }
+
     if field_changed(&old.a2a, &new.a2a) {
         plan.hot_actions.push(HotAction::ReloadA2aConfig);
     }
@@ -283,6 +349,18 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.hot_actions.push(HotAction::UpdateToolPolicy);
     }
 
+    // RBAC M3 (#3054): invalidate the AuthManager when any field that
+    // feeds it changes — `[[users]]` (role / channel_bindings /
+    // tool_policy / channel_tool_rules / tool_categories /
+    // memory_access) or the tool group catalogue used for category
+    // resolution. Without this, a `/api/config/reload` after a policy
+    // edit is a silent no-op.
+    if field_changed(&old.users, &new.users)
+        || field_changed(&old.tool_policy.groups, &new.tool_policy.groups)
+    {
+        plan.hot_actions.push(HotAction::ReloadAuth);
+    }
+
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
@@ -293,6 +371,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         );
     }
 
+    // (M6 had a separate `ReloadUsers` action here; collapsed into M3's
+    // `ReloadAuth` above since `auth.reload(&users, &tool_groups)` does
+    // the strict superset of what `replace_users` did.)
+
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {
         plan.hot_actions.push(HotAction::ReloadProviderApiKeys);
     }
@@ -300,10 +382,20 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
     // ----- No-op fields -----
 
     if old.log_level != new.log_level {
-        plan.noop_changes.push(format!(
-            "log_level: {} -> {} (requires restart — reload handle not yet plumbed)",
-            old.log_level, new.log_level
-        ));
+        if caps.log_reloader_installed {
+            plan.hot_actions
+                .push(HotAction::ReloadLogLevel(new.log_level.clone()));
+        } else {
+            // No reloader wired (embedded callers without the CLI's
+            // log_filter slot). Demote to restart_required so the
+            // dashboard reports an honest "needs restart" instead of
+            // a false "applied" — see Codex P2-2 #3200.
+            plan.restart_required = true;
+            plan.restart_reasons.push(format!(
+                "log_level: {} -> {} (no log reloader installed; restart required)",
+                old.log_level, new.log_level
+            ));
+        }
     }
 
     if old.language != new.language {
@@ -637,7 +729,6 @@ mod tests {
         // Hot-reloadable
         b.usage_footer = UsageFooterMode::Tokens;
         b.max_cron_jobs = 100;
-        // No-op
         b.log_level = "debug".to_string();
 
         let plan = build_reload_plan(&a, &b);
@@ -647,7 +738,9 @@ mod tests {
         // so the caller knows what will need re-initialization after restart.
         assert!(plan.hot_actions.contains(&HotAction::UpdateUsageFooter));
         assert!(plan.hot_actions.contains(&HotAction::UpdateCronConfig));
-        assert!(plan.noop_changes.iter().any(|c| c.contains("log_level")));
+        assert!(plan
+            .hot_actions
+            .contains(&HotAction::ReloadLogLevel("debug".to_string())));
     }
 
     // -----------------------------------------------------------------------
@@ -659,17 +752,65 @@ mod tests {
         use librefang_types::config::KernelMode;
         let a = default_cfg();
         let mut b = default_cfg();
-        b.log_level = "debug".to_string();
         b.language = "de".to_string();
         b.mode = KernelMode::Dev;
 
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.is_empty());
-        assert_eq!(plan.noop_changes.len(), 3);
-        assert!(plan.noop_changes.iter().any(|c| c.contains("log_level")));
+        assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn test_log_level_hot_reloaded() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.log_level = "debug".to_string();
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required, "log_level should be hot-reloadable");
+        assert!(plan
+            .hot_actions
+            .contains(&HotAction::ReloadLogLevel("debug".to_string())));
+    }
+
+    #[test]
+    fn test_log_level_demoted_to_restart_when_no_reloader_installed() {
+        // Codex P2-2 #3200: embedded callers (e.g. desktop server) boot
+        // the same kernel without wiring a LogLevelReloader. Without
+        // capability-aware planning, the dashboard would receive a
+        // false "applied, no restart needed" response while the live
+        // filter never moved. Assert that demoting to restart_required
+        // is the active behaviour when the reloader is absent.
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.log_level = "debug".to_string();
+
+        let plan = build_reload_plan_with_caps(
+            &a,
+            &b,
+            ReloadCapabilities {
+                log_reloader_installed: false,
+            },
+        );
+        assert!(
+            plan.restart_required,
+            "log_level change must require restart when no reloader is installed"
+        );
+        assert!(
+            !plan
+                .hot_actions
+                .iter()
+                .any(|a| matches!(a, HotAction::ReloadLogLevel(_))),
+            "ReloadLogLevel must NOT be queued as a hot action without a reloader"
+        );
+        assert!(
+            plan.restart_reasons.iter().any(|r| r.contains("log_level")),
+            "restart_reasons should explain the log_level demotion: {:?}",
+            plan.restart_reasons
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -692,7 +833,7 @@ mod tests {
             restart_required: false,
             restart_reasons: vec![],
             hot_actions: vec![],
-            noop_changes: vec!["log_level: info -> debug".to_string()],
+            noop_changes: vec!["language: en -> de".to_string()],
         };
         assert!(plan.has_changes());
 
