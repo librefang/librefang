@@ -899,7 +899,7 @@ mod mount_tests {
         let host_root = tmp.path().join("host");
         let target = host_root.join("Obsidian");
         std::fs::create_dir_all(&target).unwrap();
-        let canonical_roots = canonicalize_allowed_mount_roots(&[host_root.clone()]);
+        let canonical_roots = canonicalize_allowed_mount_roots(std::slice::from_ref(&host_root));
         let decl = decl_mount(&target, WorkspaceMode::ReadOnly);
         let resolved =
             resolve_workspace_decl("vault", &decl, tmp.path(), &canonical_roots).unwrap();
