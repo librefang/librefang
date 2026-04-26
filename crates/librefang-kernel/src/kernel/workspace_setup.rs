@@ -575,35 +575,161 @@ pub(super) fn migrate_identity_files(workspace: &Path) {
     }
 }
 
-/// Create named workspace directories and return their resolved absolute paths with modes.
-/// Paths are validated (no absolute paths, no `..` components).
+/// Canonicalize entries in `allowed_mount_roots`, skipping any that fail.
+/// Returns the canonical roots ready to be used as prefix-checks against
+/// declared `mount` paths. Used by both the boot-time setup path and the
+/// hot-path `named_workspace_prefixes` query, so a single broken root in
+/// `config.toml` doesn't poison every mount lookup.
+pub(super) fn canonicalize_allowed_mount_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter_map(|r| match r.canonicalize() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    root = %r.display(),
+                    "config.toml: allowed_mount_roots entry could not be canonicalized: {e}"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Resolve a single `[workspaces]` declaration to its canonical on-disk
+/// target, without creating any directories. Returns `None` when the
+/// declaration is invalid for any reason (warns at module level).
+///
+/// This is the shared core used by both `ensure_named_workspaces` (which
+/// additionally creates `path` targets at boot) and the runtime hot-path
+/// query `named_workspace_prefixes` (which must avoid touching the
+/// filesystem beyond `canonicalize`).
+///
+/// `allowed_mount_canonical_roots` must already be canonicalized — see
+/// `canonicalize_allowed_mount_roots`.
+pub(super) fn resolve_workspace_decl(
+    name: &str,
+    decl: &librefang_types::agent::WorkspaceDecl,
+    workspaces_root: &Path,
+    allowed_mount_canonical_roots: &[PathBuf],
+) -> Option<(PathBuf, WorkspaceMode)> {
+    match (decl.path.as_ref(), decl.mount.as_ref()) {
+        (Some(_), Some(_)) => {
+            tracing::warn!(
+                name,
+                "Workspace declaration has both `path` and `mount` set — skipped \
+                 (use exactly one)"
+            );
+            None
+        }
+        (None, None) => {
+            tracing::warn!(
+                name,
+                "Workspace declaration has neither `path` nor `mount` — skipped"
+            );
+            None
+        }
+        (Some(rel), None) => {
+            if rel.is_absolute() || has_unsafe_relative_components(rel) {
+                tracing::warn!(
+                    name,
+                    path = %rel.display(),
+                    "Invalid named workspace path — skipped (must be relative, no `..`)"
+                );
+                return None;
+            }
+            let abs = workspaces_root.join(rel);
+            match abs.canonicalize() {
+                Ok(p) => Some((p, decl.mode.clone())),
+                Err(e) => {
+                    tracing::warn!(
+                        name,
+                        path = %abs.display(),
+                        "Failed to canonicalize named workspace: {e}"
+                    );
+                    None
+                }
+            }
+        }
+        (None, Some(mount)) => {
+            if !mount.is_absolute() {
+                tracing::warn!(
+                    name,
+                    mount = %mount.display(),
+                    "Workspace mount must be an absolute path — skipped"
+                );
+                return None;
+            }
+            let canonical = match mount.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        name,
+                        mount = %mount.display(),
+                        "Failed to canonicalize workspace mount (does the directory exist?): {e}"
+                    );
+                    return None;
+                }
+            };
+            if allowed_mount_canonical_roots.is_empty() {
+                tracing::warn!(
+                    name,
+                    mount = %canonical.display(),
+                    "Workspace mount rejected — `allowed_mount_roots` is empty in config.toml. \
+                     External mounts are denied by default; whitelist a parent directory to enable."
+                );
+                return None;
+            }
+            let allowed = allowed_mount_canonical_roots
+                .iter()
+                .any(|root| canonical.starts_with(root));
+            if !allowed {
+                tracing::warn!(
+                    name,
+                    mount = %canonical.display(),
+                    "Workspace mount is not under any `config.toml: allowed_mount_roots` entry — skipped"
+                );
+                return None;
+            }
+            Some((canonical, decl.mode.clone()))
+        }
+    }
+}
+
+/// Resolve all named workspace declarations and create the directories
+/// for `path` entries. Returns the map of canonical absolute paths with
+/// access modes. Invalid declarations are logged and skipped.
+///
+/// `allowed_mount_roots` comes from `config.toml`. External `mount`
+/// targets must canonicalize to a prefix of one of these roots; the
+/// list is empty by default, which denies all external mounts.
 pub(super) fn ensure_named_workspaces(
     workspaces_root: &Path,
     decls: &HashMap<String, librefang_types::agent::WorkspaceDecl>,
+    allowed_mount_roots: &[PathBuf],
 ) -> HashMap<String, (PathBuf, WorkspaceMode)> {
+    let canonical_roots = canonicalize_allowed_mount_roots(allowed_mount_roots);
     let mut resolved = HashMap::new();
     for (name, decl) in decls {
-        if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
-            tracing::warn!(name, path = %decl.path.display(), "Invalid named workspace path — skipped");
-            continue;
-        }
-        let abs = workspaces_root.join(&decl.path);
-        if let Err(e) = std::fs::create_dir_all(&abs) {
-            tracing::warn!(name, path = %abs.display(), "Failed to create named workspace: {e}");
-            continue;
-        }
-        // Canonicalize after create_dir_all so the path is consistent with
-        // readonly_workspace_prefixes (which also canonicalizes). Skip on failure
-        // rather than falling back to a non-canonical path that would silently
-        // bypass the readonly check.
-        let canonical = match abs.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(name, path = %abs.display(), "Failed to canonicalize named workspace: {e}");
-                continue;
+        // Create the on-disk directory for `path` entries before resolving.
+        // External `mount` targets must already exist — the daemon never
+        // creates host directories on behalf of an agent (issue #3230).
+        if let (Some(rel), None) = (decl.path.as_ref(), decl.mount.as_ref()) {
+            if !(rel.is_absolute() || has_unsafe_relative_components(rel)) {
+                let abs = workspaces_root.join(rel);
+                if let Err(e) = std::fs::create_dir_all(&abs) {
+                    tracing::warn!(
+                        name,
+                        path = %abs.display(),
+                        "Failed to create named workspace: {e}"
+                    );
+                    continue;
+                }
             }
-        };
-        resolved.insert(name.clone(), (canonical, decl.mode.clone()));
+        }
+        if let Some(entry) = resolve_workspace_decl(name, decl, workspaces_root, &canonical_roots) {
+            resolved.insert(name.clone(), entry);
+        }
     }
     resolved
 }
@@ -695,5 +821,177 @@ pub(super) fn gethostname() -> Option<String> {
     #[cfg(not(any(unix, windows)))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod mount_tests {
+    //! Regression tests for issue #3230: external `mount` declarations in
+    //! `[workspaces]` must require an explicit `allowed_mount_roots`
+    //! whitelist; declarations that mix `path` and `mount`, or leave
+    //! both empty, must be rejected.
+
+    use super::*;
+    use librefang_types::agent::{WorkspaceDecl, WorkspaceMode};
+    use std::collections::HashMap;
+
+    fn decl_path(rel: &str, mode: WorkspaceMode) -> WorkspaceDecl {
+        WorkspaceDecl {
+            path: Some(PathBuf::from(rel)),
+            mount: None,
+            mode,
+        }
+    }
+
+    fn decl_mount(abs: &Path, mode: WorkspaceMode) -> WorkspaceDecl {
+        WorkspaceDecl {
+            path: None,
+            mount: Some(abs.to_path_buf()),
+            mode,
+        }
+    }
+
+    #[test]
+    fn resolve_path_relative_inside_workspaces_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rel = "shared/lib";
+        std::fs::create_dir_all(tmp.path().join(rel)).unwrap();
+        let decl = decl_path(rel, WorkspaceMode::ReadWrite);
+        let resolved = resolve_workspace_decl("lib", &decl, tmp.path(), &[]).unwrap();
+        assert_eq!(
+            resolved.0.canonicalize().unwrap(),
+            tmp.path().join(rel).canonicalize().unwrap()
+        );
+        assert_eq!(resolved.1, WorkspaceMode::ReadWrite);
+    }
+
+    #[test]
+    fn resolve_path_rejects_absolute_relative_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Putting an absolute path into the relative-only `path` field is invalid.
+        let decl = WorkspaceDecl {
+            path: Some(PathBuf::from("/etc")),
+            mount: None,
+            mode: WorkspaceMode::ReadWrite,
+        };
+        assert!(resolve_workspace_decl("bad", &decl, tmp.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_path_rejects_parent_dir_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let decl = decl_path("../escape", WorkspaceMode::ReadWrite);
+        assert!(resolve_workspace_decl("escape", &decl, tmp.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_mount_denied_when_whitelist_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("vault");
+        std::fs::create_dir_all(&target).unwrap();
+        let decl = decl_mount(&target, WorkspaceMode::ReadOnly);
+        assert!(resolve_workspace_decl("vault", &decl, tmp.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_mount_allowed_when_under_whitelisted_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_root = tmp.path().join("host");
+        let target = host_root.join("Obsidian");
+        std::fs::create_dir_all(&target).unwrap();
+        let canonical_roots = canonicalize_allowed_mount_roots(std::slice::from_ref(&host_root));
+        let decl = decl_mount(&target, WorkspaceMode::ReadOnly);
+        let resolved =
+            resolve_workspace_decl("vault", &decl, tmp.path(), &canonical_roots).unwrap();
+        assert_eq!(resolved.0, target.canonicalize().unwrap());
+        assert_eq!(resolved.1, WorkspaceMode::ReadOnly);
+    }
+
+    #[test]
+    fn resolve_mount_rejected_when_outside_whitelisted_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_root = tmp.path().join("host");
+        std::fs::create_dir_all(&host_root).unwrap();
+        // Target directory exists but lives OUTSIDE host_root.
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let canonical_roots = canonicalize_allowed_mount_roots(&[host_root]);
+        let decl = decl_mount(&outside, WorkspaceMode::ReadWrite);
+        assert!(resolve_workspace_decl("nope", &decl, tmp.path(), &canonical_roots).is_none());
+    }
+
+    #[test]
+    fn resolve_mount_rejects_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let decl = WorkspaceDecl {
+            path: None,
+            mount: Some(PathBuf::from("relative/path")),
+            mode: WorkspaceMode::ReadOnly,
+        };
+        // Even with a permissive whitelist, a relative `mount` must be rejected.
+        let canonical_roots = canonicalize_allowed_mount_roots(&[tmp.path().to_path_buf()]);
+        assert!(resolve_workspace_decl("rel", &decl, tmp.path(), &canonical_roots).is_none());
+    }
+
+    #[test]
+    fn resolve_mount_does_not_create_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_root = tmp.path().to_path_buf();
+        let missing = host_root.join("does_not_exist_yet");
+        let canonical_roots = canonicalize_allowed_mount_roots(&[host_root]);
+        let decl = decl_mount(&missing, WorkspaceMode::ReadOnly);
+        // Should be skipped: kernel never creates host directories on
+        // behalf of an agent.
+        assert!(resolve_workspace_decl("nope", &decl, tmp.path(), &canonical_roots).is_none());
+        assert!(!missing.exists(), "kernel must not create the target");
+    }
+
+    #[test]
+    fn resolve_rejects_when_both_path_and_mount_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("vault");
+        std::fs::create_dir_all(&target).unwrap();
+        let canonical_roots = canonicalize_allowed_mount_roots(&[tmp.path().to_path_buf()]);
+        let decl = WorkspaceDecl {
+            path: Some(PathBuf::from("rel")),
+            mount: Some(target),
+            mode: WorkspaceMode::ReadWrite,
+        };
+        assert!(resolve_workspace_decl("ambig", &decl, tmp.path(), &canonical_roots).is_none());
+    }
+
+    #[test]
+    fn resolve_rejects_when_neither_path_nor_mount_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let decl = WorkspaceDecl::default();
+        assert!(resolve_workspace_decl("empty", &decl, tmp.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn ensure_named_workspaces_creates_path_targets_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_root = tmp.path().join("host");
+        std::fs::create_dir_all(&host_root).unwrap();
+        let mount_target = host_root.join("Obsidian");
+        std::fs::create_dir_all(&mount_target).unwrap();
+
+        let mut decls = HashMap::new();
+        decls.insert(
+            "library".to_string(),
+            decl_path("shared/library", WorkspaceMode::ReadWrite),
+        );
+        decls.insert(
+            "vault".to_string(),
+            decl_mount(&mount_target, WorkspaceMode::ReadOnly),
+        );
+        // A `path` target that doesn't yet exist — kernel should create it.
+        let workspaces_root = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces_root).unwrap();
+        let allowed = vec![host_root];
+
+        let resolved = ensure_named_workspaces(&workspaces_root, &decls, &allowed);
+        assert_eq!(resolved.len(), 2, "both decls should resolve");
+        assert!(workspaces_root.join("shared/library").is_dir());
+        assert!(mount_target.is_dir());
     }
 }

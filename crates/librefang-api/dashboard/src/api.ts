@@ -3640,22 +3640,42 @@ export async function queryAudit(
 }
 
 // ---------------------------------------------------------------------------
-// Per-user budget (M5 / #3203 — endpoint stubbed)
+// Per-user budget (RBAC M5)
 // ---------------------------------------------------------------------------
 
-export interface UserBudgetEntry {
-  user: string;
-  spend_usd: number;
-  budget_usd: number | null;
-  tokens_in: number;
-  tokens_out: number;
-  requests: number;
-  period_start?: string;
-  period_end?: string;
+/// Per-window spend + cap pair returned by GET /api/budget/users/{user_id}.
+export interface UserBudgetWindow {
+  spend: number;
+  limit: number;
+  pct: number;
 }
 
-export interface UserBudgetResponse extends UserBudgetEntry {
-  daily?: Array<{ date: string; spend_usd: number; tokens: number }>;
+/// Shape returned by GET /api/budget/users/{user_id} — see
+/// `routes/budget.rs::user_budget_detail`.
+export interface UserBudgetResponse {
+  user_id: string;
+  name: string | null;
+  role: string | null;
+  hourly: UserBudgetWindow;
+  daily: UserBudgetWindow;
+  monthly: UserBudgetWindow;
+  alert_threshold: number;
+  alert_breach: boolean;
+  /// True once the M5 enforcement arm is wired (commit 4a00a646). Kept
+  /// in the payload so the dashboard can surface a "deferred" notice
+  /// against older daemons that may still report `false`.
+  enforced: boolean;
+}
+
+/// Body shape for PUT /api/budget/users/{user_id}. Mirrors
+/// `librefang_types::config::UserBudgetConfig`. Any window left at 0
+/// means "unlimited on that window"; same semantics as the kernel
+/// metering check.
+export interface UserBudgetPayload {
+  max_hourly_usd: number;
+  max_daily_usd: number;
+  max_monthly_usd: number;
+  alert_threshold: number;
 }
 
 export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
@@ -3664,15 +3684,69 @@ export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
   );
 }
 
+export async function updateUserBudget(
+  name: string,
+  payload: UserBudgetPayload,
+): Promise<{ status: string; budget: UserBudgetPayload }> {
+  return put(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+    payload,
+  );
+}
+
+export async function deleteUserBudget(
+  name: string,
+): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
-// Per-user permission policy (M3 / #3205 — endpoint stubbed)
+// Per-user permission policy (RBAC M3 / #3205 — wired to the real daemon)
 // ---------------------------------------------------------------------------
 
+export interface UserToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface UserToolCategories {
+  allowed_groups: string[];
+  denied_groups: string[];
+}
+
+export interface UserMemoryAccess {
+  readable_namespaces: string[];
+  writable_namespaces: string[];
+  pii_access: boolean;
+  export_allowed: boolean;
+  delete_allowed: boolean;
+}
+
+export interface ChannelToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+// Mirrors the `UserPolicyView` returned by `GET /api/users/{name}/policy`.
+// `null` on a top-level slot = "no opinion configured" (kernel falls back
+// to role-default). Empty `channel_tool_rules` map = no per-channel rules.
 export interface PermissionPolicy {
-  tool_allowlist: string[] | null;
-  tool_blocklist: string[] | null;
-  memory_read: string[] | null;
-  memory_write: string[] | null;
+  tool_policy: UserToolPolicy | null;
+  tool_categories: UserToolCategories | null;
+  memory_access: UserMemoryAccess | null;
+  channel_tool_rules: Record<string, ChannelToolPolicy>;
+}
+
+// PUT body shape: every key independently nullable. `undefined` = preserve
+// existing, `null` = clear. `channel_tool_rules` collapses absent/null to
+// "preserve"; pass `{}` to clear.
+export interface PermissionPolicyUpdate {
+  tool_policy?: UserToolPolicy | null;
+  tool_categories?: UserToolCategories | null;
+  memory_access?: UserMemoryAccess | null;
+  channel_tool_rules?: Record<string, ChannelToolPolicy>;
 }
 
 export async function getUserPolicy(name: string): Promise<PermissionPolicy> {
@@ -3683,9 +3757,9 @@ export async function getUserPolicy(name: string): Promise<PermissionPolicy> {
 
 export async function updateUserPolicy(
   name: string,
-  policy: PermissionPolicy,
-): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(
+  policy: PermissionPolicyUpdate,
+): Promise<PermissionPolicy> {
+  return put<PermissionPolicy>(
     `/api/users/${encodeURIComponent(name)}/policy`,
     policy,
   );

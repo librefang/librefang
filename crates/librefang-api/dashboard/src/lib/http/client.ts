@@ -133,11 +133,17 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
-  // per-user budget / policy (M3+M5 stubs)
+  // per-user budget (M5) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
   // effective permissions snapshot (RBAC follow-up — backs the simulator)
   getEffectivePermissions,
+} from "../../api";
+
+export type {
+  UserBudgetResponse,
+  UserBudgetWindow,
+  UserBudgetPayload,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -277,8 +283,11 @@ export {
   updateUser,
   deleteUser,
   importUsers,
-  // per-user policy (M3 stub)
+  // per-user policy (M3 #3205)
   updateUserPolicy,
+  // per-user budget (RBAC M5)
+  updateUserBudget,
+  deleteUserBudget,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -329,6 +338,11 @@ export type {
   UserBudgetEntry,
   UserBudgetResponse,
   PermissionPolicy,
+  PermissionPolicyUpdate,
+  UserToolPolicy,
+  UserToolCategories,
+  UserMemoryAccess,
+  ChannelToolPolicy,
   // effective permissions snapshot (RBAC follow-up)
   EffectivePermissions,
   EffectiveToolPolicy,
