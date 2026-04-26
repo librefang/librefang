@@ -51,6 +51,10 @@ The Telegram adapter uses long-polling via the `getUpdates` API. It polls every 
 
 Messages from authorized users are converted to `ChannelMessage` events and routed to the configured agent. Responses are sent back via the `sendMessage` API. Long responses are automatically split into multiple messages to respect Telegram's 4096-character limit using the shared `split_message()` utility.
 
+### File Attachments
+
+Files attached to Telegram messages arrive as **temporary authenticated URLs that the LLM cannot access directly**. The bridge downloads them to a configurable directory and rewrites the message into local-path content blocks — non-image files become a `ContentBlock::Text` with the saved path (the agent then calls `file_read`); images become `ContentBlock::ImageFile`. See [Channel File Downloads](/integrations/channels#channel-file-downloads) on the overview for `file_download_dir` / `file_download_max_bytes` and the stale-file sweeper.
+
 ### Interactive Setup
 
 ```bash
@@ -157,6 +161,10 @@ default_agent = "ops"
 
 The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Responses are posted via the `chat.postMessage` Web API. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
 
+### Processing-State Reactions
+
+The Slack adapter shows live "I'm working on it" feedback by adding 👀 to the user's message on receive and replacing it with ✅ when the reply is sent. Toggle with the `SLACK_REACTIONS` environment variable (default `true` — set to `false` to disable). `already_reacted` and `no_reaction` errors are silently ignored, so reaction failures never block message processing. See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
+
 ---
 
 ## WhatsApp
@@ -221,12 +229,23 @@ WhatsApp group messages are automatically detected. The bot's behavior in groups
 | `commands_only` | Only respond to slash commands |
 | `ignore` | Ignore all group messages |
 
+`mention_only` matches the bot phone number or bot name in the message body — set `bot_phone` and `bot_name` (or pass via `with_bot_phone()` / `with_bot_name()` in code) so the matcher knows what to look for. `trigger_only` instead matches `group_trigger_patterns` (regex list).
+
 Example:
 
 ```toml
 [channels.whatsapp.overrides]
 group_policy = "mention_only"
+bot_phone = "+15551234567"
+bot_name = "librefang"
+# Or use trigger_only with regex patterns:
+# group_policy = "trigger_only"
+# group_trigger_patterns = ["(?i)\\bbot\\b", "(?i)\\bhelp\\b"]
 ```
+
+### Voice Messages
+
+The WhatsApp adapter can send voice replies via `send_voice(to, audio, mime_type)`. In Cloud API mode it uploads to `/{phone_number_id}/media` then sends an `audio` message with the returned `media_id`; in gateway mode it base64-encodes and POSTs to `/message/send-voice`. See [WhatsApp Voice + DM/Group Policies](/integrations/channels#whatsapp-voice--dmgroup-policies) on the channels overview.
 
 ---
 
@@ -303,6 +322,14 @@ default_agent = "assistant"
 ### How It Works
 
 The Signal adapter spawns `signal-cli` as a subprocess in daemon mode and communicates via JSON-RPC. Incoming messages are read from the signal-cli output stream and routed to the configured agent.
+
+### Plain-Text Output by Default
+
+Signal defaults to `OutputFormat::PlainText` because `signal-cli` renders Markdown asterisks and underscores literally. To re-enable Markdown output, override the format on the agent or channel — see [Signal Plain-Text Default](/integrations/channels#signal-plain-text-default) on the channels overview.
+
+### Media Attachments
+
+The Signal adapter delivers `Image`, `Voice`, `Video`, `Audio`, `Animation`, `File`, `FileData`, and `MediaGroup` content blocks. Media URLs are downloaded and base64-encoded into `base64_attachments` on `/v2/send`. Unsupported types (`Poll`, `Sticker`, …) degrade gracefully — text-only fallback or skip — rather than fail the whole reply. See [Signal Media Attachments](/integrations/channels#signal-media-attachments) for the full type list.
 
 ---
 

@@ -6,11 +6,26 @@
 
 - Claude Code
 - GitHub Copilot
+- ChatGPT(会话令牌)
+- Kimi Coding
 - Aider
 - Claude Code CLI
 - Codex CLI
 - Gemini CLI
 - Qwen Code
+
+## CLI 登录作为一等默认 provider
+
+当你没设 provider API key 但**有**可用的 CLI 登录（`claude` / `codex` / `gemini` / `qwen` 在 `PATH` 上且已认证），LibreFang 会把 CLI provider 选成新 agent 的默认模型。检测在启动时跑，刷新 provider 可用性时也会重测。
+
+检测优先级（从前到后，先匹配先用）：
+
+1. `claude-code` — `claude` 在 `PATH`，`claude auth status` 报告 active session。
+2. `codex-cli` — `codex` 在 `PATH`，`OPENAI_API_KEY`（Codex CLI 自己需要的）已设。
+3. `gemini-cli` — `gemini` 在 `PATH`，`gemini auth login` 已认证。
+4. `qwen-code` — `qwen` 在 `PATH`，已认证。
+
+这个行为替代了之前 "API provider 失败时回退" 的启发式 — CLI provider 现在像普通远程 provider 一样被对待。要显式覆盖自动选择，在 `config.toml` 里设 `[default_model] provider = "anthropic"`（或其他）。
 
 ---
 
@@ -50,6 +65,65 @@
 3. `export GITHUB_TOKEN="ghp_..."`
 
 **说明：** Copilot 驱动自动处理 OAuth PKCE token 交换 — 它从 `https://api.github.com/copilot_internal/v2/token` 获取短期 Copilot API token 并缓存，支持自动刷新。Copilot API 使用 OpenAI 兼容的聊天补全格式。Token 在到期前 5 分钟自动刷新。
+
+---
+
+## ChatGPT(会话令牌)
+
+| | |
+|---|---|
+| **显示名称** | ChatGPT |
+| **Provider ID** | `chatgpt` |
+| **驱动** | 原生 ChatGPT(Responses API) |
+| **环境变量** | `CHATGPT_SESSION_TOKEN`(主)、`CHATGPT_REFRESH_TOKEN`(可选) |
+| **基础 URL** | `https://chatgpt.com/backend-api` |
+| **需要密钥** | 是(浏览器会话令牌) |
+| **免费额度** | 订阅制(ChatGPT Plus / Pro / Team / Enterprise) |
+| **认证方式** | 会话令牌 + bearer; OAuth 风格刷新, ~7 天 TTL |
+
+**设置：**
+1. 跑 `librefang auth chatgpt`(浏览器 OAuth 流程)。CLI 会捕获会话令牌并缓存。
+2. Token 到期前 1 小时自动刷新,无需手动轮换。
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "chatgpt"
+model = "gpt-4o"
+```
+
+**说明:** 走 ChatGPT 的专有 Responses API 而不是 `/v1/chat/completions`,这样 agent 可以复用付费的 ChatGPT 订阅而不需要单独的 OpenAI API key。**支持工具与 vision。** Embeddings 不通过此驱动 —— 用 OpenAI hosted。
+
+---
+
+## Kimi Coding
+
+| | |
+|---|---|
+| **显示名称** | Kimi Coding |
+| **Provider ID** | `kimi-coding` |
+| **驱动** | Anthropic 兼容(Messages API) |
+| **环境变量** | `KIMI_API_KEY` |
+| **基础 URL** | `https://api.kimi.com/coding` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在 Kimi 控制台注册并启用 Coding 端点
+2. 在 Coding 产品下生成 API key
+3. `export KIMI_API_KEY="sk-..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "kimi-coding"
+model = "kimi-coder"
+```
+
+**说明:** Moonshot 体系的编码专用变体, 暴露为 **Anthropic Messages API 格式**(不是 OpenAI 兼容)。复用 Anthropic 的内部驱动路径,包括 tool-use 模式转换和 vision 支持。env 与 `MOONSHOT_API_KEY` 不同 —— Kimi Coding 用自己的 key。
 
 ---
 

@@ -259,6 +259,79 @@ Sub-agent lifecycle hooks, useful when you need to isolate or merge memory scope
 
 ---
 
+### `transform_tool_result` hook
+
+Rewrites tool output **after the tool runs but before the LLM sees it**. Lets a plugin truncate, redact, mask paths, or completely replace a tool's result without touching the tool itself.
+
+**Where it fires in the loop:**
+
+```
+tool executes
+  ↓
+after_tool_call hook (observe-only)
+  ↓
+transform_tool_result hook  ← rewrite happens here
+  ↓
+sanitize + apply context budget
+  ↓
+result lands in conversation history
+```
+
+**Trait signature** (Rust plugins) — also exposed to subprocess plugins as a stdin/stdout JSON request:
+
+```rust
+fn transform(&self, ctx: &HookContext) -> Result<Option<String>, String>
+```
+
+The `HookContext` carries:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `agent_name` | `&str` | Display name of the agent |
+| `agent_id` | `&str` | Agent ID |
+| `event` | `HookEvent::TransformToolResult` | Always this variant for this hook |
+| `data` | `serde_json::Value` | `{ tool_name, args, result, is_error }` |
+
+**Request** (subprocess flavour):
+
+```json
+{
+  "type": "transform_tool_result",
+  "tool_name": "shell_exec",
+  "args": { "command": "cat /etc/passwd" },
+  "result": "root:x:0:0:root:/root:/bin/bash\n...",
+  "is_error": false
+}
+```
+
+**Response shape:**
+
+| Reply | Meaning |
+|---|---|
+| `{"type": "transformed", "result": "<new>"}` | **First-wins.** Replace the tool result and stop. No further plugins run on this hook. |
+| `{"type": "skip"}` (or `Ok(None)` in Rust) | Pass through. Next plugin in the stack gets a chance. |
+| Non-zero exit + stderr (or `Err(reason)` in Rust) | Logged at `warn` level. Skip this plugin. The chain continues — fail-open. |
+
+**Semantics:**
+
+- **First-wins, sequential.** Plugins run in registration order; the first plugin that returns a transformed result wins and the chain stops.
+- **Fail-open.** A plugin that errors is skipped; if every plugin skips or errors, the original tool result is preserved unchanged.
+- **No size cap on the transformation itself.** The transformed result is still subject to the global context-budget sanitiser afterward, so an explosively large output may still be truncated downstream.
+- **Panics are not caught** in Rust plugins — a panic in `transform()` aborts the agent turn. Wrap risky logic in `std::panic::catch_unwind` if the source is untrusted.
+
+**Typical use cases:**
+
+- **Truncation** — keep the first 200 lines of a verbose `shell_exec` output; replace the rest with `"... (N more lines truncated)"`.
+- **Redaction** — strip API keys / passwords / tokens from any tool result with a regex pass.
+- **Path masking** — rewrite absolute home-directory paths to `~/...` so the model doesn't memorise local layout.
+- **Format conversion** — convert a JSON tool result to a more model-friendly markdown table.
+- **Content filtering** — drop boilerplate banners / adverts from web-fetch results.
+- **Audit passthrough** — return `Ok(None)` but echo the call to an external system for compliance logging.
+
+The hook is exposed in the same `Plugin` trait that ships `ingest` / `assemble` / `compact` / `after_turn`. A single plugin can implement any subset.
+
+---
+
 ### Errors
 
 Exit with a non-zero code and write an error to stderr. LibreFang logs the stderr at `warn` level and falls back to the default context engine result. The turn still proceeds.

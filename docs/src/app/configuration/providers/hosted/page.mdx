@@ -15,12 +15,14 @@ This page covers internet-hosted model providers that authenticate with an API k
 - Fireworks AI
 - Perplexity AI
 - Cohere
-- AI21 Labs
 - Cerebras
 - SambaNova
 - Hugging Face
 - xAI
 - Alibaba Coding Plan
+- Moonshot (Kimi)
+- Novita AI
+- AWS Bedrock
 
 ---
 
@@ -314,29 +316,6 @@ This page covers internet-hosted model providers that authenticate with an API k
 
 ---
 
-## AI21 Labs
-
-| | |
-|---|---|
-| **Display Name** | AI21 Labs |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `AI21_API_KEY` |
-| **Base URL** | `https://api.ai21.com/studio/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | 1 |
-
-**Available Models:**
-- `jamba-1.5-large` (Smart)
-
-**Setup:**
-1. Sign up at [studio.ai21.com](https://studio.ai21.com)
-2. Create an API key
-3. `export AI21_API_KEY="..."`
-
----
-
 ## Cerebras
 
 | | |
@@ -475,3 +454,109 @@ This page covers internet-hosted model providers that authenticate with an API k
 - Monitor request quotas via Alibaba Cloud console
 - Not for automated scripts or batch API calls — coding tools only
 - For more info: [Official Documentation](https://www.alibabacloud.com/help/en/model-studio/coding-plan)
+
+---
+
+## Moonshot (Kimi)
+
+| | |
+|---|---|
+| **Display Name** | Moonshot / Kimi |
+| **Provider ID** | `moonshot` (aliases: `kimi`, `kimi2`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MOONSHOT_API_KEY` |
+| **Base URL** | `https://api.moonshot.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at [Moonshot Platform](https://platform.moonshot.cn) (mainland) or [Moonshot AI](https://platform.moonshot.ai) (international)
+2. Create an API key from the console
+3. `export MOONSHOT_API_KEY="sk-..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "moonshot"
+model = "moonshot-v1-128k"
+```
+
+**Capabilities:** Chat completions, tool use, vision (on `kimi-latest` / vision-capable models), and large-context windows up to 128K. File uploads supported via the `/files` endpoint for multi-document RAG.
+
+**Notes:** Kimi models are operated by Moonshot AI. Use the `kimi` alias for shorter config.
+
+---
+
+## Novita AI
+
+| | |
+|---|---|
+| **Display Name** | Novita AI |
+| **Provider ID** | `novita` (alias: `novita-ai`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `NOVITA_API_KEY` |
+| **Base URL** | `https://api.novita.ai/openai/v1` |
+| **Key Required** | Yes |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at [novita.ai](https://novita.ai)
+2. Generate an API key from the console
+3. `export NOVITA_API_KEY="..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "novita"
+model = "<model-id-from-novita-catalog>"
+```
+
+**Capabilities:** Tools and streaming are supported via the shared OpenAI-compatible driver. Vision support depends on the upstream model — check the Novita model card before enabling it.
+
+**Notes:** Novita exposes its catalog over the OpenAI Chat Completions API format. Auto-detection picks Novita up automatically when `NOVITA_API_KEY` is set; no explicit `provider` line is required if you only want a fallback.
+
+---
+
+## AWS Bedrock
+
+| | |
+|---|---|
+| **Display Name** | AWS Bedrock |
+| **Provider ID** | `bedrock` (alias: `aws-bedrock`) |
+| **Driver** | Native Bedrock Converse API |
+| **Env Var** | `AWS_BEARER_TOKEN_BEDROCK` |
+| **Region Var** | `AWS_REGION` (or `AWS_DEFAULT_REGION`; defaults to `us-east-1`) |
+| **Base URL** | Built per call: `https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse` |
+| **Key Required** | Yes |
+| **Auth** | `Authorization: Bearer` header (Bedrock API Keys, no SigV4) |
+
+**Setup:**
+1. In the AWS console, create a Bedrock API Key (long-lived bearer token). SigV4 is **not** used by this driver.
+2. Decide on a region with the model you want enabled in the Bedrock model catalog.
+3. Export the credentials:
+
+   ```bash
+   export AWS_BEARER_TOKEN_BEDROCK="..."
+   export AWS_REGION="us-east-1"
+   ```
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "bedrock"
+model = "anthropic.claude-sonnet-4-20250514-v1:0"
+```
+
+The `model` field is passed verbatim into the endpoint path, so use the full Bedrock model identifier (including region prefixes like `eu.` or inference-profile IDs when required by the region).
+
+**Capabilities:**
+- Tool use (function calling) via the Converse `toolConfig` shape, with full message-shape repair for `toolResult` / `toolUse` pairing.
+- Streaming and non-streaming completions.
+- Vision is **not** wired today: image content blocks are dropped before the request because Bedrock Converse rejects the LibreFang `Image` / `ImageFile` shapes.
+- Prompt-cache token counters are not surfaced — Bedrock Converse does not expose `cache_creation_input_tokens` / `cache_read_input_tokens` separately, so they report as zero in metering.
+
+**Notes:** Region resolution order is the explicit driver argument, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. If you want a regional inference profile (e.g. `eu.anthropic.…`), set `AWS_REGION` to a matching region (`eu-west-1`, etc.) and use the prefixed model ID.

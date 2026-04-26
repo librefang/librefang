@@ -136,6 +136,29 @@ command: ./run.sh
 | `version` | string | LibreFang daemon 版本 |
 | `started_at` | string (ISO 8601) | 启动完成的 UTC 时间戳 |
 
+### `transform_tool_result`
+
+一个**变换型** hook（其他都是观察型）：handler 可以在原始 tool-result 字符串进入对话上下文之前重写它。在 `after_tool_call` 之后、sanitization 之前触发，所以重写器看到的是原始 tool 输出，runtime 看到的是重写后的。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string | 跑这个 tool 的 agent |
+| `tool_name` | string | 执行的 tool 名 |
+| `tool_input` | object | 传给 tool 的输入 |
+| `tool_output` | string | tool 返回的原始字符串结果 |
+
+**Handler 契约**（`HookHandler::transform`）：
+
+```rust
+fn transform(&self, ctx: HookContext) -> Result<Option<String>, String>;
+```
+
+- `Ok(Some(replacement))` — 替换本回合剩余阶段看到的 `tool_output`。
+- `Ok(None)` — handler 弃权；链上下一个 handler 上。
+- `Err(msg)` — `warn!` 记日志后跳过（fail-open）。其他 handler 仍跑。
+
+`HookRegistry::fire_transform()` 按注册顺序遍历链，**第一个 `Ok(Some(_))` 赢**。适合：脱敏（在 LLM 看到前去掉 `git diff` 输出里的 secret）、摘要（把 5 MB JSON dump 截成 200 行摘要）、测试（给你不想真调的 MCP tool 注入确定性桩）。
+
 ---
 
 ## 示例脚本

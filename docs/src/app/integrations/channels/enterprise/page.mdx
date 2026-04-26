@@ -199,6 +199,14 @@ default_agent = "assistant"
 
 The Feishu adapter receives message events via webhook callbacks on the shared API server at `/channels/feishu/webhook`. It obtains a tenant access token using the app credentials, then uses the Feishu REST API to send message replies. Event payloads are verified using the app's verification token.
 
+### Processing-State Reactions
+
+Feishu shows live "I'm working on it" feedback by adding a `Typing` reaction to the user's message on receive and removing it once the reply is sent. Both calls are fire-and-forget — API failures `warn!` but never block message processing. See [Reactions and Processing State](/integrations/channels#reactions-and-processing-state) on the channels overview.
+
+### @Mention Preservation
+
+The Feishu adapter substitutes each `@_user_N` placeholder with `@<display-name>` resolved from the mention payload (falling back to `open_id` when name is absent), and rewrites `@_all` to `@all`. Agents see the original conversational text — "@alice can you check this?" — instead of bare punctuation. See [Feishu @Mention Preservation](/integrations/channels#feishu-mention-preservation).
+
 ---
 
 ## Rocket.Chat

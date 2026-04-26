@@ -531,6 +531,14 @@ pub struct LibreFangKernel {
     /// scanner takes a single `.load()` per call so a mid-call reload can't
     /// change the rule set under an in-flight tool invocation.
     pub(crate) taint_rules_swap: librefang_runtime::mcp::TaintRuleSetsHandle,
+    /// Pluggable hook that swaps the live tracing `EnvFilter` when
+    /// `config.log_level` changes via hot-reload. Injected by the binary
+    /// (`librefang-cli` for the daemon) post-construction; absent for
+    /// in-process callers that don't own a tracing subscriber, in which
+    /// case `log_level` changes still update `KernelConfig` in-memory but
+    /// don't take effect on the active filter (the hot-reload action is a
+    /// no-op with a warning).
+    pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -2829,6 +2837,7 @@ impl LibreFangKernel {
                 ))
             },
             taint_rules_swap: initial_taint_rules,
+            log_reloader: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -9492,6 +9501,16 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Install a [`crate::log_reload::LogLevelReloader`].
+    ///
+    /// Idempotent: subsequent calls are silently ignored (the slot is a
+    /// `OnceLock`). The injected reloader is invoked when
+    /// [`crate::config_reload::HotAction::ReloadLogLevel`] fires during
+    /// hot-reload — see `apply_hot_actions_inner`.
+    pub fn set_log_reloader(&self, reloader: crate::log_reload::LogLevelReloaderArc) {
+        let _ = self.log_reloader.set(reloader);
+    }
+
     /// Set the weak self-reference for trigger dispatch.
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.
@@ -9559,9 +9578,7 @@ system_prompt = "You are a helpful assistant."
     /// apply hot-reloadable actions. Returns the reload plan for API response.
     pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
-        use crate::config_reload::{
-            build_reload_plan, should_apply_hot, validate_config_for_reload,
-        };
+        use crate::config_reload::{should_apply_hot, validate_config_for_reload};
 
         // Read and parse config file (using load_config to process $include directives)
         let config_path = self.home_dir_boot.join("config.toml");
@@ -9583,8 +9600,14 @@ system_prompt = "You are a helpful assistant."
             return Err(format!("Validation failed: {}", errors.join("; ")));
         }
 
-        // Build the reload plan
-        let plan = build_reload_plan(&old_cfg, &new_config);
+        // Build the reload plan against the live capability set so changes
+        // whose feasibility depends on optional reloaders get correctly
+        // routed to `restart_required` when the reloader isn't installed
+        // (e.g. embedded desktop boot doesn't wire the log reloader).
+        let caps = crate::config_reload::ReloadCapabilities {
+            log_reloader_installed: self.log_reloader.get().is_some(),
+        };
+        let plan = crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
         plan.log_summary();
 
         // Apply hot actions + store new config atomically under the same
@@ -9846,6 +9869,16 @@ system_prompt = "You are a helpful assistant."
                          next MCP scan will see new rule sets without reconnect"
                     );
                 }
+                HotAction::ReloadLogLevel(level) => match self.log_reloader.get() {
+                    Some(reloader) => match reloader.reload(level) {
+                        Ok(()) => info!("Hot-reload: log_level updated to {level}"),
+                        Err(e) => warn!("Hot-reload: log_level update to {level} failed: {e}"),
+                    },
+                    None => warn!(
+                        "Hot-reload: log_level changed to {level} but no reloader is installed; \
+                         restart required for the new filter to take effect"
+                    ),
+                },
             }
         }
 
