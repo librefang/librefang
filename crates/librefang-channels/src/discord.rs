@@ -63,7 +63,12 @@ pub struct DiscordAdapter {
     /// move guilds, so this stays valid for the adapter's lifetime.
     /// Keeps `lookup_role` to one Discord API call after the first hit
     /// (the `/guilds/.../members/...` request) instead of three.
-    channel_to_guild: Arc<DashMap<String, String>>,
+    ///
+    /// `Some(guild_id)` for guild text/voice channels; `None` for DM
+    /// and group-DM channels (no `guild_id` in the channel object).
+    /// Caching the `None` case stops the resolver from re-hitting
+    /// Discord every time a user DMs the bot.
+    channel_to_guild: Arc<DashMap<String, Option<String>>>,
 }
 
 impl DiscordAdapter {
@@ -189,7 +194,7 @@ impl DiscordAdapter {
         channel_id: &str,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         if let Some(cached) = self.channel_to_guild.get(channel_id) {
-            return Ok(Some(cached.clone()));
+            return Ok(cached.clone());
         }
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}");
         let resp = self
@@ -204,14 +209,15 @@ impl DiscordAdapter {
             return Err(format!("Discord get channel failed ({status}): {body_text}").into());
         }
         let channel: serde_json::Value = resp.json().await?;
-        let Some(guild_id) = channel["guild_id"].as_str() else {
-            // DM / group-DM channels — no guild role to resolve.
-            return Ok(None);
-        };
-        let guild_id = guild_id.to_string();
+        let resolved = channel["guild_id"].as_str().map(str::to_string);
+        // Cache both `Some(guild_id)` and `None` (DM / group-DM) so
+        // subsequent calls for the same channel skip the API round-trip
+        // entirely. Discord channels do not change guild affiliation in
+        // normal operation, and snowflake ids are globally unique, so a
+        // permanent cache for the adapter's lifetime is safe.
         self.channel_to_guild
-            .insert(channel_id.to_string(), guild_id.clone());
-        Ok(Some(guild_id))
+            .insert(channel_id.to_string(), resolved.clone());
+        Ok(resolved)
     }
 
     /// Fetch a guild member and the set of guild-role names they hold.

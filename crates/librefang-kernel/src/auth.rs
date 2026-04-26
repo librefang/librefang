@@ -397,22 +397,40 @@ impl AuthManager {
         };
         let (resolved, transient) = match (role_query, has_mapping_for_channel) {
             (Some(query), true) => {
+                // Telegram and Discord both require a non-empty
+                // chat_id at the platform API; an empty value would
+                // round-trip as a 400 every call. Slack ignores
+                // chat_id (workspace-scoped roles) so empty is fine
+                // there. We treat the missing/empty case for non-
+                // Slack channels as a stable misconfiguration of the
+                // caller — cache the default-deny Viewer rather than
+                // hot-looping the platform API on every message.
                 let chat_id = sender.chat_id.as_deref().unwrap_or("");
-                match query.lookup_role(chat_id, &sender.user_id).await {
-                    Ok(Some(platform_role)) => (
-                        translate_platform_role(mapping, &sender.channel, &platform_role),
-                        false,
-                    ),
-                    Ok(None) => (None, false),
-                    Err(e) => {
-                        warn!(
-                            channel = %sender.channel,
-                            user = %sender.user_id,
-                            error = %e,
-                            "channel role lookup failed; returning default-deny \
-                             without caching so the next call re-queries"
-                        );
-                        (None, true)
+                if chat_id.is_empty() && sender.channel != "slack" {
+                    debug!(
+                        channel = %sender.channel,
+                        user = %sender.user_id,
+                        "missing chat_id for non-Slack channel; \
+                         caching default-deny without calling the platform"
+                    );
+                    (None, false)
+                } else {
+                    match query.lookup_role(chat_id, &sender.user_id).await {
+                        Ok(Some(platform_role)) => (
+                            translate_platform_role(mapping, &sender.channel, &platform_role),
+                            false,
+                        ),
+                        Ok(None) => (None, false),
+                        Err(e) => {
+                            warn!(
+                                channel = %sender.channel,
+                                user = %sender.user_id,
+                                error = %e,
+                                "channel role lookup failed; returning default-deny \
+                                 without caching so the next call re-queries"
+                            );
+                            (None, true)
+                        }
                     }
                 }
             }
@@ -684,6 +702,76 @@ fn translate_slack_role(
     // Strict mapping: typo in `[channel_role_mapping.slack]` falls
     // through to None → Viewer.
     mapped.and_then(UserRole::try_from_str_role)
+}
+
+/// Validate every configured role string in `[channel_role_mapping]`
+/// against [`UserRole::try_from_str_role`] and emit a `tracing::warn!`
+/// for each value that won't parse.
+///
+/// The runtime already fails closed on a typo'd value (the strict
+/// translator returns `None` → default-deny `Viewer`), so this pass is
+/// purely about operator visibility — without it, an operator who
+/// fat-fingers `admin_role = "admn"` ships a config that silently
+/// demotes every Telegram administrator to Viewer with no signal.
+///
+/// Called from kernel boot so the warning surfaces at startup, and on
+/// every config reload so reload-time typos surface too. Also re-runs
+/// after live edits via `/api/config/set`. Idempotent and side-effect-
+/// free apart from the log lines.
+///
+/// Returns the count of typo'd entries so callers can include it in a
+/// summary log (e.g. "boot loaded config; 2 channel-role typos").
+pub fn validate_channel_role_mapping(mapping: &ChannelRoleMapping) -> usize {
+    let mut typos = 0usize;
+    let check = |channel: &str, field: &str, value: &str| -> bool {
+        if UserRole::try_from_str_role(value).is_some() {
+            return true;
+        }
+        warn!(
+            channel = channel,
+            field = field,
+            value = value,
+            "channel_role_mapping has an unrecognized LibreFang role string \
+             — users matched by this entry will fall back to default-deny \
+             Viewer. Valid values: owner, admin, user, viewer, guest"
+        );
+        false
+    };
+    if let Some(tg) = mapping.telegram.as_ref() {
+        for (field, value) in [
+            ("admin_role", tg.admin_role.as_deref()),
+            ("creator_role", tg.creator_role.as_deref()),
+            ("member_role", tg.member_role.as_deref()),
+        ] {
+            if let Some(v) = value {
+                if !check("telegram", field, v) {
+                    typos += 1;
+                }
+            }
+        }
+    }
+    if let Some(dc) = mapping.discord.as_ref() {
+        for (role_name, mapped) in &dc.role_map {
+            if !check("discord", &format!("role_map.{role_name}"), mapped) {
+                typos += 1;
+            }
+        }
+    }
+    if let Some(sl) = mapping.slack.as_ref() {
+        for (field, value) in [
+            ("owner_role", sl.owner_role.as_deref()),
+            ("admin_role", sl.admin_role.as_deref()),
+            ("member_role", sl.member_role.as_deref()),
+            ("guest_role", sl.guest_role.as_deref()),
+        ] {
+            if let Some(v) = value {
+                if !check("slack", field, v) {
+                    typos += 1;
+                }
+            }
+        }
+    }
+    typos
 }
 
 /// Default memory ACL for a role when the user did not declare one
@@ -1584,6 +1672,75 @@ mod channel_role_tests {
             calls.load(Ordering::SeqCst),
             2,
             "successful resolution must populate the cache so subsequent calls hit it"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_role_empty_chat_id_short_circuits_for_non_slack() {
+        // A misconfigured caller that omits chat_id on Telegram/Discord
+        // would otherwise round-trip a 400 to the platform on every
+        // message. The resolver short-circuits to default-deny `Viewer`
+        // and caches it, without invoking the platform query at all.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("administrator"))),
+            calls: calls.clone(),
+        };
+        let sender = SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "tg-bob".to_string(),
+            chat_id: None,
+            display_name: "Tester".to_string(),
+            ..Default::default()
+        };
+        let role = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(role, UserRole::Viewer);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "platform must NOT be queried when chat_id is missing on a non-Slack channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_role_empty_chat_id_still_resolves_for_slack() {
+        // Slack roles are workspace-scoped — the adapter ignores
+        // `chat_id`. An empty value here is fine and must NOT short-
+        // circuit; the platform query (workspace-level `users.info`)
+        // still runs and the result is honored.
+        let mapping = ChannelRoleMapping {
+            slack: Some(SlackRoleMapping {
+                owner_role: Some("owner".to_string()),
+                admin_role: Some("admin".to_string()),
+                member_role: Some("user".to_string()),
+                guest_role: Some("guest".to_string()),
+            }),
+            ..Default::default()
+        };
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = StaticRoleQuery {
+            result: Ok(Some(PlatformRole::single("admin"))),
+            calls: calls.clone(),
+        };
+        let sender = SenderContext {
+            channel: "slack".to_string(),
+            user_id: "U-bob".to_string(),
+            chat_id: None,
+            display_name: "Tester".to_string(),
+            ..Default::default()
+        };
+        let role = mgr
+            .resolve_role_for_sender(&sender, &mapping, Some(&query))
+            .await;
+        assert_eq!(role, UserRole::Admin);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "Slack must still query the platform even with empty chat_id"
         );
     }
 

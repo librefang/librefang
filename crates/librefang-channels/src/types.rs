@@ -485,10 +485,12 @@ pub use librefang_types::config::{DmPolicy, GroupPolicy, OutputFormat};
 /// per-platform precedence rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformRole {
-    /// Every role token the user holds on the platform. Always
-    /// non-empty when constructed by [`PlatformRole::single`] or
-    /// [`PlatformRole::many`]; the resolver also early-returns on
-    /// empty before reaching the translator.
+    /// Every role token the user holds on the platform. Adapters that
+    /// have nothing to report should return `Ok(None)` from
+    /// [`ChannelRoleQuery::lookup_role`] rather than constructing an
+    /// empty `PlatformRole`; an empty `roles` vector here is a no-op
+    /// for every translator (Telegram/Slack early-return on `first()`,
+    /// Discord's loop is a no-op) and resolves to default-deny `Viewer`.
     pub roles: Vec<String>,
 }
 
@@ -515,9 +517,27 @@ impl PlatformRole {
 /// through to default-deny instead of treating it as a hard failure.
 #[async_trait]
 pub trait ChannelRoleQuery: Send + Sync {
-    /// Look up the platform-native role for `user_id` inside `chat_id`
-    /// (the meaning of `chat_id` is platform-specific: Telegram chat,
-    /// Discord guild, Slack workspace — the channel adapter knows).
+    /// Look up the platform-native role for `user_id` inside `chat_id`.
+    ///
+    /// `chat_id` is the **scope identifier as carried in
+    /// `ChannelMessage.sender.platform_id`** for the originating
+    /// message. The kernel forwards it verbatim — adapters are
+    /// responsible for mapping it to whatever the platform API needs:
+    ///
+    /// - **Telegram** — chat id (group / supergroup / DM); passed
+    ///   directly to `getChatMember`.
+    /// - **Discord** — channel id (Discord doesn't expose roles per
+    ///   channel, only per guild). The Discord adapter resolves
+    ///   channel→guild internally via `GET /channels/{channel_id}`
+    ///   and then queries `/guilds/{guild_id}/members/{user_id}`. DM
+    ///   channels (no `guild_id`) yield `Ok(None)` → default-deny.
+    /// - **Slack** — workspace-scoped roles, so `chat_id` is unused
+    ///   (the adapter ignores it and queries `users.info`).
+    ///
+    /// The kernel guarantees `chat_id` is non-empty for Telegram and
+    /// Discord before calling — empty `chat_id` on a non-Slack channel
+    /// short-circuits to default-deny `Viewer` so a misconfigured
+    /// caller cannot hot-loop the platform API.
     async fn lookup_role(
         &self,
         chat_id: &str,
