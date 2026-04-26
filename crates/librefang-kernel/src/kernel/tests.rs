@@ -4072,3 +4072,182 @@ fn test_agent_concurrency_for_returns_cached_semaphore() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// push_notification routing — locks the global-fallback match arm.
+//
+// `push_notification` resolves the delivery target list from
+// (event_type, agent_id) against `notification.agent_rules` first, and falls
+// back to `notification.alert_channels` / `approval_channels` based on the
+// event_type. Heartbeat alerts (`event_type = "health_check_failed"`) are
+// supposed to land in `alert_channels` alongside `task_failed` /
+// `tool_failure` — these tests pin that contract so a future refactor of
+// the match arm cannot silently disable it (see #3218).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_falls_back_to_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["ops:agent unresponsive".to_string()],
+        "health_check_failed must fall back to alert_channels when no agent_rule matches"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        // alert_channels is set but should be ignored — agent_rule wins.
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: "*".to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "heartbeat-topic".to_string(),
+                thread_id: None,
+            }],
+            events: vec!["health_check_failed".to_string()],
+        }],
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("worker-7", "health_check_failed", "agent unresponsive")
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["heartbeat-topic:agent unresponsive".to_string()],
+        "matching agent_rule must override alert_channels for health_check_failed"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_health_check_failed_no_targets_when_unconfigured() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // No agent_rules, no alert_channels — heartbeat must stay silent rather
+    // than panic or accidentally fan out somewhere.
+    config.notification = NotificationConfig::default();
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .await;
+
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "push_notification with no configured targets must produce no sends"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_unknown_event_type_yields_no_targets() {
+    // Regression: the global-fallback match arm has an explicit allowlist
+    // (`approval_requested` / `task_completed` / `task_failed` / `tool_failure`
+    // / `health_check_failed`). Anything else must produce zero targets — a
+    // typo in event_type should never accidentally page operators.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "approvals".to_string(),
+            thread_id: None,
+        }],
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "alerts".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification("agent-xyz", "totally_made_up_event", "should not deliver")
+        .await;
+
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "unknown event_type must not deliver to any global channel"
+    );
+
+    kernel.shutdown();
+}
