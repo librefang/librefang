@@ -4,7 +4,6 @@
 api-error-agent-not-found = Agent not found
 api-error-agent-spawn-failed = Agent spawn failed
 api-error-agent-invalid-id = Invalid agent ID
-api-error-session-invalid-id = Invalid session ID
 api-error-agent-already-exists = Agent already exists
 api-error-agent-no-workspace = Agent has no workspace
 api-error-agent-not-found-or-terminated = Agent not found or already terminated

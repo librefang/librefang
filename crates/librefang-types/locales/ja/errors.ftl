@@ -4,7 +4,6 @@
 api-error-agent-not-found = エージェントが見つかりません
 api-error-agent-spawn-failed = エージェントの作成に失敗しました
 api-error-agent-invalid-id = 無効なエージェント ID
-api-error-session-invalid-id = 無効なセッション ID
 api-error-agent-already-exists = エージェントは既に存在します
 api-error-agent-no-workspace = エージェントにワークスペースがありません
 api-error-agent-not-found-or-terminated = エージェントが見つからないか、既に終了しています
