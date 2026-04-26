@@ -207,7 +207,7 @@
       "type": "object"
     },
     "AuditConfig": {
-      "description": "Audit log configuration.\n\nConfigure in config.toml: ```toml [audit] retention_days = 90 # Optional override for the external tip-anchor path. Relative # paths resolve against `data_dir`. Leave unset for the default # `data_dir/audit.anchor`. anchor_path = \"/var/log/librefang/audit.anchor\" ```",
+      "description": "Audit log configuration.\n\nConfigure in config.toml: ```toml [audit] retention_days = 90 # Optional override for the external tip-anchor path. Relative # paths resolve against `data_dir`. Leave unset for the default # `data_dir/audit.anchor`. anchor_path = \"/var/log/librefang/audit.anchor\"\n\n[audit.retention] trim_interval_secs = 3600 max_in_memory_entries = 50000\n\n[audit.retention.retention_days_by_action] ToolInvoke = 14 LlmCompletion = 14 RoleChange = 365 PermissionDenied = 365 BudgetExceeded = 365 ```",
       "properties": {
         "anchor_path": {
           "description": "Optional override for the external Merkle-tip anchor file that `AuditLog::with_db_anchored` uses to detect full rewrites of `audit_entries`. When unset the daemon writes to `data_dir/audit.anchor`, which catches most casual tampering but sits in the same filesystem namespace as the SQLite file it is meant to verify. Operators who want a stronger boundary can point this at a path the daemon can write to but unprivileged code cannot — a chmod-0400 file owned by a dedicated user, a `systemd ReadOnlyPaths=` mount, an NFS share, or a pipe to `logger`. Relative paths are resolved against `data_dir`.",
@@ -216,12 +216,57 @@
             "null"
           ]
         },
+        "retention": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditRetentionConfig"
+            }
+          ],
+          "default": {
+            "retention_days_by_action": {}
+          },
+          "description": "Per-`AuditAction` retention policy used by the periodic trim job over the in-memory audit window. Defaults preserve every entry."
+        },
         "retention_days": {
           "default": 90,
-          "description": "How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.",
+          "description": "How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.\n\n**Coarse global retention.** This drives the legacy day-based prune over the SQLite table. For per-category in-memory retention with chain-anchor-preserving trim, see `retention` below.",
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "AuditRetentionConfig": {
+      "description": "Per-`AuditAction` retention policy for the in-memory audit window.\n\nThe audit log is a Merkle-style hash chain — every entry's hash mixes the previous entry's hash. Naively dropping a prefix would break chain verification of the surviving entries because their `prev_hash` would point at a hash no longer present. The trim implementation solves this by remembering the last-dropped entry's hash as a **chain anchor** so verification of the surviving prefix can validate continuity against the anchor instead of a missing row.\n\nCritical actions (`RoleChange`, `PermissionDenied`, `BudgetExceeded`) should keep long retention windows; noisy actions (`ToolInvoke`) can be pruned far more aggressively. Actions absent from the map are kept forever so operators that don't opt in never silently lose audit history.",
+      "properties": {
+        "max_in_memory_entries": {
+          "description": "Hard cap on the in-memory audit window — protects against runaway growth even when no per-action policy is configured. `None` or 0 means unlimited. When the cap is exceeded the trim job drops the oldest entries down to the cap regardless of their action.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retention_days_by_action": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Per-`AuditAction` retention windows in days. Key is the `AuditAction` `Display` string (e.g. `\"ToolInvoke\"`). Missing entries mean \"keep forever\".",
+          "type": "object"
+        },
+        "trim_interval_secs": {
+          "description": "How often the trim job runs. `None` (or 0) disables periodic trimming. Reasonable default for production: 3600 (one hour).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -13639,6 +13684,9 @@
         }
       ],
       "default": {
+        "retention": {
+          "retention_days_by_action": {}
+        },
         "retention_days": 90
       },
       "description": "Audit log configuration."

@@ -3622,11 +3622,26 @@ fn default_max_request_body_bytes() -> usize {
 /// # paths resolve against `data_dir`. Leave unset for the default
 /// # `data_dir/audit.anchor`.
 /// anchor_path = "/var/log/librefang/audit.anchor"
+///
+/// [audit.retention]
+/// trim_interval_secs = 3600
+/// max_in_memory_entries = 50000
+///
+/// [audit.retention.retention_days_by_action]
+/// ToolInvoke = 14
+/// LlmCompletion = 14
+/// RoleChange = 365
+/// PermissionDenied = 365
+/// BudgetExceeded = 365
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
+    ///
+    /// **Coarse global retention.** This drives the legacy day-based prune
+    /// over the SQLite table. For per-category in-memory retention with
+    /// chain-anchor-preserving trim, see `retention` below.
     pub retention_days: u32,
     /// Optional override for the external Merkle-tip anchor file that
     /// `AuditLog::with_db_anchored` uses to detect full rewrites of
@@ -3640,6 +3655,10 @@ pub struct AuditConfig {
     /// `logger`. Relative paths are resolved against `data_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_path: Option<PathBuf>,
+    /// Per-`AuditAction` retention policy used by the periodic trim job
+    /// over the in-memory audit window. Defaults preserve every entry.
+    #[serde(default)]
+    pub retention: AuditRetentionConfig,
 }
 
 impl Default for AuditConfig {
@@ -3647,8 +3666,44 @@ impl Default for AuditConfig {
         Self {
             retention_days: 90,
             anchor_path: None,
+            retention: AuditRetentionConfig::default(),
         }
     }
+}
+
+/// Per-`AuditAction` retention policy for the in-memory audit window.
+///
+/// The audit log is a Merkle-style hash chain — every entry's hash mixes
+/// the previous entry's hash. Naively dropping a prefix would break
+/// chain verification of the surviving entries because their `prev_hash`
+/// would point at a hash no longer present. The trim implementation
+/// solves this by remembering the last-dropped entry's hash as a
+/// **chain anchor** so verification of the surviving prefix can validate
+/// continuity against the anchor instead of a missing row.
+///
+/// Critical actions (`RoleChange`, `PermissionDenied`, `BudgetExceeded`)
+/// should keep long retention windows; noisy actions (`ToolInvoke`) can
+/// be pruned far more aggressively. Actions absent from the map are
+/// kept forever so operators that don't opt in never silently lose
+/// audit history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct AuditRetentionConfig {
+    /// How often the trim job runs. `None` (or 0) disables periodic trimming.
+    /// Reasonable default for production: 3600 (one hour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_interval_secs: Option<u64>,
+    /// Per-`AuditAction` retention windows in days. Key is the
+    /// `AuditAction` `Display` string (e.g. `"ToolInvoke"`). Missing
+    /// entries mean "keep forever".
+    #[serde(default)]
+    pub retention_days_by_action: HashMap<String, u32>,
+    /// Hard cap on the in-memory audit window — protects against runaway
+    /// growth even when no per-action policy is configured. `None` or 0
+    /// means unlimited. When the cap is exceeded the trim job drops the
+    /// oldest entries down to the cap regardless of their action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_memory_entries: Option<usize>,
 }
 
 /// PII privacy mode for LLM context filtering.

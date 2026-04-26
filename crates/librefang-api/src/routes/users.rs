@@ -808,7 +808,7 @@ fn rebuild_api_user_records(state: &AppState) -> Vec<ApiUserAuth> {
 // Persistence helpers
 // ---------------------------------------------------------------------------
 
-enum PersistError {
+pub(crate) enum PersistError {
     BadRequest(String),
     Conflict(String),
     NotFound(String),
@@ -822,7 +822,7 @@ enum PersistError {
 /// `update_user` uses this to surface the post-merge `UserConfig`
 /// (including preserved RBAC M3 policy fields) without an out-of-band
 /// `Arc<Mutex>` capture.
-async fn persist_users<F, R>(state: &Arc<AppState>, mutate: F) -> Result<R, PersistError>
+pub(crate) async fn persist_users<F, R>(state: &Arc<AppState>, mutate: F) -> Result<R, PersistError>
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
