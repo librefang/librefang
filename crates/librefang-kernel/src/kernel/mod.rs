@@ -11583,9 +11583,7 @@ system_prompt = "You are a helpful assistant."
                         if kernel.supervisor.is_shutting_down() {
                             break;
                         }
-                        let report = kernel
-                            .audit_log
-                            .trim(&retention, chrono::Utc::now());
+                        let report = kernel.audit_log.trim(&retention, chrono::Utc::now());
                         if !report.is_empty() {
                             // Detail is JSON of the per-action drop counts.
                             // Keeping it small + structured so a downstream

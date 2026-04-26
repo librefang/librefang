@@ -54,7 +54,12 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
     // path to be the sole reason rows are dropped).
     let audit = kernel.audit().clone();
     for i in 0..50 {
-        audit.record("agent-x", AuditAction::RoleChange, format!("noise-{i}"), "ok");
+        audit.record(
+            "agent-x",
+            AuditAction::RoleChange,
+            format!("noise-{i}"),
+            "ok",
+        );
     }
     assert!(audit.len() >= 50);
 
@@ -82,7 +87,10 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
             .iter()
             .any(|e| matches!(e.action, AuditAction::RetentionTrim)),
         "periodic trim task must record a RetentionTrim self-audit row; got: {:?}",
-        entries.iter().map(|e| e.action.to_string()).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|e| e.action.to_string())
+            .collect::<Vec<_>>()
     );
     assert!(
         audit.verify_integrity().is_ok(),

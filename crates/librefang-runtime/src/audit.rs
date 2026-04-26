@@ -799,10 +799,7 @@ impl AuditLog {
         // lock) sees a consistent (anchor, first_survivor) pair when
         // it acquires.
         {
-            let mut anchor = self
-                .chain_anchor
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
             *anchor = report.new_chain_anchor.clone();
         }
         entries.drain(..drop_count);
