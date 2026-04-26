@@ -163,7 +163,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Task queue management
         .route(
             "/tasks",
-            axum::routing::get(task_queue_list_root),
+            axum::routing::get(task_queue_list_root).post(task_queue_post_root),
         )
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
@@ -4362,6 +4362,53 @@ pub async fn task_queue_list_root(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/tasks — Enqueue a task on behalf of an external caller.
+///
+/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
+///
+/// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
+/// cron scripts, external integrations) can enqueue tasks without a
+/// runtime/agent context. The agent-side `task_post` tool keeps the
+/// caller's agent id automatically; this HTTP form takes `created_by`
+/// as an optional explicit field for provenance.
+pub async fn task_queue_post_root(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let title = match body["title"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'title' field"})),
+            );
+        }
+    };
+    let description = match body["description"].as_str() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'description' field"})),
+            );
+        }
+    };
+    let assigned_to = body["assigned_to"].as_str();
+    let created_by = body["created_by"].as_str();
+    match state
+        .kernel
+        .task_post(title, description, assigned_to, created_by)
+        .await
+    {
+        Ok(task_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": task_id, "status": "pending"})),
+        ),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
