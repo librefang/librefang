@@ -36,7 +36,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md">
+    <Modal isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md" variant="panel-right">
       <div className="p-4 sm:p-6">
         <div className="space-y-4">
           <div>
@@ -102,7 +102,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   };
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md">
+    <Modal isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md" variant="panel-right">
       <div className="p-4 sm:p-6">
         <div>
           <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.content")}</label>
@@ -219,7 +219,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg">
+    <Modal isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg" variant="panel-right">
       <p className="text-xs text-text-dim -mt-2 mb-4">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
 
       {configQuery.isLoading || !form ? (

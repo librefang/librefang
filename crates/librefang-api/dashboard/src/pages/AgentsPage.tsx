@@ -1243,7 +1243,7 @@ export function AgentsPage() {
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
-        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible>
+        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible variant="panel-right">
           <div className="p-6 space-y-5">
             <div>
               <p className="text-[11px] text-text-dim/70">
@@ -1376,7 +1376,8 @@ export function AgentsPage() {
         isOpen={showCreate}
         onClose={closeCreateModal}
         title={t("agents.create_agent")}
-        size="4xl"
+        size="2xl"
+        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the

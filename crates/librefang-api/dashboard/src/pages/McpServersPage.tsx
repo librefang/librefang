@@ -1120,6 +1120,7 @@ export function McpServersPage() {
         onClose={() => { setShowAddModal(false); setEditingServer(null); setForm(defaultForm); }}
         title={editingServer ? t("mcp.edit_server") : t("mcp.add_server")}
         size="lg"
+        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Name */}
@@ -1252,6 +1253,7 @@ export function McpServersPage() {
         onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
         title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
         size="md"
+        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>

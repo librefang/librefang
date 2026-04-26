@@ -1508,17 +1508,17 @@ impl App {
         }
     }
 
-    fn handle_memory_action(&mut self, action: memory::MemoryAction) {
+    fn handle_memory_action(&mut self, action: memory::MemoryUIAction) {
         match action {
-            memory::MemoryAction::Continue => {}
-            memory::MemoryAction::LoadAgents => self.refresh_memory(),
-            memory::MemoryAction::LoadKv(agent_id) => {
+            memory::MemoryUIAction::Continue => {}
+            memory::MemoryUIAction::LoadAgents => self.refresh_memory(),
+            memory::MemoryUIAction::LoadKv(agent_id) => {
                 if let Some(backend) = self.backend.to_ref() {
                     self.memory.loading = true;
                     event::spawn_fetch_memory_kv(backend, agent_id, self.event_tx.clone());
                 }
             }
-            memory::MemoryAction::SaveKv {
+            memory::MemoryUIAction::SaveKv {
                 agent_id,
                 key,
                 value,
@@ -1533,7 +1533,7 @@ impl App {
                     );
                 }
             }
-            memory::MemoryAction::DeleteKv { agent_id, key } => {
+            memory::MemoryUIAction::DeleteKv { agent_id, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
                 }
@@ -1662,11 +1662,11 @@ impl App {
         }
     }
 
-    fn handle_audit_action(&mut self, action: audit::AuditAction) {
+    fn handle_audit_action(&mut self, action: audit::AuditUIAction) {
         match action {
-            audit::AuditAction::Continue => {}
-            audit::AuditAction::Refresh => self.refresh_audit(),
-            audit::AuditAction::VerifyChain => {
+            audit::AuditUIAction::Continue => {}
+            audit::AuditUIAction::Refresh => self.refresh_audit(),
+            audit::AuditUIAction::VerifyChain => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_verify_chain(backend, self.event_tx.clone());
                 }

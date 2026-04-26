@@ -11,9 +11,7 @@ librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-http = { path = "../librefang-http" }
 wasmtime = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-reqwest = { workspace = true }

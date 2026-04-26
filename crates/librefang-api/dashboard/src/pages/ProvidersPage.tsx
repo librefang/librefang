@@ -613,6 +613,28 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
           </div>
         </div>
 
+        {/* Model list — placed right under the count so users see what
+            actually counts toward the number rather than scrolling past
+            properties to find it. No inner scroll: the drawer's own
+            overflow-y-auto handles overflow. */}
+        <div className="space-y-3">
+          <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.provider_models")}</h3>
+          {modelsQuery.isLoading ? (
+            <p className="text-xs text-text-dim">{t("common.loading")}</p>
+          ) : models.length === 0 ? (
+            <p className="text-xs text-text-dim">{t("providers.no_models_for_provider")}</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {models.map(m => (
+                <div key={m.id} className="flex items-center gap-2 p-2 rounded-lg bg-main/20 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.available ? "bg-success" : "bg-text-dim/30"}`} />
+                  <span className="truncate font-mono">{m.display_name || m.id}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Properties */}
         <div className="space-y-3">
           <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("common.properties")}</h3>
@@ -654,25 +676,6 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
               </div>
             )}
           </div>
-        </div>
-
-        {/* Model list */}
-        <div className="space-y-3">
-          <h3 className="text-xs font-black uppercase tracking-wider text-text-dim">{t("providers.provider_models")}</h3>
-          {modelsQuery.isLoading ? (
-            <p className="text-xs text-text-dim">{t("common.loading")}</p>
-          ) : models.length === 0 ? (
-            <p className="text-xs text-text-dim">{t("providers.no_models_for_provider")}</p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto">
-              {models.map(m => (
-                <div key={m.id} className="flex items-center gap-2 p-2 rounded-lg bg-main/20 text-xs">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${m.available ? "bg-success" : "bg-text-dim/30"}`} />
-                  <span className="truncate font-mono">{m.display_name || m.id}</span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         {provider.error_message && (
@@ -1331,7 +1334,7 @@ export function ProvidersPage() {
       )}
 
       {/* Config Modal */}
-      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md">
+      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md" variant="panel-right">
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
@@ -1451,7 +1454,7 @@ export function ProvidersPage() {
       </Modal>
 
       {/* Create Provider Wizard */}
-      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
+      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton variant="panel-right">
         <CreateProviderWizard
           onSubmit={async (values) => {
             await createRegistryContent("provider", values);
