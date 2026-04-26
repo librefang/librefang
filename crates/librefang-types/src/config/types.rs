@@ -1223,6 +1223,74 @@ pub struct SkillsConfig {
     /// its directory. Matching is case-sensitive on the skill manifest name.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Operator-side gate over skill `env_passthrough` requests: glob
+    /// patterns that block matching env-var names regardless of what the
+    /// skill manifest declares. Defaults to a deny list covering common
+    /// credential conventions (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`,
+    /// `*_API_KEY`, `AWS_*`, `GITHUB_*`). Set to an empty list to disable
+    /// the operator deny check; the built-in `FORBIDDEN_PASSTHROUGH` and
+    /// kernel-reserved hard blocks still apply.
+    #[serde(default = "default_env_passthrough_denied_patterns")]
+    pub env_passthrough_denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Lets the operator grant a
+    /// specific skill an env var that would otherwise be blocked by
+    /// `env_passthrough_denied_patterns`. Cannot bypass the built-in
+    /// `FORBIDDEN_PASSTHROUGH` hard block.
+    ///
+    /// Example: `{ "gog" = ["GOG_KEYRING_PASSWORD"] }`.
+    #[serde(default)]
+    pub env_passthrough_per_skill: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Operator-side gate over skill `env_passthrough` requests.
+///
+/// The skill manifest declares which host env vars the skill *wants*; this
+/// policy is the operator's final say on which of those requests get
+/// granted. Constructed from `[skills]` config at the call site in the
+/// runtime; the resolution algorithm lives in `librefang-skills::loader`.
+///
+/// Resolution order (applied per-skill):
+///
+/// 1. Hard block: names in the built-in `FORBIDDEN_PASSTHROUGH` list
+///    (`LD_PRELOAD`, `PYTHONPATH`, …) — never overridable.
+/// 2. Hard block: names the kernel sets explicitly per-runtime
+///    (`PATH`, `HOME`, `PYTHONIOENCODING`, …).
+/// 3. Operator deny: names matching `denied_patterns` are dropped *unless*
+///    listed in `per_skill_overrides[skill_name]`.
+/// 4. Anything else is forwarded to the subprocess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvPassthroughPolicy {
+    /// Glob patterns that block matching env-var names regardless of skill
+    /// manifest. Operators can override per-skill via `per_skill_overrides`.
+    pub denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Keyed by skill manifest name.
+    /// Cannot bypass the built-in `FORBIDDEN_PASSTHROUGH` hard block.
+    pub per_skill_overrides: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl EnvPassthroughPolicy {
+    /// Construct a policy from a `[skills]` config block. Returns `None`
+    /// when the operator has explicitly disabled the deny check (empty
+    /// patterns *and* empty overrides) — callers can skip the resolve step
+    /// in that case, since only the built-in hard blocks remain.
+    pub fn from_skills_config(cfg: &SkillsConfig) -> Self {
+        Self {
+            denied_patterns: cfg.env_passthrough_denied_patterns.clone(),
+            per_skill_overrides: cfg.env_passthrough_per_skill.clone(),
+        }
+    }
+}
+
+fn default_env_passthrough_denied_patterns() -> Vec<String> {
+    vec![
+        "*_KEY".to_string(),
+        "*_TOKEN".to_string(),
+        "*_PASSWORD".to_string(),
+        "*_SECRET".to_string(),
+        "*_API_KEY".to_string(),
+        "AWS_*".to_string(),
+        "GITHUB_*".to_string(),
+    ]
 }
 
 impl Default for SkillsConfig {
@@ -1231,6 +1299,8 @@ impl Default for SkillsConfig {
             load_user: true,
             extra_dirs: Vec::new(),
             disabled: Vec::new(),
+            env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
+            env_passthrough_per_skill: std::collections::HashMap::new(),
         }
     }
 }
