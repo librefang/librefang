@@ -166,14 +166,23 @@ impl MemoryNamespaceGuard {
 
 /// Inspect a fragment metadata map for the `"taint_labels": [..]`
 /// signal carrying [`TaintLabel::Pii`].
+///
+/// Match is **case-insensitive** so writers that hand-stamp labels like
+/// `"PII"` (the conventional uppercase form many external services use)
+/// or `"pii"` produce the same redaction outcome as the canonical
+/// `"Pii"` we emit ourselves. Without the lowercase normalisation a
+/// fragment tagged `"PII"` would slip past the metadata path and only
+/// trigger the regex backstop — fine for free-form text but a leak for
+/// structured PII (e-mail/phone we wrote into a custom field name).
 fn has_pii_label(metadata: &HashMap<String, serde_json::Value>) -> bool {
-    let target = TaintLabel::Pii.to_string();
+    let target = TaintLabel::Pii.to_string().to_lowercase();
     let Some(value) = metadata.get(PII_METADATA_KEY) else {
         return false;
     };
+    let matches = |s: &str| s.to_lowercase() == target;
     match value {
-        serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(&target)),
-        serde_json::Value::String(s) => s == &target,
+        serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str().is_some_and(matches)),
+        serde_json::Value::String(s) => matches(s),
         _ => false,
     }
 }
@@ -269,6 +278,37 @@ mod tests {
             item.metadata.get("redacted").unwrap(),
             &serde_json::Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn redact_via_metadata_label_matches_case_insensitively() {
+        // External writers commonly use uppercase "PII" or lowercase
+        // "pii"; both must trigger redaction even though the canonical
+        // Display form is "Pii". Without case-insensitive matching, a
+        // structured PII fragment whose `content` had no regex-detectable
+        // tokens (custom field names, synthesised payloads, …) would
+        // silently leak.
+        for label in ["PII", "pii", "Pii"] {
+            let g = MemoryNamespaceGuard::new(acl(&["*"], &[], false, false, false));
+            let mut item =
+                MemoryItem::new("structured payload no regex hits".into(), MemoryLevel::User);
+            item.metadata.insert(
+                "taint_labels".to_string(),
+                serde_json::json!([label.to_string()]),
+            );
+            assert!(
+                g.redact_item(&mut item),
+                "label {label:?} must trigger redaction"
+            );
+            assert_eq!(item.content, "[REDACTED:PII]");
+        }
+        // Same coverage for the scalar-string metadata shape.
+        let g = MemoryNamespaceGuard::new(acl(&["*"], &[], false, false, false));
+        let mut item = MemoryItem::new("structured payload".into(), MemoryLevel::User);
+        item.metadata
+            .insert("taint_labels".to_string(), serde_json::json!("PII"));
+        assert!(g.redact_item(&mut item));
+        assert_eq!(item.content, "[REDACTED:PII]");
     }
 
     #[test]

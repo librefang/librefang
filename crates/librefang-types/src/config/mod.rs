@@ -660,6 +660,69 @@ mod tests {
         );
     }
 
+    /// PR #3205 review follow-up — `pii_access`/`export_allowed`/
+    /// `delete_allowed` are no-ops without read access (the runtime
+    /// guard checks the flag AND `readable_namespaces`). An admin who
+    /// toggles a flag without declaring namespaces gets a silent
+    /// privilege misconfiguration. `validate()` must surface this so
+    /// the typo is caught at boot, not at first failed call.
+    #[test]
+    fn test_validate_warns_on_memory_access_flags_without_readable_namespaces() {
+        use crate::config::types::UserConfig;
+        use crate::user_policy::UserMemoryAccess;
+        let config = KernelConfig {
+            users: vec![
+                UserConfig {
+                    name: "PiiTypo".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        pii_access: true,
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+                UserConfig {
+                    name: "ProperlyConfigured".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    memory_access: Some(UserMemoryAccess {
+                        pii_access: true,
+                        readable_namespaces: vec!["proactive".into()],
+                        ..UserMemoryAccess::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                    budget: None,
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        let warnings = config.validate();
+        let pii_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("memory_access") && w.contains("readable_namespaces"))
+            .collect();
+        assert_eq!(
+            pii_warnings.len(),
+            1,
+            "exactly one warning expected (PiiTypo only); got: {warnings:#?}"
+        );
+        let w = pii_warnings[0];
+        assert!(w.contains("PiiTypo"), "warning must name the user: {w}");
+        assert!(w.contains("pii_access"), "warning must list the flag: {w}");
+        assert!(
+            !w.contains("ProperlyConfigured"),
+            "warning must NOT name the correctly-configured user: {w}"
+        );
+    }
+
     #[test]
     fn test_clamp_bounds_defaults_unchanged() {
         let mut config = KernelConfig::default();
