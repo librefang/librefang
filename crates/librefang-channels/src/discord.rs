@@ -4,7 +4,10 @@
 //! for sending responses. No external Discord crate — just `tokio-tungstenite` + `reqwest`.
 
 use crate::message_truncator::{split_to_utf16_chunks, DISCORD_MESSAGE_LIMIT};
-use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType, ChannelUser,
+    PlatformRole,
+};
 use async_trait::async_trait;
 use futures::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
@@ -157,6 +160,120 @@ impl DiscordAdapter {
             .send()
             .await?;
         Ok(())
+    }
+
+    /// Fetch a guild member and the set of guild-role names they hold.
+    ///
+    /// Discord's `GET /guilds/{guild_id}/members/{user_id}` returns role IDs;
+    /// we resolve them to names via `GET /guilds/{guild_id}/roles` so the
+    /// kernel mapping logic can match by human-readable role name (which is
+    /// what operators put in `config.toml: [channel_role_mapping.discord]`).
+    ///
+    /// Returns `Ok(None)` when the user is not in the guild (HTTP 404).
+    pub async fn api_get_guild_member_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<Option<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
+        // 1. Fetch the member's role IDs.
+        let member_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/members/{user_id}");
+        let resp = self
+            .client
+            .get(&member_url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get guild member failed ({status}): {body_text}").into());
+        }
+        let member: serde_json::Value = resp.json().await?;
+        let role_ids = parse_guild_member_role_ids(&member);
+        if role_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        // 2. Resolve role IDs → role names. The roles list is small (≤ a few
+        // hundred per guild) so a single fetch + linear lookup is fine.
+        let roles_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/roles");
+        let roles_resp = self
+            .client
+            .get(&roles_url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if !roles_resp.status().is_success() {
+            let status = roles_resp.status();
+            let body_text = roles_resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get guild roles failed ({status}): {body_text}").into());
+        }
+        let roles_json: serde_json::Value = roles_resp.json().await?;
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        Ok(Some(names))
+    }
+}
+
+/// Extract the `roles` array (list of role IDs) from a guild-member payload.
+pub(crate) fn parse_guild_member_role_ids(member: &serde_json::Value) -> Vec<String> {
+    member["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve role IDs to role names using a `GET /guilds/{id}/roles` payload.
+pub(crate) fn resolve_role_ids_to_names(
+    role_ids: &[String],
+    roles_json: &serde_json::Value,
+) -> Vec<String> {
+    let id_to_name: HashMap<String, String> = roles_json
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let id = r["id"].as_str()?.to_string();
+                    let name = r["name"].as_str()?.to_string();
+                    Some((id, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    role_ids
+        .iter()
+        .filter_map(|id| id_to_name.get(id).cloned())
+        .collect()
+}
+
+#[async_trait]
+impl ChannelRoleQuery for DiscordAdapter {
+    /// `chat_id` is interpreted as the Discord guild ID.
+    async fn lookup_role(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(roles) = self.api_get_guild_member_roles(chat_id, user_id).await? else {
+            return Ok(None);
+        };
+        if roles.is_empty() {
+            return Ok(None);
+        }
+        // Discord users have no inherent ordering on their role list, so we
+        // pass everything through and let the kernel walk `role_map` to find
+        // the first configured match.
+        let primary = roles[0].clone();
+        Ok(Some(PlatformRole {
+            primary,
+            roles: roles[1..].to_vec(),
+        }))
     }
 }
 
@@ -694,6 +811,48 @@ fn parse_discord_attachment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_resolution_parses_member_role_ids() {
+        let member = serde_json::json!({
+            "roles": ["role-mod", "role-vip"],
+            "user": { "id": "u1" }
+        });
+        assert_eq!(
+            parse_guild_member_role_ids(&member),
+            vec!["role-mod".to_string(), "role-vip".to_string()]
+        );
+    }
+
+    #[test]
+    fn role_resolution_resolves_ids_to_names_in_order() {
+        let role_ids = vec!["role-mod".to_string(), "role-vip".to_string()];
+        let roles_json = serde_json::json!([
+            { "id": "role-mod", "name": "Moderator" },
+            { "id": "role-vip", "name": "VIP" },
+            { "id": "role-other", "name": "Lurker" },
+        ]);
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        assert_eq!(names, vec!["Moderator".to_string(), "VIP".to_string()]);
+    }
+
+    #[test]
+    fn role_resolution_drops_unknown_role_ids() {
+        // A role the user holds but that no longer exists in the guild
+        // (e.g. just deleted) is silently filtered out.
+        let role_ids = vec!["role-stale".to_string(), "role-mod".to_string()];
+        let roles_json = serde_json::json!([
+            { "id": "role-mod", "name": "Moderator" },
+        ]);
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        assert_eq!(names, vec!["Moderator".to_string()]);
+    }
+
+    #[test]
+    fn role_resolution_handles_empty_roles() {
+        let member = serde_json::json!({ "roles": [] });
+        assert!(parse_guild_member_role_ids(&member).is_empty());
+    }
 
     #[tokio::test]
     async fn test_parse_discord_message_basic() {

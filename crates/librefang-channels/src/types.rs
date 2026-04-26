@@ -469,6 +469,57 @@ pub struct ChannelStatus {
 // Re-export policy/format types from librefang-types for convenience.
 pub use librefang_types::config::{DmPolicy, GroupPolicy, OutputFormat};
 
+/// Platform-native role tokens returned by [`ChannelRoleQuery`].
+///
+/// Channel adapters return platform-shaped strings (`"creator"`,
+/// `"administrator"`, `"member"`, …) that are translated into LibreFang
+/// `UserRole` values by `AuthManager` using the operator-defined mapping in
+/// `config.toml: [channel_role_mapping]`. We deliberately keep adapters
+/// unaware of `UserRole` so a kernel-side change to role granularity does
+/// not need to ripple through every channel implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformRole {
+    /// Primary role token. For Telegram this is the chat-status string
+    /// (`creator` / `administrator` / `member` / …). For Slack this is
+    /// `owner` / `admin` / `member` / `guest`. For Discord this is the
+    /// guild role name (the kernel walks the configured `role_map` to find
+    /// the first match across `roles`).
+    pub primary: String,
+    /// Additional role tokens — populated for platforms where a user can
+    /// hold multiple roles simultaneously (Discord guild roles). Empty for
+    /// Telegram/Slack where membership status is single-valued.
+    pub roles: Vec<String>,
+}
+
+impl PlatformRole {
+    /// Convenience constructor for the single-token case.
+    pub fn single(role: impl Into<String>) -> Self {
+        Self {
+            primary: role.into(),
+            roles: Vec::new(),
+        }
+    }
+}
+
+/// Adapter capability for resolving the platform-native role of a user in a
+/// specific conversation/guild/workspace. Implementors only need to query
+/// the platform API — the kernel handles caching and translation.
+///
+/// Errors are surfaced as `Err`. A successful "user not in chat / no role
+/// info available" outcome is reported as `Ok(None)` so the caller can fall
+/// through to default-deny instead of treating it as a hard failure.
+#[async_trait]
+pub trait ChannelRoleQuery: Send + Sync {
+    /// Look up the platform-native role for `user_id` inside `chat_id`
+    /// (the meaning of `chat_id` is platform-specific: Telegram chat,
+    /// Discord guild, Slack workspace — the channel adapter knows).
+    async fn lookup_role(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
 /// Trait that every channel adapter must implement.
 ///
 /// A channel adapter bridges a messaging platform to the LibreFang kernel by converting

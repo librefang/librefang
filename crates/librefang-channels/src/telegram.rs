@@ -6,8 +6,8 @@
 use crate::formatter;
 use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
-    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    InteractiveButton, InteractiveMessage, LifecycleReaction,
+    truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType,
+    ChannelUser, InteractiveButton, InteractiveMessage, LifecycleReaction, PlatformRole,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -1454,6 +1454,73 @@ impl TelegramAdapter {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Look up a user's chat status via Bot API `getChatMember`.
+    ///
+    /// Returns the raw status string (`creator`, `administrator`, `member`,
+    /// `restricted`, `left`, `kicked`) on success. Returns `Ok(None)` when
+    /// Telegram says the user is not part of the chat (`left` / `kicked`)
+    /// since those map to "no derived role" in the kernel mapping logic.
+    /// Errors are surfaced for transport/auth failures.
+    pub async fn api_get_chat_member(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/bot{}/getChatMember",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        // chat_id may be a numeric id like "-100123" or a `@username`; both
+        // are accepted by the Bot API as a JSON string.
+        let user_id_num: i64 = user_id
+            .parse()
+            .map_err(|_| format!("Invalid Telegram user_id: {user_id}"))?;
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id_num,
+        });
+        let resp = self.client.post(&url).json(&body).send().await?;
+        let status_code = resp.status();
+        let body_value: serde_json::Value = resp.json().await?;
+        parse_chat_member_response(&body_value)
+            .map_err(|desc| format!("Telegram getChatMember failed ({status_code}): {desc}").into())
+    }
+}
+
+/// Translate a Telegram `getChatMember` response into an optional status string.
+///
+/// Returns `Ok(Some(status))` for `creator` / `administrator` / `member` /
+/// `restricted`, `Ok(None)` for `left` / `kicked` (treated as "user not in
+/// chat" so the kernel falls through to default-deny), and `Err(description)`
+/// when the response indicates `ok = false`.
+pub(crate) fn parse_chat_member_response(
+    body: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    if body["ok"].as_bool() != Some(true) {
+        let desc = body["description"].as_str().unwrap_or("unknown error");
+        return Err(desc.to_string());
+    }
+    let status = body["result"]["status"].as_str().unwrap_or("");
+    if status.is_empty() || status == "left" || status == "kicked" {
+        return Ok(None);
+    }
+    Ok(Some(status.to_string()))
+}
+
+#[async_trait]
+impl ChannelRoleQuery for TelegramAdapter {
+    async fn lookup_role(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .api_get_chat_member(chat_id, user_id)
+            .await?
+            .map(PlatformRole::single))
     }
 }
 
@@ -2924,6 +2991,73 @@ fn sanitize_telegram_html(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_resolution_creator_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "creator", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("creator".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_administrator_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "administrator", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("administrator".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_member_passes_through() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "member", "user": { "id": 1 } }
+        });
+        assert_eq!(
+            parse_chat_member_response(&body).unwrap(),
+            Some("member".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_left_returns_none() {
+        // `left` and `kicked` should map to None so the kernel falls
+        // through to default-deny instead of treating "user not in chat"
+        // as a hard error.
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "left" }
+        });
+        assert!(parse_chat_member_response(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn role_resolution_kicked_returns_none() {
+        let body = serde_json::json!({
+            "ok": true,
+            "result": { "status": "kicked" }
+        });
+        assert!(parse_chat_member_response(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn role_resolution_api_error_is_err() {
+        let body = serde_json::json!({
+            "ok": false,
+            "description": "USER_ID_INVALID"
+        });
+        let err = parse_chat_member_response(&body).unwrap_err();
+        assert!(err.contains("USER_ID_INVALID"));
+    }
 
     fn test_client() -> reqwest::Client {
         crate::http_client::new_client()

@@ -5,8 +5,8 @@
 
 use crate::bridge::SENDER_USER_ID_KEY;
 use crate::types::{
-    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
-    InteractiveButton, InteractiveMessage,
+    split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType,
+    ChannelUser, InteractiveButton, InteractiveMessage, PlatformRole,
 };
 use async_trait::async_trait;
 use futures::{SinkExt, Stream, StreamExt};
@@ -369,6 +369,81 @@ impl SlackAdapter {
             self.api_remove_reaction(channel, ts, &emoji).await;
         }
         self.api_add_reaction(channel, ts, "white_check_mark").await;
+    }
+
+    /// Look up a user's workspace role via `users.info`.
+    ///
+    /// Returns one of `"owner"`, `"admin"`, `"member"`, `"guest"` based on
+    /// the boolean flags exposed by the Slack API. Returns `Ok(None)` only
+    /// when Slack reports `user_not_found` — every present user has at
+    /// minimum the `member` role.
+    pub async fn api_get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{SLACK_API_BASE}/users.info?user={user_id}");
+        let resp: serde_json::Value = self
+            .client
+            .get(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.bot_token.as_str()),
+            )
+            .send()
+            .await?
+            .json()
+            .await?;
+        parse_users_info_response(&resp)
+            .map_err(|err| format!("Slack users.info failed: {err}").into())
+    }
+}
+
+/// Translate a Slack `users.info` response into an optional role token.
+///
+/// Returns `Ok(None)` only when Slack reports `user_not_found` — every
+/// present user has at minimum the `member` role. Precedence inside a hit:
+/// `owner` (or `primary_owner`) > `admin` > `guest`
+/// (`is_restricted` / `is_ultra_restricted`) > `member`.
+pub(crate) fn parse_users_info_response(
+    body: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    if body["ok"].as_bool() != Some(true) {
+        let err = body["error"].as_str().unwrap_or("unknown error");
+        if err == "user_not_found" {
+            return Ok(None);
+        }
+        return Err(err.to_string());
+    }
+    let user = &body["user"];
+    let role = if user["is_owner"].as_bool().unwrap_or(false)
+        || user["is_primary_owner"].as_bool().unwrap_or(false)
+    {
+        "owner"
+    } else if user["is_admin"].as_bool().unwrap_or(false) {
+        "admin"
+    } else if user["is_restricted"].as_bool().unwrap_or(false)
+        || user["is_ultra_restricted"].as_bool().unwrap_or(false)
+    {
+        "guest"
+    } else {
+        "member"
+    };
+    Ok(Some(role.to_string()))
+}
+
+#[async_trait]
+impl ChannelRoleQuery for SlackAdapter {
+    /// `chat_id` is unused for Slack (roles are workspace-scoped, not
+    /// per-channel) — kept in the signature for API consistency.
+    async fn lookup_role(
+        &self,
+        _chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .api_get_user_role(user_id)
+            .await?
+            .map(PlatformRole::single))
     }
 }
 
@@ -978,6 +1053,96 @@ async fn parse_slack_block_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_resolution_owner_wins() {
+        // owner > admin > guest > member, regardless of which other flags
+        // are simultaneously true.
+        let body = serde_json::json!({
+            "ok": true,
+            "user": {
+                "id": "U1",
+                "is_owner": true,
+                "is_admin": true,
+                "is_restricted": false
+            }
+        });
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("owner".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_primary_owner_treated_as_owner() {
+        let body = serde_json::json!({
+            "ok": true,
+            "user": { "is_primary_owner": true }
+        });
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("owner".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_admin_when_not_owner() {
+        let body = serde_json::json!({
+            "ok": true,
+            "user": { "is_admin": true, "is_restricted": true }
+        });
+        // admin beats guest.
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("admin".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_guest_for_restricted() {
+        let body = serde_json::json!({
+            "ok": true,
+            "user": { "is_restricted": true }
+        });
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("guest".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_guest_for_ultra_restricted() {
+        let body = serde_json::json!({
+            "ok": true,
+            "user": { "is_ultra_restricted": true }
+        });
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("guest".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_default_member() {
+        let body = serde_json::json!({ "ok": true, "user": { "id": "U1" } });
+        assert_eq!(
+            parse_users_info_response(&body).unwrap(),
+            Some("member".to_string())
+        );
+    }
+
+    #[test]
+    fn role_resolution_user_not_found_is_none() {
+        let body = serde_json::json!({ "ok": false, "error": "user_not_found" });
+        assert!(parse_users_info_response(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn role_resolution_other_error_is_err() {
+        let body = serde_json::json!({ "ok": false, "error": "invalid_auth" });
+        let err = parse_users_info_response(&body).unwrap_err();
+        assert!(err.contains("invalid_auth"));
+    }
 
     #[tokio::test]
     async fn test_parse_slack_event_basic() {
