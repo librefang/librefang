@@ -505,6 +505,9 @@ class _McpResource(_Resource):
     def reconnect_mcp_server_handler(self, name: str):
         return self._c._request("POST", f"/api/mcp/servers/{name}/reconnect")
 
+    def list_mcp_taint_rules(self):
+        return self._c._request("GET", "/api/mcp/taint-rules")
+
 
 # ── Memory Resource ────────────────────────────────────────────
 

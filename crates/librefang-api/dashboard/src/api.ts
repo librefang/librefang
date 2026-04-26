@@ -3185,6 +3185,29 @@ export async function reloadMcp(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/mcp/reload", {});
 }
 
+// ── MCP `[[taint_rules]]` Registry ──────────────────────────────────────
+
+/** Summary of one named taint rule set defined by `[[taint_rules]]`. */
+export interface McpTaintRuleSummary {
+  /** Identifier referenced by `McpTaintToolPolicy.rule_sets`. */
+  name: string;
+  /** Severity action this set applies when one of its rules fires. */
+  action: "block" | "warn" | "log";
+  /** Number of `TaintRuleId` variants this set covers (display-only). */
+  rule_count: number;
+}
+
+/**
+ * Read-only list of `[[taint_rules]]` for dashboard validation.
+ *
+ * Used by `TaintPolicyEditor` to flag rule_set names that don't match any
+ * registered set — without this, typos sit silent in production until a
+ * scanner WARN line happens to be noticed in logs.
+ */
+export async function listMcpTaintRules(): Promise<McpTaintRuleSummary[]> {
+  return get<McpTaintRuleSummary[]>("/api/mcp/taint-rules");
+}
+
 // ── MCP OAuth Auth ──────────────────────────────────────────────────────
 
 export interface McpAuthStatusResponse {

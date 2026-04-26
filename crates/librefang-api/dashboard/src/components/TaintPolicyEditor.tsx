@@ -10,6 +10,7 @@ import {
   type TaintRuleId,
 } from "../api";
 import { useUpdateMcpTaintPolicy } from "../lib/mutations/mcp";
+import { useMcpTaintRules } from "../lib/queries/mcp";
 import { Modal } from "./ui/Modal";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
@@ -74,6 +75,15 @@ export function TaintPolicyEditor({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const mutation = useUpdateMcpTaintPolicy();
+  // Pull the registered `[[taint_rules]]` set names so we can flag typos
+  // inline. The query is shared via tanstack-query; if the request fails
+  // (e.g. fresh kernel without taint config) we fall back to disabling
+  // the validation rather than blocking the editor.
+  const { data: knownRuleSets } = useMcpTaintRules();
+  const knownRuleSetNames = useMemo(
+    () => new Set((knownRuleSets ?? []).map((r) => r.name)),
+    [knownRuleSets],
+  );
 
   const [scanning, setScanning] = useState<boolean>(server.taint_scanning ?? true);
   const [tools, setTools] = useState<DraftTools>(
@@ -229,6 +239,7 @@ export function TaintPolicyEditor({
                 key={name}
                 name={name}
                 policy={policy}
+                knownRuleSetNames={knownRuleSetNames}
                 onRename={(newName) => renameTool(name, newName)}
                 onRemove={() => removeTool(name)}
                 onChangeDefault={(action) => setToolField(name, "default", action)}
@@ -258,6 +269,7 @@ export function TaintPolicyEditor({
 function ToolPolicyRow({
   name,
   policy,
+  knownRuleSetNames,
   onRename,
   onRemove,
   onChangeDefault,
@@ -266,6 +278,7 @@ function ToolPolicyRow({
 }: {
   name: string;
   policy: McpTaintToolPolicy;
+  knownRuleSetNames: Set<string>;
   onRename: (newName: string) => void;
   onRemove: () => void;
   onChangeDefault: (action: McpTaintToolAction) => void;
@@ -275,6 +288,17 @@ function ToolPolicyRow({
   const { t } = useTranslation();
   const [localName, setLocalName] = useState(name);
   const [ruleSetsText, setRuleSetsText] = useState((policy.rule_sets ?? []).join(", "));
+  // Names typed by the operator that don't match any registered
+  // `[[taint_rules]]` set — flagged inline so typos don't sit silent
+  // (the scanner treats unknown names as no-ops; see one-shot WARN in
+  // librefang_runtime_mcp::warn_unknown_rule_set_once).
+  const unknownRuleSetNames = useMemo(() => {
+    if (knownRuleSetNames.size === 0) return [] as string[];
+    return ruleSetsText
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && !knownRuleSetNames.has(s));
+  }, [ruleSetsText, knownRuleSetNames]);
   const paths = policy.paths ?? {};
 
   const addPath = useCallback(() => {
@@ -377,6 +401,15 @@ function ToolPolicyRow({
             {t(
               "mcp.taint_skip_rule_sets_hint",
               "default = skip bypasses scanning entirely — rule_sets above will not fire (not even Log). Switch to default = scan for audit-only rule sets.",
+            )}
+          </p>
+        ) : null}
+        {unknownRuleSetNames.length > 0 ? (
+          <p className="text-[11px] italic text-error pl-22">
+            {t(
+              "mcp.taint_rule_sets_unknown_hint",
+              "Unknown rule_set name(s): {{names}} — not defined in any [[taint_rules]]. The scanner will treat them as no-ops.",
+              { names: unknownRuleSetNames.join(", ") },
             )}
           </p>
         ) : null}

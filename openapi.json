@@ -4589,6 +4589,26 @@
         }
       }
     },
+    "/api/mcp/taint-rules": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.",
+        "description": "Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references\nrule-set names by free-form string. Without this read-only endpoint,\nthe editor cannot tell the operator that a typed name doesn't match\nany registered set — and the scanner silently treats unknown names\nas no-ops (one-shot WARN in\n`librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard\nuses this list to render an inline validation hint next to the\n`rule_sets` field.",
+        "operationId": "list_mcp_taint_rules",
+        "responses": {
+          "200": {
+            "description": "List configured named taint rule sets",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/memory": {
       "get": {
         "tags": [

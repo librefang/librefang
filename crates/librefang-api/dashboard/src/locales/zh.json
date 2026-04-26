@@ -2557,7 +2557,8 @@
     "taint_default_skip_hint": "default = skip — 该工具已绕过扫描，下方路径配置将被忽略。",
     "taint_skip_rule_sets_hint": "default = skip 会完全跳过扫描——上方 rule_sets 不会触发（包括 Log）。如需仅审计，请改回 default = scan。",
     "taint_rule_sets_placeholder": "[[taint_rules]] 中定义的名称，逗号分隔",
-    "taint_rule_sets_overlap_hint": "多个集合覆盖同一规则时，最宽松的动作生效（log > warn > block）——仅审计的集合会静默使同规则上的 block 失效。"
+    "taint_rule_sets_overlap_hint": "多个集合覆盖同一规则时，最宽松的动作生效（log > warn > block）——仅审计的集合会静默使同规则上的 block 失效。",
+    "taint_rule_sets_unknown_hint": "未知 rule_set 名称：{{names}} —— 未在任何 [[taint_rules]] 中定义，扫描器会按 no-op 处理。"
   },
   "toml_viewer": {
     "tab_toml": "TOML",

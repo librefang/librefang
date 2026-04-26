@@ -611,6 +611,10 @@ class McpResource {
   async reconnectMcpServerHandler(name) {
     return this._c._request("POST", `/api/mcp/servers/${name}/reconnect`);
   }
+
+  async listMcpTaintRules() {
+    return this._c._request("GET", "/api/mcp/taint-rules");
+  }
 }
 
 // ── Memory Resource

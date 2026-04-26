@@ -61,6 +61,7 @@ export {
   getMcpCatalogEntry,
   getMcpHealth,
   getMcpAuthStatus,
+  listMcpTaintRules,
   // memory
   listMemories,
   searchMemories,

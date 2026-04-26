@@ -783,6 +783,10 @@ impl McpResource {
     pub async fn reconnect_mcp_server_handler(&self, name: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/mcp/servers/{}/reconnect", name), None, &[]).await
     }
+
+    pub async fn list_mcp_taint_rules(&self) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/mcp/taint-rules".to_string(), None, &[]).await
+    }
 }
 
 // ── Memory ──

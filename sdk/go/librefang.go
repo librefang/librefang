@@ -728,6 +728,10 @@ func (r *McpResource) ReconnectMcpServerHandler(name string) (interface{}, error
 	return r.client.request("POST", fmt.Sprintf("/api/mcp/servers/%s/reconnect", name), nil, nil)
 }
 
+func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
+	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
+}
+
 // ── Memory Resource
 
 type MemoryResource struct{ client *Client }
