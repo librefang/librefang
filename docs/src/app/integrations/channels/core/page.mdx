@@ -51,6 +51,10 @@ The Telegram adapter uses long-polling via the `getUpdates` API. It polls every 
 
 Messages from authorized users are converted to `ChannelMessage` events and routed to the configured agent. Responses are sent back via the `sendMessage` API. Long responses are automatically split into multiple messages to respect Telegram's 4096-character limit using the shared `split_message()` utility.
 
+### File Attachments
+
+Files attached to Telegram messages arrive as **temporary authenticated URLs that the LLM cannot access directly**. The bridge downloads them to a configurable directory and rewrites the message into local-path content blocks — non-image files become a `ContentBlock::Text` with the saved path (the agent then calls `file_read`); images become `ContentBlock::ImageFile`. See [Channel File Downloads](/integrations/channels#channel-file-downloads) on the overview for `file_download_dir` / `file_download_max_bytes` and the stale-file sweeper.
+
 ### Interactive Setup
 
 ```bash

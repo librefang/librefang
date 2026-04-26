@@ -357,11 +357,14 @@ librefang cost export --format csv
 
 ### 知识图谱
 
+知识图谱是 **per-agent** 的,不是全局 REST 接口。用 per-agent 端点:
+
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/memory/kg/entities` | GET | 列出实体 |
-| `/api/memory/kg/relations` | GET | 列出关系 |
-| `/api/memory/kg/query` | POST | 查询图谱 |
+| `/api/memory/agents/{id}/relations` | GET | 查询该 agent 的知识图谱(实体 + 关系) |
+| `/api/memory/agents/{id}/relations` | POST | 给该 agent 的图谱存新关系 |
+
+Agent 也可以从循环里直接用 [`knowledge_add_entity` / `knowledge_add_relation` / `knowledge_query` 工具](/zh/agent/tools#knowledge-graph) 构建图谱。早期文档列的 `/api/memory/kg/*` 端点从未发布过 —— 调那些路径会 404。
 
 ### 主动记忆（Proactive Memory）
 

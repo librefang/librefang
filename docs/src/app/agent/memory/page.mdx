@@ -450,11 +450,14 @@ librefang cost export --format csv
 
 ### Knowledge Graph
 
+The knowledge graph lives **per-agent**, not as a global REST surface. Use the per-agent endpoints:
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/memory/kg/entities` | GET | List entities |
-| `/api/memory/kg/relations` | GET | List relations |
-| `/api/memory/kg/query` | POST | Query graph |
+| `/api/memory/agents/{id}/relations` | GET | Query the agent's knowledge graph (entities + relations) |
+| `/api/memory/agents/{id}/relations` | POST | Store new relations on the agent's graph |
+
+Agents can also build the graph from inside the loop with the [`knowledge_add_entity` / `knowledge_add_relation` / `knowledge_query` tools](/agent/tools#knowledge-graph). The earlier `/api/memory/kg/*` endpoints in older documentation never shipped — those paths return 404.
 
 ### Proactive Memory
 

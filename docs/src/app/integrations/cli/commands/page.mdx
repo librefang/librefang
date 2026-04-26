@@ -965,6 +965,30 @@ librefang config delete-key openai
 
 ---
 
+### librefang config unset
+
+Remove a configuration **key** from `config.toml` (distinct from `delete-key` which removes a provider API key from `.env`).
+
+```
+librefang config unset <KEY>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<KEY>` | Dotted config path to remove (e.g. `api.cors_origin`, `triggers.cooldown_secs`). |
+
+**Example:**
+
+```bash
+librefang config unset api.cors_origin
+```
+
+> **Note:** `unset` rewrites the TOML file and **strips comments**. If you maintain hand-curated comments in `config.toml`, edit it manually instead.
+
+---
+
 ### librefang config test-key
 
 Test provider connectivity with the stored API key.

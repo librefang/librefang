@@ -965,6 +965,30 @@ librefang config delete-key openai
 
 ---
 
+### librefang config unset
+
+从 `config.toml` 中删除一个**配置 key**(和 `delete-key` 不同 —— 后者删 `.env` 里的 provider API key)。
+
+```
+librefang config unset <KEY>
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<KEY>` | 要删的配置点路径(如 `api.cors_origin`、`triggers.cooldown_secs`)。 |
+
+**示例：**
+
+```bash
+librefang config unset api.cors_origin
+```
+
+> **注意:** `unset` 会重写 TOML 文件并**抹掉注释**。如果你在 `config.toml` 里维护了手写注释,改用手动编辑。
+
+---
+
 ### librefang config test-key
 
 使用已存储的 API 密钥测试提供商连接。
