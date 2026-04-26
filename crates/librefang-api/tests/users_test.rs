@@ -829,10 +829,7 @@ async fn users_list_summary_flags_reflect_policy_state() {
     assert_eq!(status, StatusCode::OK);
     let rows = body.as_array().expect("array");
     let bare_row = rows.iter().find(|r| r["name"] == "Bare").expect("Bare");
-    let custom_row = rows
-        .iter()
-        .find(|r| r["name"] == "Custom")
-        .expect("Custom");
+    let custom_row = rows.iter().find(|r| r["name"] == "Custom").expect("Custom");
 
     assert_eq!(bare_row["has_policy"], false, "{bare_row}");
     assert_eq!(bare_row["has_memory_access"], false, "{bare_row}");
