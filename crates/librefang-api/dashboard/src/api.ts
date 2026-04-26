@@ -1016,6 +1016,43 @@ export async function patchAgentConfig(
   );
 }
 
+function trimOptionalHandRuntimeString(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return value.trim();
+}
+
+/**
+ * Hand runtime PATCH is the only agent-config write path with tri-state string
+ * semantics: absent leaves the override untouched, empty string clears it.
+ * Keep this serializer scoped to `/hand-runtime-config` so other PATCH payloads
+ * do not silently inherit those semantics.
+ */
+function serializeHandAgentRuntimeConfigPatch(config: {
+  max_tokens?: number;
+  model?: string;
+  provider?: string;
+  temperature?: number;
+  api_key_env?: string;
+  base_url?: string;
+  web_search_augmentation?: "off" | "auto" | "always";
+}): {
+  max_tokens?: number;
+  model?: string;
+  provider?: string;
+  temperature?: number;
+  api_key_env?: string;
+  base_url?: string;
+  web_search_augmentation?: "off" | "auto" | "always";
+} {
+  return {
+    ...config,
+    api_key_env: trimOptionalHandRuntimeString(config.api_key_env),
+    base_url: trimOptionalHandRuntimeString(config.base_url),
+  };
+}
+
 /** PATCH /api/agents/{id}/hand-runtime-config — partial update of per-agent
  * hand runtime overrides. Empty string for `api_key_env` / `base_url` clears
  * that specific field (tri-state: absent = leave as-is, empty = clear,
@@ -1035,7 +1072,7 @@ export async function patchHandAgentRuntimeConfig(
 ): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`,
-    config,
+    serializeHandAgentRuntimeConfigPatch(config),
   );
 }
 

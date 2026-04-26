@@ -200,6 +200,29 @@ describe("usePatchHandAgentRuntimeConfig (hand)", () => {
       queryKey: handKeys.details(),
     });
   });
+
+  it("forwards whitespace-only hand override fields to the hand runtime API helper", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
+
+    const { result } = renderHook(() => usePatchHandAgentRuntimeConfig(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync({
+      agentId: "hand-agent-1",
+      config: {
+        model: "gpt-4o",
+        api_key_env: "   ",
+        base_url: "   ",
+      },
+    });
+
+    expect(http.patchHandAgentRuntimeConfig).toHaveBeenCalledWith(
+      "hand-agent-1",
+      { model: "gpt-4o", api_key_env: "   ", base_url: "   " },
+    );
+  });
 });
 
 describe("useClearHandAgentRuntimeConfig", () => {

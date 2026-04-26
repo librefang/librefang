@@ -1,0 +1,26 @@
+name: Kernel Ignored Tests
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kernel-ignored:
+    name: Kernel Ignored / Restart Override
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel-ignored-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run ignored kernel restart override test
+        run: cargo test -p librefang-kernel --lib -- --ignored hand_runtime_override_survives_restart_via_start_background_agents

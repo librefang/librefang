@@ -5600,6 +5600,23 @@ mod tests {
     }
 
     #[test]
+    fn test_map_hand_runtime_override_err_maps_not_found_and_conflict() {
+        use librefang_kernel::error::KernelError;
+        use librefang_types::error::LibreFangError;
+
+        let not_found =
+            KernelError::LibreFang(LibreFangError::AgentNotFound("missing-agent".to_string()));
+        let (status, _) = map_hand_runtime_override_err(&not_found);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let conflict = KernelError::LibreFang(LibreFangError::Internal(
+            "Hand role not found for agent 123".to_string(),
+        ));
+        let (status, _) = map_hand_runtime_override_err(&conflict);
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[test]
     fn test_clone_request_explicit_false() {
         let json = r#"{"new_name": "clone-2", "include_skills": false, "include_tools": false}"#;
         let req: CloneAgentRequest = serde_json::from_str(json).unwrap();

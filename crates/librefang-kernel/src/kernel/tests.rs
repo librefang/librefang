@@ -941,6 +941,162 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     kernel.shutdown();
 }
 
+#[test]
+fn reactivate_builds_from_hand_toml_not_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-reactivation-hand-toml");
+    std::fs::create_dir_all(&home_dir).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let first_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate the first time: {e}"),
+    };
+    let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
+    let first_entry = kernel
+        .registry
+        .get(first_agent_id)
+        .expect("first apitester hand agent entry");
+    let resolved_manifest = first_entry.manifest.clone();
+
+    let runtime_override = librefang_hands::HandAgentRuntimeOverride {
+        model: Some("override-model".to_string()),
+        provider: Some("override-provider".to_string()),
+        api_key_env: Some(Some("OVERRIDE_API_KEY_ENV".to_string())),
+        base_url: Some(Some("https://override.invalid/v1".to_string())),
+        max_tokens: Some(12345),
+        temperature: Some(0.2),
+        web_search_augmentation: Some(WebSearchAugmentationMode::Always),
+    };
+
+    kernel
+        .update_hand_agent_runtime_override(first_agent_id, runtime_override.clone())
+        .expect("hand runtime override should update");
+
+    let overridden_entry = kernel
+        .registry
+        .get(first_agent_id)
+        .expect("overridden apitester hand agent entry");
+    assert_eq!(overridden_entry.manifest.model.model, "override-model");
+    assert_eq!(
+        overridden_entry.manifest.model.provider,
+        "override-provider"
+    );
+    assert_eq!(
+        overridden_entry.manifest.model.api_key_env.as_deref(),
+        Some("OVERRIDE_API_KEY_ENV")
+    );
+    assert_eq!(
+        overridden_entry.manifest.model.base_url.as_deref(),
+        Some("https://override.invalid/v1")
+    );
+    assert_eq!(overridden_entry.manifest.model.max_tokens, 12345);
+    assert!((overridden_entry.manifest.model.temperature - 0.2).abs() < 1e-6);
+    assert_eq!(
+        overridden_entry.manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always
+    );
+
+    kernel
+        .deactivate_hand(first_instance.instance_id)
+        .expect("apitester hand should deactivate cleanly");
+
+    let second_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test (second activation): {e}");
+            kernel.shutdown();
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate the second time: {e}"),
+    };
+    let second_agent_id = second_instance
+        .agent_id()
+        .expect("second apitester agent id");
+    let second_entry = kernel
+        .registry
+        .get(second_agent_id)
+        .expect("second apitester hand agent entry");
+    let reactivated_manifest = &second_entry.manifest;
+
+    assert_eq!(
+        reactivated_manifest.model.model, resolved_manifest.model.model,
+        "fresh activation must resolve model from HAND.toml/defaults, not prior runtime override"
+    );
+    assert_eq!(
+        reactivated_manifest.model.provider, resolved_manifest.model.provider,
+        "fresh activation must resolve provider from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.api_key_env, resolved_manifest.model.api_key_env,
+        "fresh activation must resolve api_key_env from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.base_url, resolved_manifest.model.base_url,
+        "fresh activation must resolve base_url from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.max_tokens, resolved_manifest.model.max_tokens,
+        "fresh activation must resolve max_tokens from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.model.temperature, resolved_manifest.model.temperature,
+        "fresh activation must resolve temperature from HAND.toml/defaults"
+    );
+    assert_eq!(
+        reactivated_manifest.web_search_augmentation, resolved_manifest.web_search_augmentation,
+        "fresh activation must resolve web_search_augmentation from HAND.toml/defaults"
+    );
+
+    assert_ne!(
+        reactivated_manifest.model.model,
+        runtime_override.model.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.provider,
+        runtime_override.provider.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.api_key_env.as_deref(),
+        runtime_override
+            .api_key_env
+            .unwrap()
+            .unwrap()
+            .as_str()
+            .into()
+    );
+    assert_ne!(
+        reactivated_manifest.model.base_url.as_deref(),
+        runtime_override.base_url.unwrap().as_deref()
+    );
+    assert_ne!(
+        reactivated_manifest.model.max_tokens,
+        runtime_override.max_tokens.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.model.temperature,
+        runtime_override.temperature.unwrap()
+    );
+    assert_ne!(
+        reactivated_manifest.web_search_augmentation,
+        runtime_override.web_search_augmentation.unwrap()
+    );
+
+    kernel.shutdown();
+}
+
 /// Regression test for issue #3135 — hand-level `skills = [...]` allowlist
 /// MUST propagate into each derived per-role agent's `AgentManifest.skills`,
 /// otherwise `sorted_enabled_skills` treats the empty list as "unrestricted"
