@@ -2608,6 +2608,24 @@
     "today": "今天",
     "yesterday": "昨天",
     "unknown_date": "未知日期",
-    "range_custom": "自定义…"
+    "range_custom": "自定义…",
+    "export_json": "JSON",
+    "export_csv_short": "CSV",
+    "detail_title": "审计条目",
+    "detail_seq": "序号",
+    "detail_timestamp": "时间戳",
+    "detail_action": "动作",
+    "detail_outcome": "结果",
+    "detail_agent": "Agent",
+    "detail_user": "用户",
+    "detail_channel": "渠道",
+    "detail_payload": "详情",
+    "detail_hash": "Hash",
+    "detail_prev_hash": "Previous hash",
+    "detail_copy_json": "复制 JSON",
+    "detail_copy_hash": "复制 hash",
+    "detail_copy_link": "复制永久链接",
+    "detail_copied": "已复制",
+    "open_detail": "查看详情"
   }
 }
