@@ -1393,6 +1393,7 @@ mod channel_role_tests {
             tool_categories: None,
             memory_access: None,
             channel_tool_rules: HashMap::new(),
+            budget: None,
         }];
         let mgr = AuthManager::new(&configs);
         let calls = Arc::new(AtomicUsize::new(0));
