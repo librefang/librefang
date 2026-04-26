@@ -403,9 +403,7 @@ pub async fn auth(
                     sessions.get(&token_str).cloned()
                 };
                 if let Some(session) = session_attribution {
-                    if let (Some(name), Some(role_str)) =
-                        (session.user_name, session.user_role)
-                    {
+                    if let (Some(name), Some(role_str)) = (session.user_name, session.user_role) {
                         let role = UserRole::from_str_role(&role_str);
                         let user_id = UserId::from_name(&name);
                         request.extensions_mut().insert(AuthenticatedApiUser {
