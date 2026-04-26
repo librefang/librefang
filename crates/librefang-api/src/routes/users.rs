@@ -23,14 +23,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_kernel::auth::UserRole;
+use librefang_types::agent::UserId;
 use librefang_types::config::UserConfig;
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
+use crate::middleware::{ApiUserAuth, AuthenticatedApiUser};
 
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
@@ -42,6 +45,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
                 .delete(delete_user),
         )
         .route("/users/import", axum::routing::post(import_users))
+        .route(
+            "/users/{name}/rotate-key",
+            axum::routing::post(rotate_user_key),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +123,23 @@ pub struct BulkImportResult {
     pub failed: usize,
     pub dry_run: bool,
     pub rows: Vec<BulkImportRow>,
+}
+
+/// Response payload for `POST /api/users/{name}/rotate-key`.
+///
+/// `new_api_key` is the **plaintext** rotated key — this is the only time
+/// the server will surface it. Operators must copy and store it now;
+/// nothing else (audit log included) records the plaintext.
+///
+/// `sessions_invalidated` reports how many in-memory per-user API key
+/// records were swapped — typically `1`. See the doc-comment on
+/// [`rotate_user_key`] for why dashboard sessions are NOT included in
+/// this count.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RotateKeyResponse {
+    pub status: String,
+    pub new_api_key: String,
+    pub sessions_invalidated: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +644,166 @@ pub async fn import_users(
     }
 }
 
+/// Rotate a user's API key.
+///
+/// Generates a fresh 32-byte random plaintext key, hashes it with Argon2id,
+/// stores the hash in `config.toml`, and **swaps the live in-memory snapshot
+/// the auth middleware reads from** so the next request that presents the
+/// old plaintext token immediately fails authentication. Without the live
+/// swap a leaked key could only be revoked by restarting the daemon — which
+/// defeats the point of rotation. See the `user_api_keys` field on
+/// [`AppState`] for the shared `Arc<RwLock<…>>` that makes this work.
+///
+/// Owner-only, gated by `is_owner_only_write` in `middleware.rs` — same
+/// blast radius as user create/delete. The request takes no body; the new
+/// plaintext key is returned in the response and is **never written to the
+/// audit log or echoed again**.
+///
+/// Dashboard sessions (`AppState.active_sessions`) are intentionally NOT
+/// invalidated here. The active-sessions store is keyed by an opaque token
+/// and the stored [`crate::password_hash::SessionToken`] does not carry a
+/// `user_id` — it tracks the single shared dashboard credential pair
+/// (`dashboard_user` / `dashboard_pass`), not the per-user API keys this
+/// endpoint rotates. The two auth surfaces are independent: a per-user
+/// bearer-token caller never lands in `active_sessions` at all (see
+/// `middleware.rs:618`), so the per-user key swap completes the kill on
+/// its own. If a future change ties dashboard sessions to a `UserId`, we
+/// can extend `sessions_invalidated` to include those evictions; today
+/// the count reflects the per-user-bearer-token kill, which is the actual
+/// revocation that matters for this surface.
+#[utoipa::path(
+    post,
+    path = "/api/users/{name}/rotate-key",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    responses(
+        (status = 200, description = "Key rotated. `new_api_key` is the only time the plaintext is exposed — the server cannot reproduce it later.", body = RotateKeyResponse),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn rotate_user_key(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    caller: Option<Extension<AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    // 32-byte random plaintext token, hex-encoded (64 chars). Mirrors the
+    // shape of `password_hash::generate_session_token` so operator tooling
+    // that already knows how to handle session tokens accepts these too.
+    let new_plaintext = generate_api_key_plaintext();
+    let new_hash = match crate::password_hash::hash_password(&new_plaintext) {
+        Ok(h) => h,
+        Err(e) => {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("hash failed: {e}"),
+            );
+        }
+    };
+
+    let target = name.clone();
+    let result = persist_users(&state, move |users| -> Result<(), PersistError> {
+        let idx = users
+            .iter()
+            .position(|u| u.name == target)
+            .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
+        // Preserve every other field — rotation only swaps `api_key_hash`,
+        // it must not zero out budget / RBAC M3 policy / channel bindings.
+        users[idx].api_key_hash = Some(new_hash);
+        Ok(())
+    })
+    .await;
+
+    // The post-rotation `UserConfig` isn't part of the response shape (no
+    // leakage of the new hash) but we still need to drive `persist_users`
+    // through the on-disk write + reload + middleware-snapshot refresh
+    // before serializing the success body. Discard the captured value.
+    if let Err(e) = result {
+        return match e {
+            PersistError::NotFound(m) => err_response(StatusCode::NOT_FOUND, m),
+            PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
+            PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
+            PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+        };
+    }
+
+    // `persist_users` already refreshed `state.user_api_keys` after the
+    // kernel reload — count the swapped entry for the wire response so
+    // operators can see the kill happened in the same hop. We resolve the
+    // count by inspecting the live snapshot for the rotated user instead
+    // of trusting `persist_users` to return it (the in-place refresh is
+    // best-effort with respect to ordering).
+    let sessions_invalidated = state
+        .user_api_keys
+        .read()
+        .await
+        .iter()
+        .filter(|u| u.name == name)
+        .count();
+
+    // Audit-record the rotation. Detail names the actor (caller) so the
+    // hash-chained log answers "who rotated whose key" without echoing
+    // the plaintext — that stays in the response body only.
+    let actor = caller
+        .as_ref()
+        .map(|c| c.0.name.clone())
+        .unwrap_or_else(|| "system".to_string());
+    let actor_user_id = caller.as_ref().map(|c| c.0.user_id);
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_runtime::audit::AuditAction::RoleChange,
+        format!("api_key rotated by {actor} for user {name}"),
+        "completed",
+        actor_user_id,
+        Some("api".to_string()),
+    );
+
+    Json(RotateKeyResponse {
+        status: "ok".to_string(),
+        new_api_key: new_plaintext,
+        sessions_invalidated,
+    })
+    .into_response()
+}
+
+/// Generate a 32-byte (256-bit) random API key plaintext.
+///
+/// Hex-encoded so the result is URL-safe and matches the existing
+/// `generate_session_token` shape (64 chars). We don't reuse
+/// `generate_session_token` directly because that returns a
+/// [`crate::password_hash::SessionToken`] with a creation timestamp, which
+/// is the wrong type — API keys don't carry a TTL.
+fn generate_api_key_plaintext() -> String {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rebuild the `ApiUserAuth` records from the kernel's current `[[users]]`
+/// table. Mirrors `server.rs::configured_user_api_keys`, kept private to
+/// `users.rs` so the persistence path can call it without exposing
+/// `server.rs` internals across the route boundary.
+fn rebuild_api_user_records(state: &AppState) -> Vec<ApiUserAuth> {
+    state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .filter_map(|user| {
+            let api_key_hash = user.api_key_hash.as_deref()?.trim();
+            if api_key_hash.is_empty() {
+                return None;
+            }
+            Some(ApiUserAuth {
+                name: user.name.clone(),
+                role: UserRole::from_str_role(&user.role),
+                api_key_hash: api_key_hash.to_string(),
+                user_id: UserId::from_name(&user.name),
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Persistence helpers
 // ---------------------------------------------------------------------------
@@ -738,6 +922,17 @@ where
         // restart) will pick it up.
         tracing::warn!(error = %e, "user config reload failed after write");
         return Err(PersistError::Internal(format!("reload failed: {e}")));
+    }
+
+    // Refresh the in-memory `ApiUserAuth` snapshot the auth middleware
+    // reads from. Without this swap, mutations to `users[].api_key_hash`
+    // (rotate-key, update_user, import_users) only become effective after
+    // a daemon restart — the bug rotate-key exists to fix. Done in the
+    // shared helper so every user-mutation path benefits, not only the
+    // rotation endpoint.
+    {
+        let refreshed = rebuild_api_user_records(state.as_ref());
+        *state.user_api_keys.write().await = refreshed;
     }
 
     state.kernel.audit().record(

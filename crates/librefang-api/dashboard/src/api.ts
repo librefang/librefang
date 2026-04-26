@@ -3592,6 +3592,26 @@ export async function importUsers(
 }
 
 // ---------------------------------------------------------------------------
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6)
+//
+// Owner-only. Returns the new plaintext key in the response — that is the
+// only time the server exposes it; we never log, persist, or re-derive it.
+// ---------------------------------------------------------------------------
+
+export interface RotateUserKeyResponse {
+  status: string;
+  new_api_key: string;
+  sessions_invalidated: number;
+}
+
+export async function rotateUserKey(name: string): Promise<RotateUserKeyResponse> {
+  return post<RotateUserKeyResponse>(
+    `/api/users/${encodeURIComponent(name)}/rotate-key`,
+    {},
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Audit query (M5 / #3203 — endpoint stubbed; the hook stays wired so the
 // dashboard layer is ready when the daemon ships the route).
 // ---------------------------------------------------------------------------

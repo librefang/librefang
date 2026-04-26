@@ -11,10 +11,12 @@ import {
   updateUser,
   deleteUser,
   importUsers,
+  rotateUserKey,
   updateUserPolicy,
   type UserUpsertPayload,
   type PermissionPolicy,
   type BulkImportResult,
+  type RotateUserKeyResponse,
 } from "../http/client";
 import {
   userKeys,
@@ -71,6 +73,28 @@ export function useImportUsers() {
       // Dry run never mutates state — keep the cache as-is.
       if (data.dry_run) return;
       qc.invalidateQueries({ queryKey: userKeys.all });
+    },
+  });
+}
+
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6). Owner-only on
+// the daemon — non-Owner callers get a 403 surfaced through the mutation
+// error path. The response contains the new plaintext key, which the UI
+// must show exactly once (server can't reproduce it later); the dashboard
+// itself never persists the value.
+//
+// Server-side, a successful rotation also swaps the live `user_api_keys`
+// snapshot the auth middleware reads from, so any other tab still
+// authenticated with the OLD key will start getting 401s on the next
+// request. The dashboard doesn't track sessions independently — refreshing
+// the user list is enough to surface the change.
+export function useRotateUserKey() {
+  const qc = useQueryClient();
+  return useMutation<RotateUserKeyResponse, Error, string>({
+    mutationFn: (name: string) => rotateUserKey(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: userKeys.lists() });
+      qc.invalidateQueries({ queryKey: userKeys.detail(name) });
     },
   });
 }

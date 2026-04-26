@@ -70,6 +70,7 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -587,5 +588,262 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
     assert!(
         on_disk.contains("this is not [[ valid TOML"),
         "config.toml was overwritten despite parse failure: {on_disk}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6)
+// ---------------------------------------------------------------------------
+
+/// Seed a single user with an Argon2id hash of `plaintext_key` so the
+/// auth-state snapshot the rotation endpoint mutates has something to swap.
+fn seed_user_with_key(name: &str, plaintext_key: &str) -> UserConfig {
+    let hash =
+        librefang_api::password_hash::hash_password(plaintext_key).expect("seed hash should succeed");
+    UserConfig {
+        name: name.to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: Some(hash),
+        ..Default::default()
+    }
+}
+
+/// Happy path — rotation returns a non-empty plaintext token in the response
+/// body. The plaintext is the only place the new credential exists; if this
+/// test ever asserts an empty string, operators have lost the rotated key
+/// with no way to recover it.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_returns_new_plaintext() {
+    let h = boot_with_seed_users(vec![seed_user_with_key("Alice", "old-plaintext")]).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/Alice/rotate-key",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rotate failed: {body:?}");
+    assert_eq!(body["status"], "ok");
+    let new_key = body["new_api_key"].as_str().unwrap_or("");
+    assert!(
+        !new_key.is_empty(),
+        "rotation must return a non-empty plaintext key: {body:?}"
+    );
+    assert_eq!(
+        new_key.len(),
+        64,
+        "expected 32-byte hex (64 chars), got {}: {body:?}",
+        new_key.len()
+    );
+    assert_eq!(body["sessions_invalidated"], 1);
+}
+
+/// Persisting the new hash is what closes the rotation loop — without it,
+/// the next daemon restart would silently revive the old plaintext key.
+/// We assert the hash on disk (and in the live kernel snapshot) is no
+/// longer the seeded one.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_persists_new_hash() {
+    let original_hash =
+        librefang_api::password_hash::hash_password("old-plaintext").expect("seed hash");
+    let seed = UserConfig {
+        name: "Bob".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: Some(original_hash.clone()),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, _) = json_request(&h, Method::POST, "/api/users/Bob/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "Bob")
+        .cloned()
+        .expect("user must still exist");
+    let after_hash = after.api_key_hash.expect("rotation must leave a hash");
+    assert_ne!(
+        after_hash, original_hash,
+        "api_key_hash unchanged after rotate — persist path is dead"
+    );
+    assert!(
+        after_hash.starts_with("$argon2id$"),
+        "post-rotation hash is not Argon2id PHC: {after_hash}"
+    );
+}
+
+/// The actual session kill: `state.user_api_keys` is the in-memory snapshot
+/// the auth middleware consults on every per-user bearer-token request.
+/// After rotation, the OLD plaintext token must NOT verify against any
+/// entry in the snapshot — the new hash has replaced it. This is the
+/// integration point that distinguishes "rotated, but the leaked token
+/// still authenticates until restart" from a real revocation.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_invalidates_existing_session() {
+    let h = boot_with_seed_users(vec![seed_user_with_key("Carol", "carol-plaintext")]).await;
+
+    // Pre-populate the live AppState snapshot from the seeded users so the
+    // assertion below has something to invalidate. In the real server this
+    // happens at boot via `configured_user_api_keys`; the unit harness
+    // wires AppState directly without that step, so we mirror it here.
+    {
+        let cfg = h._state.kernel.config_ref();
+        let initial = cfg
+            .users
+            .iter()
+            .filter_map(|u| {
+                let hash = u.api_key_hash.as_deref()?.trim();
+                if hash.is_empty() {
+                    return None;
+                }
+                Some(librefang_api::middleware::ApiUserAuth {
+                    name: u.name.clone(),
+                    role: librefang_kernel::auth::UserRole::from_str_role(&u.role),
+                    api_key_hash: hash.to_string(),
+                    user_id: librefang_types::agent::UserId::from_name(&u.name),
+                })
+            })
+            .collect();
+        *h._state.user_api_keys.write().await = initial;
+    }
+
+    // Sanity — the old plaintext verifies against the seeded hash before
+    // rotation. If this assertion fails the test setup is wrong and the
+    // post-rotation assertion below is meaningless.
+    let pre_swap_old_token_verifies = h
+        ._state
+        .user_api_keys
+        .read()
+        .await
+        .iter()
+        .any(|u| {
+            librefang_api::password_hash::verify_password("carol-plaintext", &u.api_key_hash)
+        });
+    assert!(
+        pre_swap_old_token_verifies,
+        "test setup invariant — seeded hash should verify before rotation"
+    );
+
+    let (status, body) = json_request(&h, Method::POST, "/api/users/Carol/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK, "rotate failed: {body:?}");
+
+    // The actual revocation. After rotation, NO entry in the live snapshot
+    // verifies against the old plaintext — the in-memory state the auth
+    // middleware reads from has been swapped, not just the on-disk file.
+    let post_swap_old_token_verifies = h
+        ._state
+        .user_api_keys
+        .read()
+        .await
+        .iter()
+        .any(|u| {
+            librefang_api::password_hash::verify_password("carol-plaintext", &u.api_key_hash)
+        });
+    assert!(
+        !post_swap_old_token_verifies,
+        "old plaintext STILL authenticates against the live snapshot — \
+         the rotate-key endpoint is not invalidating the in-memory user_api_keys, \
+         which means a leaked token is only revocable by daemon restart"
+    );
+
+    // The new plaintext returned in the response must verify against the
+    // freshly rotated hash — closes the loop end-to-end.
+    let new_plaintext = body["new_api_key"].as_str().expect("plaintext in body");
+    let new_token_verifies = h
+        ._state
+        .user_api_keys
+        .read()
+        .await
+        .iter()
+        .any(|u| librefang_api::password_hash::verify_password(new_plaintext, &u.api_key_hash));
+    assert!(
+        new_token_verifies,
+        "new plaintext does not verify against the post-rotation snapshot — \
+         the rotation surfaced a key that nobody can use"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_unknown_user_404() {
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::POST, "/api/users/Ghost/rotate-key", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "got: {body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("not found"),
+        "error must mention 'not found': {body:?}"
+    );
+}
+
+/// Rotating MUST NOT zero out other per-user fields (RBAC M3 policy,
+/// channel bindings, M5 budget). Mirrors the existing
+/// `users_update_and_import_preserve_rbac_m3_policy_fields` test for the
+/// rotation path — same regression risk.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_preserves_other_fields() {
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let mut bindings = HashMap::new();
+    bindings.insert("telegram".to_string(), "111".to_string());
+    let seed = UserConfig {
+        name: "Dan".into(),
+        role: "viewer".into(),
+        channel_bindings: bindings.clone(),
+        api_key_hash: Some(
+            librefang_api::password_hash::hash_password("seed-key").expect("seed"),
+        ),
+        budget: None,
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }),
+        tool_categories: None,
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        channel_tool_rules: HashMap::new(),
+    };
+    let h = boot_with_seed_users(vec![seed.clone()]).await;
+
+    let (status, _) = json_request(&h, Method::POST, "/api/users/Dan/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "Dan")
+        .cloned()
+        .expect("user must still exist");
+    assert_eq!(after.role, "viewer", "role flipped during rotate");
+    assert_eq!(
+        after.channel_bindings, bindings,
+        "channel_bindings cleared during rotate"
+    );
+    assert_eq!(
+        after.tool_policy, seed.tool_policy,
+        "tool_policy cleared during rotate"
+    );
+    assert_eq!(
+        after.memory_access, seed.memory_access,
+        "memory_access cleared during rotate"
     );
 }

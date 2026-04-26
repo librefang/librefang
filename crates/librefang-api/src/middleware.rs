@@ -35,7 +35,12 @@ pub struct AuthState {
     /// Whether dashboard username/password auth is configured.
     pub dashboard_auth_enabled: bool,
     /// Optional per-user API-key hashes used for role-based API access.
-    pub user_api_keys: Arc<Vec<ApiUserAuth>>,
+    ///
+    /// Wrapped in a `RwLock` (mirroring `api_key_lock`) so the rotate-key
+    /// endpoint can swap the in-memory snapshot atomically. Without a live
+    /// swap, a leaked per-user bearer token could only be revoked by
+    /// restarting the daemon — defeating the point of rotation.
+    pub user_api_keys: Arc<tokio::sync::RwLock<Vec<ApiUserAuth>>>,
     /// When `true` and an `api_key` is configured, GET endpoints that are
     /// otherwise on the dashboard public-read allowlist (agents, config,
     /// budget, sessions, approvals, hands, skills, workflows, …) are forced
@@ -320,6 +325,12 @@ pub async fn auth(
     next: Next,
 ) -> Response<Body> {
     let api_key = auth_state.api_key_lock.read().await.clone();
+    // Snapshot the per-user API key list once per request — `user_api_keys`
+    // is now an `Arc<RwLock<Vec<…>>>` so the rotate-key endpoint can swap
+    // entries live. The snapshot is cheap (small Vec of role records, no
+    // hash work) and lets every downstream read avoid re-acquiring the
+    // lock, including the constant-time `verify_password` loop below.
+    let user_api_keys: Vec<ApiUserAuth> = auth_state.user_api_keys.read().await.clone();
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
@@ -414,7 +425,7 @@ pub async fn auth(
     // (see the 401 handler below). When no auth is configured the shell
     // stays public so the out-of-the-box dev experience still works.
     let auth_configured = !api_key.trim().is_empty()
-        || !auth_state.user_api_keys.is_empty()
+        || !user_api_keys.is_empty()
         || auth_state.dashboard_auth_enabled;
     // The inline login page (`login_page.html`) only speaks username/password,
     // so only gate the shell when *that* mode is actually enabled. API-key-only
@@ -499,7 +510,7 @@ pub async fn auth(
     // reaching this branch means the caller is on the LAN/WAN.
     let api_key = api_key.trim();
     if api_key.is_empty()
-        && auth_state.user_api_keys.is_empty()
+        && user_api_keys.is_empty()
         && !auth_state.dashboard_auth_enabled
     {
         // Re-check ConnectInfo defensively — if it is missing for any reason
@@ -615,8 +626,7 @@ pub async fn auth(
         }
         drop(sessions);
 
-        if let Some(user) = auth_state
-            .user_api_keys
+        if let Some(user) = user_api_keys
             .iter()
             .find(|user| crate::password_hash::verify_password(token_str, &user.api_key_hash))
             .cloned()
@@ -981,7 +991,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1011,12 +1021,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
                 user_id: UserId::from_name("Guest"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1049,12 +1059,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
                 user_id: UserId::from_name("Guest"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1087,12 +1097,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "ReadOnly".to_string(),
                 role: UserRole::Viewer,
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
                 user_id: UserId::from_name("ReadOnly"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1125,12 +1135,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "ReadOnly".to_string(),
                 role: UserRole::Viewer,
                 api_key_hash: crate::password_hash::hash_password("viewer-key").unwrap(),
                 user_id: UserId::from_name("ReadOnly"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1162,12 +1172,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
                 user_id: UserId::from_name("Guest"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1210,7 +1220,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("somekey".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![]),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1243,12 +1253,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("user-key").unwrap(),
                 user_id: UserId::from_name("Guest"),
-            }]),
+            }])),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1285,7 +1295,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1320,7 +1330,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1352,7 +1362,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1383,7 +1393,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1421,7 +1431,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1468,7 +1478,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1499,7 +1509,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1535,12 +1545,12 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(vec![ApiUserAuth {
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "alice".into(),
                 role: UserRole::User,
                 api_key_hash: crate::password_hash::hash_password("alice-key").unwrap(),
                 user_id: UserId::from_name("alice"),
-            }]),
+            }])),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1590,7 +1600,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
             audit_log: None,
@@ -1632,7 +1642,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
@@ -1644,7 +1654,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             dashboard_auth_enabled: false,
-            user_api_keys: Arc::new(Vec::new()),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
             audit_log: None,
