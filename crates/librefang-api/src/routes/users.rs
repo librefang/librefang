@@ -717,8 +717,9 @@ pub async fn rotate_user_key(
     // so we never write any plaintext or any reversibly-related material
     // into the audit log; the operator just gets a stable correlation
     // ID for the just-revoked credential.
-    let result =
-        persist_users(&state, move |users| -> Result<Option<String>, PersistError> {
+    let result = persist_users(
+        &state,
+        move |users| -> Result<Option<String>, PersistError> {
             let idx = users
                 .iter()
                 .position(|u| u.name == target)
@@ -728,8 +729,9 @@ pub async fn rotate_user_key(
             // it must not zero out budget / RBAC M3 policy / channel bindings.
             users[idx].api_key_hash = Some(new_hash);
             Ok(old_hash)
-        })
-        .await;
+        },
+    )
+    .await;
 
     // The post-rotation `UserConfig` isn't part of the response shape (no
     // leakage of the new hash) but we still need to drive `persist_users`
@@ -763,7 +765,20 @@ pub async fn rotate_user_key(
 
     // Audit-record the rotation. Detail names the actor (caller) so the
     // hash-chained log answers "who rotated whose key" without echoing
-    // the plaintext — that stays in the response body only.
+    // the plaintext — that stays in the response body only. The
+    // `(old: <fp>)` fragment is the first 8 hex chars of
+    // `sha256(old_argon2_hash)` so operators can correlate this audit
+    // entry with prior authentication-failure log lines mentioning the
+    // same fingerprint after a leaked key is reported. The fingerprint
+    // is a hash-of-hash, so it leaks no key material — the underlying
+    // value is already an Argon2id PHC string, and the truncated SHA-256
+    // is one-way over that. If the user had no prior key (first-time
+    // assignment via rotate) we record `(old: none)` so the field is
+    // always present and parseable downstream.
+    let old_fp = old_hash
+        .as_deref()
+        .map(api_key_hash_fingerprint)
+        .unwrap_or_else(|| "none".to_string());
     let actor = caller
         .as_ref()
         .map(|c| c.0.name.clone())
@@ -772,7 +787,7 @@ pub async fn rotate_user_key(
     state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::RoleChange,
-        format!("api_key rotated by {actor} for user {name}"),
+        format!("api_key rotated by {actor} for user {name} (old: {old_fp})"),
         "completed",
         actor_user_id,
         Some("api".to_string()),
@@ -798,6 +813,30 @@ fn generate_api_key_plaintext() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Short forensic fingerprint of an Argon2 PHC `api_key_hash` string.
+///
+/// Returns the first 8 hex chars of `sha256(input)` — a hash-of-hash so
+/// nothing key-related is reversible from the result, even with the
+/// rotated key in hand. Used by the rotate-key audit detail to tag the
+/// just-revoked credential, so an operator chasing a "leaked key"
+/// authentication-failure line can correlate the failed token's
+/// fingerprint (computed the same way at the auth layer when a future
+/// telemetry change adds it) against the rotation entry that revoked it.
+///
+/// Length is 8 hex chars (32 bits) — enough to distinguish individual
+/// rotations within a normal-sized user table without making the audit
+/// detail noisy. Truncation is safe here because the value is for human
+/// pattern-matching, not a cryptographic identifier.
+fn api_key_hash_fingerprint(api_key_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(api_key_hash.as_bytes());
+    let mut s = String::with_capacity(8);
+    for b in digest.iter().take(4) {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// Rebuild the `ApiUserAuth` records from the kernel's current `[[users]]`

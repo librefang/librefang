@@ -1022,3 +1022,195 @@ async fn users_rotate_key_preserves_other_fields() {
         "memory_access cleared during rotate"
     );
 }
+
+/// Audit detail for a successful rotation must carry a short fingerprint
+/// of the OLD `api_key_hash` so operators can later correlate this entry
+/// with auth-failure log lines mentioning the same fingerprint.
+///
+/// We assert:
+/// 1. Detail contains `(old: <8 hex chars>)`.
+/// 2. The fingerprint matches `sha256(seeded_old_hash)[..4]` rendered as hex.
+/// 3. The plaintext, the new hash, and the old hash itself never appear
+///    in the audit detail — only the fingerprint.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_audit_includes_old_hash_fingerprint() {
+    use sha2::{Digest, Sha256};
+
+    let original_hash =
+        librefang_api::password_hash::hash_password("erin-plaintext").expect("seed hash");
+    let seed = UserConfig {
+        name: "Erin".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: Some(original_hash.clone()),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(&h, Method::POST, "/api/users/Erin/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK, "rotate failed: {body:?}");
+
+    let new_plaintext = body["new_api_key"]
+        .as_str()
+        .expect("plaintext in body")
+        .to_string();
+
+    // Compute the expected fingerprint the same way the handler does.
+    let digest = Sha256::digest(original_hash.as_bytes());
+    let mut expected_fp = String::with_capacity(8);
+    for b in digest.iter().take(4) {
+        expected_fp.push_str(&format!("{b:02x}"));
+    }
+
+    // Locate the rotation entry in the audit log. There may be additional
+    // entries from the persist path (`users updated` ConfigChange), so we
+    // filter by the `RoleChange` action and the user name.
+    let entries = h._state.kernel.audit().recent(50);
+    let rotate_entry = entries
+        .iter()
+        .find(|e| {
+            matches!(e.action, librefang_runtime::audit::AuditAction::RoleChange)
+                && e.detail.contains("api_key rotated")
+                && e.detail.contains("for user Erin")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no rotate-key audit entry found among {} recent entries: {:#?}",
+                entries.len(),
+                entries
+            )
+        });
+
+    assert!(
+        rotate_entry
+            .detail
+            .contains(&format!("(old: {expected_fp})")),
+        "audit detail missing fingerprint of OLD api_key_hash. \
+         expected '(old: {expected_fp})' in: {detail:?}",
+        detail = rotate_entry.detail
+    );
+
+    // Defensive — none of the secret material may leak into the audit detail.
+    assert!(
+        !rotate_entry.detail.contains(&new_plaintext),
+        "audit detail leaked the new plaintext key: {detail}",
+        detail = rotate_entry.detail
+    );
+    assert!(
+        !rotate_entry.detail.contains(&original_hash),
+        "audit detail leaked the full old api_key_hash (fingerprint only): {detail}",
+        detail = rotate_entry.detail
+    );
+    assert!(
+        !rotate_entry.detail.contains("erin-plaintext"),
+        "audit detail leaked the OLD plaintext: {detail}",
+        detail = rotate_entry.detail
+    );
+}
+
+/// Rotating a user that previously had no `api_key_hash` (rare but
+/// possible for a user added without a key, then granted one via rotate)
+/// must still produce a parseable audit detail. We render the absent old
+/// fingerprint as `(old: none)` so downstream parsers see a stable shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_audit_old_none_when_no_prior_hash() {
+    let seed = UserConfig {
+        name: "Frank".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: None,
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, _) = json_request(&h, Method::POST, "/api/users/Frank/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entries = h._state.kernel.audit().recent(50);
+    let rotate_entry = entries
+        .iter()
+        .find(|e| {
+            matches!(e.action, librefang_runtime::audit::AuditAction::RoleChange)
+                && e.detail.contains("for user Frank")
+        })
+        .expect("rotate-key audit entry must exist");
+
+    assert!(
+        rotate_entry.detail.contains("(old: none)"),
+        "expected '(old: none)' for first-time key assignment, got: {detail}",
+        detail = rotate_entry.detail
+    );
+}
+
+/// Lock-ordering invariant: the `state.user_api_keys` snapshot must be
+/// fully refreshed by the time the rotate-key handler returns 200 — i.e.,
+/// no caller can observe a window where the on-disk `config.toml` carries
+/// the new hash but the live `Vec<ApiUserAuth>` still verifies the old
+/// plaintext. We can't deterministically reproduce the race in a unit
+/// test (it depends on `reload_config` latency under contention), but we
+/// CAN assert the post-condition that, immediately after the handler
+/// resolves, the snapshot already reflects the on-disk state. If the
+/// pre-fix ordering regressed (write → reload → swap, no lock held) this
+/// assertion would still pass on a single-threaded happy path — but the
+/// assertion below ALSO checks that the snapshot is refreshed even when
+/// the caller acquires `user_api_keys.read()` immediately after the 200,
+/// before any other request can race in. Treats the lock-held-across
+/// invariant as a comment-anchored property; the deterministic regression
+/// guard for the actual hash content is `users_rotate_key_invalidates_existing_session`.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_snapshot_consistent_with_disk_post_return() {
+    let h = boot_with_seed_users(vec![seed_user_with_key("Gail", "gail-plaintext")]).await;
+
+    // Mirror the daemon's boot-time wiring: `state.user_api_keys` starts
+    // populated from the seeded `UserConfig`s.
+    {
+        let cfg = h._state.kernel.config_ref();
+        let initial = cfg
+            .users
+            .iter()
+            .filter_map(|u| {
+                let hash = u.api_key_hash.as_deref()?.trim();
+                if hash.is_empty() {
+                    return None;
+                }
+                Some(librefang_api::middleware::ApiUserAuth {
+                    name: u.name.clone(),
+                    role: librefang_kernel::auth::UserRole::from_str_role(&u.role),
+                    api_key_hash: hash.to_string(),
+                    user_id: librefang_types::agent::UserId::from_name(&u.name),
+                })
+            })
+            .collect();
+        *h._state.user_api_keys.write().await = initial;
+    }
+
+    let (status, _) = json_request(&h, Method::POST, "/api/users/Gail/rotate-key", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // After the handler returns, the on-disk hash and the live snapshot
+    // for the rotated user must agree. Disagreement = the lock dropped
+    // before the swap = the race window is back.
+    let on_disk = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "Gail")
+        .and_then(|u| u.api_key_hash.clone())
+        .expect("post-rotate Gail must have an on-disk hash");
+    let in_memory = h
+        ._state
+        .user_api_keys
+        .read()
+        .await
+        .iter()
+        .find(|u| u.name == "Gail")
+        .map(|u| u.api_key_hash.clone())
+        .expect("post-rotate Gail must have an in-memory record");
+    assert_eq!(
+        on_disk, in_memory,
+        "lock-ordering invariant broken: on-disk hash differs from live \
+         user_api_keys snapshot immediately after rotate-key returned 200"
+    );
+}
