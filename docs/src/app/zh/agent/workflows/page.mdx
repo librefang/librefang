@@ -1,5 +1,26 @@
 # 工作流引擎指南
 
+## 目录
+
+- [概述](#overview)
+- [核心类型](#core-types)
+- [工作流定义](#workflow-definition)
+- [步骤配置](#step-configuration)
+- [步骤模式](#step-modes)
+- [变量替换](#variable-substitution)
+- [错误处理](#error-handling)
+- [示例](#examples)
+- [触发器引擎](#trigger-engine)
+- [Cron 任务](#cron-jobs)
+  - [\[SILENT\] 标记](#silent-marker)
+- [API 端点](#api-endpoints)
+- [CLI 命令](#cli-commands)
+- [执行限制](#execution-limits)
+- [工作流数据流图](#workflow-data-flow-diagram)
+- [内部架构说明](#internal-architecture-notes)
+
+---
+
 ## 概述
 
 LibreFang 工作流引擎支持多步骤 Agent 流水线——通过编排一系列任务，将每个步骤的工作路由到特定 Agent，并将上一步的输出作为下一步的输入。工作流让你无需编写任何 Rust 代码，即可将多个简单的、单一用途的 Agent 组合成复杂的行为。
@@ -519,6 +540,66 @@ pub struct Trigger {
 
 ---
 
+## Cron 任务
+
+Cron 任务让你使用标准 cron 表达式为 Agent 安排定时消息。每条 cron 条目在 Agent manifest（`.toml`）中定义，独立于用户驱动的会话触发。
+
+```toml
+[[cron]]
+name = "morning-brief"
+schedule = "0 8 * * *"
+message = "Summarize any new alerts from the last 24 hours."
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 人类可读名称，用于日志和审计事件 |
+| `schedule` | string | 标准 5 字段 cron 表达式（分钟、小时、日、月、星期） |
+| `message` | string | 每次触发时发送给 Agent 的提示词 |
+| `session_mode` | string 或 null | `"persistent"`（默认）或 `"new"`，控制连续触发是否复用同一会话 |
+
+> **关于会话的注意事项**：所有使用 `session_mode = "persistent"`（默认）的 cron 触发共享一个以 `(agent, "cron")` 为键的会话。在 Agent manifest 中设置 `session_mode = "new"` **不会**为 cron 的每次触发创建独立会话——cron 调度器会合成 `SenderContext { channel: "cron" }`，在查询 `session_mode` 之前已经走了 channel 分支。
+
+### [SILENT] 标记
+
+在 cron 任务的 `message` 前加上 `[SILENT]` 可抑制 Agent 响应写入会话历史。任务照常执行——工具调用运行、计量记录、审计日志写入——但 assistant 的回复不会写回会话。
+
+这适用于周期性维护任务（备份检查、清理例程、健康探针），否则会堆积对人类用户或其他 Agent 造成干扰的对话历史。
+
+#### 用法
+
+```toml
+[[cron]]
+name = "daily-cleanup"
+schedule = "0 3 * * *"
+message = "[SILENT] Run daily cleanup: remove temp files older than 7 days"
+
+[[cron]]
+name = "hourly-health-check"
+schedule = "0 * * * *"
+message = "[SILENT] Check system health and log any anomalies."
+```
+
+#### 行为细节
+
+- **执行**：Agent 轮次正常运行至完成，所有工具调用均执行。
+- **计量与成本**：Token 用量和费用照常记录到预算账本。
+- **审计日志**：无论是否带有 `[SILENT]` 标记，均会输出包含 Agent 响应摘要的 `CronFire` 审计事件。
+- **会话历史**：仅抑制 **assistant 响应**。出站 cron 消息本身从不存入会话（cron 消息始终是临时的），因此 `[SILENT]` 不影响用户可见的提示词侧。
+
+#### 与 `session_mode = "new"` 的区别
+
+| 行为 | `[SILENT]` | `session_mode = "new"` |
+|------|------------|------------------------|
+| 抑制 assistant 响应 | 是 | 否 |
+| 创建每次触发的独立会话 | 否（复用 `(agent,"cron")` 会话） | 对 cron 无效（见上方注意事项） |
+| 防止历史污染 | 是 | 否 |
+| 正常工具执行 | 是 | 是 |
+
+需要 Agent 行动但不留任何对话历史痕迹时，使用 `[SILENT]`。
+
+---
+
 ## API 端点
 
 ### 工作流端点
@@ -810,63 +891,3 @@ librefang trigger delete <trigger_id>
 - `TriggerEngine` 使用 `DashMap` 实现无锁并发访问，并通过 `agent_triggers` 索引实现高效的按 Agent 触发器查找。
 - 扇出并行使用 `futures::future::join_all`——连续组中的所有扇出步骤同时启动。
 - 触发器的 `evaluate` 方法在 `DashMap` 上使用 `iter_mut()` 来原子地递增触发计数并检查模式，防止竞态条件。
-
----
-
-## Cron 任务
-
-Cron 任务让你使用标准 cron 表达式为 Agent 安排定时消息。每条 cron 条目在 Agent manifest（`.toml`）中定义，独立于用户驱动的会话触发。
-
-```toml
-[[cron]]
-name = "morning-brief"
-schedule = "0 8 * * *"
-message = "Summarize any new alerts from the last 24 hours."
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | 人类可读名称，用于日志和审计事件 |
-| `schedule` | string | 标准 5 字段 cron 表达式（分钟、小时、日、月、星期） |
-| `message` | string | 每次触发时发送给 Agent 的提示词 |
-| `session_mode` | string 或 null | `"persistent"`（默认）或 `"new"`，控制连续触发是否复用同一会话 |
-
-> **关于会话的注意事项**：所有使用 `session_mode = "persistent"`（默认）的 cron 触发共享一个以 `(agent, "cron")` 为键的会话。在 Agent manifest 中设置 `session_mode = "new"` **不会**为 cron 的每次触发创建独立会话——cron 调度器会合成 `SenderContext { channel: "cron" }`，在查询 `session_mode` 之前已经走了 channel 分支。
-
-### [SILENT] 标记
-
-在 cron 任务的 `message` 前加上 `[SILENT]` 可抑制 Agent 响应写入会话历史。任务照常执行——工具调用运行、计量记录、审计日志写入——但 assistant 的回复不会写回会话。
-
-这适用于周期性维护任务（备份检查、清理例程、健康探针），否则会堆积对人类用户或其他 Agent 造成干扰的对话历史。
-
-#### 用法
-
-```toml
-[[cron]]
-name = "daily-cleanup"
-schedule = "0 3 * * *"
-message = "[SILENT] Run daily cleanup: remove temp files older than 7 days"
-
-[[cron]]
-name = "hourly-health-check"
-schedule = "0 * * * *"
-message = "[SILENT] Check system health and log any anomalies."
-```
-
-#### 行为细节
-
-- **执行**：Agent 轮次正常运行至完成，所有工具调用均执行。
-- **计量与成本**：Token 用量和费用照常记录到预算账本。
-- **审计日志**：无论是否带有 `[SILENT]` 标记，均会输出包含 Agent 响应摘要的 `CronFire` 审计事件。
-- **会话历史**：仅抑制 **assistant 响应**。出站 cron 消息本身从不存入会话（cron 消息始终是临时的），因此 `[SILENT]` 不影响用户可见的提示词侧。
-
-#### 与 `session_mode = "new"` 的区别
-
-| 行为 | `[SILENT]` | `session_mode = "new"` |
-|------|------------|------------------------|
-| 抑制 assistant 响应 | 是 | 否 |
-| 创建每次触发的独立会话 | 否（复用 `(agent,"cron")` 会话） | 对 cron 无效（见上方注意事项） |
-| 防止历史污染 | 是 | 否 |
-| 正常工具执行 | 是 | 是 |
-
-需要 Agent 行动但不留任何对话历史痕迹时，使用 `[SILENT]`。

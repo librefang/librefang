@@ -1,8 +1,11 @@
 # 会话自动重置
 
-长期运行的会话会积累消息历史。随着历史记录增长，prompt token 数量上升，上下文窗口被填满，每次请求的费用也随之增加。会话自动重置会按计划清除历史记录，使 agent 在每个工作时间窗口都能以全新的上下文开始。
+长期运行的会话会积累消息历史。随着历史增长，prompt token 增多、上下文窗口被填满，每次请求的成本也随之上升。会话自动重置按计划清除历史，使 agent 在每个工作时间窗口都从干净的上下文开始，同时保留 agent 身份、配置和技能。
+
+该功能面向无人值守部署——cron 驱动的 agent、常驻助手，以及多个用户共享同一个 agent 但彼此不应看到对方历史的多租户场景。
 
 ## 目录
+
 - [配置](#configuration)
 - [重置模式](#reset-modes)
 - [暂停状态](#suspended-state)
@@ -14,12 +17,22 @@
 
 ## 配置
 
+在 `~/.librefang/config.toml` 中添加 `[session_reset]` 段：
+
 ```toml
 [session_reset]
+# "off" | "idle" | "daily" | "both"
 mode = "idle"
+
+# Minutes of inactivity before the session is reset (used by "idle" and "both").
 idle_minutes = 30
+
+# UTC hour (0–23) at which the daily reset fires (used by "daily" and "both").
+# The reset runs at the first check after this hour boundary.
 daily_at_hour = 3
 ```
+
+所有字段都有默认值——空的 `[session_reset]` 段是合法的，等同于 `mode = "off"`。
 
 | 字段 | 默认值 | 约束 |
 |---|---|---|
@@ -33,20 +46,28 @@ daily_at_hour = 3
 
 | 模式 | 行为 |
 |---|---|
-| `off` | 禁用自动重置。 |
-| `idle` | 在空闲 `idle_minutes` 分钟后重置。 |
-| `daily` | 每天在 `daily_at_hour`（UTC）时刻重置一次。 |
-| `both` | 两个条件均可触发——以先到达的为准。 |
+| `off` | 关闭自动重置。会话持续存在，直到被显式关闭。 |
+| `idle` | 在 `idle_minutes` 分钟内未收到新消息时重置。每次新消息到达都会重置计时器。 |
+| `daily` | 每天 UTC `daily_at_hour` 时刻重置一次，与活动情况无关。 |
+| `both` | 任意一个条件触发即重置——以先到达的为准。 |
+
+重置是**按会话**的，不是按 agent。一个 agent 同时运行多个会话（例如每个频道一个），每个会话独立计时。
+
+重置触发后，消息历史被清空。下一条发给 agent 的消息将开启新对话，只包含系统提示词和注入的上下文（记忆、技能），不包含此前的交流记录。
 
 ---
 
 ## 暂停状态
 
+除了自动重置，还可以通过 API **暂停**会话：
+
 ```bash
+# Suspend a session — queued messages will not be delivered until resumed
 curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
   -H "Content-Type: application/json" \
   -d '{"suspended": true}'
 
+# Resume a suspended session
 curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} \
   -H "Content-Type: application/json" \
   -d '{"suspended": false}'
@@ -54,10 +75,13 @@ curl -X PATCH http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id} 
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `suspended` | boolean | 为 true 时，消息进入队列但不处理 |
-| `resume_pending` | boolean（只读） | 暂停期间有消息到达时为 true |
+| `suspended` | boolean | 为 `true` 时，会话将到达的消息入队但不处理 |
+| `resume_pending` | boolean（只读） | 暂停期间有消息到达并等待投递时为 `true` |
 
-手动重置：
+被暂停的会话**不会**被自动重置——空闲计时器和每日时钟仍在推进，但历史会保留到重置触发或你手动重置为止。这适合维护窗口：暂停以暂缓处理，执行外部操作，再恢复。
+
+随时手动重置：
+
 ```bash
 curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/reset
 ```
@@ -66,26 +90,40 @@ curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/r
 
 ## 重置记录
 
-| `reset_reason` | 触发原因 |
+每次重置（自动或手动）后，LibreFang 会在会话元数据中记录原因。`reset_reason` 字段会在 `session:reset` 事件钩子载荷以及会话详情 API 响应中暴露。
+
+| `reset_reason` 值 | 触发条件 |
 |---|---|
 | `idle` | 空闲超时到期 |
 | `daily` | 每日时钟边界跨越 |
 | `suspended` | 会话处于暂停状态时触发了重置 |
-| `manual` | API 调用 |
+| `manual` | 显式调用 `POST /api/.../sessions/{id}/reset` |
+
+可在监控钩子中使用该字段，区分常规计划重置与意外的人工干预。
 
 ---
 
 ## 使用场景
 
-- 交互式助手的空闲重置（`mode = "idle"`，`idle_minutes = 60`）
-- 定时任务驱动 agent 的每日重置（`mode = "daily"`，`daily_at_hour = 2`）
-- 高流量共享 bot 同时启用两种模式（`mode = "both"`）
+**交互助手的空闲重置。** 上班时间为员工答疑的 agent 会从数十次对话中积累历史。设置 `mode = "idle"` 与 `idle_minutes = 60` 后，会话在静默一小时后清空——每次新对话开始时不再背负无关的历史。
+
+**cron 驱动 agent 的每日重置。** 跑夜间数据处理任务的 agent 应每天从一个已知状态开始。`mode = "daily"` 配合 `daily_at_hour = 2`，会在第一次预定任务前的 02:00 UTC 重置会话，确保昨天的上下文不会渗入今天的运行。
+
+**高流量共享 agent 的双模式。** 在繁忙团队频道里服务多个用户的 channel bot 适合 `mode = "both"`：空闲重置应对安静时段，每日重置在频道持续活跃时充当兜底。
 
 ---
 
 ## 与 session_mode 的关系
 
+`session_reset` 与 `session_mode` 是两个独立控制项，作用在不同层级。
+
 | 设置 | 位置 | 控制内容 |
 |---|---|---|
-| `session_mode` | `agent.toml`（每个 agent） | 自动化调用是创建新会话还是复用持久会话 |
-| `session_reset` | `config.toml`（全局） | 现有持久会话的历史记录是否按计划清除 |
+| `session_mode` | `agent.toml`（每 agent 清单） | 自动化调用是**创建新会话**还是**复用持久会话** |
+| `session_reset` | `config.toml`（全局） | 已有持久会话是否按计划**清空历史** |
+
+一个常见误解：在 agent 清单里设置 `session_mode = "new"` 并*不会*按计划清空历史——它只是为每次调用创建一个新的会话对象。原始的持久会话不受影响，会继续增长。
+
+反之，`session_reset` 不会创建新的会话对象。它就地清空**已有**会话的消息历史。会话 ID 保持不变，只有对话轮次被移除。
+
+对于需要每次触发完全隔离的 cron 任务，单靠任一设置都不够——应在 trigger 定义中使用 `session_mode = "new"`。对于需要在一天内保持连续、但每天早上从干净状态开始的 agent，`session_reset` 配合 `mode = "daily"` 才是正解。详见 [session_mode 参考](/zh/agent/workflows#session-mode) 的解析顺序与 cron 相关注意事项。

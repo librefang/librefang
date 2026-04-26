@@ -16,6 +16,7 @@ use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::audit::AuditAction;
+use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1981,6 +1982,180 @@ metrics = []
     assert_eq!(agent_ids_obj.len(), 2, "agent_ids must contain both roles");
     assert_eq!(agent_ids_obj["main"], main_id.to_string());
     assert_eq!(agent_ids_obj["linter"], linter_id.to_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hand_runtime_config_patch_supports_tristate_and_404() {
+    use std::collections::HashMap;
+
+    let harness = start_full_router("secret-key-123").await;
+
+    let instance = match harness
+        .state
+        .kernel
+        .activate_hand("apitester", HashMap::new())
+    {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+    let agent_id = instance.agent_id().expect("apitester agent id");
+
+    let set_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "patched-model",
+                        "provider": "patched-provider",
+                        "api_key_env": "PATCHED_API_KEY_ENV",
+                        "base_url": "https://patched.invalid/v1",
+                        "max_tokens": 777,
+                        "temperature": 0.7,
+                        "web_search_augmentation": "always"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("set override request should succeed");
+    assert_eq!(set_response.status(), StatusCode::OK);
+
+    let set_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after set");
+    assert_eq!(set_entry.manifest.model.model, "patched-model");
+    assert_eq!(set_entry.manifest.model.provider, "patched-provider");
+    assert_eq!(
+        set_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV")
+    );
+    assert_eq!(
+        set_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1")
+    );
+    assert_eq!(set_entry.manifest.model.max_tokens, 777);
+    assert!((set_entry.manifest.model.temperature - 0.7).abs() < 1e-6);
+    assert_eq!(
+        set_entry.manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always
+    );
+
+    let preserve_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "preserved-model",
+                        "api_key_env": null,
+                        "base_url": null
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("preserve override request should succeed");
+    assert_eq!(preserve_response.status(), StatusCode::OK);
+
+    let preserved_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after preserve");
+    assert_eq!(preserved_entry.manifest.model.model, "preserved-model");
+    assert_eq!(
+        preserved_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV"),
+        "missing api_key_env field must leave prior override unchanged"
+    );
+    assert_eq!(
+        preserved_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1"),
+        "missing base_url field must leave prior override unchanged"
+    );
+
+    let clear_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "api_key_env": "   ",
+                        "base_url": ""
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("clear override request should succeed");
+    assert_eq!(clear_response.status(), StatusCode::OK);
+
+    let cleared_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after clear");
+    assert_ne!(
+        cleared_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV"),
+        "empty api_key_env must clear the prior runtime override"
+    );
+    assert_ne!(
+        cleared_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1"),
+        "empty base_url must clear the prior runtime override"
+    );
+    assert_eq!(
+        cleared_entry.manifest.model.model, "preserved-model",
+        "clearing nullable fields must not disturb unrelated non-nullable overrides"
+    );
+
+    let not_found = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/agents/{}/hand-runtime-config",
+                    librefang_types::agent::AgentId::new()
+                ))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"model": "x"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("404 request should complete");
+    assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
 }
 
 // ── issue #2699: `/mcp` must rehydrate caller context from the

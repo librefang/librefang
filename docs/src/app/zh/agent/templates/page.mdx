@@ -42,152 +42,84 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ---
 
-## 软件工程
+## 模板分类
 
-面向开发者的 Agent 模板，覆盖编码、审查、调试、测试、架构和运维。
+模板按使用场景组织。所有模板都使用默认模型供应商。下表列出每个 Agent 的描述、标签、temperature 和最大输出 token 数。点击 Agent 名称可在 registry 中查看完整的 `agent.toml` 清单。
 
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [coder](https://github.com/librefang/librefang-registry/tree/main/agents/coder) | 代码读写和分析 | 0.3 | 8192 |
-| [code-reviewer](https://github.com/librefang/librefang-registry/tree/main/agents/code-reviewer) | PR 审查、问题识别、改进建议 | 0.3 | 4096 |
-| [debugger](https://github.com/librefang/librefang-registry/tree/main/agents/debugger) | Bug 追踪、堆栈分析、根因定位 | 0.2 | 4096 |
-| [test-engineer](https://github.com/librefang/librefang-registry/tree/main/agents/test-engineer) | 测试策略设计、测试编写、正确性验证 | 0.3 | 4096 |
-| [architect](https://github.com/librefang/librefang-registry/tree/main/agents/architect) | 系统架构设计、技术选型评估 | 0.3 | 8192 |
-| [ops](https://github.com/librefang/librefang-registry/tree/main/agents/ops) | 系统监控、诊断、部署管理 | 0.2 | 2048 |
-| [devops-lead](https://github.com/librefang/librefang-registry/tree/main/agents/devops-lead) | CI/CD、基础设施、部署、事件响应 | 0.2 | 4096 |
-| [security-auditor](https://github.com/librefang/librefang-registry/tree/main/agents/security-auditor) | 代码漏洞审查、配置检查、威胁建模 | 0.2 | 4096 |
-| [planner](https://github.com/librefang/librefang-registry/tree/main/agents/planner) | 项目规划、任务拆解、风险评估 | 0.3 | 8192 |
+### 软件工程
 
-```bash
-librefang spawn coder
-librefang spawn debugger
-librefang spawn architect
-```
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [coder](https://github.com/librefang/librefang-registry/tree/main/agents/coder) | 资深软件工程师。读、写、分析代码。 | python、write code、implement feature | 0.3 | 8192 |
+| [code-reviewer](https://github.com/librefang/librefang-registry/tree/main/agents/code-reviewer) | 资深代码评审员。按生产标准审查 PR、识别问题、给出改进建议。 | best-practices、code review、review this pr | 0.3 | 4096 |
+| [debugger](https://github.com/librefang/librefang-registry/tree/main/agents/debugger) | 调试专家。追踪 bug、分析栈、做根因分析。 | -- | 0.2 | 4096 |
+| [test-engineer](https://github.com/librefang/librefang-registry/tree/main/agents/test-engineer) | QA 工程师。设计测试策略、编写测试、验证正确性。 | validation、test plan、write tests | 0.3 | 4096 |
+| [architect](https://github.com/librefang/librefang-registry/tree/main/agents/architect) | 系统架构师。设计软件架构、评估权衡、产出技术规范。 | planning、system design、software architecture | 0.3 | 8192 |
+| [security-auditor](https://github.com/librefang/librefang-registry/tree/main/agents/security-auditor) | 安全专家。审查代码漏洞、检查配置、做威胁建模。 | vulnerability、security audit、vulnerability review | 0.2 | 4096 |
+| [ops](https://github.com/librefang/librefang-registry/tree/main/agents/ops) | DevOps Agent。监控系统、跑诊断、管理部署。 | -- | 0.2 | 2048 |
+| [devops-lead](https://github.com/librefang/librefang-registry/tree/main/agents/devops-lead) | DevOps 负责人。负责 CI/CD、基础设施、部署、监控、事件响应。 | -- | 0.2 | 4096 |
+| [planner](https://github.com/librefang/librefang-registry/tree/main/agents/planner) | 项目规划师。制定项目计划、拆分 epic、估算工作量、识别风险与依赖。 | -- | 0.3 | 8192 |
 
----
+### 研究与分析
 
-## 研究与分析
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [researcher](https://github.com/librefang/librefang-registry/tree/main/agents/researcher) | 调研 Agent。抓取网页内容并综合信息。 | web、web research、investigate topic | 0.5 | 4096 |
+| [academic-researcher](https://github.com/librefang/librefang-registry/tree/main/agents/academic-researcher) | 学术调研 Agent。检索学术论文、总结发现、生成文献综述。 | science、academic research、paper search | 0.3 | 8192 |
+| [analyst](https://github.com/librefang/librefang-registry/tree/main/agents/analyst) | 数据分析师。处理数据、生成洞察、撰写报告。 | -- | 0.4 | 4096 |
+| [data-scientist](https://github.com/librefang/librefang-registry/tree/main/agents/data-scientist) | 数据科学家。分析数据集、构建模型、做可视化和统计分析。 | -- | 0.3 | 4096 |
 
-面向信息检索、数据处理和学术研究的 Agent 模板。
+### 写作与文档
 
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [researcher](https://github.com/librefang/librefang-registry/tree/main/agents/researcher) | 网页检索和信息综合 | 0.5 | 4096 |
-| [academic-researcher](https://github.com/librefang/librefang-registry/tree/main/agents/academic-researcher) | 学术研究，论文搜索、文献综述 | 0.3 | 8192 |
-| [analyst](https://github.com/librefang/librefang-registry/tree/main/agents/analyst) | 数据分析、洞察生成、报告 | 0.4 | 4096 |
-| [data-scientist](https://github.com/librefang/librefang-registry/tree/main/agents/data-scientist) | 数据集分析、模型构建、可视化 | 0.3 | 4096 |
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [writer](https://github.com/librefang/librefang-registry/tree/main/agents/writer) | 内容作者。创作文档、文章和技术写作。 | -- | 0.7 | 4096 |
+| [doc-writer](https://github.com/librefang/librefang-registry/tree/main/agents/doc-writer) | 技术作者。编写文档、README、API 文档、教程和架构指南。 | -- | 0.4 | 8192 |
+| [translator](https://github.com/librefang/librefang-registry/tree/main/agents/translator) | 多语言翻译 Agent，用于文档翻译、本地化和跨文化沟通。 | translation、languages、localization、multilingual、communication | 0.3 | 8192 |
 
-```bash
-librefang spawn researcher
-librefang spawn data-scientist
-```
+### 商业与沟通
 
----
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [customer-support](https://github.com/librefang/librefang-registry/tree/main/agents/customer-support) | 客户支持 Agent，负责工单处理、问题解决与客户沟通。 | support、customer-service、tickets、helpdesk、communication | 0.3 | 4096 |
+| [sales-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/sales-assistant) | 销售助手 Agent，负责 CRM 更新、外联起草、销售漏斗管理与商机跟踪。 | deals、deal tracking、leads | 0.5 | 4096 |
+| [recruiter](https://github.com/librefang/librefang-registry/tree/main/agents/recruiter) | 招聘 Agent，负责简历筛选、候选人外联、JD 写作和招聘漏斗管理。 | hr、candidate screening、recruiting outreach | 0.4 | 4096 |
+| [email-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/email-assistant) | 邮件分流、起草、排期与收件箱管理 Agent。 | email、communication、triage、drafting、scheduling | 0.4 | 8192 |
+| [meeting-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/meeting-assistant) | 会议记录、行动项、议程准备与跟进管理 Agent。 | meetings、notes、action-items、agenda、follow-up | 0.3 | 8192 |
+| [social-media](https://github.com/librefang/librefang-registry/tree/main/agents/social-media) | 社交媒体内容创作、排期与互动策略 Agent。 | social-media、content、marketing、engagement、scheduling | 0.7 | 4096 |
 
-## 写作与文档
+### 个人与生活
 
-面向内容创作、技术文档和翻译的 Agent 模板。
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [personal-finance](https://github.com/librefang/librefang-registry/tree/main/agents/personal-finance) | 个人理财 Agent，负责预算追踪、支出分析、储蓄目标与财务规划。 | money、budget planning、expense analysis | 0.2 | 8192 |
+| [legal-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/legal-assistant) | 法律助手 Agent，负责合同审查、法律研究、合规检查与文件起草。 | documents、legal review、contract review | 0.2 | 8192 |
+| [health-tracker](https://github.com/librefang/librefang-registry/tree/main/agents/health-tracker) | 健康追踪 Agent，负责健康指标、用药提醒、健身目标与生活习惯。 | tracking、health tracking、fitness tracking | 0.3 | 4096 |
+| [travel-planner](https://github.com/librefang/librefang-registry/tree/main/agents/travel-planner) | 行程规划 Agent，负责行程编排、预订调研、预算估算与旅行物流。 | vacation、trip itinerary、travel plan | 0.5 | 8192 |
+| [home-automation](https://github.com/librefang/librefang-registry/tree/main/agents/home-automation) | 智能家居控制 Agent，负责 IoT 设备管理、自动化规则与家居监控。 | home、smart home、home automation | 0.2 | 4096 |
+| [recipe-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/recipe-assistant) | 烹饪助手，帮助处理菜谱、餐计划、食材替换和分量调整。 | food、recipe helper、meal planner | 0.5 | 4096 |
+| [tutor](https://github.com/librefang/librefang-registry/tree/main/agents/tutor) | 教学讲解 Agent，用于学习辅导和教育内容创作。 | education、teaching、tutoring、learning、explanation | 0.5 | 8192 |
 
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [writer](https://github.com/librefang/librefang-registry/tree/main/agents/writer) | 文档和技术写作 | 0.7 | 4096 |
-| [doc-writer](https://github.com/librefang/librefang-registry/tree/main/agents/doc-writer) | 技术文档、README、API 文档、教程 | 0.4 | 8192 |
-| [translator](https://github.com/librefang/librefang-registry/tree/main/agents/translator) | 多语言翻译和本地化 | 0.3 | 8192 |
+### 系统
 
-```bash
-librefang spawn writer
-librefang spawn doc-writer
-librefang spawn translator
-```
-
----
-
-## 商业与沟通
-
-面向客户支持、销售、招聘和日常沟通的 Agent 模板。
-
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [customer-support](https://github.com/librefang/librefang-registry/tree/main/agents/customer-support) | 工单处理、问题解决、客户沟通 | 0.3 | 4096 |
-| [sales-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/sales-assistant) | CRM 更新、外联、销售管道管理 | 0.5 | 4096 |
-| [recruiter](https://github.com/librefang/librefang-registry/tree/main/agents/recruiter) | 简历筛选、候选人联络、招聘管道 | 0.4 | 4096 |
-| [email-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/email-assistant) | 邮件分类、草拟、日程管理 | 0.4 | 8192 |
-| [meeting-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/meeting-assistant) | 会议记录、行动项、后续跟踪 | 0.3 | 8192 |
-| [social-media](https://github.com/librefang/librefang-registry/tree/main/agents/social-media) | 社交媒体内容创作和发布 | 0.7 | 4096 |
-
-```bash
-librefang spawn customer-support
-librefang spawn email-assistant
-librefang spawn meeting-assistant
-```
+| 模板 | 描述 | 标签 | Temp | Max Tokens |
+|------|------|------|------|------------|
+| [assistant](https://github.com/librefang/librefang-registry/tree/main/agents/assistant) | 通用助手 Agent。日常任务、问答与对话的默认 Agent。 | general、assistant、default、multipurpose、conversation | 0.5 | 8192 |
+| [hello-world](https://github.com/librefang/librefang-registry/tree/main/agents/hello-world) | 友好的问候 Agent，可读取文件、搜索网页、回答日常问题。 | -- | 0.6 | 4096 |
+| [orchestrator](https://github.com/librefang/librefang-registry/tree/main/agents/orchestrator) | 元 Agent，分解复杂任务、委派给专家 Agent 并综合结果。 | -- | 0.3 | 8192 |
 
 ---
 
-## 个人与生活
+## 理解 Temperature
 
-面向个人理财、健康、旅行、家居等日常生活场景的 Agent 模板。
+`temperature` 参数控制 Agent 响应的确定性与创造性。模板会根据每个 Agent 的用途设置合适的值：
 
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [personal-finance](https://github.com/librefang/librefang-registry/tree/main/agents/personal-finance) | 预算追踪、支出分析、理财规划 | 0.2 | 8192 |
-| [legal-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/legal-assistant) | 合同审查、法律研究、合规检查 | 0.2 | 8192 |
-| [health-tracker](https://github.com/librefang/librefang-registry/tree/main/agents/health-tracker) | 健康指标、用药提醒、健身目标 | 0.3 | 4096 |
-| [travel-planner](https://github.com/librefang/librefang-registry/tree/main/agents/travel-planner) | 行程规划、预订调研、预算估算 | 0.5 | 8192 |
-| [home-automation](https://github.com/librefang/librefang-registry/tree/main/agents/home-automation) | 智能家居控制、自动化规则 | 0.2 | 4096 |
-| [recipe-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/recipe-assistant) | 菜谱推荐、膳食计划、食材替换 | 0.5 | 4096 |
-| [tutor](https://github.com/librefang/librefang-registry/tree/main/agents/tutor) | 教学辅导和知识讲解 | 0.5 | 8192 |
-
-```bash
-librefang spawn personal-finance
-librefang spawn travel-planner
-librefang spawn tutor
-```
-
----
-
-## 系统
-
-LibreFang 内置的系统级 Agent 模板。
-
-| 模板 | 描述 | Temperature | max_tokens |
-|------|------|-------------|------------|
-| [assistant](https://github.com/librefang/librefang-registry/tree/main/agents/assistant) | 通用助手，日常问答和对话（默认 Agent） | 0.5 | 8192 |
-| [hello-world](https://github.com/librefang/librefang-registry/tree/main/agents/hello-world) | 入门示例，读取文件、搜索网页 | 0.6 | 4096 |
-| [orchestrator](https://github.com/librefang/librefang-registry/tree/main/agents/orchestrator) | 元 Agent，分解复杂任务并委派给专家 | 0.3 | 8192 |
-
-`assistant` 是 LibreFang 的默认 Agent，安装后即可使用。`hello-world` 适合用来验证系统是否正常工作或作为自定义模板的起点。`orchestrator` 可以生成和协调其他 Agent，适合处理需要多个专业 Agent 协作的复杂任务。
-
-```bash
-librefang spawn assistant
-librefang spawn hello-world
-librefang spawn orchestrator
-```
-
----
-
-## 模型配置
-
-所有模板均使用 `provider = "default"` 和 `model = "default"`。这意味着 Agent 会继承你在 `~/.librefang/config.toml` 中配置的默认供应商和模型。
-
-```toml
-# ~/.librefang/config.toml 示例
-[llm]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-api_key_env = "GROQ_API_KEY"
-```
-
-你可以在生成 Agent 时覆盖默认配置：
-
-```bash
-# CLI 覆盖
-librefang spawn coder --provider openai --model gpt-4o
-
-# API 覆盖
-curl -X POST http://localhost:4545/api/agents \
-  -H "Content-Type: application/json" \
-  -d '{"template": "coder", "provider": "openai", "model": "gpt-4o"}'
-```
+- **0.2** -- 精确且确定。用于对准确性要求最高的 Agent：`debugger`、`ops`、`security-auditor`、`devops-lead`、`personal-finance`、`legal-assistant`、`home-automation`。
+- **0.3** -- 分析型，略带灵活性。大部分工程与研究类 Agent：`coder`、`code-reviewer`、`test-engineer`、`architect`、`planner`、`data-scientist`、`academic-researcher`、`customer-support`、`translator`、`health-tracker`、`meeting-assistant`、`orchestrator`。
+- **0.4** -- 均衡的分析型。`analyst`、`doc-writer`、`email-assistant`、`recruiter`。
+- **0.5** -- 通用。`assistant`、`researcher`、`tutor`、`recipe-assistant`、`sales-assistant`、`travel-planner`。
+- **0.6** -- 对话式。`hello-world`。
+- **0.7** -- 创意型。`writer`、`social-media`。
 
 ---
 
@@ -208,7 +140,7 @@ module = "builtin:chat"
 # 可选元数据
 tags = ["tag1", "tag2"]
 
-# 模型配置
+# 模型配置（必填）
 [model]
 provider = "default"                 # 继承 config.toml 中的默认供应商
 model = "default"                    # 继承 config.toml 中的默认模型
@@ -216,6 +148,17 @@ max_tokens = 4096                    # 每次响应的最大输出 token 数
 temperature = 0.3                    # 创造性（0.0 = 确定性，1.0 = 创造性）
 system_prompt = """Your agent's personality, capabilities, and instructions go here.
 Be specific about what the agent should and should not do."""
+
+# To use a specific provider instead of default, set the provider and model explicitly:
+# provider = "gemini"
+# model = "gemini-2.5-flash"
+# api_key_env = "GEMINI_API_KEY"
+
+# Optional fallback model (used when primary is unavailable)
+# [[fallback_models]]
+# provider = "groq"
+# model = "llama-3.3-70b-versatile"
+# api_key_env = "GROQ_API_KEY"
 
 # 可选调度（用于自主/后台 Agent）
 [schedule]
@@ -355,19 +298,6 @@ cache_context = true   # 默认 false（每回合重读）
 # agent.toml —— 关闭懒加载；每回合发送所有 tool schema
 lazy_tools = false
 ```
-
----
-
-## 理解 Temperature
-
-`temperature` 参数控制 Agent 响应的确定性与创造性。模板会根据每个 Agent 的用途设置合适的值：
-
-- **0.2** -- 精确且确定。用于对准确性要求最高的 Agent：`debugger`、`ops`、`security-auditor`、`devops-lead`、`personal-finance`、`legal-assistant`、`home-automation`。
-- **0.3** -- 分析型，略带灵活性。大部分工程与研究类 Agent：`coder`、`code-reviewer`、`test-engineer`、`architect`、`planner`、`data-scientist`、`academic-researcher`、`customer-support`、`translator`、`health-tracker`、`meeting-assistant`、`orchestrator`。
-- **0.4** -- 均衡的分析型。`analyst`、`doc-writer`、`email-assistant`、`recruiter`。
-- **0.5** -- 通用。`assistant`、`researcher`、`tutor`、`recipe-assistant`、`sales-assistant`、`travel-planner`。
-- **0.6** -- 对话式。`hello-world`。
-- **0.7** -- 创意型。`writer`、`social-media`。
 
 ---
 

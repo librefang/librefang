@@ -19,6 +19,7 @@
     "scheduler": "Scheduler",
     "goals": "Goals",
     "agents": "Agents",
+    "users": "Users",
     "providers": "Providers",
     "channels": "Channels",
     "skills": "Skills",

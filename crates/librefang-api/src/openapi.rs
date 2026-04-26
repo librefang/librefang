@@ -81,6 +81,8 @@ use crate::types;
         routes::set_agent_mcp_servers,
         routes::update_agent_identity,
         routes::patch_agent_config,
+        routes::patch_hand_agent_runtime_config,
+        routes::delete_hand_agent_runtime_config,
         routes::clone_agent,
         routes::list_agent_files,
         routes::get_agent_file,
@@ -231,6 +233,14 @@ use crate::types;
         routes::auto_dream_abort,
         routes::auto_dream_set_enabled,
 
+        // ── Users / RBAC ──
+        routes::users::list_users,
+        routes::users::get_user,
+        routes::users::create_user,
+        routes::users::update_user,
+        routes::users::delete_user,
+        routes::users::import_users,
+
         // ── Memory (KV) ──
         routes::get_agent_kv,
         routes::get_agent_kv_key,
@@ -353,6 +363,11 @@ use crate::types;
         types::ExtensionInstallRequest,
         types::ExtensionUninstallRequest,
         routes::auto_dream::SetEnabledRequest,
+        routes::users::UserView,
+        routes::users::UserUpsert,
+        routes::users::BulkImportRequest,
+        routes::users::BulkImportResult,
+        routes::users::BulkImportRow,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),
@@ -375,6 +390,7 @@ use crate::types;
         (name = "pairing", description = "Device pairing and mobile sync"),
         (name = "auth", description = "OAuth/OIDC authentication endpoints"),
         (name = "openai", description = "OpenAI-compatible API endpoints"),
+        (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
     ),
 )]
 pub struct ApiDoc;

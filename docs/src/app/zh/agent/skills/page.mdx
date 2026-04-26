@@ -6,6 +6,7 @@
 
 - [概述](#overview)
 - [技能格式](#skill-format)
+- [技能配置变量](#skill-config-variables)
 - [Python 技能](#python-skills)
 - [WASM 技能](#wasm-skills)
 - [技能依赖声明](#skill-requirements)
@@ -162,6 +163,61 @@ capabilities = ["NetConnect(*)"]
 |-------|------|-------------|
 | `tools` | array | 该技能需要宿主提供的内置工具 |
 | `capabilities` | array | Agent 必须具备的能力字符串 |
+
+---
+
+## 技能配置变量
+
+技能可以在 `skill.toml` 中声明配置变量。Agent 启动时，LibreFang 会从用户的 `~/.librefang/config.toml` 中解析每个变量，并把解析得到的值注入到 Agent 的系统提示词中，让技能无需在代码里硬编码密钥或环境相关取值即可使用。
+
+### 在 `skill.toml` 中声明变量
+
+每个变量对应一个 `[[config_vars]]` 条目：
+
+```toml
+[[config_vars]]
+key = "wiki.base_url"
+description = "Base URL of the internal wiki"
+default = "https://wiki.example.com"
+
+[[config_vars]]
+key = "db.host"
+description = "Database hostname"
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|-------|------|----------|-------------|
+| `key` | string | 是 | 形如 `<namespace>.<field>` 的点分键。 |
+| `description` | string | 否 | 在仪表盘中展示的人类可读描述。 |
+| `default` | string | 否 | 当用户配置中缺少该键时使用的回退值。 |
+
+### 在 `~/.librefang/config.toml` 中存储取值
+
+第一个点之前的命名空间会映射到 `[skills.config]` 下的 TOML 表：
+
+```toml
+[skills.config.wiki]
+base_url = "https://wiki.corp.example.com"
+
+[skills.config.db]
+host = "postgres.internal"
+```
+
+### 系统提示词注入
+
+解析后的变量会以带标签的代码块形式追加到系统提示词中，位置在技能自身的提示词内容之前：
+
+```
+## Skill Config Variables
+wiki.base_url = https://wiki.corp.example.com
+db.host = postgres.internal
+```
+
+### 解析规则
+
+- **默认回退**：如果某个键在 `~/.librefang/config.toml` 中不存在，但技能声明了 `default`，则使用默认值。
+- **缺失且无默认值**：如果用户配置和技能声明中都没有该键（也未设 `default`），该变量会被静默地从注入块中省略。
+- **去重**：当多个已安装技能声明了同一个键时，**最先**加载的技能所提供的值优先生效。后续对同一键的声明在注入时会被忽略，但每个技能仍可保留自己的 `default` 用于文档说明。
 
 ---
 

@@ -502,6 +502,7 @@ def main():
         print(json.dumps({"type": "ingest_result", "memories": []}))
         return
 
+    # Open the per-plugin DB and read anything keyed to this peer.
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS prefs (peer_id TEXT, fact TEXT)")
     rows = conn.execute(

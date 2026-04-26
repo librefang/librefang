@@ -48,6 +48,7 @@ class LibreFang {
     this.skills = new SkillsResource(this);
     this.system = new SystemResource(this);
     this.tools = new ToolsResource(this);
+    this.users = new UsersResource(this);
     this.webhooks = new WebhooksResource(this);
     this.workflows = new WorkflowsResource(this);
   }
@@ -198,6 +199,14 @@ class AgentsResource {
 
   async deleteAgentFile(id, filename) {
     return this._c._request("DELETE", `/api/agents/${id}/files/${filename}`);
+  }
+
+  async deleteHandAgentRuntimeConfig(id) {
+    return this._c._request("DELETE", `/api/agents/${id}/hand-runtime-config`);
+  }
+
+  async patchHandAgentRuntimeConfig(id, data) {
+    return this._c._request("PATCH", `/api/agents/${id}/hand-runtime-config`, data, undefined);
   }
 
   async clearAgentHistory(id) {
@@ -1120,6 +1129,36 @@ class ToolsResource {
 
   async invokeTool(name, data, query) {
     return this._c._request("POST", `/api/tools/${name}/invoke`, data, query);
+  }
+}
+
+// ── Users Resource
+
+class UsersResource {
+  constructor(client) { this._c = client; }
+
+  async listUsers() {
+    return this._c._request("GET", "/api/users");
+  }
+
+  async createUser(data) {
+    return this._c._request("POST", "/api/users", data, undefined);
+  }
+
+  async importUsers(data) {
+    return this._c._request("POST", "/api/users/import", data, undefined);
+  }
+
+  async getUser(name) {
+    return this._c._request("GET", `/api/users/${name}`);
+  }
+
+  async updateUser(name, data) {
+    return this._c._request("PUT", `/api/users/${name}`, data, undefined);
+  }
+
+  async deleteUser(name) {
+    return this._c._request("DELETE", `/api/users/${name}`);
   }
 }
 

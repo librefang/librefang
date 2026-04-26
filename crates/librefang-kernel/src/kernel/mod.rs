@@ -478,6 +478,22 @@ pub struct LibreFangKernel {
     /// bridges, or cron — those paths still serialize at the existing
     /// `agent_msg_locks` / `session_msg_locks` inside `send_message_full`.
     agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
+    /// Per-hand-instance lock serializing runtime-override mutations
+    /// (PATCH/DELETE on `/api/agents/{id}/hand-runtime-config`).
+    ///
+    /// `merge_agent_runtime_override` is atomic under the DashMap shard
+    /// lock, but the subsequent `apply_*` writes against `AgentRegistry`
+    /// happen after that lock is released. Without an outer per-instance
+    /// lock, two concurrent PATCHes can interleave their `apply` steps
+    /// and leave the live AgentRegistry disagreeing with the persisted
+    /// `hand_state.json` until the next restart reconciles it. PATCH/DELETE
+    /// here is a dashboard-driven path (≪ 1 QPS), so per-instance
+    /// serialization has zero observable cost.
+    ///
+    /// Entries are removed in `deactivate_hand` so reactivating with a
+    /// fresh `instance_id` doesn't accumulate stale mutexes across
+    /// activate/deactivate cycles.
+    hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
@@ -2941,6 +2957,7 @@ impl LibreFangKernel {
             agent_msg_locks: dashmap::DashMap::new(),
             session_msg_locks: dashmap::DashMap::new(),
             agent_concurrency: dashmap::DashMap::new(),
+            hand_runtime_override_locks: dashmap::DashMap::new(),
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
@@ -3045,7 +3062,8 @@ impl LibreFangKernel {
             std::collections::HashMap<String, serde_json::Value>,
         > = {
             let state_path = cfg.home_dir.join("data").join("hand_state.json");
-            librefang_hands::registry::HandRegistry::load_state(&state_path)
+            librefang_hands::registry::HandRegistry::load_state_detailed(&state_path)
+                .entries
                 .into_iter()
                 .map(|e| (e.hand_id, e.config))
                 .collect()
@@ -3056,6 +3074,9 @@ impl LibreFangKernel {
             Ok(agents) => {
                 let count = agents.len();
                 for entry in agents {
+                    if entry.is_hand {
+                        continue;
+                    }
                     let agent_id = entry.id;
                     let name = entry.name.clone();
 
@@ -9258,7 +9279,13 @@ system_prompt = "You are a helpful assistant."
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
     ) -> KernelResult<librefang_hands::HandInstance> {
-        self.activate_hand_with_id(hand_id, config, None, None)
+        self.activate_hand_with_id(
+            hand_id,
+            config,
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
     }
 
     /// Like [`activate_hand`](Self::activate_hand) but allows specifying an
@@ -9267,6 +9294,10 @@ system_prompt = "You are a helpful assistant."
         &self,
         hand_id: &str,
         mut config: std::collections::HashMap<String, serde_json::Value>,
+        agent_runtime_overrides: std::collections::BTreeMap<
+            String,
+            librefang_hands::HandAgentRuntimeOverride,
+        >,
         instance_id: Option<uuid::Uuid>,
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
@@ -9314,7 +9345,13 @@ system_prompt = "You are a helpful assistant."
         // Create the instance in the registry
         let instance = self
             .hand_registry
-            .activate_with_id(hand_id, config, instance_id, timestamps)
+            .activate_with_id(
+                hand_id,
+                config,
+                agent_runtime_overrides,
+                instance_id,
+                timestamps,
+            )
             .map_err(|e| match e {
                 HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
                     format!("Hand already active: {id}"),
@@ -9413,6 +9450,7 @@ system_prompt = "You are a helpful assistant."
 
         for (role, hand_agent) in &def.agents {
             let mut manifest = hand_agent.manifest.clone();
+            let runtime_override = instance.agent_runtime_overrides.get(role).cloned();
 
             // Prefix hand agent name with hand_id to avoid colliding with
             // standalone specialist agents spawned by routing.
@@ -9542,6 +9580,30 @@ system_prompt = "You are a helpful assistant."
             // the prompt on every restart.
             let _ =
                 apply_settings_block_to_manifest(&mut manifest, &def.settings, &instance.config);
+
+            if let Some(runtime_override) = runtime_override {
+                if let Some(provider) = runtime_override.provider {
+                    manifest.model.provider = provider;
+                }
+                if let Some(model) = runtime_override.model {
+                    manifest.model.model = model;
+                }
+                if let Some(api_key_env) = runtime_override.api_key_env {
+                    manifest.model.api_key_env = api_key_env;
+                }
+                if let Some(base_url) = runtime_override.base_url {
+                    manifest.model.base_url = base_url;
+                }
+                if let Some(max_tokens) = runtime_override.max_tokens {
+                    manifest.model.max_tokens = max_tokens;
+                }
+                if let Some(temperature) = runtime_override.temperature {
+                    manifest.model.temperature = temperature;
+                }
+                if let Some(mode) = runtime_override.web_search_augmentation {
+                    manifest.web_search_augmentation = mode;
+                }
+            }
 
             // Inject allowed env vars
             if !allowed_env.is_empty() {
@@ -9739,9 +9801,21 @@ system_prompt = "You are a helpful assistant."
             .deactivate(instance_id)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
 
-        // Kill all agents spawned by this hand (multi-agent support)
+        // Collect every hand-agent id touched by this instance so we can both
+        // kill the live runtime and scrub the persisted SQLite rows below.
+        //
+        // `kill_agent` already calls `memory.remove_agent` on its happy path,
+        // but it bails out with `Err` at `registry.remove(agent_id)?` when the
+        // agent isn't in the in-memory registry — which is exactly what
+        // happens to hand-agents across a restart since the boot fix in
+        // #a023519d skips `is_hand=true` rows in `load_all_agents`. On the
+        // error path the SQLite row is never touched, so without the explicit
+        // `memory.remove_agent` pass below the orphan accumulates every
+        // deactivate/reactivate cycle.
+        let mut affected_agents: Vec<AgentId> = Vec::new();
         if !instance.agent_ids.is_empty() {
             for &agent_id in instance.agent_ids.values() {
+                affected_agents.push(agent_id);
                 if let Err(e) = self.kill_agent(agent_id) {
                     warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
                 }
@@ -9751,6 +9825,7 @@ system_prompt = "You are a helpful assistant."
             let hand_tag = format!("hand:{}", instance.hand_id);
             for entry in self.registry.list() {
                 if entry.tags.contains(&hand_tag) {
+                    affected_agents.push(entry.id);
                     if let Err(e) = self.kill_agent(entry.id) {
                         warn!(agent = %entry.id, error = %e, "Failed to kill orphaned hand agent");
                     } else {
@@ -9759,6 +9834,25 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         }
+
+        // Remove the SQLite rows for every hand-agent we just tore down.
+        // `remove_agent` cascades to session rows, so we don't need a
+        // separate `delete_agent_sessions` call here.
+        for agent_id in &affected_agents {
+            if let Err(e) = self.memory.remove_agent(*agent_id) {
+                warn!(
+                    agent = %agent_id,
+                    hand_id = %instance.hand_id,
+                    error = %e,
+                    "Failed to remove hand-agent row from SQLite on deactivate"
+                );
+            }
+        }
+
+        // Drop the per-instance runtime-override mutex so reactivating
+        // with a fresh `instance_id` doesn't leak entries here.
+        self.hand_runtime_override_locks.remove(&instance_id);
+
         // Persist hand state so it survives restarts
         self.persist_hand_state();
         Ok(())
@@ -9777,6 +9871,321 @@ system_prompt = "You are a helpful assistant."
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
+    }
+
+    fn persist_hand_state_result(&self) -> KernelResult<()> {
+        let state_path = self.home_dir_boot.join("data").join("hand_state.json");
+        self.hand_registry
+            .persist_state(&state_path)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+    }
+
+    /// Per-instance serialization lock for runtime-override mutations.
+    /// See the field comment on `hand_runtime_override_locks` for the
+    /// race this guards against.
+    fn hand_runtime_override_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
+        self.hand_runtime_override_locks
+            .entry(instance_id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn apply_hand_agent_runtime_override_to_registry(
+        &self,
+        agent_id: AgentId,
+        default_manifest: &librefang_types::agent::AgentManifest,
+        merged: &librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()> {
+        if merged.model.is_some()
+            || merged.provider.is_some()
+            || merged.api_key_env.is_some()
+            || merged.base_url.is_some()
+        {
+            let (default_model, default_provider, default_api_key_env, default_base_url) =
+                self.resolve_hand_agent_model_defaults(default_manifest);
+            self.registry
+                .update_model_provider_config(
+                    agent_id,
+                    merged.model.clone().unwrap_or(default_model),
+                    merged.provider.clone().unwrap_or(default_provider),
+                    merged.api_key_env.clone().unwrap_or(default_api_key_env),
+                    merged.base_url.clone().unwrap_or(default_base_url),
+                )
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(max_tokens) = merged.max_tokens {
+            self.registry
+                .update_max_tokens(agent_id, max_tokens)
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(temperature) = merged.temperature {
+            self.registry
+                .update_temperature(agent_id, temperature)
+                .map_err(KernelError::LibreFang)?;
+        }
+        if let Some(mode) = merged.web_search_augmentation {
+            self.registry
+                .update_web_search_augmentation(agent_id, mode)
+                .map_err(KernelError::LibreFang)?;
+        }
+        Ok(())
+    }
+
+    fn resolve_hand_agent_model_defaults(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+    ) -> (String, String, Option<String>, Option<String>) {
+        let cfg = self.config.load();
+        let mut provider = manifest.model.provider.clone();
+        let mut model = manifest.model.model.clone();
+        let mut api_key_env = manifest.model.api_key_env.clone();
+        let mut base_url = manifest.model.base_url.clone();
+        if provider == "default" {
+            provider = cfg.default_model.provider.clone();
+            if api_key_env.is_none() {
+                api_key_env = Some(cfg.default_model.api_key_env.clone());
+            }
+            if base_url.is_none() {
+                base_url = cfg.default_model.base_url.clone();
+            }
+        }
+        if model == "default" {
+            model = cfg.default_model.model.clone();
+        }
+        // Match the spawn-time normalization in `spawn_agent` (~line 3802):
+        // a `provider/model` or `provider:model` model id collapses to bare
+        // `model`. Without this, clear/update over a default-resolved model
+        // (e.g. cfg.default_model.model = "claude-code/sonnet" + provider
+        // "claude-code") leaves the live AgentRegistry holding the prefixed
+        // form while spawn stored the bare form — the two paths disagree,
+        // and `clear_hand_agent_runtime_override_resets_manifest_and_state`
+        // catches it.
+        let stripped = strip_provider_prefix(&model, &provider);
+        if stripped != model {
+            model = stripped;
+        }
+        (model, provider, api_key_env, base_url)
+    }
+
+    pub fn update_hand_agent_runtime_override(
+        &self,
+        agent_id: AgentId,
+        override_config: librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()> {
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        // Serialize the entire merge → persist → apply flow per hand
+        // instance. The DashMap shard lock inside
+        // `merge_agent_runtime_override` only covers the merge step; without
+        // this outer guard, two concurrent PATCHes can interleave their
+        // `apply_hand_agent_runtime_override_to_registry` calls and leave
+        // the live AgentRegistry inconsistent with `hand_state.json`.
+        let lock = self.hand_runtime_override_lock(instance.instance_id);
+        let _guard = lock.lock().unwrap_or_else(|e| {
+            warn!(
+                instance = %instance.instance_id,
+                "hand_runtime_override_lock poisoned, recovering: {e}"
+            );
+            e.into_inner()
+        });
+        // Re-read the instance under the lock so any concurrent
+        // mutation (e.g. an in-flight clear) is reflected in the
+        // `previous` snapshot used for rollback.
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let role = instance
+            .agent_ids
+            .iter()
+            .find_map(|(role, id)| (*id == agent_id).then(|| role.clone()))
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand role not found for agent {agent_id}"
+                )))
+            })?;
+        let def = self
+            .hand_registry
+            .get_definition(&instance.hand_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand definition not loaded for {}",
+                    instance.hand_id
+                )))
+            })?;
+        let agent_def = def.agents.get(&role).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Hand role not found for agent {agent_id}"
+            )))
+        })?;
+
+        let previous = instance.agent_runtime_overrides.get(&role).cloned();
+        let merged = self
+            .hand_registry
+            .merge_agent_runtime_override(instance.instance_id, &role, override_config)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        if let Err(err) = self.persist_hand_state_result() {
+            let _ = self.hand_registry.restore_agent_runtime_override(
+                instance.instance_id,
+                &role,
+                previous,
+            );
+            return Err(err);
+        }
+        if let Err(err) = self.apply_hand_agent_runtime_override_to_registry(
+            agent_id,
+            &agent_def.manifest,
+            &merged,
+        ) {
+            let _ = self.hand_registry.restore_agent_runtime_override(
+                instance.instance_id,
+                &role,
+                previous,
+            );
+            let _ = self.persist_hand_state_result();
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Clear all runtime overrides for a hand agent, restoring the live
+    /// manifest to the defaults declared in the owning hand's HAND.toml.
+    ///
+    /// Returns [`LibreFangError::AgentNotFound`] if the agent id is not
+    /// attached to any active hand. Returns an `Internal` error with the
+    /// `Hand role not found` prefix if the hand instance exists but no role
+    /// maps to the given agent id (should not happen in practice — guarded
+    /// so the HTTP layer can surface a 409 instead of a silent 500).
+    ///
+    /// Unlike [`Self::update_hand_agent_runtime_override`], this is a full
+    /// reset: the per-role entry in `agent_runtime_overrides` is dropped and
+    /// the agent's `model`, `provider`, `api_key_env`, `base_url`,
+    /// `max_tokens`, `temperature`, and `web_search_augmentation` fields
+    /// are rewritten from `def.agents[role].manifest`. State is persisted
+    /// before the live AgentRegistry rewrite so a partial failure leaves
+    /// the persisted file as the source of truth — and the in-memory
+    /// override is restored if either persist or AgentRegistry-write
+    /// fails. Mirrors the rollback discipline in
+    /// [`Self::update_hand_agent_runtime_override`].
+    pub fn clear_hand_agent_runtime_override(&self, agent_id: AgentId) -> KernelResult<()> {
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        // See the matching block in `update_hand_agent_runtime_override`:
+        // serialize per instance so PATCH and DELETE on the same hand
+        // can't interleave their AgentRegistry writes.
+        let lock = self.hand_runtime_override_lock(instance.instance_id);
+        let _guard = lock.lock().unwrap_or_else(|e| {
+            warn!(
+                instance = %instance.instance_id,
+                "hand_runtime_override_lock poisoned, recovering: {e}"
+            );
+            e.into_inner()
+        });
+        // Re-read after taking the lock so a concurrent update isn't
+        // silently overwritten by a stale snapshot.
+        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let role = instance
+            .agent_ids
+            .iter()
+            .find_map(|(role, id)| (*id == agent_id).then(|| role.clone()))
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand role not found for agent {agent_id}"
+                )))
+            })?;
+
+        // Snapshot the current override so we can roll back the
+        // persisted state if the live AgentRegistry rewrite fails.
+        let previous = instance.agent_runtime_overrides.get(&role).cloned();
+
+        // Step 1: clear from the in-memory hand registry (atomic under
+        // the DashMap shard lock). If `previous` was already None this
+        // returns Ok(None) — idempotent.
+        self.hand_registry
+            .clear_agent_runtime_override(instance.instance_id, &role)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+
+        // Step 2: persist before touching live state. If the disk write
+        // fails, restore the in-memory entry and bail — the operator
+        // sees the original override on retry.
+        if let Err(err) = self.persist_hand_state_result() {
+            let _ = self.hand_registry.restore_agent_runtime_override(
+                instance.instance_id,
+                &role,
+                previous,
+            );
+            return Err(err);
+        }
+
+        // Step 3: rewrite the live AgentRegistry to the HAND.toml
+        // defaults. Errors here roll back both the in-memory override
+        // and the persisted file so the next PATCH/DELETE sees a
+        // coherent snapshot.
+        let def = self.hand_registry.get_definition(&instance.hand_id);
+        if let Some(def) = def {
+            if let Some(agent_def) = def.agents.get(&role) {
+                // Start from the raw HAND.toml manifest and re-apply the
+                // same "default" sentinel resolution that `activate_hand_with_id`
+                // runs at activation time. Going through the raw manifest
+                // would leave `model = "default"` on disk, which the LLM
+                // driver can't route.
+                let (model, provider, api_key_env, base_url) =
+                    self.resolve_hand_agent_model_defaults(&agent_def.manifest);
+
+                let apply_result = (|| -> KernelResult<()> {
+                    self.registry
+                        .update_model_provider_config(
+                            agent_id,
+                            model,
+                            provider,
+                            api_key_env,
+                            base_url,
+                        )
+                        .map_err(KernelError::LibreFang)?;
+                    self.registry
+                        .update_max_tokens(agent_id, agent_def.manifest.model.max_tokens)
+                        .map_err(KernelError::LibreFang)?;
+                    self.registry
+                        .update_temperature(agent_id, agent_def.manifest.model.temperature)
+                        .map_err(KernelError::LibreFang)?;
+                    self.registry
+                        .update_web_search_augmentation(
+                            agent_id,
+                            agent_def.manifest.web_search_augmentation,
+                        )
+                        .map_err(KernelError::LibreFang)?;
+                    Ok(())
+                })();
+
+                if let Err(err) = apply_result {
+                    let _ = self.hand_registry.restore_agent_runtime_override(
+                        instance.instance_id,
+                        &role,
+                        previous,
+                    );
+                    let _ = self.persist_hand_state_result();
+                    return Err(err);
+                }
+            } else {
+                warn!(
+                    agent = %agent_id,
+                    hand = %instance.hand_id,
+                    role = %role,
+                    "Hand definition has no entry for role; skipping manifest reset"
+                );
+            }
+        } else {
+            warn!(
+                agent = %agent_id,
+                hand = %instance.hand_id,
+                "Hand definition not loaded; skipping manifest reset on clear"
+            );
+        }
+
+        Ok(())
     }
 
     /// Pause a hand (marks it paused and suspends background loop ticks).
@@ -10715,12 +11124,13 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load_full();
         // Restore previously active hands from persisted state
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
-        let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
-        if !saved_hands.is_empty() {
-            info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for saved_hand in saved_hands {
+        let saved_hands = librefang_hands::registry::HandRegistry::load_state_detailed(&state_path);
+        if !saved_hands.entries.is_empty() {
+            info!("Restoring {} persisted hand(s)", saved_hands.entries.len());
+            for saved_hand in saved_hands.entries {
                 let hand_id = saved_hand.hand_id;
                 let config = saved_hand.config;
+                let agent_runtime_overrides = saved_hand.agent_runtime_overrides;
                 let old_agent_id = saved_hand.old_agent_ids;
                 let status = saved_hand.status;
                 let persisted_instance_id = saved_hand.instance_id;
@@ -10747,6 +11157,7 @@ system_prompt = "You are a helpful assistant."
                 match self.activate_hand_with_id(
                     &hand_id,
                     config,
+                    agent_runtime_overrides.clone(),
                     persisted_instance_id,
                     timestamps,
                 ) {
@@ -10842,6 +11253,72 @@ system_prompt = "You are a helpful assistant."
                 // Write an empty state file so subsequent boots skip this block.
                 self.persist_hand_state();
             }
+        }
+
+        // ── Orphaned hand-agent GC ────────────────────────────────────────
+        // After the boot restore loop above, `hand_registry.list_instances()`
+        // contains every agent id that belongs to a currently active hand.
+        // Any `is_hand = true` row in SQLite whose id is not in that live
+        // set is orphaned — it belonged to a previous activation that was
+        // deactivated or failed to restore, and since the #a023519d fix
+        // skips `is_hand` rows in `load_all_agents`, it will never be
+        // reconstructed. Remove it (and its sessions via the cascade in
+        // `memory.remove_agent`) so the DB doesn't accumulate garbage
+        // across restart cycles.
+        //
+        // Non-hand agents are untouched; we filter on `entry.is_hand`
+        // before considering a row for deletion.
+        //
+        // Hand agents restore from `hand_state.json`, not from the generic
+        // SQLite boot path. The `is_hand = true` SQLite rows are secondary
+        // state used for continuity and cleanup only. If `hand_state.json`
+        // is unreadable, skip GC so a transient parse failure cannot delete
+        // the only surviving hand-agent metadata.
+        if saved_hands.status != librefang_hands::registry::LoadStateStatus::ParseFailed {
+            let live_hand_agents: std::collections::HashSet<AgentId> = self
+                .hand_registry
+                .list_instances()
+                .iter()
+                .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
+                .collect();
+            match self.memory.load_all_agents() {
+                Ok(all) => {
+                    let mut removed = 0usize;
+                    for entry in all {
+                        if !entry.is_hand {
+                            continue;
+                        }
+                        if live_hand_agents.contains(&entry.id) {
+                            continue;
+                        }
+                        match self.memory.remove_agent(entry.id) {
+                            Ok(()) => {
+                                removed += 1;
+                                info!(
+                                    agent = %entry.name,
+                                    id = %entry.id,
+                                    "GC: removed orphaned hand-agent row from SQLite"
+                                );
+                            }
+                            Err(e) => warn!(
+                                agent = %entry.name,
+                                id = %entry.id,
+                                error = %e,
+                                "GC: failed to remove orphaned hand-agent row"
+                            ),
+                        }
+                    }
+                    if removed > 0 {
+                        info!("GC: removed {removed} orphaned hand-agent row(s) from SQLite");
+                    }
+                }
+                Err(e) => warn!("GC: failed to enumerate agents for orphan scan: {e}"),
+            }
+        } else {
+            warn!(
+                path = %state_path.display(),
+                "Skipping orphaned hand-agent GC because hand_state.json failed to parse"
+            );
         }
 
         // Context-engine bootstrap is async; run it at daemon startup so hook

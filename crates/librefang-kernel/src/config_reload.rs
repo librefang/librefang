@@ -70,7 +70,8 @@ pub enum HotAction {
     /// (RBAC M3, #3054). Without this action, design decision #7
     /// ("invalidate per-user permission cache on config reload") is
     /// silently violated — the dashboard reports "applied" while the
-    /// previous policy is still being enforced.
+    /// previous policy is still being enforced. Supersedes the M6
+    /// `ReloadUsers` action that only rebuilt the channel-binding index.
     ReloadAuth,
 }
 
@@ -369,6 +370,10 @@ pub fn build_reload_plan_with_caps(
             "sanitize config changed (effective on next message via config swap)".to_string(),
         );
     }
+
+    // (M6 had a separate `ReloadUsers` action here; collapsed into M3's
+    // `ReloadAuth` above since `auth.reload(&users, &tool_groups)` does
+    // the strict superset of what `replace_users` did.)
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {
         plan.hot_actions.push(HotAction::ReloadProviderApiKeys);

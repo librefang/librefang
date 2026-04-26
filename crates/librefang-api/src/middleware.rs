@@ -89,14 +89,27 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // exposes that cross the "Owner action" line; add here rather than
     // matching a prefix so a new Admin-write endpoint doesn't silently
     // get locked to Owner by accident.
-    matches!(
+    if matches!(
         path,
         "/api/config"
             | "/api/config/set"
             | "/api/config/reload"
             | "/api/auth/change-password"
             | "/api/shutdown"
-    )
+    ) {
+        return true;
+    }
+    // RBAC user-management surface (M6) — every mutating call under
+    // `/api/users*` (create / replace / delete / bulk import) maps to
+    // `Action::ManageUsers` in the kernel, which requires `Owner`. We
+    // match by prefix because the path can be `/api/users`,
+    // `/api/users/{name}`, or `/api/users/import`. GET is left to the
+    // generic Admin-or-above gate so the dashboard's user list and
+    // permission simulator stay usable for Admins.
+    if path == "/api/users" || path.starts_with("/api/users/") {
+        return true;
+    }
+    false
 }
 
 /// Whitelist check for per-user API-key access.
@@ -800,6 +813,56 @@ mod tests {
                 "User must NOT be allowed to POST {path}"
             );
         }
+    }
+
+    #[test]
+    fn test_user_role_admin_cannot_mutate_users_endpoints() {
+        // RBAC M6: every mutating call under /api/users* maps to
+        // Action::ManageUsers, which requires Owner. Without this gate an
+        // Admin per-user API key could promote itself to Owner via
+        // POST /api/users.
+        for method in [
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ] {
+            for path in ["/api/users", "/api/users/alice", "/api/users/import"] {
+                assert!(
+                    !user_role_allows_request(UserRole::Admin, &method, path),
+                    "Admin must NOT be allowed to {method} {path}"
+                );
+                assert!(
+                    user_role_allows_request(UserRole::Owner, &method, path),
+                    "Owner must be allowed to {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_user_role_viewer_can_still_list_users_for_simulator() {
+        // GET on /api/users* stays at the generic Admin-or-above gate (the
+        // permission simulator needs the list). Viewer/User remain GET-only
+        // by the existing user_role_allows_request rules.
+        let get = axum::http::Method::GET;
+        assert!(user_role_allows_request(
+            UserRole::Admin,
+            &get,
+            "/api/users"
+        ));
+        assert!(user_role_allows_request(
+            UserRole::Owner,
+            &get,
+            "/api/users"
+        ));
+        // GET is universally allowed by the role-allows logic, so even
+        // Viewer can read — middleware-level filtering of PII is a
+        // separate concern (UserView already redacts api_key_hash).
+        assert!(user_role_allows_request(
+            UserRole::Viewer,
+            &get,
+            "/api/users"
+        ));
     }
 
     #[test]

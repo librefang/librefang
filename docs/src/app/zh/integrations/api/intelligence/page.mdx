@@ -202,19 +202,18 @@ LibreFang 提供两套记忆系统：每个 Agent 独立的简单键值存储，
     {
       "name": "github",
       "version": "1.0.0",
-      "runtime": "prompt_only",
+      "runtime": "PromptOnly",
       "description": "GitHub integration for issues, PRs, and repos",
-      "bundled": true
-    },
-    {
-      "name": "docker",
-      "version": "1.0.0",
-      "runtime": "prompt_only",
-      "description": "Docker container management",
-      "bundled": true
+      "author": "librefang",
+      "tags": ["devtools"],
+      "tools_count": 0,
+      "enabled": true,
+      "has_prompt_context": true,
+      "source": {"type": "local"}
     }
   ],
-  "total": 60
+  "total": 60,
+  "categories": ["ai-ml", "cloud", "data", "devtools", "general"]
 }
 ```
 
@@ -264,25 +263,81 @@ LibreFang 提供两套记忆系统：每个 Agent 独立的简单键值存储，
 
 ### POST /api/skills/create
 
-从模板创建新技能。
+通过 evolution 模块创建一个新的 prompt-only 技能。技能会被校验、安全扫描，并立即热加载到注册表。
 
 **请求体**：
 
 ```json
 {
-  "name": "my-skill",
-  "runtime": "python",
-  "description": "A custom skill"
+  "name": "csv-analysis",
+  "description": "Expert CSV data analysis and cleaning workflows",
+  "prompt_context": "# CSV Analysis\n\nWhen analyzing CSV files...",
+  "tags": ["data", "csv"]
 }
 ```
 
-**响应** `201 Created`：
+**响应** `200 OK`：
 
 ```json
 {
   "status": "created",
-  "skill": "my-skill",
-  "path": "/home/user/.librefang/skills/my-skill"
+  "name": "csv-analysis",
+  "version": "0.1.0",
+  "message": "Skill 'csv-analysis' created successfully"
+}
+```
+
+### GET /api/skills/&lbrace;name&rbrace;
+
+获取某个技能的详细信息，包括演化历史、工具、配套文件以及使用指标。
+
+**响应** `200 OK`：
+
+```json
+{
+  "name": "csv-analysis",
+  "version": "0.1.2",
+  "description": "Expert CSV data analysis and cleaning workflows",
+  "author": "agent-evolved",
+  "license": "",
+  "tags": ["data", "csv"],
+  "runtime": "PromptOnly",
+  "tools": [],
+  "has_prompt_context": true,
+  "prompt_context_length": 2450,
+  "source": "Local",
+  "enabled": true,
+  "path": "/home/user/.librefang/skills/csv-analysis",
+  "linked_files": {
+    "references": ["pandas-cheatsheet.md"],
+    "templates": ["clean.py"]
+  },
+  "evolution": {
+    "versions": [
+      {
+        "version": "0.1.0",
+        "timestamp": "2026-04-16T12:00:00Z",
+        "changelog": "Initial creation by agent",
+        "content_hash": "a1b2c3..."
+      },
+      {
+        "version": "0.1.2",
+        "timestamp": "2026-04-16T14:30:00Z",
+        "changelog": "Added encoding detection step",
+        "content_hash": "d4e5f6..."
+      }
+    ],
+    "use_count": 12,
+    "evolution_count": 3
+  }
+}
+```
+
+**响应** `404 Not Found`：
+
+```json
+{
+  "error": "Skill 'nonexistent' not found"
 }
 ```
 
