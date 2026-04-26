@@ -34,6 +34,8 @@ import {
   Clock,
   RotateCcw,
   Filter,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 import { PageHeader } from "../components/ui/PageHeader";
@@ -256,6 +258,86 @@ function groupByDate(
   return groups;
 }
 
+// Per-group outcome tally for the date-header strip. Rendered as
+// coloured dot+count chips so the operator can see "this day was 12
+// ok / 3 denied" without scrolling the whole bucket. Intentionally
+// flat counts only — finer-grained breakdowns (per-action) live behind
+// the existing filter chips.
+function outcomeBreakdown(rows: AuditQueryEntry[]): {
+  ok: number;
+  denied: number;
+  error: number;
+  other: number;
+} {
+  const tally = { ok: 0, denied: 0, error: 0, other: 0 };
+  for (const r of rows) {
+    if (r.outcome === "ok") tally.ok += 1;
+    else if (r.outcome === "denied") tally.denied += 1;
+    else if (r.outcome === "error") tally.error += 1;
+    else tally.other += 1;
+  }
+  return tally;
+}
+
+// Long-detail heuristic: any string that exceeds DETAIL_CLAMP_CHARS or
+// contains a newline gets rendered with line-clamp-2 + "Show more" so
+// a 4KB JSON blob doesn't push the next 30 rows below the fold. The
+// threshold is conservative enough that one-line file paths and
+// "denied: …" strings stay fully visible.
+const DETAIL_CLAMP_CHARS = 200;
+function shouldClampDetail(detail: string): boolean {
+  return detail.length > DETAIL_CLAMP_CHARS || detail.includes("\n");
+}
+
+// Quick-pick presets for the `from` filter. Apply via a click — sets
+// `draft.from` to `now − N` and clears `draft.to`, so the operator
+// gets "everything in the last hour / today / last 24h / last 7 days"
+// in one tap instead of fighting the native datetime-local picker.
+// The label is shown verbatim; `since` returns the wall-clock instant
+// to feed into a `<input type="datetime-local">` value (local-time
+// string, no timezone — `toRfc3339` normalises before send).
+interface DatePreset {
+  key: string;
+  label: string;
+  since: () => string;
+}
+function localDatetimeInput(d: Date): string {
+  // YYYY-MM-DDTHH:MM in local time (the format datetime-local expects).
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const DATE_PRESETS: DatePreset[] = [
+  {
+    key: "1h",
+    label: "1h",
+    since: () => localDatetimeInput(new Date(Date.now() - 3_600_000)),
+  },
+  {
+    key: "24h",
+    label: "24h",
+    since: () => localDatetimeInput(new Date(Date.now() - 86_400_000)),
+  },
+  {
+    key: "today",
+    label: "Today",
+    since: () => {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return localDatetimeInput(d);
+    },
+  },
+  {
+    key: "7d",
+    label: "7d",
+    since: () => localDatetimeInput(new Date(Date.now() - 7 * 86_400_000)),
+  },
+  {
+    key: "30d",
+    label: "30d",
+    since: () => localDatetimeInput(new Date(Date.now() - 30 * 86_400_000)),
+  },
+];
+
 // Active-filter chips for the collapsed-but-active state: shows what the
 // operator is currently filtering by without forcing the form open. Each
 // chip strips its own field on click.
@@ -287,6 +369,30 @@ export function AuditPage() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // Per-row detail-expansion. Keyed by `${seq}-${hash}` (same as row key).
+  // We default to "clamped" for any row with shouldClampDetail(detail);
+  // Show more flips it for that one row only.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggleExpanded = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // Datetime-preset click. Sets `from` to now-N, clears `to`, applies
+  // immediately so the operator sees the result without a second click.
+  const applyDatePreset = (preset: DatePreset) => {
+    const next: AuditQueryFilters = {
+      ...active,
+      from: preset.since(),
+      to: undefined,
+    };
+    setActive(next);
+    setDraft(next);
+  };
 
   // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
   // the bare datetime-local format. Same for export URL.
@@ -421,7 +527,10 @@ export function AuditPage() {
         </Card>
       )}
 
-      {/* Filter bar — collapsible; chips show what's active when closed */}
+      {/* Filter bar — collapsible; chips show what's active when closed.
+          Sticks to the top of the scroll container so it stays usable
+          when a long log is open. */}
+      <div className="sticky top-0 z-10 -mx-1 px-1 py-1 backdrop-blur supports-[backdrop-filter]:bg-surface/60">
       <Card padding="md">
         <div className="flex items-center gap-3 flex-wrap">
           <button
@@ -463,6 +572,26 @@ export function AuditPage() {
         </div>
 
         {filtersOpen && (
+          <>
+            {/* Datetime quick-picks — apply immediately, save the
+                operator from fighting the native datetime-local picker
+                for the common "everything in the last hour/day" case. */}
+            <div className="flex items-center gap-2 flex-wrap mt-4 pb-3 border-b border-border-subtle">
+              <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                {t("audit.quick_range", "Quick range")}
+              </span>
+              {DATE_PRESETS.map((p) => (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => applyDatePreset(p)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-main/40 px-2 py-1 text-[10px] font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
+                >
+                  <Clock className="h-3 w-3" />
+                  {p.label}
+                </button>
+              ))}
+            </div>
           <form onSubmit={onApply} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
             <Input
               label={t("audit.f_user", "User")}
@@ -541,8 +670,10 @@ export function AuditPage() {
               </Button>
             </div>
           </form>
+          </>
         )}
       </Card>
+      </div>
 
       {isForbidden && (
         <Card padding="lg">
@@ -610,16 +741,43 @@ export function AuditPage() {
         />
       ) : query.data ? (
         <div className="flex flex-col gap-4">
-          {groupByDate(query.data.entries).map((group) => (
+          {groupByDate(query.data.entries).map((group) => {
+            const tally = outcomeBreakdown(group.rows);
+            return (
             <section key={group.label} className="flex flex-col gap-2">
               <div className="flex items-center gap-3 px-1">
                 <h2 className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                   {group.label}
                 </h2>
                 <div className="flex-1 h-px bg-border-subtle/60" />
-                <span className="text-[10px] font-bold text-text-dim/70">
-                  {group.rows.length}
-                </span>
+                <div className="flex items-center gap-2 text-[10px] font-bold">
+                  {tally.ok > 0 && (
+                    <span className="inline-flex items-center gap-1 text-success">
+                      <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                      {tally.ok}
+                    </span>
+                  )}
+                  {tally.denied > 0 && (
+                    <span className="inline-flex items-center gap-1 text-error">
+                      <span className="w-1.5 h-1.5 rounded-full bg-error" />
+                      {tally.denied}
+                    </span>
+                  )}
+                  {tally.error > 0 && (
+                    <span className="inline-flex items-center gap-1 text-warning">
+                      <span className="w-1.5 h-1.5 rounded-full bg-warning" />
+                      {tally.error}
+                    </span>
+                  )}
+                  {tally.other > 0 && (
+                    <span className="inline-flex items-center gap-1 text-text-dim">
+                      <span className="w-1.5 h-1.5 rounded-full bg-text-dim/40" />
+                      {tally.other}
+                    </span>
+                  )}
+                  <span className="text-text-dim/50 ml-1">·</span>
+                  <span className="text-text-dim/70">{group.rows.length}</span>
+                </div>
               </div>
               <div className="space-y-2 stagger-children">
                 {group.rows.map((e) => {
@@ -689,11 +847,44 @@ export function AuditPage() {
                             #{e.seq}
                           </span>
                         </div>
-                        {e.detail && (
-                          <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
-                            {e.detail}
-                          </p>
-                        )}
+                        {e.detail && (() => {
+                          const rowKey = `${e.seq}-${e.hash}`;
+                          const clamp = shouldClampDetail(e.detail);
+                          const isExpanded = expanded.has(rowKey);
+                          if (!clamp) {
+                            return (
+                              <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
+                                {e.detail}
+                              </p>
+                            );
+                          }
+                          return (
+                            <div className="mt-1">
+                              <p
+                                className={`text-xs text-text-main/90 break-words leading-relaxed whitespace-pre-wrap ${isExpanded ? "" : "line-clamp-2"}`}
+                              >
+                                {e.detail}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => toggleExpanded(rowKey)}
+                                className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-brand hover:text-brand/80 transition-colors"
+                              >
+                                {isExpanded ? (
+                                  <>
+                                    <ChevronUp className="h-3 w-3" />
+                                    {t("audit.show_less", "Show less")}
+                                  </>
+                                ) : (
+                                  <>
+                                    <ChevronDown className="h-3 w-3" />
+                                    {t("audit.show_more", "Show more")}
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Timestamp */}
@@ -709,7 +900,8 @@ export function AuditPage() {
                 })}
               </div>
             </section>
-          ))}
+            );
+          })}
         </div>
       ) : null}
     </div>
