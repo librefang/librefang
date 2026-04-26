@@ -361,6 +361,7 @@ function ToolPolicyRow({
               "comma-separated names from [[taint_rules]]",
             )}
             className="text-xs font-mono"
+            disabled={policy.default === "skip"}
           />
         </div>
         {ruleSetsText.trim().length > 0 && (
@@ -371,6 +372,14 @@ function ToolPolicyRow({
             )}
           </p>
         )}
+        {policy.default === "skip" && (policy.rule_sets ?? []).length > 0 ? (
+          <p className="text-[11px] italic text-warning pl-22">
+            {t(
+              "mcp.taint_skip_rule_sets_hint",
+              "default = skip bypasses scanning entirely — rule_sets above will not fire (not even Log). Switch to default = scan for audit-only rule sets.",
+            )}
+          </p>
+        ) : null}
       </div>
 
       {/* Paths */}
