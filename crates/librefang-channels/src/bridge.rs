@@ -2538,6 +2538,61 @@ async fn dispatch_message(
         // Download failed — fall through to text description below
     }
 
+    // For voice messages: download to disk and send as content blocks so
+    // tools like media_transcribe can read the saved file directly.
+    if let ChannelContent::Voice {
+        ref url,
+        ref caption,
+        duration_seconds,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let saved = blocks.iter().any(|b| match b {
+            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+            _ => false,
+        });
+        if saved {
+            // Prepend a context block carrying duration + caption so the
+            // model knows this is voice (not an arbitrary file) and any
+            // user-supplied caption survives the save-path replacement.
+            let context = match caption {
+                Some(c) if !c.is_empty() => {
+                    format!("[Voice message ({duration_seconds}s)]\nCaption: {c}")
+                }
+                _ => format!("[Voice message ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
     // Intercept interactive menu callbacks before forwarding to LLM.
     if let ChannelContent::ButtonCallback { ref action, .. } = message.content {
         if action.starts_with("prov:") || action.starts_with("model:") || action == "back:providers"
@@ -3459,6 +3514,23 @@ const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// Used both by `download_file_to_blocks` to produce the text and by
 /// `dispatch_message` to detect success vs failure.
 const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
+
+/// Extract a basename-style filename from the path component of a URL.
+///
+/// Returns `None` when the URL is unparseable, has no path basename, or the
+/// basename collapses to empty after trimming. Query/fragment portions are
+/// dropped. Used by the voice/file dispatch path to derive a stable filename
+/// for the on-disk saved copy when the channel didn't provide one.
+fn filename_from_url(url: &str) -> Option<String> {
+    let parsed = ::url::Url::parse(url).ok()?;
+    let last = parsed.path_segments()?.next_back()?;
+    let trimmed = last.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
 
 /// Sanitize a file extension to alphanumeric characters only.
 ///
@@ -5307,6 +5379,28 @@ mod tests {
             content_to_text(&voice),
             "[Voice message (30s): https://example.com/voice.ogg]"
         );
+    }
+
+    #[test]
+    fn test_filename_from_url_basic() {
+        assert_eq!(
+            filename_from_url("https://example.com/path/voice_42.oga").as_deref(),
+            Some("voice_42.oga")
+        );
+    }
+
+    #[test]
+    fn test_filename_from_url_strips_query_and_fragment() {
+        assert_eq!(
+            filename_from_url("https://example.com/x/file.ogg?token=abc#t=1").as_deref(),
+            Some("file.ogg")
+        );
+    }
+
+    #[test]
+    fn test_filename_from_url_no_basename() {
+        assert!(filename_from_url("https://example.com/").is_none());
+        assert!(filename_from_url("not a url").is_none());
     }
 
     #[test]
