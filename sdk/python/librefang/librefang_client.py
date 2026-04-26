@@ -216,6 +216,9 @@ class _AgentsResource(_Resource):
     def set_model(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/model", data)
 
+    def list_agent_runtime(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/runtime")
+
     def get_agent_session(self, id: str, session_id: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/session", None, query={"session_id": session_id})
 
@@ -239,6 +242,9 @@ class _AgentsResource(_Resource):
 
     def export_session(self, id: str, session_id: str):
         return self._c._request("GET", f"/api/agents/{id}/sessions/{session_id}/export")
+
+    def stop_session(self, id: str, session_id: str):
+        return self._c._request("POST", f"/api/agents/{id}/sessions/{session_id}/stop")
 
     def attach_session_stream(self, id: str, session_id: str) -> Generator[Dict, None, None]:
         return self._c._stream("GET", f"/api/agents/{id}/sessions/{session_id}/stream")
@@ -504,6 +510,9 @@ class _McpResource(_Resource):
 
     def reconnect_mcp_server_handler(self, name: str):
         return self._c._request("POST", f"/api/mcp/servers/{name}/reconnect")
+
+    def list_mcp_taint_rules(self):
+        return self._c._request("GET", "/api/mcp/taint-rules")
 
 
 # ── Memory Resource ────────────────────────────────────────────

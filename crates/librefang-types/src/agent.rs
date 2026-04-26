@@ -344,6 +344,37 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Snapshot of a single in-flight (agent, session) loop, returned by
+/// `GET /api/agents/{id}/runtime`.
+///
+/// The state field is intentionally a single `Running` variant for now —
+/// fine-grained sub-states (`WaitingLLM` / `ExecutingTool(name)`) require
+/// the agent loop to write back its current step, which is a separate
+/// follow-up. The wire format leaves room for that without a breaking
+/// change: deserialisers should treat unknown variants as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningSessionSnapshot {
+    /// The session that's currently executing.
+    pub session_id: SessionId,
+    /// When the loop was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Coarse-grained execution state.
+    #[serde(default)]
+    pub state: RunningSessionState,
+}
+
+/// Coarse-grained execution state for a `RunningSessionSnapshot`. Only
+/// `Running` is emitted today; the enum exists so callers can pattern-match
+/// instead of hard-coding strings, and so future fine-grained states slot
+/// in without breaking the wire format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningSessionState {
+    /// Loop has been spawned and not yet completed.
+    #[default]
+    Running,
+}
+
 /// How sessions are resolved for non-channel (automated) invocations.
 ///
 /// Controls whether background ticks, triggers, and `agent_send` calls
@@ -872,6 +903,34 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
+    /// Trigger-dispatch-only: cap on concurrent invocations from the
+    /// kernel's event-trigger fan-out (`TaskPosted` / `MessageReceived`
+    /// / …). Channel messages, cron jobs, and `agent_send` are NOT
+    /// throttled by this knob — they continue to serialize at the
+    /// existing per-agent / per-session locks inside `send_message_full`.
+    /// Despite the unqualified field name, the scope is intentionally
+    /// narrow.
+    ///
+    /// `None` means inherit from `KernelConfig.queue.concurrency.default_per_agent`
+    /// (today: 1). `Some(1)` is identical to the legacy per-agent
+    /// serialization behavior. `Some(0)` is treated as `Some(1)` (the
+    /// resolver floors at 1 — `0` would deadlock the agent).
+    ///
+    /// Concurrent fires only make sense when each fire runs in its own
+    /// session, so caps `> 1` require `session_mode = "new"` on the
+    /// **manifest** (per-trigger `session_mode` overrides do NOT unlock
+    /// the cap — the per-agent semaphore is sized once from the
+    /// manifest default). `persistent` + cap `> 1` is auto-clamped to
+    /// `1` with a `WARN` log; parallel writes to a single persistent
+    /// session's history are undefined.
+    ///
+    /// Hot-reload: the per-agent semaphore is sized on first dispatch
+    /// and is NOT invalidated by `manifest_swap`. To pick up a new cap
+    /// the agent must be killed and respawned (or the daemon restarted);
+    /// an in-place activate / status flip silently retains the old
+    /// capacity.
+    #[serde(default)]
+    pub max_concurrent_invocations: Option<u32>,
     /// If true, the agent's `context.md` is read once at session start and
     /// reused. Default is `false`: the runtime re-reads `context.md` before
     /// every turn so external writers (cron jobs, integrations) reach the LLM
@@ -952,6 +1011,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,

@@ -3721,6 +3721,13 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
             "max_depth_per_agent": queue_cfg.max_depth_per_agent,
             "max_depth_global": queue_cfg.max_depth_global,
             "task_ttl_secs": queue_cfg.task_ttl_secs,
+            "concurrency": {
+                "main_lane": queue_cfg.concurrency.main_lane,
+                "cron_lane": queue_cfg.concurrency.cron_lane,
+                "subagent_lane": queue_cfg.concurrency.subagent_lane,
+                "trigger_lane": queue_cfg.concurrency.trigger_lane,
+                "default_per_agent": queue_cfg.concurrency.default_per_agent,
+            },
         },
     }))
 }

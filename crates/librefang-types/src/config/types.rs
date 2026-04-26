@@ -352,6 +352,26 @@ pub struct UserConfig {
     /// Optional API key hash for API authentication.
     #[serde(default)]
     pub api_key_hash: Option<String>,
+    /// Per-user tool allow/deny lists. Layered ON TOP of the per-agent
+    /// `ToolPolicy` and any channel rules in `ApprovalPolicy`.
+    /// `None` means "no per-user policy — defer to other layers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<crate::user_policy::UserToolPolicy>,
+    /// Bulk allow/deny by `ToolGroup` category (groups are declared in
+    /// `KernelConfig.tool_policy.groups`). Lets admins say
+    /// `denied_groups = ["dangerous"]` without listing each tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_categories: Option<crate::user_policy::UserToolCategories>,
+    /// Memory namespace ACL — controls reads/writes to memory scopes
+    /// (`proactive`, `kv:*`, etc.) and PII redaction. `None` means
+    /// "use the role default ACL".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_access: Option<crate::user_policy::UserMemoryAccess>,
+    /// Per-channel tool overrides for THIS user. Keyed by channel adapter
+    /// name (e.g. `"telegram"`, `"discord"`). Layers on top of the global
+    /// `ApprovalPolicy.channel_rules` — both must agree to allow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
 }
 
 fn default_role() -> String {
@@ -1939,6 +1959,8 @@ impl Default for QueueConfig {
 /// main_lane = 3
 /// cron_lane = 2
 /// subagent_lane = 3
+/// trigger_lane = 8
+/// default_per_agent = 1
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -1949,6 +1971,19 @@ pub struct QueueConcurrencyConfig {
     pub cron_lane: usize,
     /// Subagent lane concurrent limit (child agents).
     pub subagent_lane: usize,
+    /// Trigger lane concurrent limit — global cap on event-trigger
+    /// (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the
+    /// same time, across all agents. Acquired BEFORE the per-agent
+    /// semaphore so a single hot agent cannot starve the kernel.
+    /// Default `8`. `0` is rewritten to `1` by validation.
+    pub trigger_lane: usize,
+    /// Default per-agent invocation cap when an agent's manifest does
+    /// not set `max_concurrent_invocations`. `1` reproduces the
+    /// legacy per-agent-mutex serialization that pre-existed this
+    /// knob — change deliberately. `0` is rewritten to `1` by
+    /// validation. Typed `usize` to match the sibling lane fields and
+    /// to feed `Semaphore::new` without a cast.
+    pub default_per_agent: usize,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -1957,6 +1992,8 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+            trigger_lane: 8,
+            default_per_agent: 1,
         }
     }
 }
@@ -2250,6 +2287,20 @@ pub struct KernelConfig {
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
+    /// Reusable named taint rule sets referenced by
+    /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
+    /// taint rules with a severity action (block / warn / log) that the
+    /// MCP scanner applies to every tool that opts in.
+    ///
+    /// **Hot-reload caveat:** the kernel snapshots this list onto each
+    /// connected MCP server at install / reload time. Edits to
+    /// `[[taint_rules]]` followed by a config reload do NOT propagate to
+    /// already-connected MCP servers until the server itself is reloaded
+    /// (e.g. via `reload_mcp_server_config` or a daemon restart). The
+    /// snapshot keeps the scanner's view stable for the lifetime of a
+    /// single tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_rules: Vec<NamedTaintRuleSet>,
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default)]
     pub a2a: Option<A2aConfig>,
@@ -3794,6 +3845,18 @@ fn default_prompt_caching() -> bool {
 }
 
 /// Taint skip rules for a single argument path within a tool.
+///
+/// The policy key is a minimal JSONPath expression matched by the runtime
+/// scanner. Supported wildcard syntax:
+///
+/// - `$.foo`      — exact property at any depth specified literally.
+/// - `$.foo.*`    — any direct child of `$.foo` (single segment, non-array).
+/// - `$.foo[*]`   — any array element of `$.foo` (e.g. `$.foo[0]`, `$.foo[42]`).
+/// - `$.*`        — any top-level property.
+///
+/// Wildcards do NOT span multiple segments: `$.foo.*` matches `$.foo.bar`
+/// but not `$.foo.bar.baz`. Use exact paths plus rule_sets for deep
+/// exemptions across many paths.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPathPolicy {
     /// Rule IDs to skip when scanning this path.  An empty list means
@@ -3802,14 +3865,42 @@ pub struct McpTaintPathPolicy {
     pub skip_rules: Vec<crate::taint::TaintRuleId>,
 }
 
+/// What the scanner does for a tool's argument paths NOT matched by any
+/// entry in [`McpTaintToolPolicy::paths`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintToolAction {
+    /// Apply the full taint rule set to every argument leaf (current behaviour).
+    #[default]
+    Scan,
+    /// Bypass scanning entirely for this tool. Even sensitive object keys are
+    /// allowed through. Use as a tool-level kill switch when a tool's arguments
+    /// are by-design opaque (browser tab handles, DB session IDs, etc.).
+    Skip,
+}
+
 /// Per-tool taint policy for an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintToolPolicy {
+    /// What to do for argument paths not matched by `paths`.
+    /// Defaults to [`McpTaintToolAction::Scan`] (current behaviour).
+    ///
+    /// Set to [`McpTaintToolAction::Skip`] to bypass scanning for the whole
+    /// tool with one line, instead of enumerating every argument path.
+    #[serde(default)]
+    pub default: McpTaintToolAction,
     /// Per-path exemptions.  The key is a minimal JSONPath expression
     /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
-    /// listed here have all rules applied.
+    /// listed here have all rules applied (subject to `default`).
     #[serde(default)]
     pub paths: HashMap<String, McpTaintPathPolicy>,
+    /// Names of top-level `[[taint_rules]]` rule sets to apply to every
+    /// argument leaf of this tool. Each referenced set's `action` controls
+    /// whether the listed rules block, warn, or log when they fire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_sets: Vec<String>,
 }
 
 /// Per-server taint policy that lets operators disable specific taint
@@ -3817,9 +3908,12 @@ pub struct McpTaintToolPolicy {
 ///
 /// Example config.toml:
 /// ```toml
-/// [mcp_servers.my_firefox.taint_policy.tools.navigate.paths]
-/// "$.tabId"     = { skip_rules = ["opaque_token"] }
-/// "$.sessionId" = { skip_rules = ["opaque_token"] }
+/// [mcp_servers.my_firefox.taint_policy.tools.navigate]
+/// default = "skip"   # bypass scanning entirely for `navigate`
+///
+/// [mcp_servers.my_firefox.taint_policy.tools.read_file.paths]
+/// "$.content"   = { skip_rules = ["opaque_token"] }
+/// "$.metadata.*" = { skip_rules = ["sensitive_key_name"] }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPolicy {
@@ -3827,6 +3921,67 @@ pub struct McpTaintPolicy {
     /// the MCP server's tool list (without the `mcp_<server>_` prefix).
     #[serde(default)]
     pub tools: HashMap<String, McpTaintToolPolicy>,
+}
+
+/// Severity action for a [`NamedTaintRuleSet`] when one of its rules fires
+/// during MCP argument scanning.
+///
+/// **Overlap resolution: most permissive wins.** When a tool's `rule_sets`
+/// list references multiple sets that all cover the same `TaintRuleId`,
+/// the scanner applies the *most permissive* action — `Log` > `Warn` >
+/// `Block`. This is intentional (it lets a narrow `audit_only` set carve
+/// out exceptions to a broad `Block` set without rewriting the broad set),
+/// but it means **adding an audit-only set with `action = log` will
+/// silently neutralise any `block` set that overlaps on the same rule**.
+/// The dashboard surfaces a hint next to the `rule_sets` field; operators
+/// authoring config by hand should keep this in mind.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintRuleSetAction {
+    /// Abort the MCP tool call and surface a violation error to the LLM
+    /// (current scanner default).
+    #[default]
+    Block,
+    /// Allow the call through, but emit a structured WARN-level tracing
+    /// event so operators can see exemptions firing.
+    Warn,
+    /// Allow the call through and emit at INFO level. Useful for building
+    /// an exemption baseline before flipping a rule set to `block`.
+    Log,
+}
+
+/// A reusable, named group of taint rules with an associated severity action.
+///
+/// Defined as `[[taint_rules]]` in `config.toml` and referenced by
+/// [`McpTaintToolPolicy::rule_sets`]:
+///
+/// ```toml
+/// [[taint_rules]]
+/// name = "browser_handles"
+/// action = "warn"
+/// rules = ["opaque_token"]
+///
+/// [mcp_servers.camofox.taint_policy.tools.navigate]
+/// rule_sets = ["browser_handles"]
+/// ```
+///
+/// `PartialEq + Eq` are derived so the kernel's reload-plan diff can
+/// detect `[[taint_rules]]` changes and emit
+/// `HotAction::ReloadTaintRules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NamedTaintRuleSet {
+    /// Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be
+    /// unique within a [`KernelConfig`]; duplicate names are resolved by
+    /// last-wins ordering.
+    pub name: String,
+    /// What happens when one of `rules` fires during scanning.
+    #[serde(default)]
+    pub action: McpTaintRuleSetAction,
+    /// `TaintRuleId` variants this set covers.
+    #[serde(default)]
+    pub rules: Vec<crate::taint::TaintRuleId>,
 }
 
 /// Configuration entry for an MCP server.
@@ -4112,6 +4267,7 @@ impl Default for KernelConfig {
             users: Vec::new(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
+            taint_rules: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
             stable_prefix_mode: false,
@@ -7085,5 +7241,151 @@ max_tokens_per_hour = 500000
         assert_eq!(c.max_concurrent, 4);
         assert_eq!(c.mcp_default_safety, "write_shared");
         assert!(c.mcp_readonly_allowlist.is_empty());
+    }
+
+    // ── Issue #3050: granular MCP taint policy ─────────────────────────────
+
+    #[test]
+    fn mcp_taint_tool_policy_default_is_scan_and_omits_optional_fields() {
+        // Backward compat: a bare `[tool_policy.tools.foo]` table must
+        // deserialise into `default = Scan`, no paths, no rule_sets.
+        let toml_str = "default = \"scan\"\n";
+        let policy: McpTaintToolPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.default, McpTaintToolAction::Scan);
+        assert!(policy.paths.is_empty());
+        assert!(policy.rule_sets.is_empty());
+
+        let empty: McpTaintToolPolicy = toml::from_str("").unwrap();
+        assert_eq!(empty.default, McpTaintToolAction::Scan);
+    }
+
+    #[test]
+    fn mcp_taint_tool_action_skip_round_trips() {
+        let mut tools = HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                default: McpTaintToolAction::Skip,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+
+        // TOML round-trip — primary surface for operators.
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back_toml: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back_toml.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+    }
+
+    #[test]
+    fn mcp_taint_path_policy_round_trips_with_wildcards() {
+        let mut paths = HashMap::new();
+        paths.insert(
+            "$.metadata.*".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::SensitiveKeyName],
+            },
+        );
+        paths.insert(
+            "$.items[*]".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::OpaqueToken],
+            },
+        );
+        let mut tools = HashMap::new();
+        tools.insert(
+            "read_file".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        let read_paths = &back.tools.get("read_file").unwrap().paths;
+        assert!(read_paths.contains_key("$.metadata.*"));
+        assert!(read_paths.contains_key("$.items[*]"));
+    }
+
+    #[test]
+    fn mcp_taint_rule_set_actions_round_trip() {
+        // Inline TOML covers all three severity tiers.
+        let toml_str = r#"
+[[taint_rules]]
+name = "browser_handles"
+action = "warn"
+rules = ["opaque_token"]
+
+[[taint_rules]]
+name = "pii_baseline"
+action = "log"
+rules = ["pii_email", "pii_phone"]
+
+[[taint_rules]]
+name = "strict_default"
+rules = ["authorization_literal"]
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.taint_rules.len(), 3);
+        assert_eq!(cfg.taint_rules[0].name, "browser_handles");
+        assert_eq!(cfg.taint_rules[0].action, McpTaintRuleSetAction::Warn);
+        assert_eq!(cfg.taint_rules[1].action, McpTaintRuleSetAction::Log);
+        // Default action when omitted: Block.
+        assert_eq!(cfg.taint_rules[2].action, McpTaintRuleSetAction::Block);
+    }
+
+    #[test]
+    fn tool_policy_rule_sets_reference_round_trips() {
+        // `McpTaintPolicy` has a single field `tools` — the test deserialises
+        // the policy directly, not the surrounding `[mcp_servers.<name>.taint_policy]`
+        // table. Using the un-prefixed `[tools.<name>]` shape keeps the test
+        // focused on the policy struct.
+        let toml_str = r#"
+[tools.navigate]
+default = "skip"
+rule_sets = ["browser_handles"]
+
+[tools.read_file]
+rule_sets = ["browser_handles", "pii_baseline"]
+
+[tools.read_file.paths]
+"$.content" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Skip);
+        assert_eq!(nav.rule_sets, vec!["browser_handles"]);
+
+        let rf = policy.tools.get("read_file").unwrap();
+        assert_eq!(rf.default, McpTaintToolAction::Scan);
+        assert_eq!(rf.rule_sets.len(), 2);
+        assert!(rf.paths.contains_key("$.content"));
+    }
+
+    #[test]
+    fn legacy_taint_policy_without_new_fields_still_loads() {
+        // Pre-issue #3050 config.toml shape — must continue to deserialise
+        // identically with `default = Scan`, empty `rule_sets`.
+        let toml_str = r#"
+[tools.navigate.paths]
+"$.tabId" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Scan);
+        assert!(nav.rule_sets.is_empty());
+        assert_eq!(nav.paths.len(), 1);
     }
 }

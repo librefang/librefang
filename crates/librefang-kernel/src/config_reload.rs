@@ -56,10 +56,22 @@ pub enum HotAction {
     ReloadProxy,
     /// Dashboard credentials (user/pass/hash) changed — config swap is sufficient.
     UpdateDashboardCredentials,
+    /// `[[taint_rules]]` registry changed — push the new rule sets into
+    /// the kernel's shared `taint_rules_swap` so connected MCP servers see
+    /// them on the next scan call without a reconnect.
+    ReloadTaintRules,
     /// `log_level` changed — swap the live tracing `EnvFilter`. Carries the
     /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
     /// since the kernel doesn't keep the parsed filter around.
     ReloadLogLevel(String),
+    /// `[[users]]` or `[tool_policy.groups]` changed — rebuild the RBAC
+    /// `AuthManager` so per-user `tool_policy` / `memory_access` /
+    /// `channel_tool_rules` edits take effect on the next tool call
+    /// (RBAC M3, #3054). Without this action, design decision #7
+    /// ("invalidate per-user permission cache on config reload") is
+    /// silently violated — the dashboard reports "applied" while the
+    /// previous policy is still being enforced.
+    ReloadAuth,
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +323,13 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadMcpServers);
     }
 
+    // Top-level [[taint_rules]] registry — hot-reloadable via the shared
+    // `taint_rules_swap`. Tracked separately from `mcp_servers` because
+    // operators commonly tune rule sets without touching MCP server config.
+    if old.taint_rules != new.taint_rules {
+        plan.hot_actions.push(HotAction::ReloadTaintRules);
+    }
+
     if field_changed(&old.a2a, &new.a2a) {
         plan.hot_actions.push(HotAction::ReloadA2aConfig);
     }
@@ -327,6 +346,18 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.tool_policy, &new.tool_policy) {
         plan.hot_actions.push(HotAction::UpdateToolPolicy);
+    }
+
+    // RBAC M3 (#3054): invalidate the AuthManager when any field that
+    // feeds it changes — `[[users]]` (role / channel_bindings /
+    // tool_policy / channel_tool_rules / tool_categories /
+    // memory_access) or the tool group catalogue used for category
+    // resolution. Without this, a `/api/config/reload` after a policy
+    // edit is a silent no-op.
+    if field_changed(&old.users, &new.users)
+        || field_changed(&old.tool_policy.groups, &new.tool_policy.groups)
+    {
+        plan.hot_actions.push(HotAction::ReloadAuth);
     }
 
     if field_changed(&old.proactive_memory, &new.proactive_memory) {

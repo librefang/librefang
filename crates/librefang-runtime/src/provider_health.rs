@@ -287,39 +287,133 @@ impl Default for ProbeCache {
 /// "no auth" behaviour for direct-to-localhost setups.
 pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str>) -> ProbeResult {
     let start = Instant::now();
-
-    let client = probe_client();
+    let lower = provider.to_lowercase();
     let is_loopback = is_loopback_base_url(base_url);
 
-    let lower = provider.to_lowercase();
-
-    // Ollama uses a non-OpenAI endpoint for model listing
-    let (url, is_ollama) = if lower == "ollama" {
-        // base_url is typically "http://localhost:11434/v1" — strip /v1 for the tags endpoint
+    // For the "ollama" provider slot we try the native /api/tags first, then
+    // fall back to the OpenAI-compatible /v1/models. Lemonade Server, LM Studio
+    // run with OpenAI-only mode, llama.cpp's server, and any other "looks like
+    // ollama but isn't" daemon all expose only the OpenAI shape — without the
+    // fallback, those users see "probe failed" forever even though the chat
+    // endpoint works fine. See issue #3191.
+    if lower == "ollama" {
         let root = base_url
             .trim_end_matches('/')
             .trim_end_matches("/v1")
             .trim_end_matches("/v1/");
-        (format!("{root}/api/tags"), true)
-    } else {
-        // OpenAI-compatible: GET {base_url}/models
-        let trimmed = base_url.trim_end_matches('/');
-        (format!("{trimmed}/models"), false)
-    };
+        let tags_url = format!("{root}/api/tags");
+        match try_probe_endpoint(&tags_url, EndpointShape::OllamaTags, api_key, is_loopback).await {
+            EndpointOutcome::Ok { models, model_info } => {
+                return ProbeResult {
+                    reachable: true,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    discovered_models: models,
+                    discovered_model_info: model_info,
+                    error: None,
+                    ..Default::default()
+                };
+            }
+            EndpointOutcome::Failed { error: tags_error } => {
+                let openai_url = format!("{}/models", base_url.trim_end_matches('/'));
+                match try_probe_endpoint(
+                    &openai_url,
+                    EndpointShape::OpenAiModels,
+                    api_key,
+                    is_loopback,
+                )
+                .await
+                {
+                    EndpointOutcome::Ok { models, model_info } => {
+                        return ProbeResult {
+                            reachable: true,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            discovered_models: models,
+                            discovered_model_info: model_info,
+                            error: None,
+                            ..Default::default()
+                        };
+                    }
+                    EndpointOutcome::Failed {
+                        error: openai_error,
+                    } => {
+                        // Surface both errors so operators can tell whether the
+                        // server is wholly unreachable or just doesn't speak
+                        // either dialect.
+                        return ProbeResult {
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            error: Some(format!(
+                                "/api/tags: {tags_error}; /v1/models: {openai_error}"
+                            )),
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
+        }
+    }
 
-    // Attach Bearer token when an api_key was supplied. Ollama itself
-    // ignores Authorization headers (and bare ollama servers should not
-    // be passed a key here), but reverse-proxy frontends like Open WebUI
-    // require them — without this, the probe always 401s and the
-    // catalog flips to LocalOffline even though the underlying ollama
-    // is healthy.
-    let mut req = client.get(&url);
+    // Non-ollama: single OpenAI-compatible probe.
+    let openai_url = format!("{}/models", base_url.trim_end_matches('/'));
+    match try_probe_endpoint(
+        &openai_url,
+        EndpointShape::OpenAiModels,
+        api_key,
+        is_loopback,
+    )
+    .await
+    {
+        EndpointOutcome::Ok { models, model_info } => ProbeResult {
+            reachable: true,
+            latency_ms: start.elapsed().as_millis() as u64,
+            discovered_models: models,
+            discovered_model_info: model_info,
+            error: None,
+            ..Default::default()
+        },
+        EndpointOutcome::Failed { error } => ProbeResult {
+            latency_ms: start.elapsed().as_millis() as u64,
+            error: Some(error),
+            ..Default::default()
+        },
+    }
+}
+
+/// Wire format expected at a probe endpoint.
+#[derive(Debug, Clone, Copy)]
+enum EndpointShape {
+    /// Ollama native: `{ "models": [{ "name": "...", "details": {...} }, ...] }`
+    OllamaTags,
+    /// OpenAI-compatible: `{ "data": [{ "id": "...", ... }, ...] }`
+    OpenAiModels,
+}
+
+/// Internal result of one probe attempt — used to drive the ollama→openai
+/// fallback chain inside [`probe_provider`].
+enum EndpointOutcome {
+    Ok {
+        models: Vec<String>,
+        model_info: Vec<DiscoveredModelInfo>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+/// Send one probe request and parse the response in the given shape.
+///
+/// Treats "transport / non-2xx / non-JSON / wrong-shape body" all as `Failed`
+/// so the caller can decide whether to fall back to a different endpoint
+/// (the ollama path needs this — Lemonade returns 404 on /api/tags but a
+/// well-formed list on /v1/models).
+async fn try_probe_endpoint(
+    url: &str,
+    shape: EndpointShape,
+    api_key: Option<&str>,
+    is_loopback: bool,
+) -> EndpointOutcome {
+    let client = probe_client();
+    let mut req = client.get(url);
     if is_loopback {
-        // Tighten the request budget for loopback targets so a dead local
-        // daemon still surfaces fast. The shared client carries the relaxed
-        // remote timeout; per-request `.timeout()` overrides it for this call.
-        // (`connect_timeout` is fixed at client build, but the 2 s request
-        // timeout fires first on any pathological local stall.)
         req = req.timeout(Duration::from_secs(PROBE_TIMEOUT_SECS));
     }
     if let Some(key) = api_key {
@@ -332,125 +426,135 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            return ProbeResult {
-                latency_ms: start.elapsed().as_millis() as u64,
-                error: Some(format_request_error(&e)),
-                ..Default::default()
+            return EndpointOutcome::Failed {
+                error: format_request_error(&e),
             };
         }
     };
 
     if !resp.status().is_success() {
-        return ProbeResult {
-            latency_ms: start.elapsed().as_millis() as u64,
-            error: Some(format!("HTTP {}", resp.status())),
-            ..Default::default()
+        return EndpointOutcome::Failed {
+            error: format!("HTTP {}", resp.status()),
         };
     }
 
     let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
-            return ProbeResult {
-                reachable: true, // server responded, just bad JSON
-                latency_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Invalid JSON: {e}")),
-                ..Default::default()
+            return EndpointOutcome::Failed {
+                error: format!("Invalid JSON: {e}"),
             };
         }
     };
 
-    let latency_ms = start.elapsed().as_millis() as u64;
+    match shape {
+        EndpointShape::OllamaTags => parse_ollama_tags(&body),
+        EndpointShape::OpenAiModels => parse_openai_models(&body),
+    }
+}
 
-    // Parse model names and metadata
-    let (models, model_info) = if is_ollama {
-        // Ollama: { "models": [ { "name": "llama3.2:latest", "size": 12345, "details": { ... } }, ... ] }
-        let arr = body
-            .get("models")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let names: Vec<String> = arr
-            .iter()
-            .filter_map(|m| {
-                m.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        let info: Vec<DiscoveredModelInfo> = arr
-            .iter()
-            .filter_map(|m| {
-                let name = m.get("name").and_then(|n| n.as_str())?.to_string();
-                let details = m.get("details");
-                let families = details
-                    .and_then(|d| d.get("families"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|f| f.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|v| !v.is_empty());
-                let family = details
-                    .and_then(|d| d.get("family"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // Ollama ≥0.7 exposes a top-level `capabilities` array per
-                // model in /api/tags. Older versions omit it — we fall back
-                // to heuristic detection from the model name and family.
-                let capabilities: Vec<String> =
-                    if let Some(caps) = m.get("capabilities").and_then(|v| v.as_array()) {
-                        caps.iter()
-                            .filter_map(|c| c.as_str().map(String::from))
-                            .collect()
-                    } else {
-                        infer_ollama_capabilities(&name, family.as_deref())
-                    };
-
-                Some(DiscoveredModelInfo {
-                    name,
-                    parameter_size: details
-                        .and_then(|d| d.get("parameter_size"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    quantization_level: details
-                        .and_then(|d| d.get("quantization_level"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    family,
-                    families,
-                    size: m.get("size").and_then(|v| v.as_u64()),
-                    capabilities,
-                })
-            })
-            .collect();
-
-        (names, info)
-    } else {
-        // OpenAI-compatible: { "data": [ { "id": "model-name", ... }, ... ] }
-        let names = body
-            .get("data")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        (names, vec![])
+/// Parse an Ollama `/api/tags` response into discovered models + enriched info.
+///
+/// Reports `Failed` (rather than `Ok` with empty lists) when the body is not
+/// the expected shape so the caller can fall back to a different endpoint.
+fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
+    let arr = match body.get("models").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return EndpointOutcome::Failed {
+                error: "response did not contain a `models` array".to_string(),
+            };
+        }
     };
 
-    ProbeResult {
-        reachable: true,
-        latency_ms,
-        discovered_models: models,
-        discovered_model_info: model_info,
-        error: None,
-        ..Default::default()
+    let names: Vec<String> = arr
+        .iter()
+        .filter_map(|m| {
+            m.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    let info: Vec<DiscoveredModelInfo> = arr
+        .iter()
+        .filter_map(|m| {
+            let name = m.get("name").and_then(|n| n.as_str())?.to_string();
+            let details = m.get("details");
+            let families = details
+                .and_then(|d| d.get("families"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|f| f.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty());
+            let family = details
+                .and_then(|d| d.get("family"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Ollama ≥0.7 exposes a top-level `capabilities` array per
+            // model in /api/tags. Older versions omit it — we fall back
+            // to heuristic detection from the model name and family.
+            let capabilities: Vec<String> =
+                if let Some(caps) = m.get("capabilities").and_then(|v| v.as_array()) {
+                    caps.iter()
+                        .filter_map(|c| c.as_str().map(String::from))
+                        .collect()
+                } else {
+                    infer_ollama_capabilities(&name, family.as_deref())
+                };
+
+            Some(DiscoveredModelInfo {
+                name,
+                parameter_size: details
+                    .and_then(|d| d.get("parameter_size"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                quantization_level: details
+                    .and_then(|d| d.get("quantization_level"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                family,
+                families,
+                size: m.get("size").and_then(|v| v.as_u64()),
+                capabilities,
+            })
+        })
+        .collect();
+
+    EndpointOutcome::Ok {
+        models: names,
+        model_info: info,
+    }
+}
+
+/// Parse an OpenAI-compatible `/v1/models` response into discovered model IDs.
+///
+/// `data[].id` is the only field required by spec. We don't try to derive
+/// capabilities from this shape because OpenAI-format `/v1/models` doesn't
+/// expose vision/tools flags — capability inference is left to whatever
+/// downstream consumer cares (e.g. `merge_discovered_models`).
+fn parse_openai_models(body: &serde_json::Value) -> EndpointOutcome {
+    let arr = match body.get("data").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => {
+            return EndpointOutcome::Failed {
+                error: "response did not contain a `data` array".to_string(),
+            };
+        }
+    };
+
+    let names: Vec<String> = arr
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    EndpointOutcome::Ok {
+        models: names,
+        model_info: vec![],
     }
 }
 
@@ -735,5 +839,102 @@ mod tests {
     fn test_infer_ollama_capabilities_chat_only() {
         let caps = infer_ollama_capabilities("llama3.2:latest", Some("llama"));
         assert_eq!(caps, vec!["completion"]);
+    }
+
+    fn ok_or_panic(outcome: EndpointOutcome) -> (Vec<String>, Vec<DiscoveredModelInfo>) {
+        match outcome {
+            EndpointOutcome::Ok { models, model_info } => (models, model_info),
+            EndpointOutcome::Failed { error } => panic!("expected Ok, got Failed: {error}"),
+        }
+    }
+
+    fn fail_or_panic(outcome: EndpointOutcome) -> String {
+        match outcome {
+            EndpointOutcome::Failed { error } => error,
+            EndpointOutcome::Ok { models, .. } => {
+                panic!("expected Failed, got Ok with {} models", models.len())
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_ollama_tags_extracts_names_and_capabilities() {
+        // Mirrors what `ollama list` returns on a box that has llama3.2 pulled.
+        let body = serde_json::json!({
+            "models": [
+                {
+                    "name": "llama3.2:latest",
+                    "size": 2_000_000_000u64,
+                    "details": {
+                        "family": "llama",
+                        "families": ["llama"],
+                        "parameter_size": "3.2B",
+                        "quantization_level": "Q4_K_M"
+                    },
+                    "capabilities": ["completion", "tools"]
+                }
+            ]
+        });
+        let (models, info) = ok_or_panic(parse_ollama_tags(&body));
+        assert_eq!(models, vec!["llama3.2:latest"]);
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].name, "llama3.2:latest");
+        assert_eq!(info[0].family.as_deref(), Some("llama"));
+        assert_eq!(info[0].capabilities, vec!["completion", "tools"]);
+    }
+
+    #[test]
+    fn test_parse_ollama_tags_failed_on_wrong_shape() {
+        // Lemonade's /api/tags returns 404, but if it returned a 200 with the
+        // wrong shape we still need to fall back — assert the parser flags it.
+        let body = serde_json::json!({"data": []}); // OpenAI shape, no "models"
+        let err = fail_or_panic(parse_ollama_tags(&body));
+        assert!(err.contains("models"));
+    }
+
+    #[test]
+    fn test_parse_openai_models_extracts_data_ids() {
+        // Exact body the issue #3191 reporter pasted from Lemonade — verify
+        // the parser pulls `Gemma-4-26B-A4B-it-GGUF` out as-is, no normalization.
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "Gemma-4-26B-A4B-it-GGUF", "object": "model"},
+                {"id": "nomic-embed-text-v2-moe-GGUF", "object": "model"}
+            ]
+        });
+        let (models, info) = ok_or_panic(parse_openai_models(&body));
+        assert_eq!(
+            models,
+            vec!["Gemma-4-26B-A4B-it-GGUF", "nomic-embed-text-v2-moe-GGUF"]
+        );
+        // OpenAI shape has no capability metadata.
+        assert!(info.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_models_failed_on_wrong_shape() {
+        let body = serde_json::json!({"models": []}); // Ollama shape, no "data"
+        let err = fail_or_panic(parse_openai_models(&body));
+        assert!(err.contains("data"));
+    }
+
+    #[tokio::test]
+    async fn test_probe_provider_ollama_unreachable_reports_both_endpoints() {
+        // The whole point of the fallback chain is to cover servers like
+        // Lemonade that 404 on /api/tags but answer /v1/models. When *both*
+        // endpoints fail the error message must mention both so an operator
+        // can tell "wrong server type" apart from "server is dead".
+        let result = probe_provider("ollama", "http://127.0.0.1:19994", None).await;
+        assert!(!result.reachable);
+        let err = result.error.expect("probe should have an error");
+        assert!(
+            err.contains("/api/tags"),
+            "missing /api/tags in error: {err}"
+        );
+        assert!(
+            err.contains("/v1/models"),
+            "missing /v1/models in error: {err}"
+        );
     }
 }

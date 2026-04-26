@@ -631,6 +631,19 @@ default_agent = "assistant"
 
 The Webhook adapter provides a generic bidirectional HTTP integration. Incoming messages are received as HTTP POST requests on the shared API server at `/channels/webhook/webhook`, verified via HMAC-SHA256 using the shared secret. Responses are delivered as HTTP POST payloads to the configured URL, also signed with HMAC-SHA256.
 
+### `deliver_only` Pass-through Mode
+
+The webhook channel can also run as a zero-LLM pass-through: incoming payloads bypass the agent loop entirely (no sanitiser, no rate limiter, no agent lookup) and forward straight to a target channel. Useful for push notifications and out-of-band alerts where you only need the message to land in Telegram / Slack / etc.
+
+```toml
+[channels.webhook]
+enabled = true
+deliver_only = true
+deliver = "telegram:123456789"     # required when deliver_only is true
+```
+
+When `deliver_only = true` but `deliver` is unset, librefang emits a startup `warn` and the webhook stays inactive. See [Webhook `deliver_only` Mode](/integrations/channels#webhook-deliver_only-mode) on the channels overview for the internal `__deliver_only__` / `__deliver_target__` metadata signalling.
+
 ---
 
 ## Voice

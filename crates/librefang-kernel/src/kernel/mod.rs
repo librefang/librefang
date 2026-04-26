@@ -292,6 +292,20 @@ fn collect_rotation_key_specs(
     specs
 }
 
+/// One in-flight `(agent, session)` loop. Stored in
+/// `LibreFangKernel.running_tasks` to support per-session cancellation
+/// (`stop_session_run`) and runtime introspection
+/// (`list_running_sessions` / `GET /api/agents/{id}/runtime`).
+///
+/// `started_at` is captured at spawn time, before the agent loop yields
+/// — callers reading the snapshot get a stable wall-clock timestamp for
+/// "when was this turn launched", independent of how long the loop has
+/// been blocked on the LLM or a tool. UTC, RFC3339-serialised on the wire.
+pub(crate) struct RunningTask {
+    pub(crate) abort: tokio::task::AbortHandle,
+    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct LibreFangKernel {
     /// Boot-time home directory (immutable — cannot hot-reload).
     home_dir_boot: PathBuf,
@@ -349,15 +363,23 @@ pub struct LibreFangKernel {
     pub(crate) model_catalog: std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
     /// Skill registry for plugin skills (RwLock for hot-reload on install/uninstall).
     pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
-    /// Tracks running agent tasks for cancellation support.
-    pub(crate) running_tasks: dashmap::DashMap<AgentId, tokio::task::AbortHandle>,
-    /// Tracks per-agent session interrupts so `stop_agent_run` can signal
-    /// `cancel()` in addition to aborting the tokio task.  Without this,
-    /// `SessionInterrupt` is moved into `LoopOptions` and the external handle
-    /// is lost, making all `is_cancelled()` checks inside tool futures
-    /// permanently return `false`.
+    /// Tracks running agent loops for cancellation + observability. Keyed by
+    /// `(agent, session)` so concurrent loops on the same agent (parallel
+    /// `session_mode = "new"` triggers, `agent_send` fan-out, parallel
+    /// channel chats) each retain their own abort handle. Pre-rekey this
+    /// was `DashMap<AgentId, AbortHandle>`, which silently overwrote prior
+    /// handles when a second loop spawned and left earlier loops un-stoppable.
+    /// See issue #3172.
+    pub(crate) running_tasks: dashmap::DashMap<(AgentId, SessionId), RunningTask>,
+    /// Tracks per-(agent, session) interrupts so `stop_agent_run` /
+    /// `stop_session_run` can signal `cancel()` in addition to aborting the
+    /// tokio task. Without this, `SessionInterrupt` is moved into
+    /// `LoopOptions` and the external handle is lost, making all
+    /// `is_cancelled()` checks inside tool futures permanently return
+    /// `false`. Same key shape as `running_tasks` so the two maps stay in
+    /// sync at a glance.
     pub(crate) session_interrupts:
-        dashmap::DashMap<AgentId, librefang_runtime::interrupt::SessionInterrupt>,
+        dashmap::DashMap<(AgentId, SessionId), librefang_runtime::interrupt::SessionInterrupt>,
     /// MCP server connections (lazily initialized at start_background_agents).
     pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
     /// Per-server MCP OAuth authentication state.
@@ -446,6 +468,16 @@ pub struct LibreFangKernel {
     /// supplies an explicit `session_id_override`. Allows concurrent messages to
     /// different sessions of the same agent (multi-tab / multi-session UIs).
     session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent invocation semaphore — caps concurrent **trigger
+    /// dispatch** fires to a single agent. Capacity is resolved lazily
+    /// on first use from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`.
+    /// Permits are acquired in addition to (and AFTER) the global
+    /// trigger lane permit, so a hot agent throttles itself without
+    /// starving the kernel. NOT acquired by `agent_send`, channel
+    /// bridges, or cron — those paths still serialize at the existing
+    /// `agent_msg_locks` / `session_msg_locks` inside `send_message_full`.
+    agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
@@ -521,6 +553,16 @@ pub struct LibreFangKernel {
     /// directory could not be resolved at boot.
     pub(crate) checkpoint_manager:
         Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
+    /// Live, atomically-swappable handle to `KernelConfig.taint_rules`.
+    ///
+    /// The kernel mirrors `config.load().taint_rules` into this swap on boot
+    /// and on every config reload (see [`Self::reload_config`]). Each
+    /// connected MCP server holds an [`Arc::clone`] of this same swap as its
+    /// `taint_rule_sets` field, so reading via `.load()` at scan time always
+    /// returns the latest registry — without restarting the server. The
+    /// scanner takes a single `.load()` per call so a mid-call reload can't
+    /// change the rule set under an in-flight tool invocation.
+    pub(crate) taint_rules_swap: librefang_runtime::mcp::TaintRuleSetsHandle,
     /// Pluggable hook that swaps the live tracing `EnvFilter` when
     /// `config.log_level` changes via hot-reload. Injected by the binary
     /// (`librefang-cli` for the daemon) post-construction; absent for
@@ -721,6 +763,16 @@ impl LibreFangKernel {
         roots
     }
 
+    /// Hand out an [`Arc::clone`] of the kernel's live taint-rules swap to a
+    /// fresh `McpServerConfig`. All connected servers share the same swap,
+    /// so `[[taint_rules]]` edits applied via [`Self::reload_config`]
+    /// immediately reach every server's next scan call. The scanner takes a
+    /// single `.load()` per tool call to keep the rule view stable across a
+    /// single argument-tree walk.
+    fn snapshot_taint_rules(&self) -> librefang_runtime::mcp::TaintRuleSetsHandle {
+        std::sync::Arc::clone(&self.taint_rules_swap)
+    }
+
     /// Build the default list of root directories to advertise to MCP servers
     /// via the MCP Roots capability.
     ///
@@ -850,6 +902,7 @@ impl LibreFangKernel {
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: server_roots,
             };
 
@@ -1369,10 +1422,22 @@ impl LibreFangKernel {
         &self.delivery_tracker
     }
 
-    /// Running agent task handles (for cancellation).
-    #[inline]
-    pub fn running_tasks_ref(&self) -> &dashmap::DashMap<AgentId, tokio::task::AbortHandle> {
-        &self.running_tasks
+    /// First currently-active `SessionInterrupt` registered for `agent_id`,
+    /// across any of its sessions. Used by fork / subagent paths that just
+    /// need a cancellation handle to chain off the parent — they don't care
+    /// which specific session, only that aborting any one of the agent's
+    /// in-flight loops cascades into them.
+    ///
+    /// If the agent has multiple concurrent loops the choice is unspecified
+    /// (DashMap iteration order). Returns `None` when no loop is in flight.
+    pub(crate) fn any_session_interrupt_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Option<librefang_runtime::interrupt::SessionInterrupt> {
+        self.session_interrupts
+            .iter()
+            .find(|e| e.key().0 == agent_id)
+            .map(|e| e.value().clone())
     }
 
     /// Per-agent decision traces.
@@ -1419,6 +1484,64 @@ impl LibreFangKernel {
     #[inline]
     pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
         &self.command_queue
+    }
+
+    /// Resolve the per-agent concurrency semaphore, lazily creating it on
+    /// first use. Capacity comes from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`,
+    /// floored at 1 (covers a manifest typo of `Some(0)`). The returned
+    /// `Arc<Semaphore>` is cheap to clone and safe to move into a
+    /// spawned task via `acquire_owned()`.
+    ///
+    /// The semaphore is removed by `gc_sweep` only when the agent leaves
+    /// the registry (kill / despawn). It is NOT invalidated on
+    /// `manifest_swap` hot-reload — to pick up a new cap operators must
+    /// kill the agent and let it respawn (or restart the daemon). An
+    /// in-place activate / status flip that keeps the agent in the
+    /// registry will silently retain the old capacity. This avoids a
+    /// permit-loss race during live config reloads.
+    pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
+        if let Some(existing) = self.agent_concurrency.get(&agent_id) {
+            return existing.clone();
+        }
+        // Single registry read so cap and session_mode come from the
+        // same manifest snapshot — avoids a TOCTOU window where two
+        // separate gets see manifests on either side of a swap.
+        let (manifest_cap, session_mode) = match self.registry.get(agent_id) {
+            Some(e) => (
+                e.manifest.max_concurrent_invocations.map(|n| n as usize),
+                e.manifest.session_mode,
+            ),
+            None => (None, librefang_types::agent::SessionMode::default()),
+        };
+        // Clamp `persistent` agents to 1: parallel writes to the same
+        // session's message history are undefined. Emit a warn so a
+        // misconfigured manifest is visible at boot rather than silently
+        // ignored. The check lives here (the resolver) instead of a
+        // dedicated validator because the rule is structural to the
+        // dispatch path, not a TOML-time concern.
+        let resolved_cap = match (session_mode, manifest_cap) {
+            (librefang_types::agent::SessionMode::Persistent, Some(n)) if n > 1 => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    requested = n,
+                    "max_concurrent_invocations > 1 ignored — session_mode = \
+                     \"persistent\" cannot run parallel invocations safely; \
+                     clamped to 1. Set session_mode = \"new\" on the manifest \
+                     to enable parallel fires (per-trigger overrides cannot \
+                     escape the clamp — the per-agent semaphore is sized once \
+                     from the manifest default).",
+                );
+                1
+            }
+            (_, Some(n)) => n,
+            (_, None) => self.config.load().queue.concurrency.default_per_agent,
+        }
+        .max(1);
+        self.agent_concurrency
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(resolved_cap)))
+            .clone()
     }
 
     /// Persistent process manager.
@@ -1529,16 +1652,18 @@ impl LibreFangKernel {
         //    already finished (is_finished() == true).  Without this, every
         //    completed agent turn leaves an orphan AbortHandle in the map
         //    that is never cleaned up by stop_agent_run / suspend_agent.
+        //    Map is keyed by `(agent, session)` post-#3172, so the sweep
+        //    fans out across all sessions for each dead/finished agent.
         {
-            let finished: Vec<AgentId> = self
+            let finished: Vec<(AgentId, SessionId)> = self
                 .running_tasks
                 .iter()
-                .filter(|e| !live_agents.contains(e.key()) || e.value().is_finished())
+                .filter(|e| !live_agents.contains(&e.key().0) || e.value().abort.is_finished())
                 .map(|e| *e.key())
                 .collect();
             total_removed += finished.len();
-            for id in finished {
-                self.running_tasks.remove(&id);
+            for key in finished {
+                self.running_tasks.remove(&key);
             }
         }
 
@@ -1553,6 +1678,22 @@ impl LibreFangKernel {
             total_removed += stale.len();
             for id in stale {
                 self.agent_msg_locks.remove(&id);
+            }
+        }
+
+        // 3b. agent_concurrency — remove per-agent invocation semaphores
+        // for dead agents. Mirrors the agent_msg_locks pass above; lazy
+        // re-init on next dispatch will pick up any updated manifest cap.
+        {
+            let stale: Vec<AgentId> = self
+                .agent_concurrency
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.agent_concurrency.remove(&id);
             }
         }
 
@@ -2181,8 +2322,10 @@ impl LibreFangKernel {
         let wasm_sandbox = WasmSandbox::new()
             .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
-        // Initialize RBAC authentication manager
-        let auth = AuthManager::new(&config.users);
+        // Initialize RBAC authentication manager. Tool groups are passed
+        // through so per-user `tool_categories` (RBAC M3) can resolve
+        // group names to their tool patterns.
+        let auth = AuthManager::with_tool_groups(&config.users, &config.tool_policy.groups);
         if auth.is_enabled() {
             info!("RBAC enabled with {} users", auth.user_count());
         }
@@ -2654,6 +2797,7 @@ impl LibreFangKernel {
             config.queue.concurrency.main_lane as u32,
             config.queue.concurrency.cron_lane as u32,
             config.queue.concurrency.subagent_lane as u32,
+            config.queue.concurrency.trigger_lane as u32,
         );
 
         // Build the pluggable context engine from config
@@ -2706,6 +2850,13 @@ impl LibreFangKernel {
             None => config.data_dir.join("audit.anchor"),
         };
         let hooks_dir = config.home_dir.join("hooks");
+        // Snapshot the initial taint rule registry into a shared
+        // `Arc<ArcSwap<...>>`. This swap is the single source of truth read
+        // by every connected MCP server's scanner — `Self::reload_config`
+        // calls `.store(...)` on it so config edits propagate without
+        // restarting servers.
+        let initial_taint_rules =
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config.taint_rules.clone()));
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -2777,6 +2928,7 @@ impl LibreFangKernel {
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             session_msg_locks: dashmap::DashMap::new(),
+            agent_concurrency: dashmap::DashMap::new(),
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
@@ -2808,6 +2960,7 @@ impl LibreFangKernel {
                     librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
                 ))
             },
+            taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
         };
 
@@ -3987,10 +4140,7 @@ system_prompt = "You are a helpful assistant."
             .get()
             .and_then(|w| w.upgrade())
             .map(|arc| arc as Arc<dyn KernelHandle>);
-        let upstream = self
-            .session_interrupts
-            .get(&parent_agent_id)
-            .map(|r| r.clone());
+        let upstream = self.any_session_interrupt_for_agent(parent_agent_id);
         self.send_message_full_with_upstream(
             agent_id, message, handle, None, None, None, None, None, upstream,
         )
@@ -4076,42 +4226,6 @@ system_prompt = "You are a helpful assistant."
             content_blocks,
             None,
             None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// Send a message with a session mode override.
-    ///
-    /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
-    /// without changing the public `send_message` signature.
-    ///
-    /// When the target agent has a configured **home channel** (a channel whose
-    /// `default_agent` matches this agent), a synthetic `SenderContext` is
-    /// attached so that downstream channel routing (prompt hints, the
-    /// `channel_send` tool account-id fallback, the `delivery.last_channel`
-    /// memory key, …) targets that home channel instead of the first channel
-    /// in the config array. See issue #2872.
-    async fn send_message_with_session_mode(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        session_mode_override: Option<librefang_types::agent::SessionMode>,
-    ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
-        let home_channel = self.resolve_agent_home_channel(agent_id);
-        self.send_message_full(
-            agent_id,
-            message,
-            handle,
-            None,
-            home_channel.as_ref(),
-            session_mode_override,
             None,
             None,
         )
@@ -5092,10 +5206,16 @@ system_prompt = "You are a helpful assistant."
         // observed by both. When no parent is running (e.g. auto_memorize
         // fires from an idle agent), fall back to a fresh interrupt so the
         // fork still has a cancellation primitive for its own tools.
+        //
+        // Post-#3172 the interrupt map is keyed by (agent, session); the
+        // fork doesn't yet know which parent session is driving it, so we
+        // pick any in-flight one for the same agent. With concurrent
+        // loops the choice is best-effort, but cancellation chains via the
+        // shared Arc<AtomicBool> still work — `stop_agent_run(agent_id)`
+        // fans out across all sessions, so no matter which entry we
+        // borrowed from, the cascade reaches this fork.
         let interrupt = self
-            .session_interrupts
-            .get(&agent_id)
-            .map(|entry| entry.value().clone())
+            .any_session_interrupt_for_agent(agent_id)
             .unwrap_or_default();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
@@ -5160,11 +5280,13 @@ system_prompt = "You are a helpful assistant."
         // non-streaming `send_message_as`, so this is latent — but the next
         // caller that adds streaming subagent dispatch must extend the
         // cascade here.
+        // Construct the interrupt here; the registration into
+        // `session_interrupts` happens inside
+        // `send_message_streaming_with_sender_and_opts` once
+        // `effective_session_id` has been resolved (the map is keyed by
+        // `(agent, session)` post-#3172 and the session id is not yet known
+        // at this layer).
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
-        // Retain a clone in `session_interrupts` so `stop_agent_run` can call
-        // `cancel()`.  The original is moved into `LoopOptions` below.
-        self.session_interrupts
-            .insert(agent_id, session_interrupt.clone());
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             allowed_tools: None,
@@ -5337,6 +5459,17 @@ system_prompt = "You are a helpful assistant."
                 },
             }
         };
+
+        // Register the SessionInterrupt clone now that `effective_session_id`
+        // is known. Forks deliberately skip this — they share the parent's
+        // entry by lookup (see `run_forked_agent_streaming`) and must not
+        // overwrite it. See #3172 for the rekey rationale.
+        if !loop_opts.is_fork {
+            if let Some(interrupt) = loop_opts.interrupt.as_ref() {
+                self.session_interrupts
+                    .insert((agent_id, effective_session_id), interrupt.clone());
+            }
+        }
 
         let existing_session = self
             .memory
@@ -5964,8 +6097,12 @@ system_prompt = "You are a helpful assistant."
                     // from `stop_agent_run` cancellation. Only the original
                     // parent turn cleans up the map.
                     if !loop_opts.is_fork {
-                        kernel_clone.session_interrupts.remove(&agent_id);
-                        kernel_clone.running_tasks.remove(&agent_id);
+                        kernel_clone
+                            .session_interrupts
+                            .remove(&(agent_id, effective_session_id));
+                        kernel_clone
+                            .running_tasks
+                            .remove(&(agent_id, effective_session_id));
                     }
                     Ok(result)
                 }
@@ -5982,8 +6119,12 @@ system_prompt = "You are a helpful assistant."
                         },
                     );
                     if !loop_opts.is_fork {
-                        kernel_clone.session_interrupts.remove(&agent_id);
-                        kernel_clone.running_tasks.remove(&agent_id);
+                        kernel_clone
+                            .session_interrupts
+                            .remove(&(agent_id, effective_session_id));
+                        kernel_clone
+                            .running_tasks
+                            .remove(&(agent_id, effective_session_id));
                     }
                     Err(KernelError::LibreFang(e))
                 }
@@ -5991,14 +6132,21 @@ system_prompt = "You are a helpful assistant."
         });
 
         // Store abort handle for cancellation support. Fork turns skip —
-        // registering the fork's handle under `agent_id` would overwrite
-        // the parent turn's handle, so a caller invoking
-        // `stop_agent_run(agent_id)` during the fork window would abort
-        // the fork instead of the parent. Forks are driven by their own
-        // caller (auto_memorize, dream) which has its own join handle
-        // and doesn't need external cancellation via `agent_id` key.
+        // registering the fork's handle under the parent's `(agent, session)`
+        // key would overwrite the parent's entry (forks deliberately reuse
+        // the parent's session id for cache alignment), so a caller invoking
+        // `stop_agent_run(agent_id)` during the fork window would abort the
+        // fork instead of the parent. Forks are driven by their own caller
+        // (auto_memorize, dream) which has its own join handle and doesn't
+        // need external cancellation via the registry.
         if !is_fork {
-            self.running_tasks.insert(agent_id, handle.abort_handle());
+            self.running_tasks.insert(
+                (agent_id, effective_session_id),
+                RunningTask {
+                    abort: handle.abort_handle(),
+                    started_at: chrono::Utc::now(),
+                },
+            );
         }
 
         Ok((rx, handle))
@@ -7227,10 +7375,12 @@ system_prompt = "You are a helpful assistant."
             Some(up) => librefang_runtime::interrupt::SessionInterrupt::new_with_upstream(up),
             None => librefang_runtime::interrupt::SessionInterrupt::new(),
         };
-        // Register in session_interrupts so stop_agent_run can call cancel()
-        // even when the caller uses the non-streaming send_message() path.
+        // Register in session_interrupts so stop_agent_run / stop_session_run
+        // can call cancel() even when the caller uses the non-streaming
+        // send_message() path. Map keyed by (agent, session) post-#3172 so
+        // concurrent sessions for one agent don't overwrite each other.
         self.session_interrupts
-            .insert(agent_id, session_interrupt.clone());
+            .insert((agent_id, effective_session_id), session_interrupt.clone());
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             allowed_tools: None,
@@ -7307,8 +7457,9 @@ system_prompt = "You are a helpful assistant."
 
         // Clean up the interrupt handle regardless of outcome — the map must
         // not retain stale entries that would suppress cancellation on the
-        // next run for the same agent.
-        self.session_interrupts.remove(&agent_id);
+        // next run for the same (agent, session) pair.
+        self.session_interrupts
+            .remove(&(agent_id, effective_session_id));
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
@@ -8573,26 +8724,108 @@ system_prompt = "You are a helpful assistant."
         Ok((input_tokens, output_tokens, cost))
     }
 
-    /// Cancel an agent's currently running LLM task.
+    /// Cancel **every** in-flight LLM task for an agent. Fans out across
+    /// all `(agent, session)` entries so an agent that owns multiple
+    /// concurrent loops (parallel `session_mode = "new"` triggers,
+    /// `agent_send` fan-out, parallel channel chats) is fully halted.
     ///
-    /// Two signals are sent:
+    /// Two signals are sent per session:
     /// 1. `AbortHandle::abort()` — terminates the tokio task at the next
     ///    `.await` point (fast but coarse).
     /// 2. `SessionInterrupt::cancel()` — sets the per-session atomic flag so
     ///    in-flight tool futures that poll `is_cancelled()` can bail out
     ///    gracefully before the task is actually dropped.
+    ///
+    /// Returns `true` when at least one session was stopped, `false` when
+    /// the agent had no active loops. Callers that need session-scoped
+    /// stop should use [`Self::stop_session_run`] instead.
+    ///
+    /// **Snapshot semantics:** session keys are collected into a `Vec` first,
+    /// then iterated to remove. A session that finishes between the snapshot
+    /// and the removal is silently absent from the count (already gone, so
+    /// the removal is a no-op). A session inserted **after** the snapshot is
+    /// not aborted by this call — `stop_agent_run` is best-effort against the
+    /// instant it observes. Concurrent dispatches that race with stop are
+    /// expected to either be aborted or to start cleanly afterward; partial
+    /// abort of a half-spawned loop would be more surprising than missing
+    /// it. Callers that need a strict "freeze, then abort" should suspend
+    /// the agent first via [`Self::suspend_agent`] (which itself fans out
+    /// through this method).
     pub fn stop_agent_run(&self, agent_id: AgentId) -> KernelResult<bool> {
-        // Signal the interrupt first so tools see it before the task is aborted.
-        if let Some((_, interrupt)) = self.session_interrupts.remove(&agent_id) {
-            interrupt.cancel();
+        let sessions: Vec<SessionId> = self
+            .running_tasks
+            .iter()
+            .filter(|e| e.key().0 == agent_id)
+            .map(|e| e.key().1)
+            .collect();
+        let interrupt_sessions: Vec<SessionId> = self
+            .session_interrupts
+            .iter()
+            .filter(|e| e.key().0 == agent_id)
+            .map(|e| e.key().1)
+            .collect();
+        // Signal interrupts first so tools see cancellation before the
+        // tokio tasks are dropped at the next .await.
+        for sid in &interrupt_sessions {
+            if let Some((_, interrupt)) = self.session_interrupts.remove(&(agent_id, *sid)) {
+                interrupt.cancel();
+            }
         }
-        if let Some((_, handle)) = self.running_tasks.remove(&agent_id) {
-            handle.abort();
-            info!(agent_id = %agent_id, "Agent run cancelled");
+        let mut stopped = 0usize;
+        for sid in &sessions {
+            if let Some((_, task)) = self.running_tasks.remove(&(agent_id, *sid)) {
+                task.abort.abort();
+                stopped += 1;
+            }
+        }
+        if stopped > 0 {
+            info!(agent_id = %agent_id, sessions = stopped, "Agent run cancelled (fan-out)");
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    /// Cancel a single in-flight `(agent, session)` loop without affecting
+    /// the agent's other concurrent sessions. Mirrors [`Self::stop_agent_run`]
+    /// signal pair (interrupt first, then abort) but scoped to one entry.
+    ///
+    /// Returns `true` when the entry existed and was aborted, `false` when
+    /// no loop was running for that pair (already finished, never started,
+    /// or the session belongs to a different agent).
+    pub fn stop_session_run(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<bool> {
+        if let Some((_, interrupt)) = self.session_interrupts.remove(&(agent_id, session_id)) {
+            interrupt.cancel();
+        }
+        if let Some((_, task)) = self.running_tasks.remove(&(agent_id, session_id)) {
+            task.abort.abort();
+            info!(agent_id = %agent_id, session_id = %session_id, "Session run cancelled");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Snapshot every in-flight `(agent, session)` loop owned by `agent_id`.
+    /// Empty `Vec` when the agent has no active loops. Order is unspecified
+    /// (DashMap iteration order); callers that need a stable order should
+    /// sort by `started_at` themselves.
+    pub fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot> {
+        self.running_tasks
+            .iter()
+            .filter(|e| e.key().0 == agent_id)
+            .map(|e| RunningSessionSnapshot {
+                session_id: e.key().1,
+                started_at: e.value().started_at,
+                state: RunningSessionState::Running,
+            })
+            .collect()
+    }
+
+    /// Cheap check used by `librefang-api/src/ws.rs` to gate state-event
+    /// fan-out — true when `agent_id` has at least one session in flight.
+    pub fn agent_has_active_session(&self, agent_id: AgentId) -> bool {
+        self.running_tasks.iter().any(|e| e.key().0 == agent_id)
     }
 
     /// Suspend an agent — sets state to Suspended, persists enabled=false to TOML.
@@ -8602,14 +8835,9 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         let _ = self.registry.set_state(agent_id, AgentState::Suspended);
-        // Also stop any active run — signal the interrupt first so in-flight
-        // tools observe cancellation before the task is dropped.
-        if let Some((_, interrupt)) = self.session_interrupts.remove(&agent_id) {
-            interrupt.cancel();
-        }
-        if let Some((_, handle)) = self.running_tasks.remove(&agent_id) {
-            handle.abort();
-        }
+        // Stop every active session for the agent — same fan-out as
+        // `stop_agent_run` so a multi-session agent is fully halted.
+        let _ = self.stop_agent_run(agent_id);
         // Persist enabled=false to agent.toml
         self.persist_agent_enabled(agent_id, &entry.name, false);
         info!(agent_id = %agent_id, "Agent suspended");
@@ -9592,6 +9820,20 @@ system_prompt = "You are a helpful assistant."
         if should_apply_hot(old_cfg.reload.mode, &plan) {
             let _write_guard = self.config_reload_lock.write().await;
             self.apply_hot_actions_inner(&plan, &new_config);
+            // Push the new `[[taint_rules]]` registry into the shared swap
+            // BEFORE swapping `self.config`. Connected MCP servers read from
+            // this swap on every scan; updating it now means the next tool
+            // call inherits the new rules without restarting the server.
+            // Order: taint_rules first, then config — that way no scanner
+            // sees a window where `self.config.load().taint_rules` and the
+            // `taint_rules_swap` snapshot disagree.
+            //
+            // The reload-plan diff (`build_reload_plan`) emits
+            // `HotAction::ReloadTaintRules` whenever `[[taint_rules]]`
+            // changes, so `should_apply_hot` reaches this branch on those
+            // edits even when no other hot action fires.
+            self.taint_rules_swap
+                .store(std::sync::Arc::new(new_config.taint_rules.clone()));
             self.config.store(std::sync::Arc::new(new_config));
         }
 
@@ -9762,6 +10004,50 @@ system_prompt = "You are a helpful assistant."
                 HotAction::ReloadMcpServers => {
                     info!("Hot-reload: MCP server config updated");
                     let new_mcp = new_config.mcp_servers.clone();
+
+                    // Snapshot the previous effective list so we can diff
+                    // which entries actually changed. Existing connections
+                    // hold a per-server `McpServerConfig` clone (including
+                    // `taint_policy`/`taint_scanning`/`headers`/`env`/
+                    // `transport`), so any field that is not behind a shared
+                    // `ArcSwap` (only `taint_rule_sets` is) requires a
+                    // disconnect+reconnect for the new value to reach
+                    // in-flight tool calls. Without this, edits via PUT
+                    // `/api/mcp/servers/{name}`, CLI `config.toml` edits,
+                    // or any non-PATCH path would silently keep the old
+                    // policy alive on already-connected servers.
+                    let old_mcp = self
+                        .effective_mcp_servers
+                        .read()
+                        .map(|s| s.clone())
+                        .unwrap_or_default();
+
+                    let new_by_name: std::collections::HashMap<&str, _> =
+                        new_mcp.iter().map(|s| (s.name.as_str(), s)).collect();
+                    let mut to_reconnect: Vec<String> = Vec::new();
+                    for old_entry in &old_mcp {
+                        match new_by_name.get(old_entry.name.as_str()) {
+                            None => {
+                                // Removed: stale connection still alive in
+                                // `mcp_connections` until we evict it.
+                                to_reconnect.push(old_entry.name.clone());
+                            }
+                            Some(new_entry) => {
+                                // Modified: serialize-compare is robust
+                                // against future field additions and avoids
+                                // forcing `PartialEq` onto every nested
+                                // config type (`McpTaintPolicy`,
+                                // `McpOAuthConfig`, transport variants…).
+                                let old_json = serde_json::to_string(old_entry).unwrap_or_default();
+                                let new_json =
+                                    serde_json::to_string(*new_entry).unwrap_or_default();
+                                if old_json != new_json {
+                                    to_reconnect.push(old_entry.name.clone());
+                                }
+                            }
+                        }
+                    }
+
                     let mut effective = self
                         .effective_mcp_servers
                         .write()
@@ -9783,13 +10069,47 @@ system_prompt = "You are a helpful assistant."
                     }
                     let count = new_mcp.len();
                     *effective = new_mcp;
-                    info!(
-                        "Hot-reload: effective MCP server list rebuilt ({count} total, \
-                         connections will be re-established on next agent message)"
-                    );
+                    drop(effective);
+
                     // Bump MCP generation so tool list caches are invalidated
                     self.mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    if to_reconnect.is_empty() {
+                        info!(
+                            "Hot-reload: effective MCP server list rebuilt \
+                             ({count} total, no reconnects needed)"
+                        );
+                    } else {
+                        info!(
+                            servers = ?to_reconnect,
+                            "Hot-reload: effective MCP server list rebuilt \
+                             ({count} total, {} server(s) need reconnection \
+                             to apply config changes)",
+                            to_reconnect.len()
+                        );
+                        // Fire-and-forget: `disconnect_mcp_server` drops the
+                        // stale slot and `connect_mcp_servers` is idempotent
+                        // (re-adds servers missing from `mcp_connections`
+                        // using the now-updated effective list).
+                        if let Some(weak) = self.self_handle.get() {
+                            if let Some(kernel) = weak.upgrade() {
+                                tokio::spawn(async move {
+                                    for name in &to_reconnect {
+                                        kernel.disconnect_mcp_server(name).await;
+                                    }
+                                    kernel.connect_mcp_servers().await;
+                                });
+                            } else {
+                                tracing::warn!(
+                                    server_count = to_reconnect.len(),
+                                    "Hot-reload: kernel self-handle dropped \
+                                     — MCP servers will keep stale config \
+                                     until next restart"
+                                );
+                            }
+                        }
+                    }
                 }
                 HotAction::ReloadA2aConfig => {
                     info!(
@@ -9815,6 +10135,25 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
+                }
+                HotAction::ReloadAuth => {
+                    info!(
+                        "Hot-reload: rebuilding AuthManager ({} users, {} tool groups)",
+                        new_config.users.len(),
+                        new_config.tool_policy.groups.len(),
+                    );
+                    self.auth
+                        .reload(&new_config.users, &new_config.tool_policy.groups);
+                }
+                HotAction::ReloadTaintRules => {
+                    // Actual swap is performed by the caller (`reload_config`)
+                    // after this match completes — this arm is informational
+                    // only. Logging here keeps the action visible alongside
+                    // every other hot reload in the audit trail.
+                    info!(
+                        "Hot-reload: [[taint_rules]] registry updated — \
+                         next MCP scan will see new rule sets without reconnect"
+                    );
                 }
                 HotAction::ReloadLogLevel(level) => match self.log_reloader.get() {
                     Some(reloader) => match reloader.reload(level) {
@@ -9920,22 +10259,95 @@ system_prompt = "You are a helpful assistant."
         // Publish to the event bus
         self.event_bus.publish(event).await;
 
-        // Actually dispatch triggered messages to agents
+        // Actually dispatch triggered messages to agents.
+        //
+        // Concurrency model — three layered semaphores, in order:
+        //   1. Global Lane::Trigger (config: queue.concurrency.trigger_lane).
+        //      Caps total in-flight trigger dispatches kernel-wide so a
+        //      runaway producer (50× task_post in a tight loop) can't spawn
+        //      unbounded tokio tasks racing for everyone else's mutexes.
+        //   2. Per-agent semaphore (config: manifest.max_concurrent_invocations
+        //      → fallback queue.concurrency.default_per_agent → 1).
+        //      Caps how many of THIS agent's fires run in parallel.
+        //   3. Per-session mutex (existing session_msg_locks at
+        //      send_message_full).  Reached only when we materialize a
+        //      `session_id_override` here for `session_mode = "new"`
+        //      effective mode — otherwise the inner code path falls back
+        //      to the per-agent lock and blocks parallelism inside
+        //      send_message_full regardless of how many permits we hold.
+        //
+        // Resolution order for effective session mode:
+        //   trigger_match.session_mode_override → manifest.session_mode.
+        // We materialize `SessionId::new()` only when the resolved mode is
+        // `New`; persistent fires reuse the canonical session and must
+        // serialize at the per-agent mutex, so we leave session_id_override
+        // = None for them.
         if let Some(weak) = self.self_handle.get() {
             for trigger_match in &triggered {
-                if let Some(kernel) = weak.upgrade() {
-                    let aid = trigger_match.agent_id;
-                    let msg = trigger_match.message.clone();
-                    let mode_override = trigger_match.session_mode_override;
-                    tokio::spawn(async move {
-                        if let Err(e) = kernel
-                            .send_message_with_session_mode(aid, &msg, mode_override)
-                            .await
-                        {
-                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
-                        }
-                    });
-                }
+                let kernel = match weak.upgrade() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let aid = trigger_match.agent_id;
+                let msg = trigger_match.message.clone();
+                let mode_override = trigger_match.session_mode_override;
+
+                // Resolve the effective session mode now so we can decide
+                // whether to materialize a fresh session id. Skip dispatch
+                // if the agent has been deleted between trigger evaluation
+                // and dispatch — preserves prior behavior.
+                let manifest_mode = match kernel.registry.get(aid) {
+                    Some(entry) => entry.manifest.session_mode,
+                    None => continue,
+                };
+                let effective_mode = mode_override.unwrap_or(manifest_mode);
+                let session_id_override = match effective_mode {
+                    librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                    librefang_types::agent::SessionMode::Persistent => None,
+                };
+
+                let trigger_sem = kernel
+                    .command_queue
+                    .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
+                let agent_sem = kernel.agent_concurrency_for(aid);
+
+                tokio::spawn(async move {
+                    // (1) Global trigger lane permit. `acquire_owned` so the
+                    //     permit moves into the spawned task and drops at
+                    //     task exit.
+                    let _lane_permit = match trigger_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return, // lane closed during shutdown
+                    };
+                    // (2) Per-agent permit.
+                    let _agent_permit = match agent_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    // (3) Inner per-session mutex applies inside
+                    //     send_message_full when session_id_override is Some.
+                    let handle: Option<Arc<dyn KernelHandle>> = kernel
+                        .self_handle
+                        .get()
+                        .and_then(|w| w.upgrade())
+                        .map(|arc| arc as Arc<dyn KernelHandle>);
+                    let home_channel = kernel.resolve_agent_home_channel(aid);
+                    if let Err(e) = kernel
+                        .send_message_full(
+                            aid,
+                            &msg,
+                            handle,
+                            None,
+                            home_channel.as_ref(),
+                            mode_override,
+                            None,
+                            session_id_override,
+                        )
+                        .await
+                    {
+                        warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                    }
+                });
             }
         }
 
@@ -11685,6 +12097,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11834,6 +12247,7 @@ system_prompt = "You are a helpful assistant."
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
+            taint_rule_sets: self.snapshot_taint_rules(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -11958,6 +12372,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -12104,6 +12519,7 @@ system_prompt = "You are a helpful assistant."
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
+            taint_rule_sets: self.snapshot_taint_rules(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -14876,6 +15292,43 @@ impl KernelHandle for LibreFangKernel {
             .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        if !self.auth.is_enabled() {
+            return None;
+        }
+        let user_id = self.auth.resolve_user(sender_id, channel)?;
+        self.auth.memory_acl_for(user_id)
+    }
+
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        // Only the synthetic `"cron"` channel is treated as a system-
+        // internal call. The cron dispatcher synthesises
+        // `SenderContext{channel:"cron"}` (see kernel/mod.rs ~10876)
+        // before fanning out to agents; everything else MUST carry a
+        // real `(channel, sender_id)` tuple.
+        //
+        // Earlier drafts also matched `"system"` / `"internal"` and
+        // treated `(None, None)` as system, but neither sentinel is
+        // synthesised anywhere in the codebase, and the `(None, None)`
+        // shortcut silently re-opened the H7 fail-open at the trait
+        // boundary the AuthManager unit tests were written to close
+        // (PR #3205 review item #1). Both have been removed: an
+        // unattributed inbound now goes through the guest gate so
+        // RBAC fails closed end-to-end.
+        let system_call = matches!(channel, Some("cron"));
+        self.auth
+            .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,
@@ -15027,16 +15480,27 @@ impl KernelHandle for LibreFangKernel {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
-                if entry.tags.iter().any(|t| t.starts_with("hand:")) {
-                    info!(
-                        agent_id,
-                        tool_name, "Auto-approved for hand agent (non-blocking)"
-                    );
-                    return Ok(ToolApprovalSubmission::AutoApproved);
+        // EXCEPTION (RBAC M3, #3054): when the per-user policy demanded approval
+        // (`force_human=true`), the carve-out MUST NOT fire — otherwise a Viewer/User
+        // chatting with a hand-tagged agent silently inherits the agent's full
+        // tool surface, defeating user-level RBAC entirely.
+        if !deferred.force_human {
+            if let Ok(aid) = agent_id.parse::<AgentId>() {
+                if let Some(entry) = self.registry.get(aid) {
+                    if entry.tags.iter().any(|t| t.starts_with("hand:")) {
+                        info!(
+                            agent_id,
+                            tool_name, "Auto-approved for hand agent (non-blocking)"
+                        );
+                        return Ok(ToolApprovalSubmission::AutoApproved);
+                    }
                 }
             }
+        } else {
+            debug!(
+                agent_id,
+                tool_name, "Hand-agent auto-approval skipped because user policy demanded approval"
+            );
         }
 
         let policy = self.approval_manager.policy();

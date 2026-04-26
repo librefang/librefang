@@ -79,6 +79,52 @@ impl StructuredStore {
         Ok(())
     }
 
+    /// Get wrapper guarded by a [`MemoryNamespaceGuard`]. The namespace
+    /// presented to the guard is `kv:<key>` so callers can express
+    /// per-prefix policies (e.g. `readable_namespaces = ["kv:user_*"]`).
+    pub fn get_with_guard(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<Option<serde_json::Value>> {
+        let namespace = format!("kv:{key}");
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read(&namespace) {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+        self.get(agent_id, key)
+    }
+
+    /// Set wrapper guarded by a [`MemoryNamespaceGuard`].
+    pub fn set_with_guard(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        value: serde_json::Value,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<()> {
+        let namespace = format!("kv:{key}");
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_write(&namespace) {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+        self.set(agent_id, key, value)
+    }
+
+    /// Delete wrapper guarded by a [`MemoryNamespaceGuard`]. Honours
+    /// `delete_allowed` in addition to the write check.
+    pub fn delete_with_guard(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<()> {
+        let namespace = format!("kv:{key}");
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete(&namespace) {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+        self.delete(agent_id, key)
+    }
+
     /// List all key-value pairs for an agent.
     pub fn list_kv(&self, agent_id: AgentId) -> LibreFangResult<Vec<(String, serde_json::Value)>> {
         let conn = self
@@ -631,6 +677,90 @@ mod tests {
         store.set(agent_id, "key", serde_json::json!("v2")).unwrap();
         let value = store.get(agent_id, "key").unwrap();
         assert_eq!(value, Some(serde_json::json!("v2")));
+    }
+
+    #[test]
+    fn kv_namespace_guard_blocks_unauthorised_read() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .set(agent_id, "secret", serde_json::json!("treasure map"))
+            .unwrap();
+
+        // Guard with no read access at all.
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess::default());
+        let err = store.get_with_guard(agent_id, "secret", &guard);
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+    }
+
+    #[test]
+    fn kv_namespace_guard_allows_matching_prefix() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .set(agent_id, "user_alice", serde_json::json!("hello"))
+            .unwrap();
+
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["kv:user_*".into()],
+            ..Default::default()
+        });
+        let v = store
+            .get_with_guard(agent_id, "user_alice", &guard)
+            .unwrap();
+        assert_eq!(v, Some(serde_json::json!("hello")));
+
+        // A different key prefix is denied.
+        store
+            .set(agent_id, "internal", serde_json::json!("nope"))
+            .unwrap();
+        assert!(matches!(
+            store.get_with_guard(agent_id, "internal", &guard),
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+    }
+
+    #[test]
+    fn kv_namespace_guard_delete_requires_flag() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let store = setup();
+        let agent_id = AgentId::new();
+        store.set(agent_id, "tmp", serde_json::json!(1)).unwrap();
+
+        // Write access without delete_allowed → blocked.
+        let no_delete = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            delete_allowed: false,
+            ..Default::default()
+        });
+        assert!(matches!(
+            store.delete_with_guard(agent_id, "tmp", &no_delete),
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
+        // delete_allowed → succeeds.
+        let with_delete = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["*".into()],
+            writable_namespaces: vec!["*".into()],
+            delete_allowed: true,
+            ..Default::default()
+        });
+        store
+            .delete_with_guard(agent_id, "tmp", &with_delete)
+            .unwrap();
+        assert!(store.get(agent_id, "tmp").unwrap().is_none());
     }
 
     #[test]

@@ -1234,6 +1234,37 @@
         }
       }
     },
+    "/api/agents/{id}/runtime": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/runtime — Snapshot of in-flight loops for the agent.",
+        "description": "Returns one entry per `(agent, session)` pair that's currently executing.\nEmpty array when the agent is idle.",
+        "operationId": "list_agent_runtime",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of in-flight sessions for the agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/session": {
       "get": {
         "tags": [
@@ -1537,6 +1568,46 @@
         "responses": {
           "200": {
             "description": "Exported session data",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/{session_id}/stop": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/sessions/{session_id}/stop — Cancel a single\nin-flight `(agent, session)` loop without affecting the agent's other\nconcurrent sessions.",
+        "description": "Returns `{\"status\":\"ok\",\"stopped\":true}` when a loop was running for that\npair, `{\"status\":\"ok\",\"stopped\":false}` when nothing was running (already\nfinished, never started, or the session belongs to a different agent).",
+        "operationId": "stop_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel a single (agent, session) loop",
             "content": {
               "application/json": {
                 "schema": {}
@@ -4580,6 +4651,26 @@
           },
           "404": {
             "description": "MCP server not configured",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/taint-rules": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.",
+        "description": "Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references\nrule-set names by free-form string. Without this read-only endpoint,\nthe editor cannot tell the operator that a typed name doesn't match\nany registered set — and the scanner silently treats unknown names\nas no-ops (one-shot WARN in\n`librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard\nuses this list to render an inline validation hint next to the\n`rule_sets` field.",
+        "operationId": "list_mcp_taint_rules",
+        "responses": {
+          "200": {
+            "description": "List configured named taint rule sets",
             "content": {
               "application/json": {
                 "schema": {}
