@@ -44,7 +44,13 @@ fn test_config(name: &str) -> KernelConfig {
     cfg
 }
 
-#[tokio::test]
+// `start_background_agents` reaches into kernel paths that call
+// `tokio::task::block_in_place` (e.g. the synchronous toml_edit /
+// memory-substrate touch points). That requires the multi-threaded
+// runtime — the default current-thread runtime panics with
+// "can call blocking only when running on the multi-threaded runtime"
+// at kernel/mod.rs:3610.
+#[tokio::test(flavor = "multi_thread")]
 async fn test_kernel_boot_with_retention_config_starts_trim_task() {
     let cfg = test_config("trim-task");
     let kernel = Arc::new(LibreFangKernel::boot_with_config(cfg).expect("kernel boots"));
