@@ -1616,23 +1616,30 @@ enum ServiceCommands {
     Status,
 }
 
-/// Wraps an inner `FormatEvent` impl so every emitted log line is prefixed
-/// with `trace_id=<32-hex>` whenever the current tracing span is part of an
-/// OpenTelemetry-traced flow (i.e. the OTel reload layer has been swapped
+/// Wraps an inner `FormatEvent` impl so every emitted log line carries a
+/// `trace_id=<32-hex>` suffix whenever the current tracing span is part of
+/// an OpenTelemetry-traced flow (i.e. the OTel reload layer has been swapped
 /// in by `init_otel_tracing` and the span has a valid trace context).
+///
+/// The trace_id sits at the **end** of the line as a logfmt-style structured
+/// suffix rather than at the front. This keeps the human-readable
+/// timestamp/level/message portion at the start of the line where readers
+/// expect it, matching the convention that structured key=value fields
+/// follow the unstructured prose of a log entry.
 ///
 /// When telemetry is compiled out, the wrapper still exists but the
 /// `cfg(feature = "telemetry")` block is empty — every call delegates to
 /// the inner formatter unchanged, so non-telemetry builds see no behaviour
 /// change. When telemetry is compiled in but no OTel context is active
 /// (e.g. an early boot log before the reload swap, a CLI subcommand that
-/// never started the API), the trace context is invalid and the prefix is
-/// omitted.
+/// never started the API), the trace context is invalid and the suffix is
+/// omitted — again the inner formatter's output is passed through verbatim.
 ///
-/// The prefix uses bare logfmt `trace_id=<hex>` (no quotes) — the matching
+/// The suffix uses bare logfmt `trace_id=<hex>` (no quotes) — the matching
 /// `derivedFields` regex in `deploy/grafana/provisioning/datasources/loki.yml`
-/// is `trace_id="?([0-9a-f]{32})"?`, which resolves either form, so a future
-/// switch to quoted output stays compatible without re-provisioning Grafana.
+/// is `trace_id="?([0-9a-f]{32})"?`, which is anchored on the literal
+/// `trace_id=` token rather than line position, so the suffix placement
+/// resolves the same clickable trace link as a prefix would.
 struct WithTraceId<F>(F);
 
 impl<S, N, F> tracing_subscriber::fmt::format::FormatEvent<S, N> for WithTraceId<F>
@@ -1660,7 +1667,20 @@ where
             let span_ref = cx.span();
             let span_cx = span_ref.span_context();
             if span_cx.is_valid() {
-                write!(writer, "trace_id={:032x} ", span_cx.trace_id())?;
+                // Capture the inner formatter's output into a buffer so we
+                // can append the trace_id suffix before the trailing newline.
+                // The inner formatter writes its own `\n`; we strip it,
+                // append ` trace_id=<hex>`, then re-emit a single newline.
+                // Allocates one String per traced log event — acceptable,
+                // and the no-OTel path below avoids the alloc entirely.
+                let mut buf = String::new();
+                self.0.format_event(
+                    ctx,
+                    tracing_subscriber::fmt::format::Writer::new(&mut buf),
+                    event,
+                )?;
+                let trimmed = buf.trim_end_matches('\n');
+                return writeln!(writer, "{trimmed} trace_id={:032x}", span_cx.trace_id());
             }
         }
         self.0.format_event(ctx, writer, event)
@@ -1726,9 +1746,9 @@ fn init_tracing_stderr(log_level: &str) {
     // default writer is stdout, which would interleave tracing output
     // with the JSON payload and corrupt downstream parsers.
     // Build the inner format separately so we can wrap it in `WithTraceId`,
-    // which prepends the OTel `trace_id` to every line when an OTel context
-    // is active. The wrapper is unconditional but no-ops without the
-    // `telemetry` feature; see `WithTraceId` doc above.
+    // which appends the OTel `trace_id` as a logfmt suffix on every line when
+    // an OTel context is active. The wrapper is unconditional but no-ops
+    // without the `telemetry` feature; see `WithTraceId` doc above.
     let inner_format = tracing_subscriber::fmt::format()
         .without_time()
         .with_target(false)
@@ -1799,7 +1819,7 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
     match std::fs::File::create(&log_path) {
         Ok(file) => {
             // Same `WithTraceId` wrapper as `init_tracing_stderr` so the TUI
-            // log file carries `trace_id=<hex>` prefixes when OTel is on.
+            // log file carries `trace_id=<hex>` suffixes when OTel is on.
             // We have to build the subscriber by hand here (rather than the
             // `tracing_subscriber::fmt()` builder shortcut) because the
             // builder owns its formatter and doesn't expose `event_format`.
