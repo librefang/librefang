@@ -9805,6 +9805,50 @@ system_prompt = "You are a helpful assistant."
                 HotAction::ReloadMcpServers => {
                     info!("Hot-reload: MCP server config updated");
                     let new_mcp = new_config.mcp_servers.clone();
+
+                    // Snapshot the previous effective list so we can diff
+                    // which entries actually changed. Existing connections
+                    // hold a per-server `McpServerConfig` clone (including
+                    // `taint_policy`/`taint_scanning`/`headers`/`env`/
+                    // `transport`), so any field that is not behind a shared
+                    // `ArcSwap` (only `taint_rule_sets` is) requires a
+                    // disconnect+reconnect for the new value to reach
+                    // in-flight tool calls. Without this, edits via PUT
+                    // `/api/mcp/servers/{name}`, CLI `config.toml` edits,
+                    // or any non-PATCH path would silently keep the old
+                    // policy alive on already-connected servers.
+                    let old_mcp = self
+                        .effective_mcp_servers
+                        .read()
+                        .map(|s| s.clone())
+                        .unwrap_or_default();
+
+                    let new_by_name: std::collections::HashMap<&str, _> =
+                        new_mcp.iter().map(|s| (s.name.as_str(), s)).collect();
+                    let mut to_reconnect: Vec<String> = Vec::new();
+                    for old_entry in &old_mcp {
+                        match new_by_name.get(old_entry.name.as_str()) {
+                            None => {
+                                // Removed: stale connection still alive in
+                                // `mcp_connections` until we evict it.
+                                to_reconnect.push(old_entry.name.clone());
+                            }
+                            Some(new_entry) => {
+                                // Modified: serialize-compare is robust
+                                // against future field additions and avoids
+                                // forcing `PartialEq` onto every nested
+                                // config type (`McpTaintPolicy`,
+                                // `McpOAuthConfig`, transport variants…).
+                                let old_json = serde_json::to_string(old_entry).unwrap_or_default();
+                                let new_json =
+                                    serde_json::to_string(*new_entry).unwrap_or_default();
+                                if old_json != new_json {
+                                    to_reconnect.push(old_entry.name.clone());
+                                }
+                            }
+                        }
+                    }
+
                     let mut effective = self
                         .effective_mcp_servers
                         .write()
@@ -9826,13 +9870,47 @@ system_prompt = "You are a helpful assistant."
                     }
                     let count = new_mcp.len();
                     *effective = new_mcp;
-                    info!(
-                        "Hot-reload: effective MCP server list rebuilt ({count} total, \
-                         connections will be re-established on next agent message)"
-                    );
+                    drop(effective);
+
                     // Bump MCP generation so tool list caches are invalidated
                     self.mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    if to_reconnect.is_empty() {
+                        info!(
+                            "Hot-reload: effective MCP server list rebuilt \
+                             ({count} total, no reconnects needed)"
+                        );
+                    } else {
+                        info!(
+                            servers = ?to_reconnect,
+                            "Hot-reload: effective MCP server list rebuilt \
+                             ({count} total, {} server(s) need reconnection \
+                             to apply config changes)",
+                            to_reconnect.len()
+                        );
+                        // Fire-and-forget: `disconnect_mcp_server` drops the
+                        // stale slot and `connect_mcp_servers` is idempotent
+                        // (re-adds servers missing from `mcp_connections`
+                        // using the now-updated effective list).
+                        if let Some(weak) = self.self_handle.get() {
+                            if let Some(kernel) = weak.upgrade() {
+                                tokio::spawn(async move {
+                                    for name in &to_reconnect {
+                                        kernel.disconnect_mcp_server(name).await;
+                                    }
+                                    kernel.connect_mcp_servers().await;
+                                });
+                            } else {
+                                tracing::warn!(
+                                    server_count = to_reconnect.len(),
+                                    "Hot-reload: kernel self-handle dropped \
+                                     — MCP servers will keep stale config \
+                                     until next restart"
+                                );
+                            }
+                        }
+                    }
                 }
                 HotAction::ReloadA2aConfig => {
                     info!(
