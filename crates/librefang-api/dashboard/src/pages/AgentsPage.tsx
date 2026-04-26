@@ -880,12 +880,6 @@ export function AgentsPage() {
             {/* Body — scrollable inspectable sections. */}
             <div className="px-6 py-5 space-y-5">
 
-              {detailAgent.is_hand && (
-                <div className="rounded-lg bg-brand/5 border border-brand/20 px-4 py-3 text-xs text-text-dim leading-relaxed">
-                  {t("agents.hand_agent_hint", { defaultValue: "You are editing the active runtime agent created by a hand." })}
-                </div>
-              )}
-
               {/* Model */}
               {detailAgent.model && (
                 <section>
