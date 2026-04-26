@@ -42,13 +42,27 @@ impl UserRole {
     /// maps to `Viewer` so that operators using the RBAC-M4 channel-role
     /// mapping vocabulary (`guest_role = "guest"`) get a sensible
     /// default-deny floor without having to learn the legacy name.
-    /// Unknown strings fall through to `User`.
+    /// Unknown strings fall through to `User` — lenient on the
+    /// `UserConfig.role` boot path because a typo there is visible to the
+    /// operator (audit + dashboard show `User`). Channel-mapping translators
+    /// MUST use [`UserRole::try_from_str_role`] instead so a typo in
+    /// `[channel_role_mapping]` fails closed to `Viewer`.
     pub fn from_str_role(s: &str) -> Self {
+        Self::try_from_str_role(s).unwrap_or(UserRole::User)
+    }
+
+    /// Strict variant: returns `None` for any unrecognized role string. Used
+    /// by the channel-role-mapping translators so a typo (e.g. `admn` or
+    /// `creator_role = "ower"`) does not silently become `User` privilege.
+    /// The resolver falls through to `Viewer` when the translator returns
+    /// `None`, preserving the design's default-deny floor.
+    pub fn try_from_str_role(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "owner" => UserRole::Owner,
-            "admin" => UserRole::Admin,
-            "viewer" | "guest" => UserRole::Viewer,
-            _ => UserRole::User,
+            "owner" => Some(UserRole::Owner),
+            "admin" => Some(UserRole::Admin),
+            "user" => Some(UserRole::User),
+            "viewer" | "guest" => Some(UserRole::Viewer),
+            _ => None,
         }
     }
 }
@@ -342,7 +356,10 @@ impl RoleTranslator for TelegramTranslator<'_> {
             "member" => self.0.member_role.as_deref(),
             _ => None,
         };
-        mapped.map(UserRole::from_str_role)
+        // Strict mapping: an operator typo in `[channel_role_mapping.telegram]`
+        // (e.g. `admin_role = "admn"`) falls through to None → Viewer rather
+        // than silently granting `User`.
+        mapped.and_then(UserRole::try_from_str_role)
     }
 }
 
@@ -358,11 +375,15 @@ impl RoleTranslator for DiscordTranslator<'_> {
         let candidates = std::iter::once(&role.primary).chain(role.roles.iter());
         for name in candidates {
             if let Some(mapped_str) = self.0.role_map.get(name) {
-                let candidate = UserRole::from_str_role(mapped_str);
-                best = Some(match best {
-                    Some(prev) => prev.max(candidate),
-                    None => candidate,
-                });
+                // Strict mapping: typo in `role_map` (e.g. `Moderator = "admn"`)
+                // is skipped rather than defaulting to `User`, so unrecognized
+                // role-name → privilege drift is impossible.
+                if let Some(candidate) = UserRole::try_from_str_role(mapped_str) {
+                    best = Some(match best {
+                        Some(prev) => prev.max(candidate),
+                        None => candidate,
+                    });
+                }
             }
         }
         best
@@ -379,7 +400,9 @@ impl RoleTranslator for SlackTranslator<'_> {
             "guest" => self.0.guest_role.as_deref(),
             _ => None,
         };
-        mapped.map(UserRole::from_str_role)
+        // Strict mapping: typo in `[channel_role_mapping.slack]` falls through
+        // to None → Viewer.
+        mapped.and_then(UserRole::try_from_str_role)
     }
 }
 
@@ -529,6 +552,24 @@ mod tests {
         assert_eq!(UserRole::from_str_role("user"), UserRole::User);
         assert_eq!(UserRole::from_str_role("OWNER"), UserRole::Owner);
         assert_eq!(UserRole::from_str_role("unknown"), UserRole::User);
+
+        // try_from_str_role: strict variant used by channel translators.
+        // Channel-role mapping typos must NOT silently grant `User` privilege.
+        assert_eq!(UserRole::try_from_str_role("owner"), Some(UserRole::Owner));
+        assert_eq!(UserRole::try_from_str_role("admin"), Some(UserRole::Admin));
+        assert_eq!(UserRole::try_from_str_role("user"), Some(UserRole::User));
+        assert_eq!(
+            UserRole::try_from_str_role("viewer"),
+            Some(UserRole::Viewer)
+        );
+        assert_eq!(UserRole::try_from_str_role("guest"), Some(UserRole::Viewer));
+        assert_eq!(UserRole::try_from_str_role("ADMIN"), Some(UserRole::Admin));
+        // Typos and unknown role names are None — the resolver falls through
+        // to Viewer (default-deny) rather than User.
+        assert_eq!(UserRole::try_from_str_role("admn"), None);
+        assert_eq!(UserRole::try_from_str_role("ower"), None);
+        assert_eq!(UserRole::try_from_str_role(""), None);
+        assert_eq!(UserRole::try_from_str_role("Moderator"), None);
     }
 
     #[test]
@@ -904,5 +945,114 @@ mod channel_role_tests {
             .resolve_role_for_sender(&telegram_sender("u1", "c1"), &mapping, Some(&query))
             .await;
         assert_eq!(role, UserRole::Viewer);
+    }
+
+    #[tokio::test]
+    async fn channel_role_typo_in_mapping_falls_closed_to_viewer() {
+        // RBAC M4 fail-closed: a typo in [channel_role_mapping.*] must NOT
+        // silently translate to UserRole::User. Three paths to cover —
+        // Telegram, Discord, Slack — each fed an unrecognized role-name
+        // string. The resolver must return Viewer (not User).
+
+        // Telegram: `creator_role = "ower"` (typo) — should yield Viewer.
+        {
+            let mapping = ChannelRoleMapping {
+                telegram: Some(TelegramRoleMapping {
+                    creator_role: Some("ower".to_string()), // typo
+                    admin_role: Some("admn".to_string()),   // typo
+                    member_role: Some("guest".to_string()), // valid synonym for Viewer
+                }),
+                discord: None,
+                slack: None,
+            };
+            let mgr = AuthManager::new(&[]);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let query = StaticRoleQuery {
+                result: Ok(Some(PlatformRole::single("creator"))),
+                calls: calls.clone(),
+            };
+            let role = mgr
+                .resolve_role_for_sender(
+                    &telegram_sender("tg-typo", "chat-1"),
+                    &mapping,
+                    Some(&query),
+                )
+                .await;
+            assert_eq!(
+                role,
+                UserRole::Viewer,
+                "telegram creator_role typo must fail closed"
+            );
+        }
+
+        // Discord: `role_map = { Moderator = "admn" }` (typo) — Moderator
+        // user should NOT become User. Falls through to Viewer.
+        {
+            let mut role_map = HashMap::new();
+            role_map.insert("Moderator".to_string(), "admn".to_string()); // typo
+            role_map.insert("Member".to_string(), "viewer".to_string());
+            let mapping = ChannelRoleMapping {
+                telegram: None,
+                discord: Some(DiscordRoleMapping { role_map }),
+                slack: None,
+            };
+            let mgr = AuthManager::new(&[]);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let query = StaticRoleQuery {
+                result: Ok(Some(PlatformRole::single("Moderator"))),
+                calls: calls.clone(),
+            };
+            let sender = SenderContext {
+                channel: "discord".to_string(),
+                user_id: "user-typo".to_string(),
+                chat_id: Some("guild-1".to_string()),
+                display_name: "Tester".to_string(),
+                ..Default::default()
+            };
+            let role = mgr
+                .resolve_role_for_sender(&sender, &mapping, Some(&query))
+                .await;
+            assert_eq!(
+                role,
+                UserRole::Viewer,
+                "discord role_map typo must fail closed"
+            );
+        }
+
+        // Slack: `admin_role = "admn"` typo — Slack admin user falls through
+        // to Viewer rather than being silently demoted to User.
+        {
+            let mapping = ChannelRoleMapping {
+                telegram: None,
+                discord: None,
+                slack: Some(SlackRoleMapping {
+                    owner_role: Some("owner".to_string()),
+                    admin_role: Some("admn".to_string()), // typo
+                    member_role: Some("viewer".to_string()),
+                    guest_role: Some("guest".to_string()),
+                }),
+            };
+            let mgr = AuthManager::new(&[]);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let query = StaticRoleQuery {
+                result: Ok(Some(PlatformRole::single("admin"))),
+                calls: calls.clone(),
+            };
+            let sender = SenderContext {
+                channel: "slack".to_string(),
+                user_id: "U-TYPO".to_string(),
+                chat_id: Some("C-1".to_string()),
+                display_name: "Tester".to_string(),
+                ..Default::default()
+            };
+            let role = mgr
+                .resolve_role_for_sender(&sender, &mapping, Some(&query))
+                .await;
+            assert_eq!(
+                role,
+                UserRole::Viewer,
+                "slack admin_role typo must fail closed"
+            );
+        }
     }
 }
