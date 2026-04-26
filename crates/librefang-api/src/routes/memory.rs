@@ -1393,8 +1393,14 @@ mod tests {
         // Denied: every other namespace, all writes, all exports, all
         // deletes — the four channels through which the pre-fix
         // fallback leaked sensitive data.
-        assert!(matches!(guard.check_read("kv:secrets"), NamespaceGate::Deny(_)));
-        assert!(matches!(guard.check_read("shared:any"), NamespaceGate::Deny(_)));
+        assert!(matches!(
+            guard.check_read("kv:secrets"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_read("shared:any"),
+            NamespaceGate::Deny(_)
+        ));
         assert!(matches!(guard.check_read("kg"), NamespaceGate::Deny(_)));
         assert!(matches!(
             guard.check_write("proactive"),
