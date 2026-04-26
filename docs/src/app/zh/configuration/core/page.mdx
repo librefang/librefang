@@ -477,3 +477,237 @@ cron_session_max_messages = 100
 
 `session_mode = "new"` 时**跳过**裁切——那种触发本身就拿全新 session，不会带旧状态。两个上限同时生效（哪个先触发哪个裁更多）。
 
+---
+
+### `[rate_limit]`
+
+API 与 WebSocket 限流配置。HTTP 路径用每 IP GCRA 令牌桶,WS 路径还加 idle 超时和按消息 debounce,避免流式 UI 把下游连接打爆。
+
+```toml
+[rate_limit]
+api_requests_per_minute = 500
+retry_after_secs = 60
+max_ws_per_ip = 5
+ws_messages_per_minute = 10
+ws_terminal_messages_per_minute = 3600
+ws_idle_timeout_secs = 1800
+ws_debounce_ms = 100
+ws_debounce_chars = 200
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `api_requests_per_minute` | u32 | `500` | HTTP 每 IP 每分钟令牌额度(GCRA)。 |
+| `retry_after_secs` | u64 | `60` | 429 时返回 `Retry-After` 的秒数。 |
+| `max_ws_per_ip` | usize | `5` | 每 IP 允许并发 WS 连接数。 |
+| `ws_messages_per_minute` | u32 | `10` | 单连接 chat WS 每分钟消息数。 |
+| `ws_terminal_messages_per_minute` | u32 | `3600` | 终端 WS 每按键预算(60/s ≈ 720 WPM)。 |
+| `ws_idle_timeout_secs` | u64 | `1800` | 空闲 N 秒后自动关闭。 |
+| `ws_debounce_ms` | u64 | `100` | 文本 delta 在此毫秒内合并后再 flush。 |
+| `ws_debounce_chars` | usize | `200` | 缓冲达此字符数时强制 flush。 |
+
+终端额度比 chat 高两个数量级是有原因的: 用 chat 的 `ws_messages_per_minute = 10` 时,在 vim 里敲 `:wq` 就把额度耗光了。除非你刻意要节流 PTY,否则别把 `ws_terminal_messages_per_minute` 调到 600 以下。
+
+---
+
+### `[sanitize]`
+
+入站消息清洗 / prompt-injection 检测。默认关。开启后,超长或匹配规则的入站文本在到达 LLM 前被阻断或告警。
+
+```toml
+[sanitize]
+mode = "off"            # "off" | "warn" | "block"
+max_message_length = 32768
+custom_block_patterns = [
+  "(?i)ignore previous instructions",
+]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"off"` = 透传; `"warn"` = 记日志但接受; `"block"` = 拒绝。 |
+| `max_message_length` | usize | `32768` | 入站消息字节硬上限。 |
+| `custom_block_patterns` | `Vec<string>` | `[]` | 在内置 prompt-injection 规则之上追加的正则。 |
+
+`block` 模式下,channel 适配器返回清洗器拒绝提示, 不消耗任何 LLM token。配合 `[privacy]` 做防御纵深。
+
+---
+
+### `[privacy]`
+
+LLM prompt 上的 PII 脱敏或假名化。默认关。脱敏器跑在每次出站 prompt 上,包括历史 replay。
+
+```toml
+[privacy]
+mode = "off"            # "off" | "redact" | "pseudonymize"
+redact_patterns = [
+  "\\b[A-Z]{2}\\d{6,8}\\b",   # 在内置规则之上追加
+]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"redact"` 把匹配替换为 `[REDACTED]`;`"pseudonymize"` 替换成确定性 token(同输入 → 同假名),让 LLM 仍能围绕"身份"推理。 |
+| `redact_patterns` | `Vec<string>` | `[]` | 追加在内置 PII 集(邮箱、电话、信用卡、IP)之上的正则。 |
+
+`pseudonymize` 的替换映射只存在内存中 —— 重启 daemon 后映射表清零。
+
+---
+
+### `[telemetry]`
+
+OpenTelemetry tracing + Prometheus 指标。自带 Tempo/Grafana 栈从这里读;外部 collector 也行 —— 把 `otlp_endpoint` 指向它。
+
+```toml
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+service_name = "librefang"
+sample_rate = 1.0
+prometheus_enabled = true
+auto_start_observability_stack = false
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `true` | OTLP trace 导出主开关。 |
+| `otlp_endpoint` | string | `"http://localhost:4317"` | OTel collector 的 gRPC 端点。 |
+| `service_name` | string | `"librefang"` | 上报为 `service.name` resource attribute。 |
+| `sample_rate` | f64 | `1.0` | 0.0 ~ 1.0 — trace 采样比例。 |
+| `prometheus_enabled` | bool | `true` | 暴露 `/api/metrics` 供抓取。 |
+| `auto_start_observability_stack` | bool | `false` | `true` 时 `librefang start` 会拉起捆绑的 Grafana/Prometheus/Tempo Docker 栈。默认关 —— 多数运维不希望"启动 daemon"附带四个容器副作用。 |
+
+---
+
+### `[heartbeat]`
+
+常驻(autonomous)agent 的心跳监测器。Agent 在 `default_timeout_secs` 内没心跳,监测器把它标记为无响应。
+
+```toml
+[heartbeat]
+check_interval_secs = 30
+default_timeout_secs = 60
+keep_recent = 10
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `check_interval_secs` | u64 | `30` | 心跳扫描运行频率。 |
+| `default_timeout_secs` | u64 | `60` | 多少秒没心跳就视为无响应。 |
+| `keep_recent` | usize | `10` | 裁剪 session 上下文时,保留多少条最近的心跳轮次。 |
+
+心跳路径还兼任崩溃环防护 —— 连续 N 次同样错误的 agent 会被暂停为 `auth_status: "crashed"`,而不是无限重试。
+
+---
+
+### `[compaction]`
+
+基于 LLM 的历史摘要。session 越过消息数门槛或 token 比例门槛后,daemon 启一个后台轮把前半部分历史按用户对话语言摘要,替换为摘要 + 最近 N 轮。
+
+```toml
+[compaction]
+threshold_messages = 30
+keep_recent = 10
+max_summary_tokens = 1024
+token_threshold_ratio = 0.7
+max_chunk_chars = 80000
+max_retries = 3
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `threshold_messages` | usize | `30` | 历史达此消息数时触发。 |
+| `keep_recent` | usize | `10` | 边界处保留这些数量的最近消息。 |
+| `max_summary_tokens` | usize | `1024` | 摘要输出 token 上限。 |
+| `token_threshold_ratio` | f64 | `0.7` | 估算 token 越过模型上下文窗的此比例时也触发。 |
+| `max_chunk_chars` | usize | `80000` | 摘要 prompt 自身溢出时,按此大小切块。 |
+| `max_retries` | u32 | `3` | 摘要 LLM 失败时的重试次数, 之后跳过本轮。 |
+
+Per-agent 覆盖:`agent.toml` 里 `max_history_messages` 锁该 agent 的 trim 上限。配置低于全局默认时,compaction 提前触发。
+
+---
+
+### `[tool_invoke]`
+
+直接工具调用 REST 端点的允许列表(`POST /api/tools/{name}/invoke`)。默认锁死 —— 两个字段都填了才解锁,否则一切请求 403。
+
+```toml
+[tool_invoke]
+enabled = true
+allowlist = ["web_search", "web_fetch", "file_read"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 主开关 —— `false` 时无视允许列表全拒。 |
+| `allowlist` | `Vec<string>` | `[]` | 调用方可以触发的工具名 glob 模式(`web_*`、`file_*`、`mcp__github__*` 等)。空列表全拒。 |
+
+Glob 语义同 agent capability 授权 —— `*` 是通配。这个配置是给窄场景用的(CI worker 直调 `web_fetch`),不是给一般客户端 API 访问用。
+
+---
+
+### `[parallel_tools]`(扩展)
+
+Agent 循环的并行工具分发器(catchup wave 引入)。默认关 —— runtime 仍序列化跑工具调用,直到分发器全量上线。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 主开关。 |
+| `max_concurrent` | u32 | `4` | 单桶并发上限(`0` = 不封顶)。 |
+| `mcp_default_safety` | string | `"write_shared"` | 没标注的 MCP 工具的默认安全等级 —— `"read_only"` 或 `"write_shared"`。 |
+| `mcp_readonly_allowlist` | `Vec<string>` | `[]` | 全限定 MCP 工具名(`mcp__server__name`),无视 `mcp_default_safety` 当 read-only 处理。 |
+
+`write_shared` 让没标注的 MCP 工具严格序列化, 是安全默认值。审核过单个 server 后再把它们调成 `read_only`。
+
+---
+
+### 资源限制与边界(顶层字段)
+
+全局安全网,封顶入站 payload 大小和 agent 间递归深度。所有字段都有内置默认值 —— 知道自己在干什么再覆盖。
+
+```toml
+[kernel]
+max_upload_size_bytes      = 10485760     # 10 MiB
+max_request_body_bytes     = 16777216     # 16 MiB
+max_concurrent_bg_llm      = 8
+max_agent_call_depth       = 5
+local_probe_interval_secs  = 60
+strict_config              = false
+update_channel             = "stable"     # "stable" | "beta" | "rc"
+trusted_hosts              = []
+trusted_manifest_signers   = []
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `max_upload_size_bytes` | usize | `10485760`(10 MiB) | 单文件上传上限。 |
+| `max_request_body_bytes` | usize | `16777216`(16 MiB) | 整个 HTTP 请求体上限。 |
+| `max_concurrent_bg_llm` | usize | `8` | 后台 LLM 调用并发数(compaction、summarise、dream 等)。 |
+| `max_agent_call_depth` | u32 | `5` | Agent 间调用深度(防 `agent_send` 递归炸弹)。 |
+| `local_probe_interval_secs` | u64 | `60` | 本地 provider(Ollama / vLLM / LM Studio)的复探周期。 |
+| `strict_config` | bool | `false` | `true` 时配置里有未知字段就启动失败(否则 warn 后继续)。 |
+| `update_channel` | enum | `"stable"` | `librefang upgrade` 看哪个发布通道。 |
+| `trusted_hosts` | `Vec<string>` | `[]` | 允许在 MCP 鉴权流里驱动 OAuth `redirect_uri` 的主机名。防止针对 dashboard 的开放重定向。 |
+| `trusted_manifest_signers` | `Vec<string>` | `[]` | 允许签名 agent manifest 的 Ed25519 公钥。安全模式要求验签时,非这些 key 签的 manifest 被拒。 |
+
+---
+
+### Dashboard 鉴权(顶层字段)
+
+从非 loopback 地址访问 dashboard?设用户名密码,首次启动时 LibreFang 自动把密码哈希成 Argon2id。
+
+```toml
+[kernel]
+dashboard_user = "admin"
+dashboard_pass = "vault:DASHBOARD_PASS"   # 也可以 plain string 或 env var
+# dashboard_pass_hash 自动填入,不要手动改
+require_auth_for_reads = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `dashboard_user` | string | `""` | 用户名。空 = 关闭 dashboard 鉴权(只在 loopback 用)。 |
+| `dashboard_pass` | string | `""` | 明文密码、`vault:KEY` 或 `env:VAR`。启动时就地哈希 —— 磁盘上只留 hash。 |
+| `dashboard_pass_hash` | string | 自动 | Argon2id hash, 自动写入。**不要手动设**这个字段 —— 用 `librefang hash-password` 生成。 |
+| `require_auth_for_reads` | bool \| null | `null` | 覆盖读端点鉴权允许列表。`null` 走默认(loopback 上不鉴权,其他地址鉴权)。 |
+
