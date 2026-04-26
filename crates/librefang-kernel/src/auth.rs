@@ -111,9 +111,10 @@ pub struct AuthManager {
     channel_index: DashMap<String, UserId>,
     /// Tool groups (categories) referenced by per-user policies. Cloned
     /// from `KernelConfig.tool_policy.groups` at construction.
-    /// Wrapped in RwLock so config_reload can swap the cached groups
-    /// without rebuilding the entire AuthManager.
-    tool_groups: std::sync::RwLock<Vec<ToolGroup>>,
+    /// `RwLock<Arc<…>>` so `config_reload` can swap the snapshot in
+    /// place while resolution-path readers (`tool_groups()`) only pay
+    /// for an `Arc::clone` instead of a per-call `Vec` clone.
+    tool_groups: std::sync::RwLock<std::sync::Arc<Vec<ToolGroup>>>,
 }
 
 impl AuthManager {
@@ -132,7 +133,7 @@ impl AuthManager {
         let manager = Self {
             users: DashMap::new(),
             channel_index: DashMap::new(),
-            tool_groups: std::sync::RwLock::new(tool_groups.to_vec()),
+            tool_groups: std::sync::RwLock::new(std::sync::Arc::new(tool_groups.to_vec())),
         };
         manager.populate(user_configs);
         manager
@@ -196,9 +197,15 @@ impl AuthManager {
     pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
         self.users.clear();
         self.channel_index.clear();
-        if let Ok(mut guard) = self.tool_groups.write() {
-            *guard = tool_groups.to_vec();
-        }
+        // Panic on a poisoned lock: silently keeping the stale snapshot
+        // would mean `/api/config/reload` reports success while the new
+        // `[tool_policy.groups]` are never enforced — exactly the
+        // failure mode `HotAction::ReloadAuth` exists to prevent.
+        *self
+            .tool_groups
+            .write()
+            .expect("AuthManager.tool_groups RwLock poisoned during reload") =
+            std::sync::Arc::new(tool_groups.to_vec());
         self.populate(user_configs);
         info!(
             users = self.users.len(),
@@ -273,14 +280,17 @@ impl AuthManager {
         self.channel_index.get(&key).map(|r| *r.value())
     }
 
-    /// A snapshot clone of the kernel's tool groups (used for per-user
-    /// category evaluation). Behind a `RwLock` so config reload can swap
-    /// the cached vec — clone the slice instead of holding the guard.
-    pub fn tool_groups(&self) -> Vec<ToolGroup> {
+    /// Cheap snapshot of the kernel's tool groups (used for per-user
+    /// category evaluation). Returns an `Arc::clone` of the live
+    /// snapshot so the resolution hot path doesn't pay a `Vec` clone
+    /// per tool call. Config reload swaps the inner `Arc` in place
+    /// (`reload()`); existing `Arc` clones held by in-flight evaluations
+    /// keep pointing at the pre-swap snapshot for their lifetime.
+    pub fn tool_groups(&self) -> std::sync::Arc<Vec<ToolGroup>> {
         self.tool_groups
             .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+            .expect("AuthManager.tool_groups RwLock poisoned")
+            .clone()
     }
 
     /// Get the resolved per-user RBAC policy for a user, if registered.
@@ -329,9 +339,12 @@ impl AuthManager {
             return UserToolGate::Allow;
         }
 
-        // Explicit system-internal invocations bypass RBAC. The set of
-        // call sites that may set this flag is curated in the kernel
-        // (see `kernel::is_system_call_context`).
+        // Explicit system-internal invocations bypass RBAC. Today the
+        // only caller that sets this flag is the cron dispatcher (via
+        // `LibreFangKernel::resolve_user_tool_decision` matching
+        // `channel == "cron"`); future system-fire sites should be
+        // wired through the same trait method, never by inventing a
+        // new sentinel string here.
         if system_call {
             return UserToolGate::Allow;
         }
@@ -352,7 +365,9 @@ impl AuthManager {
         };
 
         // Layer A — apply the user's own policy.
-        let user_decision = identity.policy.evaluate(tool_name, channel, &groups);
+        let user_decision = identity
+            .policy
+            .evaluate(tool_name, channel, groups.as_slice());
 
         match user_decision {
             UserToolDecision::Allow => UserToolGate::Allow,

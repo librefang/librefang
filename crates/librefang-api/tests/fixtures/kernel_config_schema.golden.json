@@ -940,6 +940,28 @@
       },
       "type": "object"
     },
+    "ChannelToolPolicy": {
+      "description": "Per-user, per-channel allow/deny lists.\n\nThis is a strictly more permissive variant of [`crate::approval::ChannelToolRule`]. The approval channel rule is global to the agent; this one is keyed off the LibreFang user identity resolved from the inbound message's channel binding. It allows statements like \"User Bob may run `shell_*` from his Telegram chat, but only `web_*` from Discord\".\n\nDeny-wins inside one rule (mirrors `ChannelToolRule::check_tool`).",
+      "properties": {
+        "allowed_tools": {
+          "default": [],
+          "description": "Tool patterns explicitly allowed when this user speaks via this channel. Empty = no allow-list (rule is deny-only or no-op).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_tools": {
+          "default": [],
+          "description": "Tool patterns explicitly denied for this user on this channel. Always wins over `allowed_tools`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ChannelToolRule": {
       "description": "Per-channel tool authorization rule.\n\nControls which tools are allowed or denied when requests originate from a specific channel (e.g. \"telegram\", \"discord\", \"slack\").  If both `allowed_tools` and `denied_tools` are non-empty, `denied_tools` takes precedence (deny-wins).",
       "properties": {
@@ -12109,6 +12131,24 @@
           "description": "Channel bindings: maps channel platform IDs to this user. e.g., {\"telegram\": \"123456\", \"discord\": \"987654\"}",
           "type": "object"
         },
+        "channel_tool_rules": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ChannelToolPolicy"
+          },
+          "description": "Per-channel tool overrides for THIS user. Keyed by channel adapter name (e.g. `\"telegram\"`, `\"discord\"`). Layers on top of the global `ApprovalPolicy.channel_rules` — both must agree to allow.",
+          "type": "object"
+        },
+        "memory_access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserMemoryAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Memory namespace ACL — controls reads/writes to memory scopes (`proactive`, `kv:*`, etc.) and PII redaction. `None` means \"use the role default ACL\"."
+        },
         "name": {
           "description": "User display name.",
           "type": "string"
@@ -12117,11 +12157,114 @@
           "default": "user",
           "description": "User role (owner, admin, user, viewer).",
           "type": "string"
+        },
+        "tool_categories": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserToolCategories"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bulk allow/deny by `ToolGroup` category (groups are declared in `KernelConfig.tool_policy.groups`). Lets admins say `denied_groups = [\"dangerous\"]` without listing each tool."
+        },
+        "tool_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserToolPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-user tool allow/deny lists. Layered ON TOP of the per-agent `ToolPolicy` and any channel rules in `ApprovalPolicy`. `None` means \"no per-user policy — defer to other layers\"."
         }
       },
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "UserMemoryAccess": {
+      "description": "Per-user memory namespace ACL.\n\nMemory in LibreFang is partitioned by *namespace* — typically the agent ID for KV / proactive entries, plus a small set of well-known shared scopes (`shared`, `proactive`, `kv`, …). This ACL gates which of those a given user may read or write through the LLM-facing memory tools.\n\nPII handling: when `pii_access` is `false`, fragments tagged with [`TaintLabel::Pii`](crate::taint::TaintLabel::Pii) MUST be redacted before they reach the user. The redaction itself happens at the memory call site (kernel + memory crate); this struct only declares intent.",
+      "properties": {
+        "delete_allowed": {
+          "default": false,
+          "description": "Whether the user may delete memory entries they can otherwise read.",
+          "type": "boolean"
+        },
+        "export_allowed": {
+          "default": false,
+          "description": "Whether the user may export memory in bulk.",
+          "type": "boolean"
+        },
+        "pii_access": {
+          "default": false,
+          "description": "Whether PII-tagged fragments may be returned to this user. When `false`, PII fields are redacted on read.",
+          "type": "boolean"
+        },
+        "readable_namespaces": {
+          "default": [],
+          "description": "Namespaces this user may read. Empty list with `pii_access=false` is a meaningful \"no-read\" deny-all — see [`Self::can_read`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "writable_namespaces": {
+          "default": [],
+          "description": "Namespaces this user may write to. Empty list = no-write (read-only).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UserToolCategories": {
+      "description": "Bulk allow/deny by tool category — references existing `ToolGroup` definitions by name (e.g. `\"web_tools\"`, `\"code_tools\"`). Group definitions live in [`KernelConfig.tool_policy.groups`](crate::tool_policy::ToolPolicy::groups).\n\nCategories let admins say \"this user only gets read-only categories\" without listing every tool individually.",
+      "properties": {
+        "allowed_groups": {
+          "default": [],
+          "description": "Group names whose tools are allowed for this user. Empty = no category-level allow-list.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_groups": {
+          "default": [],
+          "description": "Group names whose tools are denied for this user. Always wins.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "UserToolPolicy": {
+      "description": "Per-user allow/deny lists for tool invocations.\n\nThese rules layer on top of the per-agent [`ToolPolicy`](crate::tool_policy::ToolPolicy) and the per-agent channel rules in [`ApprovalPolicy`](crate::approval::ApprovalPolicy). All layers must agree (fail-closed AND) for a call to proceed without approval.",
+      "properties": {
+        "allowed_tools": {
+          "default": [],
+          "description": "Tool name patterns this user may invoke. Empty list means \"no allow-list — defer to other layers\". When non-empty, every invocation must match at least one pattern.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "denied_tools": {
+          "default": [],
+          "description": "Tool name patterns this user must never invoke. Always wins.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "VaultConfig": {

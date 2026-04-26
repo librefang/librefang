@@ -206,6 +206,86 @@ async fn evaluate_tool_call_unrecognised_sender_no_longer_fail_open() {
     );
 }
 
+/// PR #3205 review item #1: the trait-layer wrapper used to set
+/// `system_call=true` whenever both `sender_id` and `channel` were
+/// `None`, which silently re-opened the H7 fail-open the AuthManager
+/// unit tests close. With the wrapper fixed, calling the trait method
+/// with `(None, None)` must now route through the guest gate and
+/// produce `NeedsApproval` for tools that aren't on the read-only
+/// allowlist. Only `Some("cron")` keeps the system-call escape hatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluate_tool_call_trait_layer_none_sender_fails_closed() {
+    let kernel = boot(vec![user("Alice", "owner", "1", None, None)], vec![]);
+    let kh: &dyn KernelHandle = &*kernel;
+
+    // (None, None) must NOT fail open — was the regression.
+    let gate = kh.resolve_user_tool_decision("shell_exec", None, None);
+    assert!(
+        matches!(gate, UserToolGate::NeedsApproval { .. }),
+        "trait layer must fail closed for (None, None), got {gate:?}"
+    );
+
+    // Read-only safe tool still passes via the guest gate.
+    let safe = kh.resolve_user_tool_decision("file_read", None, None);
+    assert_eq!(safe, UserToolGate::Allow);
+
+    // The cron synthetic channel keeps its system-call carve-out.
+    let cron = kh.resolve_user_tool_decision("shell_exec", None, Some("cron"));
+    assert_eq!(cron, UserToolGate::Allow);
+
+    // Aspirational sentinels that earlier drafts also matched
+    // (`"system"` / `"internal"`) are NOT system-call channels — they
+    // are normal unattributed inbounds and must fail closed.
+    let pseudo_system = kh.resolve_user_tool_decision("shell_exec", None, Some("system"));
+    assert!(
+        matches!(pseudo_system, UserToolGate::NeedsApproval { .. }),
+        "channel=\"system\" must NOT be treated as a system call, got {pseudo_system:?}"
+    );
+}
+
+/// Companion to `evaluate_tool_call_user_categories_resolve_against_kernel_groups`:
+/// that test uses an Admin role, which masks the layer-3 `Allow`
+/// because admins also bypass NeedsRoleEscalation. This variant pins
+/// the allow-list path with a plain User role, so a regression that
+/// breaks `UserToolCategories::check_tool` returning `Some(true)`
+/// would surface as `NeedsApproval` instead of `Allow`.
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluate_tool_call_user_categories_allow_list_short_circuits_for_user_role() {
+    let kernel = boot(
+        vec![user(
+            "Bob",
+            "user",
+            "111",
+            None,
+            Some(UserToolCategories {
+                allowed_groups: vec!["read_only".into()],
+                denied_groups: vec![],
+            }),
+        )],
+        vec![ToolGroup {
+            name: "read_only".into(),
+            tools: vec!["file_read".into(), "web_search".into()],
+        }],
+    );
+
+    let kh: &dyn KernelHandle = &*kernel;
+
+    // In the allowed group → Allow even though user role is below admin.
+    let allowed = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+    assert_eq!(
+        allowed,
+        UserToolGate::Allow,
+        "category allow-list match must short-circuit to Allow for User role"
+    );
+
+    // Outside the allow-list → category layer denies (allow-list configured + no match).
+    let denied = kh.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+    assert!(
+        matches!(denied, UserToolGate::Deny { .. }),
+        "tool outside the allow-list group must hard-deny, got {denied:?}"
+    );
+}
+
 /// B3 — when the user-policy gate demanded approval and surfaces that
 /// to the kernel via `DeferredToolExecution.force_human=true`, the
 /// hand-agent auto-approve carve-out MUST NOT fire. We spawn a hand-

@@ -156,9 +156,19 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 /// 1. `axum::Extension<AuthenticatedApiUser>` set by the auth middleware
 ///    when a per-user API key matched — look up that user by name in the
 ///    kernel's `AuthManager` and use their resolved `UserMemoryAccess`.
-/// 2. No authenticated user (loopback dev / single-user mode) → return an
-///    "owner-equivalent" guard so the existing dashboard read paths keep
-///    working unchanged. This preserves the M2 contract.
+/// 2. No authenticated user (loopback dev / single-user mode, or any
+///    request the auth middleware allowed through without binding a
+///    user) → fall back to an **owner-equivalent** guard.
+///
+/// SECURITY: the fallback grants full read/write across every namespace
+/// AND `pii_access`. That is intentional for the M2 contract — the
+/// dashboard SPA hits these endpoints loopback with no API key today
+/// and depends on seeing every memory fragment — but it means the
+/// per-user namespace ACL only kicks in when the auth middleware
+/// attaches a real user. Operators who want the ACL enforced on every
+/// request must enable per-user API keys AND ensure the auth allowlist
+/// in `middleware.rs` does not whitelist these routes. See PR #3205
+/// review item #3.
 fn guard_for_request(
     state: &AppState,
     extensions: &axum::http::Extensions,
@@ -172,8 +182,7 @@ fn guard_for_request(
             return MemoryNamespaceGuard::new(acl);
         }
     }
-    // Fall back to owner-equivalent access (read/write everything,
-    // including PII). Single-user / loopback flows hit this path.
+    // Owner-equivalent fallback — see SECURITY note above.
     MemoryNamespaceGuard::new(UserMemoryAccess {
         readable_namespaces: vec!["*".into()],
         writable_namespaces: vec!["*".into()],

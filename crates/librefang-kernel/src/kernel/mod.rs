@@ -14905,11 +14905,21 @@ impl KernelHandle for LibreFangKernel {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> librefang_types::user_policy::UserToolGate {
-        // Treat the documented "system" channel sentinel as a system-internal
-        // call (cron fires, fork turns, internal events). Direct user
-        // invocations all carry a real `(channel, sender_id)` pair.
-        let system_call = matches!(channel, Some("cron") | Some("system") | Some("internal"))
-            || (sender_id.is_none() && channel.is_none());
+        // Only the synthetic `"cron"` channel is treated as a system-
+        // internal call. The cron dispatcher synthesises
+        // `SenderContext{channel:"cron"}` (see kernel/mod.rs ~10876)
+        // before fanning out to agents; everything else MUST carry a
+        // real `(channel, sender_id)` tuple.
+        //
+        // Earlier drafts also matched `"system"` / `"internal"` and
+        // treated `(None, None)` as system, but neither sentinel is
+        // synthesised anywhere in the codebase, and the `(None, None)`
+        // shortcut silently re-opened the H7 fail-open at the trait
+        // boundary the AuthManager unit tests were written to close
+        // (PR #3205 review item #1). Both have been removed: an
+        // unattributed inbound now goes through the guest gate so
+        // RBAC fails closed end-to-end.
+        let system_call = matches!(channel, Some("cron"));
         self.auth
             .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
     }
