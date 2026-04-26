@@ -851,6 +851,20 @@ pub struct AgentManifest {
     /// are silently clamped at runtime with a warning log.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
+    /// Per-agent cap on concurrent invocations from the trigger dispatcher
+    /// and `agent_send`. `None` means inherit from
+    /// `KernelConfig.queue.concurrency.default_per_agent` (today: 1).
+    /// `Some(1)` is identical to the legacy per-agent serialization
+    /// behavior.
+    ///
+    /// Concurrent fires only make sense when each fire runs in its own
+    /// session — the runtime requires `session_mode = "new"` (or a
+    /// per-trigger / per-cron `session_mode` override) for caps `> 1`.
+    /// `persistent` + `max_concurrent_invocations > 1` is auto-clamped
+    /// to 1 with a warning log because parallel writes to a single
+    /// session's message history are undefined.
+    #[serde(default)]
+    pub max_concurrent_invocations: Option<u32>,
     /// If true, the agent's `context.md` is read once at session start and
     /// reused. Default is `false`: the runtime re-reads `context.md` before
     /// every turn so external writers (cron jobs, integrations) reach the LLM
@@ -931,6 +945,7 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            max_concurrent_invocations: None,
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,

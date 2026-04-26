@@ -1844,6 +1844,8 @@ impl Default for QueueConfig {
 /// main_lane = 3
 /// cron_lane = 2
 /// subagent_lane = 3
+/// trigger_lane = 8
+/// default_per_agent = 1
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -1854,6 +1856,18 @@ pub struct QueueConcurrencyConfig {
     pub cron_lane: usize,
     /// Subagent lane concurrent limit (child agents).
     pub subagent_lane: usize,
+    /// Trigger lane concurrent limit — global cap on event-trigger
+    /// (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the
+    /// same time, across all agents. Acquired BEFORE the per-agent
+    /// semaphore so a single hot agent cannot starve the kernel.
+    /// Default `8`. `0` is rewritten to `1` by validation.
+    pub trigger_lane: usize,
+    /// Default per-agent invocation cap when an agent's manifest does
+    /// not set `max_concurrent_invocations`. `1` reproduces the
+    /// legacy per-agent-mutex serialization that pre-existed this
+    /// knob — change deliberately. `0` is rewritten to `1` by
+    /// validation.
+    pub default_per_agent: u32,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -1862,6 +1876,8 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+            trigger_lane: 8,
+            default_per_agent: 1,
         }
     }
 }

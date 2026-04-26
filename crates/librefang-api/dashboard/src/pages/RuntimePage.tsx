@@ -512,6 +512,35 @@ export function RuntimePage() {
                       <p className="text-[9px] text-text-dim uppercase">{t("runtime.task_ttl")}</p>
                     </div>
                   </div>
+                  {queueConfig.concurrency ? (
+                    <div className="mt-3 pt-3 border-t border-border-subtle/60">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-text-dim/50 mb-2">
+                        {t("runtime.queue_concurrency", { defaultValue: "Lane Caps & Per-Agent Default" })}
+                      </p>
+                      <div className="grid grid-cols-5 gap-2 text-center">
+                        <div title={t("runtime.main_lane_help", { defaultValue: "User messages bridged from channels" })}>
+                          <p className="text-base font-black text-brand">{queueConfig.concurrency.main_lane ?? "-"}</p>
+                          <p className="text-[8px] text-text-dim uppercase leading-tight">main</p>
+                        </div>
+                        <div title={t("runtime.cron_lane_help", { defaultValue: "Scheduled cron job dispatch" })}>
+                          <p className="text-base font-black text-brand">{queueConfig.concurrency.cron_lane ?? "-"}</p>
+                          <p className="text-[8px] text-text-dim uppercase leading-tight">cron</p>
+                        </div>
+                        <div title={t("runtime.subagent_lane_help", { defaultValue: "Spawned child agents (agent_send)" })}>
+                          <p className="text-base font-black text-brand">{queueConfig.concurrency.subagent_lane ?? "-"}</p>
+                          <p className="text-[8px] text-text-dim uppercase leading-tight">subagent</p>
+                        </div>
+                        <div title={t("runtime.trigger_lane_help", { defaultValue: "Event-trigger dispatches (TaskPosted, MessageReceived, …)" })}>
+                          <p className="text-base font-black text-brand">{queueConfig.concurrency.trigger_lane ?? "-"}</p>
+                          <p className="text-[8px] text-text-dim uppercase leading-tight">trigger</p>
+                        </div>
+                        <div title={t("runtime.default_per_agent_help", { defaultValue: "Per-agent fallback when manifest omits max_concurrent_invocations" })}>
+                          <p className="text-base font-black text-warning">{queueConfig.concurrency.default_per_agent ?? "-"}</p>
+                          <p className="text-[8px] text-text-dim uppercase leading-tight">per-agent</p>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </Card>

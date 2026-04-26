@@ -76,6 +76,10 @@ readability = true              # Clean HTML → readable text
 main_lane = 3                   # Concurrent user messages
 cron_lane = 2                   # Concurrent scheduled jobs
 subagent_lane = 3               # Concurrent child agents
+trigger_lane = 8                # Global cap on in-flight trigger dispatches
+default_per_agent = 1           # Per-agent fallback when manifest omits cap
+                                # (1 = legacy serial behavior; raise per-agent
+                                # via [agents.*] max_concurrent_invocations)
 
 # ── Shell Execution Policy ───────────────────────────────────
 [exec_policy]

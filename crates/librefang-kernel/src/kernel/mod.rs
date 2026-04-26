@@ -446,6 +446,13 @@ pub struct LibreFangKernel {
     /// supplies an explicit `session_id_override`. Allows concurrent messages to
     /// different sessions of the same agent (multi-tab / multi-session UIs).
     session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent invocation semaphore — caps concurrent trigger / `agent_send`
+    /// dispatches to a single agent. Capacity is resolved lazily on first use
+    /// from `AgentManifest.max_concurrent_invocations`, falling back to
+    /// `KernelConfig.queue.concurrency.default_per_agent`. Permits are
+    /// acquired in addition to (and AFTER) the global trigger lane permit,
+    /// so a hot agent throttles itself without starving the kernel.
+    agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
@@ -1413,6 +1420,58 @@ impl LibreFangKernel {
         &self.command_queue
     }
 
+    /// Resolve the per-agent concurrency semaphore, lazily creating it on
+    /// first use. Capacity comes from `AgentManifest.max_concurrent_invocations`,
+    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`,
+    /// floored at 1. The returned `Arc<Semaphore>` is cheap to clone and
+    /// safe to move into a spawned task via `acquire_owned()`.
+    ///
+    /// The semaphore is invalidated when an agent is killed (see the
+    /// cleanup pass in the gc loop). It is NOT invalidated on manifest
+    /// hot-reload — operators changing the cap should reactivate the
+    /// agent (or the hand) for the new capacity to take effect. This
+    /// avoids a permit-loss race during live config reloads.
+    pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
+        if let Some(existing) = self.agent_concurrency.get(&agent_id) {
+            return existing.clone();
+        }
+        let entry = self.registry.get(agent_id);
+        let manifest_cap = entry
+            .as_ref()
+            .and_then(|e| e.manifest.max_concurrent_invocations)
+            .map(|n| n as usize);
+        let session_mode = entry
+            .as_ref()
+            .map(|e| e.manifest.session_mode)
+            .unwrap_or_default();
+        // Clamp `persistent` agents to 1: parallel writes to the same
+        // session's message history are undefined. Emit a warn so a
+        // misconfigured manifest is visible at boot rather than silently
+        // ignored. The check lives here (the resolver) instead of a
+        // dedicated validator because the rule is structural to the
+        // dispatch path, not a TOML-time concern.
+        let resolved_cap = match (session_mode, manifest_cap) {
+            (librefang_types::agent::SessionMode::Persistent, Some(n)) if n > 1 => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    requested = n,
+                    "max_concurrent_invocations > 1 ignored — session_mode = \
+                     \"persistent\" cannot run parallel invocations safely; \
+                     clamped to 1. Set session_mode = \"new\" on the manifest \
+                     (or per-trigger) to enable parallel fires.",
+                );
+                1
+            }
+            (_, Some(n)) => n,
+            (_, None) => self.config.load().queue.concurrency.default_per_agent as usize,
+        }
+        .max(1);
+        self.agent_concurrency
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(resolved_cap)))
+            .clone()
+    }
+
     /// Persistent process manager.
     #[inline]
     pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
@@ -1545,6 +1604,22 @@ impl LibreFangKernel {
             total_removed += stale.len();
             for id in stale {
                 self.agent_msg_locks.remove(&id);
+            }
+        }
+
+        // 3b. agent_concurrency — remove per-agent invocation semaphores
+        // for dead agents. Mirrors the agent_msg_locks pass above; lazy
+        // re-init on next dispatch will pick up any updated manifest cap.
+        {
+            let stale: Vec<AgentId> = self
+                .agent_concurrency
+                .iter()
+                .filter(|e| !live_agents.contains(e.key()))
+                .map(|e| *e.key())
+                .collect();
+            total_removed += stale.len();
+            for id in stale {
+                self.agent_concurrency.remove(&id);
             }
         }
 
@@ -2646,6 +2721,7 @@ impl LibreFangKernel {
             config.queue.concurrency.main_lane as u32,
             config.queue.concurrency.cron_lane as u32,
             config.queue.concurrency.subagent_lane as u32,
+            config.queue.concurrency.trigger_lane as u32,
         );
 
         // Build the pluggable context engine from config
@@ -2769,6 +2845,7 @@ impl LibreFangKernel {
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             session_msg_locks: dashmap::DashMap::new(),
+            agent_concurrency: dashmap::DashMap::new(),
             injection_senders: dashmap::DashMap::new(),
             injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
@@ -4067,42 +4144,6 @@ system_prompt = "You are a helpful assistant."
             content_blocks,
             None,
             None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// Send a message with a session mode override.
-    ///
-    /// Used by trigger dispatch to plumb per-trigger `session_mode` overrides
-    /// without changing the public `send_message` signature.
-    ///
-    /// When the target agent has a configured **home channel** (a channel whose
-    /// `default_agent` matches this agent), a synthetic `SenderContext` is
-    /// attached so that downstream channel routing (prompt hints, the
-    /// `channel_send` tool account-id fallback, the `delivery.last_channel`
-    /// memory key, …) targets that home channel instead of the first channel
-    /// in the config array. See issue #2872.
-    async fn send_message_with_session_mode(
-        &self,
-        agent_id: AgentId,
-        message: &str,
-        session_mode_override: Option<librefang_types::agent::SessionMode>,
-    ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
-        let home_channel = self.resolve_agent_home_channel(agent_id);
-        self.send_message_full(
-            agent_id,
-            message,
-            handle,
-            None,
-            home_channel.as_ref(),
-            session_mode_override,
             None,
             None,
         )
@@ -9890,22 +9931,95 @@ system_prompt = "You are a helpful assistant."
         // Publish to the event bus
         self.event_bus.publish(event).await;
 
-        // Actually dispatch triggered messages to agents
+        // Actually dispatch triggered messages to agents.
+        //
+        // Concurrency model — three layered semaphores, in order:
+        //   1. Global Lane::Trigger (config: queue.concurrency.trigger_lane).
+        //      Caps total in-flight trigger dispatches kernel-wide so a
+        //      runaway producer (50× task_post in a tight loop) can't spawn
+        //      unbounded tokio tasks racing for everyone else's mutexes.
+        //   2. Per-agent semaphore (config: manifest.max_concurrent_invocations
+        //      → fallback queue.concurrency.default_per_agent → 1).
+        //      Caps how many of THIS agent's fires run in parallel.
+        //   3. Per-session mutex (existing session_msg_locks at
+        //      send_message_full).  Reached only when we materialize a
+        //      `session_id_override` here for `session_mode = "new"`
+        //      effective mode — otherwise the inner code path falls back
+        //      to the per-agent lock and blocks parallelism inside
+        //      send_message_full regardless of how many permits we hold.
+        //
+        // Resolution order for effective session mode:
+        //   trigger_match.session_mode_override → manifest.session_mode.
+        // We materialize `SessionId::new()` only when the resolved mode is
+        // `New`; persistent fires reuse the canonical session and must
+        // serialize at the per-agent mutex, so we leave session_id_override
+        // = None for them.
         if let Some(weak) = self.self_handle.get() {
             for trigger_match in &triggered {
-                if let Some(kernel) = weak.upgrade() {
-                    let aid = trigger_match.agent_id;
-                    let msg = trigger_match.message.clone();
-                    let mode_override = trigger_match.session_mode_override;
-                    tokio::spawn(async move {
-                        if let Err(e) = kernel
-                            .send_message_with_session_mode(aid, &msg, mode_override)
-                            .await
-                        {
-                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
-                        }
-                    });
-                }
+                let kernel = match weak.upgrade() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let aid = trigger_match.agent_id;
+                let msg = trigger_match.message.clone();
+                let mode_override = trigger_match.session_mode_override;
+
+                // Resolve the effective session mode now so we can decide
+                // whether to materialize a fresh session id. Skip dispatch
+                // if the agent has been deleted between trigger evaluation
+                // and dispatch — preserves prior behavior.
+                let manifest_mode = match kernel.registry.get(aid) {
+                    Some(entry) => entry.manifest.session_mode,
+                    None => continue,
+                };
+                let effective_mode = mode_override.unwrap_or(manifest_mode);
+                let session_id_override = match effective_mode {
+                    librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                    librefang_types::agent::SessionMode::Persistent => None,
+                };
+
+                let trigger_lane = kernel
+                    .command_queue
+                    .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
+                let agent_sem = kernel.agent_concurrency_for(aid);
+
+                tokio::spawn(async move {
+                    // (1) Global trigger lane permit. `acquire_owned` so the
+                    //     permit moves into the spawned task and drops at
+                    //     task exit.
+                    let _lane_permit = match trigger_lane.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return, // lane closed during shutdown
+                    };
+                    // (2) Per-agent permit.
+                    let _agent_permit = match agent_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    // (3) Inner per-session mutex applies inside
+                    //     send_message_full when session_id_override is Some.
+                    let handle: Option<Arc<dyn KernelHandle>> = kernel
+                        .self_handle
+                        .get()
+                        .and_then(|w| w.upgrade())
+                        .map(|arc| arc as Arc<dyn KernelHandle>);
+                    let home_channel = kernel.resolve_agent_home_channel(aid);
+                    if let Err(e) = kernel
+                        .send_message_full(
+                            aid,
+                            &msg,
+                            handle,
+                            None,
+                            home_channel.as_ref(),
+                            mode_override,
+                            None,
+                            session_id_override,
+                        )
+                        .await
+                    {
+                        warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                    }
+                });
             }
         }
 
