@@ -8860,12 +8860,15 @@
       },
       "UserView": {
         "type": "object",
-        "description": "Sanitized user view returned over the wire — never echoes the\n`api_key_hash` value, only its presence.",
+        "description": "Sanitized user view returned over the wire — never echoes the\n`api_key_hash` value, nor the contents of `tool_policy`,\n`memory_access`, `budget`, etc. The list view only needs presence\nflags so the dashboard can show a \"this user is policy-customized\"\nbadge; the per-user detail endpoints already surface the bodies.",
         "required": [
           "name",
           "role",
           "channel_bindings",
-          "has_api_key"
+          "has_api_key",
+          "has_policy",
+          "has_memory_access",
+          "has_budget"
         ],
         "properties": {
           "channel_bindings": {
@@ -8879,6 +8882,18 @@
           },
           "has_api_key": {
             "type": "boolean"
+          },
+          "has_budget": {
+            "type": "boolean",
+            "description": "True when the user has a per-user budget cap configured."
+          },
+          "has_memory_access": {
+            "type": "boolean",
+            "description": "True when the user has a custom memory namespace ACL."
+          },
+          "has_policy": {
+            "type": "boolean",
+            "description": "True when the user has any per-user tool policy configured —\neither an allow/deny list, tool-category overrides, or\nper-channel rules. Summary only; the contents stay behind\n`/api/users/{name}/policy`."
           },
           "name": {
             "type": "string"

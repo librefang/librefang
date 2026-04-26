@@ -9,12 +9,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
-import { ListChecks, ArrowLeft, Save, AlertTriangle } from "lucide-react";
+import {
+  ListChecks,
+  ArrowLeft,
+  Save,
+  AlertTriangle,
+  Plus,
+  X,
+} from "lucide-react";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { usePermissionPolicy } from "../lib/queries/permissionPolicy";
@@ -191,6 +199,14 @@ function formToPayload(form: FormState): PermissionPolicyUpdate {
   return payload;
 }
 
+// Loose channel-key sanity check — kernel side accepts arbitrary strings,
+// but typos like " Telegram " or empty are almost always wrong. We trim,
+// lowercase, and require at least one printable non-space char so the
+// resulting key matches what the channel adapter actually emits.
+function normalizeChannelKey(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
 export function UserPolicyPage() {
   const { t } = useTranslation();
   const { name } = useParams({ from: "/users/$name/policy" });
@@ -201,6 +217,11 @@ export function UserPolicyPage() {
   const [form, setForm] = useState<FormState>(() => policyToForm(undefined));
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitOk, setSubmitOk] = useState(false);
+  // Inline add-channel state. Kept local to the page (not in the form)
+  // because it's transient — the value disappears once the channel slot
+  // joins `form.channel_tool_rules`.
+  const [newChannel, setNewChannel] = useState("");
+  const [newChannelError, setNewChannelError] = useState<string | null>(null);
 
   // Re-hydrate the form whenever the underlying query resolves a new value
   // (e.g. on initial load or after invalidation).
@@ -211,6 +232,33 @@ export function UserPolicyPage() {
   }, [policyQuery.data]);
 
   const validationError = useMemo(() => validateForm(form), [form]);
+
+  const handleAddChannel = () => {
+    const key = normalizeChannelKey(newChannel);
+    if (!key) {
+      setNewChannelError(
+        t("user_policy.add_channel_err_empty", "Channel name is required."),
+      );
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(form.channel_tool_rules, key)) {
+      const tmpl = t(
+        "user_policy.add_channel_err_duplicate",
+        "Channel '{{key}}' already has a rule slot.",
+      );
+      setNewChannelError(tmpl.replace("{{key}}", key));
+      return;
+    }
+    setForm(f => ({
+      ...f,
+      channel_tool_rules: {
+        ...f.channel_tool_rules,
+        [key]: { allowed: "", denied: "" },
+      },
+    }));
+    setNewChannel("");
+    setNewChannelError(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -502,48 +550,124 @@ export function UserPolicyPage() {
             <p className="mt-1 text-xs text-text-dim">
               {t(
                 "user_policy.channels_desc",
-                "Override the user's tool surface per channel adapter (telegram / discord / …).",
+                "Override the user's tool surface per channel adapter (telegram / discord / …). Add custom adapters with the input below.",
               )}
             </p>
           </div>
           <Badge variant="info">{Object.keys(form.channel_tool_rules).length}</Badge>
         </div>
         <div className="mt-4 flex flex-col gap-4">
-          {Object.entries(form.channel_tool_rules).map(([ch, rule]) => (
-            <div key={ch} className="rounded-xl border border-border-subtle p-3">
-              <div className="text-xs font-black uppercase tracking-widest text-text-dim">
-                {ch}
+          {Object.entries(form.channel_tool_rules).map(([ch, rule]) => {
+            const isDefault = (DEFAULT_CHANNELS as readonly string[]).includes(ch);
+            return (
+              <div key={ch} className="rounded-xl border border-border-subtle p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-black uppercase tracking-widest text-text-dim">
+                    {ch}
+                    {!isDefault ? (
+                      <span className="ml-2 normal-case tracking-normal text-[10px] text-text-dim/60">
+                        ({t("user_policy.custom_channel", "custom")})
+                      </span>
+                    ) : null}
+                  </div>
+                  {!isDefault ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={t("user_policy.remove_channel", "Remove channel")}
+                      onClick={() =>
+                        setForm(f => {
+                          const next = { ...f.channel_tool_rules };
+                          delete next[ch];
+                          return { ...f, channel_tool_rules: next };
+                        })
+                      }
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <Textarea
+                    label={t("user_policy.allowed_tools", "Allowed tools")}
+                    value={rule.allowed}
+                    onChange={value =>
+                      setForm(f => ({
+                        ...f,
+                        channel_tool_rules: {
+                          ...f.channel_tool_rules,
+                          [ch]: { ...f.channel_tool_rules[ch], allowed: value },
+                        },
+                      }))
+                    }
+                  />
+                  <Textarea
+                    label={t("user_policy.denied_tools", "Denied tools")}
+                    value={rule.denied}
+                    onChange={value =>
+                      setForm(f => ({
+                        ...f,
+                        channel_tool_rules: {
+                          ...f.channel_tool_rules,
+                          [ch]: { ...f.channel_tool_rules[ch], denied: value },
+                        },
+                      }))
+                    }
+                  />
+                </div>
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <Textarea
-                  label={t("user_policy.allowed_tools", "Allowed tools")}
-                  value={rule.allowed}
-                  onChange={value =>
-                    setForm(f => ({
-                      ...f,
-                      channel_tool_rules: {
-                        ...f.channel_tool_rules,
-                        [ch]: { ...f.channel_tool_rules[ch], allowed: value },
-                      },
-                    }))
+            );
+          })}
+        </div>
+        {/* Add-channel inline form. Lets operators surface a custom channel
+            adapter (e.g. `wechat`, `matrix`) without hand-editing config.toml.
+            Validation here mirrors the obvious mistakes — the daemon still
+            accepts any non-empty string. */}
+        <div className="mt-4 border-t border-border-subtle pt-4">
+          <label className="block text-[10px] font-black uppercase tracking-widest text-text-dim">
+            {t("user_policy.add_channel_label", "Add channel")}
+          </label>
+          <div className="mt-2 flex gap-2 items-start">
+            <div className="grow">
+              <Input
+                value={newChannel}
+                placeholder={t(
+                  "user_policy.add_channel_placeholder",
+                  "wechat, matrix, …",
+                )}
+                onChange={e => {
+                  setNewChannel(e.target.value);
+                  if (newChannelError) setNewChannelError(null);
+                }}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleAddChannel();
                   }
-                />
-                <Textarea
-                  label={t("user_policy.denied_tools", "Denied tools")}
-                  value={rule.denied}
-                  onChange={value =>
-                    setForm(f => ({
-                      ...f,
-                      channel_tool_rules: {
-                        ...f.channel_tool_rules,
-                        [ch]: { ...f.channel_tool_rules[ch], denied: value },
-                      },
-                    }))
-                  }
-                />
-              </div>
+                }}
+              />
             </div>
-          ))}
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={handleAddChannel}
+              leftIcon={<Plus className="h-3.5 w-3.5" />}
+            >
+              {t("common.add", "Add")}
+            </Button>
+          </div>
+          {newChannelError ? (
+            <p className="mt-1.5 text-[11px] text-error">{newChannelError}</p>
+          ) : (
+            <p className="mt-1.5 text-[11px] text-text-dim">
+              {t(
+                "user_policy.add_channel_hint",
+                "Channel adapter name (lowercase). Must match the key the bridge emits.",
+              )}
+            </p>
+          )}
         </div>
       </Card>
 

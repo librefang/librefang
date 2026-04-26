@@ -56,17 +56,32 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 
 /// Sanitized user view returned over the wire — never echoes the
-/// `api_key_hash` value, only its presence.
+/// `api_key_hash` value, nor the contents of `tool_policy`,
+/// `memory_access`, `budget`, etc. The list view only needs presence
+/// flags so the dashboard can show a "this user is policy-customized"
+/// badge; the per-user detail endpoints already surface the bodies.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct UserView {
     pub name: String,
     pub role: String,
     pub channel_bindings: HashMap<String, String>,
     pub has_api_key: bool,
+    /// True when the user has any per-user tool policy configured —
+    /// either an allow/deny list, tool-category overrides, or
+    /// per-channel rules. Summary only; the contents stay behind
+    /// `/api/users/{name}/policy`.
+    pub has_policy: bool,
+    /// True when the user has a custom memory namespace ACL.
+    pub has_memory_access: bool,
+    /// True when the user has a per-user budget cap configured.
+    pub has_budget: bool,
 }
 
 impl From<&UserConfig> for UserView {
     fn from(cfg: &UserConfig) -> Self {
+        let has_policy = cfg.tool_policy.is_some()
+            || cfg.tool_categories.is_some()
+            || !cfg.channel_tool_rules.is_empty();
         Self {
             name: cfg.name.clone(),
             role: cfg.role.clone(),
@@ -76,6 +91,9 @@ impl From<&UserConfig> for UserView {
                 .as_deref()
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false),
+            has_policy,
+            has_memory_access: cfg.memory_access.is_some(),
+            has_budget: cfg.budget.is_some(),
         }
     }
 }

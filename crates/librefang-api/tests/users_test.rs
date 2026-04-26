@@ -783,3 +783,141 @@ async fn users_policy_put_validates_no_empty_tool_strings() {
         "error must mention the empty entry: {body:?}"
     );
 }
+
+/// Follow-up to PR #3229 — the user-list view must surface presence
+/// flags so the dashboard can render "Policy / Memory / Budget" badges
+/// without an extra round-trip per row. A bare user must report all
+/// three flags as `false`; a customized user must report `true` for the
+/// slots that are actually set.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_list_summary_flags_reflect_policy_state() {
+    use librefang_types::config::UserBudgetConfig;
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let bare = UserConfig {
+        name: "Bare".into(),
+        role: "user".into(),
+        ..Default::default()
+    };
+    let customized = UserConfig {
+        name: "Custom".into(),
+        role: "admin".into(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec![],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        budget: Some(UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 10.0,
+            max_monthly_usd: 100.0,
+            ..Default::default()
+        }),
+        channel_tool_rules: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![bare, customized]).await;
+
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("array");
+    let bare_row = rows.iter().find(|r| r["name"] == "Bare").expect("Bare");
+    let custom_row = rows
+        .iter()
+        .find(|r| r["name"] == "Custom")
+        .expect("Custom");
+
+    assert_eq!(bare_row["has_policy"], false, "{bare_row}");
+    assert_eq!(bare_row["has_memory_access"], false, "{bare_row}");
+    assert_eq!(bare_row["has_budget"], false, "{bare_row}");
+
+    assert_eq!(custom_row["has_policy"], true, "{custom_row}");
+    assert_eq!(custom_row["has_memory_access"], true, "{custom_row}");
+    assert_eq!(custom_row["has_budget"], true, "{custom_row}");
+}
+
+/// Sanity check on the M3 follow-up — the list view's three summary
+/// booleans must NOT be accompanied by the underlying contents. The
+/// per-user detail endpoints (`/api/users/{name}/policy`, the budget
+/// API) are the only paths that should expose policy bodies; leaking
+/// `tool_policy` / `memory_access` / `budget` from the list would (a)
+/// inflate response size proportionally to user count and (b) widen
+/// the disclosure surface for callers that only have list-read.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_list_summary_does_not_leak_policy_contents() {
+    use librefang_types::config::UserBudgetConfig;
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let seed = UserConfig {
+        name: "Spy".into(),
+        role: "user".into(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: true,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        budget: Some(UserBudgetConfig {
+            max_hourly_usd: 0.5,
+            max_daily_usd: 5.0,
+            max_monthly_usd: 50.0,
+            ..Default::default()
+        }),
+        channel_tool_rules: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = body
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["name"] == "Spy"))
+        .expect("row")
+        .as_object()
+        .expect("object");
+
+    // The summary booleans must be present so the dashboard can render
+    // badges. The actual policy bodies must NOT — they only belong on
+    // the per-user detail endpoints.
+    assert!(row.contains_key("has_policy"));
+    assert!(row.contains_key("has_memory_access"));
+    assert!(row.contains_key("has_budget"));
+    assert!(
+        !row.contains_key("tool_policy"),
+        "tool_policy contents leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("tool_categories"),
+        "tool_categories leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("memory_access"),
+        "memory_access body leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("channel_tool_rules"),
+        "channel_tool_rules leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("budget"),
+        "budget body leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("api_key_hash"),
+        "api_key_hash leaked into list view: {row:?}"
+    );
+}
