@@ -1866,8 +1866,9 @@ pub struct QueueConcurrencyConfig {
     /// not set `max_concurrent_invocations`. `1` reproduces the
     /// legacy per-agent-mutex serialization that pre-existed this
     /// knob — change deliberately. `0` is rewritten to `1` by
-    /// validation.
-    pub default_per_agent: u32,
+    /// validation. Typed `usize` to match the sibling lane fields and
+    /// to feed `Semaphore::new` without a cast.
+    pub default_per_agent: usize,
 }
 
 impl Default for QueueConcurrencyConfig {
