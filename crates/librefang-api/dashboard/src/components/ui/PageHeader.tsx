@@ -7,8 +7,8 @@ interface PageHeaderProps {
   icon: ReactNode;
   title: string;
   subtitle?: string;
-  /** Optional small label rendered next to the title (e.g. "Beta", count). */
-  badge?: string;
+  /** Optional small label rendered next to the title (e.g. "Beta", count, or a <Badge/> element). */
+  badge?: ReactNode;
   actions?: ReactNode;
   isFetching?: boolean;
   onRefresh?: () => void;

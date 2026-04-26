@@ -1160,6 +1160,10 @@ class UsersResource {
   async deleteUser(name) {
     return this._c._request("DELETE", `/api/users/${name}`);
   }
+
+  async rotateUserKey(name) {
+    return this._c._request("POST", `/api/users/${name}/rotate-key`);
+  }
 }
 
 // ── Webhooks Resource

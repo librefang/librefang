@@ -2447,14 +2447,33 @@ fn parse_telegram_callback_query(
     })
 }
 
+/// Source of a Telegram message's sender id.
+///
+/// `From` means the id came from `message.from.id` and is a real user id
+/// (positive integer per Telegram API). `SenderChat` means the id came from
+/// `message.sender_chat.id` (anonymous channel admins, channel-on-behalf
+/// posts) and is a NEGATIVE chat id — semantically a channel, not a user.
+///
+/// Downstream consumers (RBAC, per-user rate limiting) key off
+/// `metadata[SENDER_USER_ID_KEY]`. Callers must prefix `SenderChat` ids
+/// with `tg_channel:` before writing them so they cannot collide with — or
+/// be mistaken for — a real user identity in the same key namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramSenderSource {
+    From,
+    SenderChat,
+}
+
 /// Extract sender identity from a Telegram message.
 ///
 /// Tries `from` (user) first, then falls back to `sender_chat` (channel/group).
-/// Returns `(user_id, display_name, Option<username>)`.
+/// Returns `(user_id, display_name, Option<username>, source)`. Callers must
+/// inspect `source` before writing `user_id` into `SENDER_USER_ID_KEY` — see
+/// `TelegramSenderSource` for the namespace prefix rule.
 fn extract_telegram_sender(
     message: &serde_json::Value,
     update_id: i64,
-) -> Result<(i64, String, Option<String>), DropReason> {
+) -> Result<(i64, String, Option<String>, TelegramSenderSource), DropReason> {
     if let Some(from) = message.get("from") {
         let uid = match from["id"].as_i64() {
             Some(id) => id,
@@ -2472,7 +2491,7 @@ fn extract_telegram_sender(
             format!("{first_name} {last_name}")
         };
         let username = from["username"].as_str().map(String::from);
-        Ok((uid, name, username))
+        Ok((uid, name, username, TelegramSenderSource::From))
     } else if let Some(sender_chat) = message.get("sender_chat") {
         // Messages sent on behalf of a channel or group have `sender_chat` instead of `from`.
         let uid = match sender_chat["id"].as_i64() {
@@ -2484,7 +2503,12 @@ fn extract_telegram_sender(
             }
         };
         let title = sender_chat["title"].as_str().unwrap_or("Unknown Channel");
-        Ok((uid, title.to_string(), None))
+        Ok((
+            uid,
+            title.to_string(),
+            None,
+            TelegramSenderSource::SenderChat,
+        ))
     } else {
         Err(DropReason::ParseError(format!(
             "update {update_id} has no from or sender_chat field"
@@ -2778,7 +2802,8 @@ async fn parse_telegram_update(
         }
     };
 
-    let (user_id, display_name, username) = extract_telegram_sender(message, update_id)?;
+    let (user_id, display_name, username, sender_source) =
+        extract_telegram_sender(message, update_id)?;
 
     // Security: check allowed_users (supports user ID and username)
     if !telegram_user_allowed(allowed_users, user_id, username.as_deref()) {
@@ -2816,9 +2841,19 @@ async fn parse_telegram_update(
     // sender's user id, so without this entry `bridge::sender_user_id()` would
     // fall back to the chat_id and `auth_manager.identify("telegram", chat_id)`
     // would reject every group message as "Unrecognized user".
+    //
+    // For `sender_chat` (anonymous channel admins / channel-on-behalf posts)
+    // the id is a NEGATIVE chat id, not a user id. Prefix it with
+    // `tg_channel:` so it cannot be mistaken for — or collide with — a real
+    // user identity in the shared SENDER_USER_ID_KEY namespace consumed by
+    // RBAC and per-user rate limiting.
+    let sender_user_id_value = match sender_source {
+        TelegramSenderSource::From => user_id.to_string(),
+        TelegramSenderSource::SenderChat => format!("tg_channel:{user_id}"),
+    };
     metadata.insert(
         SENDER_USER_ID_KEY.to_string(),
-        serde_json::json!(user_id.to_string()),
+        serde_json::json!(sender_user_id_value),
     );
 
     // Store reply-to-message metadata for downstream consumers.
@@ -3593,15 +3628,50 @@ mod tests {
         );
         // sender_chat fallback yields the *channel id*, not a user id. We
         // still write it into SENDER_USER_ID_KEY for shape consistency, but
-        // it is not a real user identity — RBAC will (correctly) reject it
-        // because no `[[users]]` entry maps to a negative channel id.
-        // Documenting the value here so a future change can't silently flip
-        // anonymous-admin / channel-on-behalf posts into authorized users.
+        // it MUST be prefixed with `tg_channel:` so it cannot collide with
+        // — or be mistaken for — a real user identity in the shared
+        // namespace consumed by RBAC and per-user rate limiting. RBAC will
+        // (correctly) reject it because no `[[users]]` entry maps to a
+        // `tg_channel:` prefixed key.
         assert_eq!(
             msg.metadata
                 .get(crate::bridge::SENDER_USER_ID_KEY)
                 .and_then(|v| v.as_str()),
-            Some("-1001999888777"),
+            Some("tg_channel:-1001999888777"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_from_user_no_prefix() {
+        // Regression: ensure normal `from`-sourced messages write the bare
+        // integer string into SENDER_USER_ID_KEY (no `tg_channel:` prefix).
+        // The prefix is reserved exclusively for the sender_chat fallback
+        // path; applying it to real users would break RBAC lookups.
+        let update = serde_json::json!({
+            "update_id": 502,
+            "message": {
+                "message_id": 82,
+                "from": {
+                    "id": 12345_i64,
+                    "first_name": "Alice",
+                    "username": "alice"
+                },
+                "chat": { "id": 12345_i64, "type": "private" },
+                "date": 1700000000,
+                "text": "hi"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("12345"),
+            "from-sourced sender id must be the bare integer, no `tg_channel:` prefix",
         );
     }
 

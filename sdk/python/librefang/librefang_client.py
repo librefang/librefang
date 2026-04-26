@@ -922,6 +922,9 @@ class _UsersResource(_Resource):
     def delete_user(self, name: str):
         return self._c._request("DELETE", f"/api/users/{name}")
 
+    def rotate_user_key(self, name: str):
+        return self._c._request("POST", f"/api/users/{name}/rotate-key")
+
 
 # ── Webhooks Resource ──────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LibreFang",
-  "version": "26.4.32245",
+  "version": "26.4.32276",
   "identifier": "ai.librefang.desktop",
   "build": {},
   "app": {

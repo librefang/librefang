@@ -49,6 +49,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, instrument, warn};
 
+/// Synthetic `SenderContext.channel` value the cron dispatcher uses for
+/// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
+/// to bypass per-user RBAC the same way the `system_call=true` flag does
+/// — daemon-driven calls have no user to attribute to.
+pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
+
+/// Synthetic `SenderContext.channel` value the autonomous-loop dispatcher
+/// uses for agents whose manifest declares `[autonomous]`. Same RBAC
+/// carve-out as [`SYSTEM_CHANNEL_CRON`] — both are kernel-internal and
+/// have no user to attribute to. Issue #3243.
+pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
 /// API listens on a wildcard address.
@@ -11948,9 +11960,9 @@ system_prompt = "You are a helpful assistant."
                                 let wants_new_session = job.session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 let cron_sender = SenderContext {
-                                    channel: "cron".to_string(),
+                                    channel: SYSTEM_CHANNEL_CRON.to_string(),
                                     user_id: job.peer_id.clone().unwrap_or_default(),
-                                    display_name: "cron".to_string(),
+                                    display_name: SYSTEM_CHANNEL_CRON.to_string(),
                                     is_group: false,
                                     was_mentioned: false,
                                     thread_id: None,
@@ -12406,13 +12418,33 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Start continuous/periodic loops
+        // Start continuous/periodic loops.
+        //
+        // RBAC carve-out (issue #3243): autonomous ticks have no inbound
+        // user. Without a synthetic `SenderContext { channel:"autonomous" }`
+        // the runtime would call `resolve_user_tool_decision(.., None, None)`
+        // → `guest_gate` → `NeedsApproval` for any non-safe-list tool, and
+        // every tick would flood the approval queue when `[[users]]` is
+        // configured. The `"autonomous"` channel sentinel matches the same
+        // `system_call=true` carve-out as cron (see
+        // `resolve_user_tool_decision` in this file).
         let kernel = Arc::clone(self);
         self.background
             .start_agent(agent_id, name, schedule, move |aid, msg| {
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
-                    match k.send_message(aid, &msg).await {
+                    let sender = SenderContext {
+                        channel: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+                        user_id: aid.to_string(),
+                        display_name: SYSTEM_CHANNEL_AUTONOMOUS.to_string(),
+                        is_group: false,
+                        was_mentioned: false,
+                        thread_id: None,
+                        account_id: None,
+                        is_internal_cron: false,
+                        ..Default::default()
+                    };
+                    match k.send_message_with_sender_context(aid, &msg, &sender).await {
                         Ok(_) => {}
                         Err(e) => {
                             // send_message already records the panic in supervisor,
@@ -15997,11 +16029,20 @@ impl KernelHandle for LibreFangKernel {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> librefang_types::user_policy::UserToolGate {
-        // Only the synthetic `"cron"` channel is treated as a system-
-        // internal call. The cron dispatcher synthesises
-        // `SenderContext{channel:"cron"}` (see kernel/mod.rs ~10876)
-        // before fanning out to agents; everything else MUST carry a
-        // real `(channel, sender_id)` tuple.
+        // The synthetic `"cron"` and `"autonomous"` channels are the only
+        // two the kernel treats as system-internal. Both are synthesised
+        // by the kernel itself for daemon-driven calls that have no
+        // user-facing sender:
+        //   - `"cron"` — `kernel/mod.rs::start_periodic_loops` cron tick
+        //     (~line 11950) for `[[cron_jobs]]` fires.
+        //   - `"autonomous"` — `start_continuous_autonomous_loop`
+        //     (~line 12412) for autonomous-tick prompts on agents whose
+        //     manifest declares `[autonomous]`.
+        // Both fan out the agent's own loop with a synthetic
+        // `SenderContext { channel: "cron" | "autonomous" }`. Issue #3243
+        // tracks the autonomous case: without this carve-out, every
+        // autonomous tool call falls into `guest_gate` → NeedsApproval
+        // and floods the approval queue when RBAC is enabled.
         //
         // Earlier drafts also matched `"system"` / `"internal"` and
         // treated `(None, None)` as system, but neither sentinel is
@@ -16011,7 +16052,10 @@ impl KernelHandle for LibreFangKernel {
         // (PR #3205 review item #1). Both have been removed: an
         // unattributed inbound now goes through the guest gate so
         // RBAC fails closed end-to-end.
-        let system_call = matches!(channel, Some("cron"));
+        let system_call = matches!(
+            channel,
+            Some(c) if c == SYSTEM_CHANNEL_CRON || c == SYSTEM_CHANNEL_AUTONOMOUS
+        );
         self.auth
             .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
     }

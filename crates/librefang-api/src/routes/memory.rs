@@ -158,23 +158,35 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Va
 ///    kernel's `AuthManager` and use their resolved `UserMemoryAccess`.
 /// 2. No authenticated user (loopback dev / single-user mode, or any
 ///    request the auth middleware allowed through without binding a
-///    user) → fall back to an **owner-equivalent** guard.
+///    user) → fall back to a **fail-closed Viewer-equivalent** guard:
+///    read access is limited to the `proactive` namespace, all writes,
+///    deletes, exports, and PII access are denied.
 ///
-/// SECURITY: the fallback grants full read/write across every namespace
-/// AND `pii_access`. That is intentional for the M2 contract — the
-/// dashboard SPA hits these endpoints loopback with no API key today
-/// and depends on seeing every memory fragment — but it means the
-/// per-user namespace ACL only kicks in when the auth middleware
-/// attaches a real user. Operators who want the ACL enforced on every
-/// request must enable per-user API keys AND ensure the auth allowlist
-/// in `middleware.rs` does not whitelist these routes. See PR #3205
-/// review item #3.
+/// SECURITY (PR #3205 follow-up — Issue #6 fail-open fix): the previous
+/// fallback granted **owner-equivalent** access (`readable=["*"]`,
+/// `writable=["*"]`, `pii_access=true`, `export_allowed=true`,
+/// `delete_allowed=true`) to anonymous loopback callers. That meant any
+/// process with `127.0.0.1` access (or any deployment with
+/// `LIBREFANG_ALLOW_NO_AUTH=1`) could exfiltrate every memory fragment
+/// — including PII — and bulk-delete/export memories without
+/// attribution. Other admin-gated RBAC endpoints (`/api/audit/query`,
+/// `/api/budget/users/*`, `/api/authz/effective/*`) already reject
+/// anonymous callers outright with `PermissionDenied` audit rows.
+///
+/// We pick the slightly looser "Viewer-equivalent" fallback (rather
+/// than a hard 403) so the loopback dashboard SPA — which today hits
+/// these endpoints with no Bearer token — keeps working for the
+/// non-sensitive read path. Dangerous capabilities (PII, export, write,
+/// delete, `kv:*`/`shared:*` namespaces) all fail closed: the guarded
+/// store calls return `AuthDenied` → 403 to the client. To regain the
+/// previous broad access, configure at least one user with an API key +
+/// an `Owner`/`Admin` role and use that token; the auth middleware will
+/// attach `AuthenticatedApiUser` and the matching ACL applies.
 fn guard_for_request(
     state: &AppState,
     extensions: &axum::http::Extensions,
 ) -> librefang_memory::namespace_acl::MemoryNamespaceGuard {
     use librefang_memory::namespace_acl::MemoryNamespaceGuard;
-    use librefang_types::user_policy::UserMemoryAccess;
 
     if let Some(api_user) = extensions.get::<crate::middleware::AuthenticatedApiUser>() {
         let user_id = librefang_types::agent::UserId::from_name(&api_user.name);
@@ -182,21 +194,72 @@ fn guard_for_request(
             return MemoryNamespaceGuard::new(acl);
         }
     }
-    // Owner-equivalent fallback — see SECURITY note above.
-    MemoryNamespaceGuard::new(UserMemoryAccess {
-        readable_namespaces: vec!["*".into()],
-        writable_namespaces: vec!["*".into()],
-        pii_access: true,
-        export_allowed: true,
-        delete_allowed: true,
-    })
+    MemoryNamespaceGuard::new(anonymous_fallback_acl())
 }
 
-/// Convert an `AuthDenied` error to a 403 JSON response.
-fn auth_denied(reason: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+/// Least-privilege ACL handed out when the request has no authenticated
+/// `AuthenticatedApiUser` (anonymous loopback / `LIBREFANG_ALLOW_NO_AUTH=1`).
+///
+/// Mirrors `librefang_kernel::auth::default_memory_acl(UserRole::Viewer)`
+/// — read-only access to the `proactive` namespace, no PII, no writes,
+/// no exports, no deletes. We deliberately do NOT call into the kernel
+/// helper directly; inlining here keeps the API-layer fail-closed
+/// contract self-contained and visible at the only call site. See the
+/// SECURITY note on [`guard_for_request`].
+fn anonymous_fallback_acl() -> librefang_types::user_policy::UserMemoryAccess {
+    librefang_types::user_policy::UserMemoryAccess {
+        readable_namespaces: vec!["proactive".into()],
+        writable_namespaces: vec![],
+        pii_access: false,
+        export_allowed: false,
+        delete_allowed: false,
+    }
+}
+
+/// Convert an `AuthDenied` error to a 403 JSON response **and** record a
+/// `PermissionDenied` audit row.
+///
+/// The reviewer of PR #3205 flagged that memory ACL denials at the API
+/// layer were silently dropped from the audit chain, while the parallel
+/// `routes/audit.rs`, `routes/budget.rs`, `routes/authz.rs`, and the
+/// global auth middleware all emit a `PermissionDenied` row. This helper
+/// closes that gap so a privilege probe against `/api/memory*` shows up
+/// in `/api/audit` and the `audit.log` chain.
+///
+/// Anonymous (loopback / no-auth mode) callers are recorded with
+/// `user_id = None` and the reason string in the detail field — same
+/// shape as `routes/audit.rs::require_admin`.
+fn auth_denied(
+    state: &AppState,
+    extensions: &axum::http::Extensions,
+    reason: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let reason_str = reason.to_string();
+    let api_user = extensions.get::<crate::middleware::AuthenticatedApiUser>();
+    let (user_id, detail) = match api_user {
+        Some(u) => (
+            Some(u.user_id),
+            format!(
+                "memory denied for {} (role={}): {reason_str}",
+                u.name, u.role
+            ),
+        ),
+        None => (
+            None,
+            format!("memory denied for anonymous caller: {reason_str}"),
+        ),
+    };
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_runtime::audit::AuditAction::PermissionDenied,
+        detail,
+        "denied",
+        user_id,
+        Some("api".to_string()),
+    );
     (
         StatusCode::FORBIDDEN,
-        Json(serde_json::json!({"error": reason.to_string()})),
+        Json(serde_json::json!({"error": reason_str})),
     )
 }
 
@@ -233,7 +296,9 @@ pub async fn memory_search(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied(&state, request.extensions(), reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -300,7 +365,9 @@ pub async fn memory_list(
                 })),
             )
         }
-        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied(&state, request.extensions(), reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -333,7 +400,9 @@ pub async fn memory_get_user(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied(&state, request.extensions(), reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -704,7 +773,9 @@ pub async fn memory_list_agent(
                 })),
             )
         }
-        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied(&state, request.extensions(), reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -746,7 +817,9 @@ pub async fn memory_search_agent(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => auth_denied(reason),
+        Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
+            auth_denied(&state, request.extensions(), reason)
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -1303,4 +1376,214 @@ pub async fn memory_config_patch(
         StatusCode::OK,
         Json(serde_json::json!({"status": "updated", "note": "Restart required for full effect"})),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for PR #3205 follow-ups.
+    //!
+    //! - **Issue #6 (fail-open)**: anonymous request (no
+    //!   `AuthenticatedApiUser` extension) must get a Viewer-equivalent
+    //!   ACL, NOT the historical owner-equivalent fallback.
+    //!   `anonymous_fallback_*` tests pin that contract.
+    //! - **Issue #8b (missing audit emit)**: a memory ACL denial at the
+    //!   API layer must record a `PermissionDenied` audit row, matching
+    //!   `routes/audit.rs`, `routes/budget.rs`, `routes/authz.rs`, and
+    //!   the global auth middleware. `auth_denied_emits_audit_*` tests
+    //!   pin that contract.
+    //!
+    //! `anonymous_fallback_*` tests exercise the helper directly because
+    //! constructing a real [`AppState`] requires booting an entire
+    //! kernel; `auth_denied_*` tests do boot a kernel because we need to
+    //! observe the audit chain.
+    use super::*;
+    use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
+    use librefang_runtime::audit::AuditAction;
+    use librefang_types::config::KernelConfig;
+
+    #[test]
+    fn anonymous_fallback_denies_pii_export_and_delete() {
+        let acl = anonymous_fallback_acl();
+        assert!(
+            !acl.pii_access,
+            "anonymous fallback must NOT expose PII (was true pre-fix — Issue #6)"
+        );
+        assert!(
+            !acl.export_allowed,
+            "anonymous fallback must NOT allow bulk export"
+        );
+        assert!(
+            !acl.delete_allowed,
+            "anonymous fallback must NOT allow delete"
+        );
+        assert!(
+            acl.writable_namespaces.is_empty(),
+            "anonymous fallback must NOT permit writes, got {:?}",
+            acl.writable_namespaces
+        );
+        assert_eq!(
+            acl.readable_namespaces,
+            vec!["proactive".to_string()],
+            "anonymous fallback must only allow reading the `proactive` namespace"
+        );
+    }
+
+    #[test]
+    fn anonymous_fallback_guard_gates_match_acl_intent() {
+        let guard = MemoryNamespaceGuard::new(anonymous_fallback_acl());
+
+        assert!(matches!(
+            guard.check_read("proactive"),
+            NamespaceGate::Allow
+        ));
+
+        assert!(matches!(
+            guard.check_read("kv:secrets"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_read("shared:any"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(guard.check_read("kg"), NamespaceGate::Deny(_)));
+        assert!(matches!(
+            guard.check_write("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_export("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(matches!(
+            guard.check_delete("proactive"),
+            NamespaceGate::Deny(_)
+        ));
+        assert!(
+            !guard.pii_access_allowed(),
+            "fallback guard must redact PII"
+        );
+    }
+
+    /// Minimal `AppState` for unit-testing the audit-emit path of
+    /// [`auth_denied`]. Mirrors the fixture in `routes/agents.rs` but
+    /// keeps fields to the bare minimum we touch here.
+    fn audit_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-memory-audit-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("data").join("webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "telemetry")]
+            prometheus_handle: None,
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            config_write_lock: tokio::sync::Mutex::new(()),
+        });
+        (state, tmp)
+    }
+
+    /// Reviewer claim (PR #3205 follow-up #8b): a memory ACL denial at
+    /// the API layer must emit a `PermissionDenied` audit row, matching
+    /// `routes/audit.rs`, `routes/budget.rs`, `routes/authz.rs`, and the
+    /// global auth middleware. Without this, a privilege probe against
+    /// `/api/memory*` was silently dropped from the chain.
+    ///
+    /// Anonymous (loopback / no-auth) variant — the row is recorded with
+    /// `user_id = None`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auth_denied_emits_audit_row_for_anonymous() {
+        let (state, _tmp) = audit_test_app_state();
+        let extensions = axum::http::Extensions::new();
+
+        let before = state.kernel.audit().len();
+        let (status, _body) = auth_denied(
+            &state,
+            &extensions,
+            "namespace 'kv:secrets' is not readable for the current user",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let entries = state.kernel.audit().recent(8);
+        assert!(
+            state.kernel.audit().len() > before,
+            "auth_denied must append at least one audit entry"
+        );
+        let last = entries.last().expect("audit log must have a tail entry");
+        assert!(matches!(last.action, AuditAction::PermissionDenied));
+        assert_eq!(last.outcome, "denied");
+        assert!(
+            last.detail.contains("anonymous"),
+            "anonymous detail should mark the caller: got {:?}",
+            last.detail
+        );
+        assert!(
+            last.detail.contains("kv:secrets"),
+            "detail should carry the rejected namespace reason: got {:?}",
+            last.detail
+        );
+        assert!(
+            last.user_id.is_none(),
+            "anonymous denial must not attribute a user_id"
+        );
+        assert_eq!(last.channel.as_deref(), Some("api"));
+    }
+
+    /// Authenticated-but-denied variant — the row carries the attributed
+    /// `user_id` so an admin can see *who* tried to read what.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auth_denied_emits_audit_row_for_authenticated_user() {
+        use crate::middleware::AuthenticatedApiUser;
+        use librefang_kernel::auth::UserRole;
+        use librefang_types::agent::UserId;
+
+        let (state, _tmp) = audit_test_app_state();
+        let mut extensions = axum::http::Extensions::new();
+        let user_id = UserId::from_name("alice");
+        extensions.insert(AuthenticatedApiUser {
+            name: "alice".to_string(),
+            role: UserRole::User,
+            user_id,
+        });
+
+        let (status, _body) = auth_denied(&state, &extensions, "kv:secrets not readable");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let last = state
+            .kernel
+            .audit()
+            .recent(4)
+            .into_iter()
+            .last()
+            .expect("audit must have a tail entry");
+        assert!(matches!(last.action, AuditAction::PermissionDenied));
+        assert_eq!(last.user_id, Some(user_id));
+        assert!(
+            last.detail.contains("alice"),
+            "authenticated detail should name the user: got {:?}",
+            last.detail
+        );
+    }
 }

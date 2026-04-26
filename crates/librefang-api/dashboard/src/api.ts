@@ -3531,6 +3531,11 @@ export interface UserItem {
   role: string;
   channel_bindings: Record<string, string>;
   has_api_key: boolean;
+  // Summary flags — true when the user overrides the role default for
+  // that slot. Bodies stay on the per-user detail endpoints.
+  has_policy: boolean;
+  has_memory_access: boolean;
+  has_budget: boolean;
 }
 
 export interface UserUpsertPayload {
@@ -3589,6 +3594,26 @@ export async function importUsers(
     rows,
     dry_run: options.dryRun ?? false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6)
+//
+// Owner-only. Returns the new plaintext key in the response — that is the
+// only time the server exposes it; we never log, persist, or re-derive it.
+// ---------------------------------------------------------------------------
+
+export interface RotateUserKeyResponse {
+  status: string;
+  new_api_key: string;
+  sessions_invalidated: number;
+}
+
+export async function rotateUserKey(name: string): Promise<RotateUserKeyResponse> {
+  return post<RotateUserKeyResponse>(
+    `/api/users/${encodeURIComponent(name)}/rotate-key`,
+    {},
+  );
 }
 
 // ---------------------------------------------------------------------------
