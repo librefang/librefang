@@ -481,3 +481,235 @@ cron_session_max_messages = 100
 Pruning is **skipped** when `session_mode = "new"` — those fires always start fresh and never carry stale state. Both caps apply jointly (whichever fires first prunes more).
 
 ---
+
+### `[rate_limit]`
+
+API and WebSocket rate-limiting knobs. The HTTP path uses a GCRA token bucket per IP; WebSocket paths add an idle timeout and a per-message debounce so streaming UIs don't hammer downstream consumers.
+
+```toml
+[rate_limit]
+api_requests_per_minute = 500
+retry_after_secs = 60
+max_ws_per_ip = 5
+ws_messages_per_minute = 10
+ws_terminal_messages_per_minute = 3600
+ws_idle_timeout_secs = 1800
+ws_debounce_ms = 100
+ws_debounce_chars = 200
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `api_requests_per_minute` | u32 | `500` | HTTP token budget per IP per minute (GCRA). |
+| `retry_after_secs` | u64 | `60` | Value sent in `Retry-After` when 429. |
+| `max_ws_per_ip` | usize | `5` | Concurrent WebSocket connections allowed per IP. |
+| `ws_messages_per_minute` | u32 | `10` | Chat WS messages per connection per minute. |
+| `ws_terminal_messages_per_minute` | u32 | `3600` | Per-keystroke budget for terminal WS sessions (60/sec ≈ 720 WPM). |
+| `ws_idle_timeout_secs` | u64 | `1800` | Auto-close after N seconds of inactivity. |
+| `ws_debounce_ms` | u64 | `100` | Coalesce text deltas for this many ms before flushing to clients. |
+| `ws_debounce_chars` | usize | `200` | Force-flush the buffer when it reaches this character count. |
+
+The terminal limit is two orders of magnitude higher than the chat limit for a reason: chat `ws_messages_per_minute = 10` would exhaust the budget on a single `vim` + `:wq` keystroke flurry. Don't lower `ws_terminal_messages_per_minute` below ~600 unless you actively want to throttle interactive PTYs.
+
+---
+
+### `[sanitize]`
+
+Inbound message sanitisation / prompt-injection detection. Off by default — when on, oversized or pattern-matching inbound text is blocked or warned before reaching the LLM.
+
+```toml
+[sanitize]
+mode = "off"            # "off" | "warn" | "block"
+max_message_length = 32768
+custom_block_patterns = [
+  "(?i)ignore previous instructions",
+]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"off"` = pass through; `"warn"` = log but accept; `"block"` = reject. |
+| `max_message_length` | usize | `32768` | Hard cap on inbound message bytes. |
+| `custom_block_patterns` | `Vec<string>` | `[]` | Regexes added on top of the built-in prompt-injection patterns. |
+
+In `block` mode the channel adapter responds with a sanitiser-rejection notice and zero LLM tokens are spent. Pair with `[privacy]` for a defence-in-depth setup.
+
+---
+
+### `[privacy]`
+
+PII redaction or pseudonymisation applied to LLM prompts. Off by default. The redactor runs on every outbound prompt, including history replays.
+
+```toml
+[privacy]
+mode = "off"            # "off" | "redact" | "pseudonymize"
+redact_patterns = [
+  "\\b[A-Z]{2}\\d{6,8}\\b",   # add custom patterns on top of built-ins
+]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `mode` | enum | `"off"` | `"redact"` replaces matches with `[REDACTED]`; `"pseudonymize"` substitutes deterministic tokens (same input → same fake) so the LLM can still reason about identity. |
+| `redact_patterns` | `Vec<string>` | `[]` | Extra regexes added to the built-in PII set (emails, phones, credit cards, IPs). |
+
+`pseudonymize` keeps a per-process mapping in memory only — restarting the daemon resets the substitution table.
+
+---
+
+### `[telemetry]`
+
+OpenTelemetry tracing + Prometheus metrics. The bundled Tempo/Grafana stack reads from these endpoints; external collectors work too — just point `otlp_endpoint` at them.
+
+```toml
+[telemetry]
+enabled = true
+otlp_endpoint = "http://localhost:4317"
+service_name = "librefang"
+sample_rate = 1.0
+prometheus_enabled = true
+auto_start_observability_stack = false
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Master switch for OTLP trace export. |
+| `otlp_endpoint` | string | `"http://localhost:4317"` | gRPC endpoint of an OTel collector. |
+| `service_name` | string | `"librefang"` | Reported as `service.name` resource attribute. |
+| `sample_rate` | f64 | `1.0` | 0.0 to 1.0 — fraction of traces sampled. |
+| `prometheus_enabled` | bool | `true` | Expose `/api/metrics` for scraping. |
+| `auto_start_observability_stack` | bool | `false` | If `true`, `librefang start` spins up the bundled Grafana/Prometheus/Tempo Docker stack. Off by default — most operators don't want four extra containers as a side-effect of starting the daemon. |
+
+---
+
+### `[heartbeat]`
+
+Heartbeat monitor for autonomous (always-on) agents. The monitor flags an agent as unresponsive when it hasn't heartbeated within `default_timeout_secs`.
+
+```toml
+[heartbeat]
+check_interval_secs = 30
+default_timeout_secs = 60
+keep_recent = 10
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `check_interval_secs` | u64 | `30` | How often the heartbeat sweep runs. |
+| `default_timeout_secs` | u64 | `60` | An agent is considered unresponsive after this many seconds without a heartbeat. |
+| `keep_recent` | usize | `10` | When pruning session context, keep this many recent heartbeat turns. |
+
+The heartbeat path also short-circuits crash-loop prevention — an agent that emits the same error N times in a row is paused with `auth_status: "crashed"` rather than retried indefinitely.
+
+---
+
+### `[compaction]`
+
+LLM-based history summarisation. When a session crosses either the message-count threshold or the token-ratio threshold, the daemon spawns a background turn that summarises the older half of the history in the user's conversation language and replaces it with the summary plus the most recent N turns.
+
+```toml
+[compaction]
+threshold_messages = 30
+keep_recent = 10
+max_summary_tokens = 1024
+token_threshold_ratio = 0.7
+max_chunk_chars = 80000
+max_retries = 3
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `threshold_messages` | usize | `30` | Trigger when the history reaches this many messages. |
+| `keep_recent` | usize | `10` | Preserve this many recent messages verbatim across the boundary. |
+| `max_summary_tokens` | usize | `1024` | Cap on the summary's output tokens. |
+| `token_threshold_ratio` | f64 | `0.7` | Also trigger when estimated tokens exceed this fraction of the model's context window. |
+| `max_chunk_chars` | usize | `80000` | When the summarisation prompt itself overflows, split into chunks of this size. |
+| `max_retries` | u32 | `3` | Retries on summariser LLM failures before giving up and skipping this round. |
+
+Per-agent overrides: `max_history_messages` in `agent.toml` clamps the trim cap for that agent. Compaction kicks in earlier if you set it lower than the global default.
+
+---
+
+### `[tool_invoke]`
+
+Direct tool-invocation REST endpoint allowlist (see `POST /api/tools/{name}/invoke`). Locked down by default — every request returns 403 unless both fields are populated.
+
+```toml
+[tool_invoke]
+enabled = true
+allowlist = ["web_search", "web_fetch", "file_read"]
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch — `false` rejects every call, regardless of allowlist. |
+| `allowlist` | `Vec<string>` | `[]` | Glob patterns of tool names callers may invoke (`web_*`, `file_*`, `mcp__github__*`, etc.). Empty list denies all. |
+
+Glob semantics match agent capability grants — `*` is the wildcard. Use this for narrow integrations (a CI worker calling `web_fetch` directly), not for general client API access.
+
+---
+
+### `[parallel_tools]` (extended)
+
+The agent-loop's parallel tool dispatcher (introduced in the catchup wave). Off by default — the runtime still serialises tool calls until the dispatcher rolls out fully.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch. |
+| `max_concurrent` | u32 | `4` | Concurrency cap per bucket (`0` = uncapped). |
+| `mcp_default_safety` | string | `"write_shared"` | Default safety class for unannotated MCP tools — `"read_only"` or `"write_shared"`. |
+| `mcp_readonly_allowlist` | `Vec<string>` | `[]` | Fully-namespaced MCP tool names (`mcp__server__name`) to treat as read-only regardless of `mcp_default_safety`. |
+
+`write_shared` keeps unannotated MCP tools strictly serialised, which is the safe default. Only flip individual servers to `read_only` after auditing them.
+
+---
+
+### Resource Limits & Boundaries (top-level)
+
+Global safety nets that cap inbound payload sizes and inter-agent recursion depth. All have built-in defaults — override only when you know what you're doing.
+
+```toml
+[kernel]
+max_upload_size_bytes      = 10485760     # 10 MiB
+max_request_body_bytes     = 16777216     # 16 MiB
+max_concurrent_bg_llm      = 8
+max_agent_call_depth       = 5
+local_probe_interval_secs  = 60
+strict_config              = false
+update_channel             = "stable"     # "stable" | "beta" | "rc"
+trusted_hosts              = []
+trusted_manifest_signers   = []
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_upload_size_bytes` | usize | `10485760` (10 MiB) | Cap on a single uploaded file. |
+| `max_request_body_bytes` | usize | `16777216` (16 MiB) | Cap on the entire HTTP request body. |
+| `max_concurrent_bg_llm` | usize | `8` | Concurrent background LLM calls (compaction, summarise, dream, …). |
+| `max_agent_call_depth` | u32 | `5` | Inter-agent call depth (prevents recursion bombs across `agent_send`). |
+| `local_probe_interval_secs` | u64 | `60` | How often local providers (Ollama / vLLM / LM Studio) are re-probed. |
+| `strict_config` | bool | `false` | When `true`, unknown config fields cause boot to fail (otherwise log a warning and continue). |
+| `update_channel` | enum | `"stable"` | Which release channel `librefang upgrade` consults. |
+| `trusted_hosts` | `Vec<string>` | `[]` | Hostnames allowed to drive OAuth `redirect_uri` in MCP auth flows. Defence against open-redirect against your dashboard. |
+| `trusted_manifest_signers` | `Vec<string>` | `[]` | Ed25519 public keys allowed to sign agent manifests. Manifests not signed by one of these keys are rejected when the security mode requires signature verification. |
+
+---
+
+### Dashboard authentication (top-level)
+
+Reach the dashboard from a non-loopback address? Set a username/password and LibreFang will hash the password to Argon2id automatically on first boot.
+
+```toml
+[kernel]
+dashboard_user = "admin"
+dashboard_pass = "vault:DASHBOARD_PASS"   # or plain string, or env var
+# dashboard_pass_hash is auto-populated; do NOT set by hand
+require_auth_for_reads = true
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `dashboard_user` | string | `""` | Username. Empty disables dashboard auth (only use on loopback). |
+| `dashboard_pass` | string | `""` | Plain password, `vault:KEY`, or `env:VAR`. Hashed in-place at boot — the file on disk only ever holds the hash. |
+| `dashboard_pass_hash` | string | auto | Argon2id hash, written automatically. **Do not set this field manually** — generate via `librefang hash-password`. |
+| `require_auth_for_reads` | bool \| null | `null` | Override the read-endpoint auth allowlist. `null` keeps the default (read endpoints unauthenticated on loopback, authenticated otherwise). |
