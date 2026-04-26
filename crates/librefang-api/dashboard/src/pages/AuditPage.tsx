@@ -199,15 +199,6 @@ function actionChipClass(outcome: string): string {
   return "bg-brand/10 text-brand border-brand/20";
 }
 
-// 4-pixel left rail tinted by outcome — gives the eye an O(1) scan
-// signal across a long list of mostly-same rows.
-function outcomeRailClass(outcome: string): string {
-  if (outcome === "denied") return "border-l-4 border-l-error";
-  if (outcome === "error") return "border-l-4 border-l-warning";
-  if (outcome === "ok") return "border-l-4 border-l-success";
-  return "border-l-4 border-l-text-dim/20";
-}
-
 // UserId / agent_id are full UUIDs — `f47ac10b-58cc-4372-a567-0e02b2c3d479`
 // is 36 chars and dominates the secondary metadata line. Render as
 // first 8 + last 4, which keeps the entropy operators actually use to
@@ -787,7 +778,7 @@ export function AuditPage() {
                   return (
                     <div
                       key={`${e.seq}-${e.hash}`}
-                      className={`flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm ${outcomeRailClass(e.outcome)}`}
+                      className="flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
                     >
                       {/* Action chip — click filters by this action */}
                       <button
