@@ -136,6 +136,8 @@ export {
   // per-user budget (M5) / policy (M3 stub)
   getUserBudget,
   getUserPolicy,
+  // effective permissions snapshot (RBAC follow-up — backs the simulator)
+  getEffectivePermissions,
 } from "../../api";
 
 export type {
@@ -336,4 +338,11 @@ export type {
   UserBudgetEntry,
   UserBudgetResponse,
   PermissionPolicy,
+  // effective permissions snapshot (RBAC follow-up)
+  EffectivePermissions,
+  EffectiveToolPolicy,
+  EffectiveToolCategories,
+  EffectiveMemoryAccess,
+  EffectiveBudget,
+  EffectiveChannelToolPolicy,
 } from "../../api";
