@@ -1895,6 +1895,27 @@ fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateCh
         .ok()
 }
 
+/// Load the `[skills]` config block and derive the `EnvPassthroughPolicy`
+/// the daemon would apply. Falls back to `SkillsConfig::default()` so the
+/// conservative built-in deny patterns still apply when no config exists —
+/// otherwise `librefang skill test` would silently allow vars that
+/// production strips. Errors during read/parse degrade to default; this is
+/// a dev-time gate, not a security boundary, but its job is to mirror
+/// what prod will do.
+fn load_skill_env_policy_from_config() -> librefang_types::config::EnvPassthroughPolicy {
+    let cfg = (|| -> Option<librefang_types::config::SkillsConfig> {
+        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let value: toml::Value = toml::from_str(&content).ok()?;
+        let skills = value.get("skills")?.clone();
+        skills
+            .try_into::<librefang_types::config::SkillsConfig>()
+            .ok()
+    })()
+    .unwrap_or_default();
+    librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg)
+}
+
 /// Load just the `log_dir` field from config.toml without fully deserializing.
 /// Returns the configured custom log directory, or `None` to use the default.
 fn load_log_dir_from_config() -> Option<PathBuf> {
@@ -6917,12 +6938,13 @@ fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<Str
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let env_policy = load_skill_env_policy_from_config();
     let result = rt.block_on(librefang_skills::loader::execute_skill_tool(
         &prepared.manifest,
         &prepared.source_dir,
         &tool_name,
         &input_json,
-        None,
+        Some(&env_policy),
     ));
     match result {
         Ok(result) => {

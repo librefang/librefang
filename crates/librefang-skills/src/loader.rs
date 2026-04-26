@@ -120,9 +120,18 @@ pub fn resolve_effective_passthrough(
                 );
                 return false;
             }
-            let blocked_by_deny = denied
-                .iter()
-                .any(|pattern| librefang_types::capability::glob_matches(pattern, name));
+            // Match deny patterns case-insensitively. `glob_matches` itself
+            // is case-sensitive, but env-var names are conventionally
+            // upper-case and case-insensitive on Windows; lowercasing both
+            // sides closes a bypass where `aws_secret_access_key` would slip
+            // past the default `AWS_*` deny pattern.
+            let name_lower = name.to_ascii_lowercase();
+            let blocked_by_deny = denied.iter().any(|pattern| {
+                librefang_types::capability::glob_matches(
+                    &pattern.to_ascii_lowercase(),
+                    &name_lower,
+                )
+            });
             if blocked_by_deny {
                 let allowed_by_override = overrides
                     .map(|v| v.iter().any(|n| name_matches(n, name)))
@@ -700,6 +709,26 @@ mod tests {
         let resolved = resolve_effective_passthrough(&manifest, "any-skill", Some(&policy));
         // OPENAI_API_KEY matches *_KEY; AWS_REGION matches AWS_*; the keyring
         // password is fine because *_PASSWORD isn't in this policy.
+        assert_eq!(resolved, vec!["GOG_KEYRING_PASSWORD".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_passthrough_deny_pattern_is_case_insensitive() {
+        // Default deny includes `AWS_*` and `*_KEY`. Lowercase requests must
+        // still be blocked — Windows env-var names are case-insensitive at
+        // the OS level, so `aws_secret_access_key` resolves to the same
+        // value as `AWS_SECRET_ACCESS_KEY`.
+        let policy = EnvPassthroughPolicy {
+            denied_patterns: vec!["AWS_*".to_string(), "*_KEY".to_string()],
+            per_skill_overrides: std::collections::HashMap::new(),
+        };
+        let manifest = vec![
+            "aws_secret_access_key".to_string(),
+            "openai_api_key".to_string(),
+            "Aws_Region".to_string(),
+            "GOG_KEYRING_PASSWORD".to_string(),
+        ];
+        let resolved = resolve_effective_passthrough(&manifest, "any-skill", Some(&policy));
         assert_eq!(resolved, vec!["GOG_KEYRING_PASSWORD".to_string()]);
     }
 

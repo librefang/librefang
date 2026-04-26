@@ -1269,10 +1269,12 @@ pub struct EnvPassthroughPolicy {
 }
 
 impl EnvPassthroughPolicy {
-    /// Construct a policy from a `[skills]` config block. Returns `None`
-    /// when the operator has explicitly disabled the deny check (empty
-    /// patterns *and* empty overrides) — callers can skip the resolve step
-    /// in that case, since only the built-in hard blocks remain.
+    /// Construct a policy from a `[skills]` config block. Always returns a
+    /// populated `Self`; callers that want to skip applying the operator
+    /// gate entirely (e.g. an operator with empty deny patterns and no
+    /// per-skill overrides) should drop down to passing `None` for the
+    /// `env_policy` argument instead — that's `KernelHandle::skill_env_passthrough_policy`'s
+    /// job, not this constructor's.
     pub fn from_skills_config(cfg: &SkillsConfig) -> Self {
         Self {
             denied_patterns: cfg.env_passthrough_denied_patterns.clone(),
