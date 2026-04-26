@@ -1098,3 +1098,104 @@ Type `/help` inside a chat session to render the list scoped to the CLI:
 | `/exit` | End the chat session. `quit` is accepted as an alias. |
 
 Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Note that **`/new` forks into a fresh session rather than wiping the current one** — the previous session stays accessible from the channel and can be resumed. Unknown command names fall through to a single "unknown command" error rather than being passed to the model.
+
+---
+
+## Top-Level Command Reference
+
+Beyond the agent / hand / skill / workflow / channel / config groups documented above, these top-level commands ship with the CLI. All of them are real (verified against `crates/librefang-cli/src/main.rs`); some are aliases of nested forms.
+
+### Daemon lifecycle
+
+| Command | Purpose | Notable flags |
+|---|---|---|
+| `librefang start` | Start the daemon. | `--foreground` (no fork), `--log-file <path>` |
+| `librefang stop` | Stop the running daemon. | — |
+| `librefang restart` | Restart the daemon. | `--tail` (follow new logs), `--foreground` |
+| `librefang health` | Quick readiness probe. | `--json` |
+| `librefang status` | Show kernel + provider state. | `--watch <secs>` (refresh loop) |
+| `librefang logs` | Tail daemon logs. | `--lines <n>`, `--follow` / `-f` |
+| `librefang tui` | Launch the interactive terminal dashboard. | — |
+
+### Setup / onboarding / migration
+
+| Command | Purpose | Notes |
+|---|---|---|
+| `librefang onboard` | Interactive setup wizard. | `--quick`, `--upgrade` |
+| `librefang setup` | Non-interactive `init --quick` alias. | `--quick`, `--upgrade` |
+| `librefang configure` | Interactive credential & channel wizard. | — |
+| `librefang migrate --from <framework>` | Import config / sessions from another framework. | `<framework>` ∈ `openclaw`, `langchain`, `autogpt`, `openfang` |
+| `librefang reset --confirm` | Wipe local config and state (destructive). | Requires `--confirm` |
+| `librefang uninstall` | Remove LibreFang. | `--confirm`, `--keep-config` |
+
+### Catalog & registry
+
+| Command | Purpose | Subcommands |
+|---|---|---|
+| `librefang models` | LLM model catalog. | `list`, `aliases`, `providers`, `set` |
+| `librefang mcp` | MCP server management. | `list`, `catalog`, `add`, `remove` |
+| `librefang webhooks` | Outbound webhook management. | `list`, `create`, `test`, `delete` |
+| `librefang sessions [agent]` | List conversation sessions. | `--json` |
+| `librefang memory` | Agent memory KV store. | `list`, `get`, `set`, `delete` |
+| `librefang cron` | Scheduled job management. | `list`, `create`, `delete`, `enable`, `disable` |
+| `librefang approvals` | Execution approval queue. | `list`, `approve`, `reject` |
+
+### Security / auth / vault
+
+| Command | Purpose | Subcommands |
+|---|---|---|
+| `librefang vault` | Encrypted credential store. | `init`, `set`, `list`, `remove` |
+| `librefang auth chatgpt` | Authenticate with ChatGPT (browser OAuth). | `--device-auth` |
+| `librefang security` | Security audit and verification. | `status`, `audit`, `verify` |
+| `librefang devices` | Device pairing management. | `list`, `pair`, `remove` |
+| `librefang qr` | Render a pairing QR code on stdout. | — |
+| `librefang hash-password` | Generate an Argon2id hash for `dashboard_pass_hash`. | `--password <plain>` (else prompts) |
+
+### Agent shortcuts (aliases of nested forms)
+
+| Command | Same as | Purpose |
+|---|---|---|
+| `librefang spawn <template>` | `agent spawn` | Spawn an agent from template/manifest. `--name`, `--dry-run` |
+| `librefang agents` | `agent list` | List agents. `--json` |
+| `librefang kill <agent_id>` | `agent kill` | Kill a running agent. |
+| `librefang message <agent> <text>` | — | Send one-shot message; print the reply. `--json` |
+
+### Scaffolding
+
+| Command | Purpose |
+|---|---|
+| `librefang new skill` | Scaffold a new skill (interactive). |
+| `librefang new mcp` | Scaffold a new MCP server. |
+
+### `librefang hand` extra subcommands
+
+The hand group already has `list / install / activate / info / check-deps / install-deps / pause / resume / deactivate` documented above. These are the additional ones:
+
+| Subcommand | Purpose |
+|---|---|
+| `hand status [id]` | Show hand status (single or all). |
+| `hand active` | List active hand instances. |
+| `hand settings <name>` | Show a hand's current configuration. |
+| `hand set <name> <key> <value>` | Set a single hand-config value. |
+| `hand reload` | Reload all `HAND.toml` files from disk. |
+| `hand chat <name>` | Interactive chat with an active hand. |
+
+### System & meta
+
+| Command | Purpose |
+|---|---|
+| `librefang system info` | Print platform / version / dependency info. |
+| `librefang system version` | Print just the version string. |
+| `librefang gateway` | Low-level daemon control (start / stop / restart / status), used by service supervisors that want to bypass the friendly `start` wrapper. |
+
+### Slash commands not surfaced above
+
+These slash commands exist in the registry alongside `/help` / `/clear` / etc. but were not previously documented:
+
+| Command | Behaviour |
+|---|---|
+| `/reboot` | Restart the agent process (resets in-process state, but keeps session history). |
+| `/compact` | Trigger an LLM-based compaction round on the current session. |
+| `/think` | Toggle visible chain-of-thought / reasoning rendering for the next reply. |
+
+Commands surfaced by channel adapters (`/agents`, `/new`, `/usage`, `/triggers`, `/budget`, …) are described under [Provider Management — Channel Commands](/configuration/providers/management). Note that **`/new` forks into a fresh session rather than wiping the current one** — the previous session stays accessible from the channel and can be resumed. Unknown command names fall through to a single "unknown command" error rather than being passed to the model.

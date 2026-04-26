@@ -1098,3 +1098,102 @@ librefang service status
 | `/exit` | 结束聊天会话。`quit` 是别名。 |
 
 channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、`/budget` 等）见 [Provider 管理 — Channel 命令](/zh/configuration/providers/management)。注意 **`/new` 是分叉出新会话，不是清空当前会话** — 旧会话保留在通道里仍可恢复。未知命令名只会得到一个 "unknown command" 错误，不会被传给模型。
+
+---
+
+## 顶层命令参考
+
+在上面 agent / hand / skill / workflow / channel / config 几组之外,这些顶层命令也随 CLI 一起发布。所有命令都对照过 `crates/librefang-cli/src/main.rs` 验证为真;部分是嵌套形式的别名。
+
+### Daemon 生命周期
+
+| 命令 | 用途 | 主要 flag |
+|---|---|---|
+| `librefang start` | 启动 daemon。 | `--foreground`(不 fork)、`--log-file <path>` |
+| `librefang stop` | 停止运行中的 daemon。 | — |
+| `librefang restart` | 重启 daemon。 | `--tail`(跟新日志)、`--foreground` |
+| `librefang health` | 快速就绪探针。 | `--json` |
+| `librefang status` | 显示 kernel 与 provider 状态。 | `--watch <secs>`(刷新循环) |
+| `librefang logs` | tail daemon 日志。 | `--lines <n>`、`--follow` / `-f` |
+| `librefang tui` | 启动交互终端 dashboard。 | — |
+
+### 安装 / 引导 / 迁移
+
+| 命令 | 用途 | 备注 |
+|---|---|---|
+| `librefang onboard` | 交互式安装向导。 | `--quick`、`--upgrade` |
+| `librefang setup` | 非交互式 `init --quick` 别名。 | `--quick`、`--upgrade` |
+| `librefang configure` | 凭据与 channel 交互配置向导。 | — |
+| `librefang migrate --from <framework>` | 从其他框架导入配置/会话。 | `<framework>` 取值 `openclaw`、`langchain`、`autogpt`、`openfang` |
+| `librefang reset --confirm` | 抹除本地配置和状态(破坏性)。 | 需要 `--confirm` |
+| `librefang uninstall` | 卸载 LibreFang。 | `--confirm`、`--keep-config` |
+
+### 目录与注册表
+
+| 命令 | 用途 | 子命令 |
+|---|---|---|
+| `librefang models` | LLM 模型目录。 | `list`、`aliases`、`providers`、`set` |
+| `librefang mcp` | MCP server 管理。 | `list`、`catalog`、`add`、`remove` |
+| `librefang webhooks` | 出站 webhook 管理。 | `list`、`create`、`test`、`delete` |
+| `librefang sessions [agent]` | 列出对话 session。 | `--json` |
+| `librefang memory` | Agent memory KV 存储。 | `list`、`get`、`set`、`delete` |
+| `librefang cron` | 定时任务管理。 | `list`、`create`、`delete`、`enable`、`disable` |
+| `librefang approvals` | Approval 队列。 | `list`、`approve`、`reject` |
+
+### 安全 / 认证 / 凭据库
+
+| 命令 | 用途 | 子命令 |
+|---|---|---|
+| `librefang vault` | 加密凭据库。 | `init`、`set`、`list`、`remove` |
+| `librefang auth chatgpt` | ChatGPT 认证(浏览器 OAuth)。 | `--device-auth` |
+| `librefang security` | 安全审计与验证。 | `status`、`audit`、`verify` |
+| `librefang devices` | 设备配对管理。 | `list`、`pair`、`remove` |
+| `librefang qr` | 在 stdout 渲染配对二维码。 | — |
+| `librefang hash-password` | 给 `dashboard_pass_hash` 生成 Argon2id 哈希。 | `--password <plain>`(否则交互输入) |
+
+### Agent 简写(嵌套形式的别名)
+
+| 命令 | 等同于 | 用途 |
+|---|---|---|
+| `librefang spawn <template>` | `agent spawn` | 从模板/manifest spawn agent。`--name`、`--dry-run` |
+| `librefang agents` | `agent list` | 列出 agent。`--json` |
+| `librefang kill <agent_id>` | `agent kill` | 杀掉运行中的 agent。 |
+| `librefang message <agent> <text>` | — | 发一次性消息,打印回复。`--json` |
+
+### 脚手架
+
+| 命令 | 用途 |
+|---|---|
+| `librefang new skill` | 脚手架一个新 skill(交互式)。 |
+| `librefang new mcp` | 脚手架一个新 MCP server。 |
+
+### `librefang hand` 额外子命令
+
+hand 组已经有上面文档里的 `list / install / activate / info / check-deps / install-deps / pause / resume / deactivate`。下面这些是补充的:
+
+| 子命令 | 用途 |
+|---|---|
+| `hand status [id]` | 显示 hand 状态(单个或全部)。 |
+| `hand active` | 列出活跃 hand 实例。 |
+| `hand settings <name>` | 显示某 hand 当前配置。 |
+| `hand set <name> <key> <value>` | 设置单个 hand-config 值。 |
+| `hand reload` | 从磁盘重载所有 `HAND.toml`。 |
+| `hand chat <name>` | 与某活跃 hand 交互聊天。 |
+
+### 系统与元
+
+| 命令 | 用途 |
+|---|---|
+| `librefang system info` | 打印平台/版本/依赖信息。 |
+| `librefang system version` | 只打印版本字符串。 |
+| `librefang gateway` | 底层 daemon 控制(start / stop / restart / status), 给绕过友好 `start` 包装的 service 监督进程用。 |
+
+### 上面没列出的 Slash 命令
+
+这些 slash 命令在 registry 里跟 `/help` / `/clear` 等并存,但之前没文档化:
+
+| 命令 | 行为 |
+|---|---|
+| `/reboot` | 重启 agent 进程(重置进程内状态,但保留 session 历史)。 |
+| `/compact` | 在当前 session 上触发一轮 LLM 摘要。 |
+| `/think` | 切换下一回复时的 chain-of-thought / 推理过程是否可见。 |
