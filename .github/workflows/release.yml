@@ -182,7 +182,7 @@ jobs:
             cat /tmp/changelog.md
             echo ""
             echo "<details>"
-            echo "<summary>📦 Install / Upgrade</summary>"
+            echo "<summary>Install / Upgrade</summary>"
             echo ""
             echo '**Homebrew (macOS):**'
             echo '```bash'

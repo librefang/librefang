@@ -62,6 +62,8 @@ struct PrInfo {
     number: u64,
     title: String,
     author: String,
+    /// Conventional-commits breaking-change marker: `feat!:`, `fix(scope)!:`, etc.
+    breaking: bool,
 }
 
 fn fetch_pr_info(num: u64) -> Option<PrInfo> {
@@ -79,9 +81,12 @@ fn fetch_pr_info(num: u64) -> Option<PrInfo> {
         return None;
     }
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let title = json["title"].as_str()?.to_string();
+    let breaking_re = Regex::new(r"^\w+(?:\([^)]*\))?!:").unwrap();
     Some(PrInfo {
         number: json["number"].as_u64()?,
-        title: json["title"].as_str()?.to_string(),
+        breaking: breaking_re.is_match(&title),
+        title,
         author: json["author"]["login"].as_str().unwrap_or("").to_string(),
     })
 }
@@ -195,6 +200,81 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
     }
 
     output
+}
+
+/// Build a `### Breaking Changes` block from PRs whose conventional-commit
+/// title carries the `!` marker (`feat!:`, `fix(scope)!:`, etc.). Returns
+/// `None` when there are none — the section is omitted entirely.
+fn generate_breaking_changes(prs: &[PrInfo]) -> Option<String> {
+    let conv_re = Regex::new(r"^(\w+)(?:\([^)]*\))?!:\s*(.*)").unwrap();
+    let mut bullets = Vec::new();
+    for pr in prs {
+        if !pr.breaking || should_skip(pr.title.trim()) {
+            continue;
+        }
+        let credit = if pr.author.is_empty() {
+            String::new()
+        } else {
+            format!(" (@{})", pr.author)
+        };
+        let desc = conv_re
+            .captures(pr.title.trim())
+            .and_then(|c| c.get(2).map(|m| m.as_str().trim().to_string()))
+            .unwrap_or_else(|| pr.title.trim().to_string());
+        let desc = {
+            let mut chars = desc.chars();
+            match chars.next() {
+                None => desc,
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+            }
+        };
+        bullets.push(format!("- {} (#{}){}", desc, pr.number, credit));
+    }
+    if bullets.is_empty() {
+        return None;
+    }
+    let mut block = String::from("### Breaking Changes\n\n");
+    for b in bullets {
+        block.push_str(&b);
+        block.push('\n');
+    }
+    block.push('\n');
+    Some(block)
+}
+
+/// One-line stats prefix: `_N PRs from M contributors since vBASE._`
+/// `base_tag` is the version we're comparing from; `None` when unknown.
+fn generate_stats_line(prs: &[PrInfo], base_tag: Option<&str>) -> Option<String> {
+    let included: Vec<&PrInfo> = prs
+        .iter()
+        .filter(|p| !should_skip(p.title.trim()))
+        .collect();
+    if included.is_empty() {
+        return None;
+    }
+    let pr_count = included.len();
+    let mut authors: Vec<&str> = included
+        .iter()
+        .map(|p| p.author.as_str())
+        .filter(|a| !a.is_empty())
+        .collect();
+    authors.sort_unstable();
+    authors.dedup();
+    let author_count = authors.len();
+    let pr_word = if pr_count == 1 { "PR" } else { "PRs" };
+    let contrib_word = if author_count == 1 {
+        "contributor"
+    } else {
+        "contributors"
+    };
+    let suffix = match base_tag {
+        Some(t) => format!(" since {}", t),
+        None => String::new(),
+    };
+    Some(format!(
+        "_{} {} from {} {}{}._\n\n",
+        pr_count, pr_word, author_count, contrib_word, suffix
+    ))
 }
 
 /// Summarize the classified changelog into a `### Highlights` block via local
@@ -360,11 +440,14 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let classified = generate_classified_output(&prs);
+    let breaking = generate_breaking_changes(&prs).unwrap_or_default();
+    let stats = generate_stats_line(&prs, base_tag.as_deref()).unwrap_or_default();
 
-    let final_output = match generate_highlights(&classified) {
-        Some(highlights) => format!("{}{}", highlights, classified),
-        None => classified,
-    };
+    // Feed breaking + classified to claude so highlights can flag breaking items.
+    let highlights_input = format!("{}{}", breaking, classified);
+    let highlights = generate_highlights(&highlights_input).unwrap_or_default();
+
+    let final_output = format!("{}{}{}{}", stats, breaking, highlights, classified);
 
     write_changelog(&changelog_path, &args.version, &final_output)?;
 
