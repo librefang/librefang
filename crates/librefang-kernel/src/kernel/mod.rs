@@ -713,6 +713,17 @@ impl LibreFangKernel {
         roots
     }
 
+    /// Snapshot the kernel's `[[taint_rules]]` registry for a fresh
+    /// `McpServerConfig`. Each connected MCP server captures the current
+    /// rule sets at install/reload time; subsequent edits to
+    /// `KernelConfig.taint_rules` only take effect for that server when the
+    /// server itself is reloaded (drop + reconnect or
+    /// `reload_mcp_server_config`). Snapshotting keeps the scanner's view
+    /// stable across the lifetime of a single tool call.
+    fn snapshot_taint_rules(&self) -> Vec<librefang_types::config::NamedTaintRuleSet> {
+        self.config.load().taint_rules.clone()
+    }
+
     /// Build the default list of root directories to advertise to MCP servers
     /// via the MCP Roots capability.
     ///
@@ -842,7 +853,7 @@ impl LibreFangKernel {
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
-                taint_rule_sets: self.config.load().taint_rules.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: server_roots,
             };
 
@@ -11653,7 +11664,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
-                taint_rule_sets: self.config.load().taint_rules.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -11803,7 +11814,7 @@ system_prompt = "You are a helpful assistant."
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
-            taint_rule_sets: self.config.load().taint_rules.clone(),
+            taint_rule_sets: self.snapshot_taint_rules(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 
@@ -11928,7 +11939,7 @@ system_prompt = "You are a helpful assistant."
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
-                taint_rule_sets: self.config.load().taint_rules.clone(),
+                taint_rule_sets: self.snapshot_taint_rules(),
                 roots: self.mcp_roots_for_server(server_config),
             };
 
@@ -12075,7 +12086,7 @@ system_prompt = "You are a helpful assistant."
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
-            taint_rule_sets: self.config.load().taint_rules.clone(),
+            taint_rule_sets: self.snapshot_taint_rules(),
             roots: self.mcp_roots_for_server(&server_config),
         };
 

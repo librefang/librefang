@@ -2153,6 +2153,14 @@ pub struct KernelConfig {
     /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
     /// taint rules with a severity action (block / warn / log) that the
     /// MCP scanner applies to every tool that opts in.
+    ///
+    /// **Hot-reload caveat:** the kernel snapshots this list onto each
+    /// connected MCP server at install / reload time. Edits to
+    /// `[[taint_rules]]` followed by a config reload do NOT propagate to
+    /// already-connected MCP servers until the server itself is reloaded
+    /// (e.g. via `reload_mcp_server_config` or a daemon restart). The
+    /// snapshot keeps the scanner's view stable for the lifetime of a
+    /// single tool call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taint_rules: Vec<NamedTaintRuleSet>,
     /// A2A (Agent-to-Agent) protocol configuration.
@@ -7187,15 +7195,19 @@ rules = ["authorization_literal"]
 
     #[test]
     fn tool_policy_rule_sets_reference_round_trips() {
+        // `McpTaintPolicy` has a single field `tools` — the test deserialises
+        // the policy directly, not the surrounding `[mcp_servers.<name>.taint_policy]`
+        // table. Using the un-prefixed `[tools.<name>]` shape keeps the test
+        // focused on the policy struct.
         let toml_str = r#"
-[mcp_servers.tools.navigate]
+[tools.navigate]
 default = "skip"
 rule_sets = ["browser_handles"]
 
-[mcp_servers.tools.read_file]
+[tools.read_file]
 rule_sets = ["browser_handles", "pii_baseline"]
 
-[mcp_servers.tools.read_file.paths]
+[tools.read_file.paths]
 "$.content" = { skip_rules = ["opaque_token"] }
 "#;
         let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();

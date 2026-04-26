@@ -228,24 +228,30 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
     check_outbound_text_violation_with_skip(payload, sink, &HashSet::new())
 }
 
-/// Like [`check_outbound_text_violation_with_skip`] but returns the
-/// specific [`TaintRuleId`] that caused the violation instead of a
-/// pre-formatted string. Useful when callers need to apply rule-set
-/// severity actions (`block` / `warn` / `log`) — they need to know
-/// *which* rule fired to decide whether the call is exempted.
+/// Like [`check_outbound_text_violation_with_skip`] but returns *every*
+/// [`TaintRuleId`] that fires against the payload — both Secret-family and
+/// PII-family rules — instead of a pre-formatted string.
 ///
-/// Returns `None` when no rule fires, `Some(rule)` otherwise.
-pub fn detect_outbound_text_violation_with_skip(
+/// Callers applying rule-set severity actions (`block` / `warn` / `log`)
+/// MUST use this rather than [`detect_outbound_text_violation_with_skip`]:
+/// returning only the first match would let a rule-set downgrade authorized
+/// for one rule silently mask an unrelated violation in the same payload
+/// (e.g. a Secret rule downgraded to `warn` masking a PII rule that the
+/// rule set never authorized).
+///
+/// Returns an empty vector when no rule fires.
+pub fn detect_outbound_text_violation_rules_with_skip(
     payload: &str,
     sink: &TaintSink,
     skip_rules: &HashSet<TaintRuleId>,
-) -> Option<TaintRuleId> {
+) -> Vec<TaintRuleId> {
+    let mut hits = Vec::new();
     if let Some(rule) = detect_secret_rule_with_skip(payload, skip_rules) {
         let mut labels = HashSet::new();
         labels.insert(TaintLabel::Secret);
         let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
         if tainted.check_sink(sink).is_err() {
-            return Some(rule);
+            hits.push(rule);
         }
     }
     if sink.blocked_labels.contains(&TaintLabel::Pii) {
@@ -254,11 +260,33 @@ pub fn detect_outbound_text_violation_with_skip(
             labels.insert(TaintLabel::Pii);
             let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
             if tainted.check_sink(sink).is_err() {
-                return Some(rule);
+                hits.push(rule);
             }
         }
     }
-    None
+    hits
+}
+
+/// Like [`check_outbound_text_violation_with_skip`] but returns the
+/// specific [`TaintRuleId`] that caused the violation instead of a
+/// pre-formatted string.
+///
+/// **For rule-set severity decisions, prefer
+/// [`detect_outbound_text_violation_rules_with_skip`]** — this function
+/// returns only the first matching rule and is unsafe to use as the input
+/// for downgrade decisions, because a rule-set authorized to downgrade the
+/// returned rule could mask other rules that fired but weren't authorized.
+///
+/// Returns `None` when no rule fires, `Some(rule)` otherwise (Secret rules
+/// take precedence over PII rules — same order as the underlying detector).
+pub fn detect_outbound_text_violation_with_skip(
+    payload: &str,
+    sink: &TaintSink,
+    skip_rules: &HashSet<TaintRuleId>,
+) -> Option<TaintRuleId> {
+    detect_outbound_text_violation_rules_with_skip(payload, sink, skip_rules)
+        .into_iter()
+        .next()
 }
 
 /// Like [`check_outbound_text_violation`] but lets callers skip specific

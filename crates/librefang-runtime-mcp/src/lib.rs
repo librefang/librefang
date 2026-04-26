@@ -16,7 +16,9 @@ use librefang_types::config::{
 use librefang_types::config::{
     McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolAction, NamedTaintRuleSet,
 };
-use librefang_types::taint::{detect_outbound_text_violation_with_skip, TaintRuleId, TaintSink};
+use librefang_types::taint::{
+    detect_outbound_text_violation_rules_with_skip, TaintRuleId, TaintSink,
+};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -319,7 +321,13 @@ fn walk_taint(
         serde_json::Value::String(s) => {
             // Discard the underlying violation string entirely — it may be
             // derived from the payload — and report only the JSON path.
-            if let Some(rule) = detect_outbound_text_violation_with_skip(s, sink, &skip) {
+            //
+            // CRITICAL: iterate over EVERY fired rule, not just the first.
+            // A rule_set authorized to downgrade rule A must not silently
+            // mask an unauthorized rule B that fires in the same payload
+            // (e.g. a Secret-rule warn downgrade masking a PII-rule fire).
+            // We block as soon as any fired rule is not downgraded.
+            for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
                 if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
                     return Some(format!(
                         "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
@@ -2555,6 +2563,60 @@ mod tests {
             )
             .is_none(),
             "rule_set warn covering SensitiveKeyName must allow object key through"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_downgrade_does_not_mask_unrelated_rule() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Regression for the multi-rule masking issue: a rule set that
+        // downgrades a Secret rule must NOT silently allow a PII rule that
+        // also fires on the same payload but is not covered by any set.
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "post_message".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["secret_warn".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "secret_warn".to_string(),
+            action: McpTaintRuleSetAction::Warn,
+            // Covers Secret-family rules only — PII rules are intentionally
+            // omitted to model an operator who downgraded one family but
+            // never authorized PII downgrade.
+            rules: vec![
+                TaintRuleId::WellKnownPrefix,
+                TaintRuleId::OpaqueToken,
+                TaintRuleId::AuthorizationLiteral,
+                TaintRuleId::KeyValueSecret,
+            ],
+        }];
+
+        // Single string trips BOTH KeyValueSecret (matches `api_key=`) AND
+        // PiiEmail (matches the email regex). The Secret-family rule is
+        // downgraded by the rule set; PiiEmail is not — call must still
+        // block. The pre-fix scanner returned only the first match
+        // (KeyValueSecret), saw it downgraded, and silently allowed the
+        // PII through; the regression check below would have failed there.
+        let args = serde_json::json!({
+            "blob": "api_key=alice@example.com"
+        });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "post_message"
+            )
+            .is_some(),
+            "rule_set warn for Secret must NOT mask an unauthorized PII rule firing on the same payload"
         );
     }
 
