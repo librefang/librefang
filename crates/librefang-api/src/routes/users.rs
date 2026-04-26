@@ -63,17 +63,32 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 
 /// Sanitized user view returned over the wire — never echoes the
-/// `api_key_hash` value, only its presence.
+/// `api_key_hash` value, nor the contents of `tool_policy`,
+/// `memory_access`, `budget`, etc. The list view only needs presence
+/// flags so the dashboard can show a "this user is policy-customized"
+/// badge; the per-user detail endpoints already surface the bodies.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct UserView {
     pub name: String,
     pub role: String,
     pub channel_bindings: HashMap<String, String>,
     pub has_api_key: bool,
+    /// True when the user has any per-user tool policy configured —
+    /// either an allow/deny list, tool-category overrides, or
+    /// per-channel rules. Summary only; the contents stay behind
+    /// `/api/users/{name}/policy`.
+    pub has_policy: bool,
+    /// True when the user has a custom memory namespace ACL.
+    pub has_memory_access: bool,
+    /// True when the user has a per-user budget cap configured.
+    pub has_budget: bool,
 }
 
 impl From<&UserConfig> for UserView {
     fn from(cfg: &UserConfig) -> Self {
+        let has_policy = cfg.tool_policy.is_some()
+            || cfg.tool_categories.is_some()
+            || !cfg.channel_tool_rules.is_empty();
         Self {
             name: cfg.name.clone(),
             role: cfg.role.clone(),
@@ -83,6 +98,9 @@ impl From<&UserConfig> for UserView {
                 .as_deref()
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false),
+            has_policy,
+            has_memory_access: cfg.memory_access.is_some(),
+            has_budget: cfg.budget.is_some(),
         }
     }
 }
@@ -1136,11 +1154,41 @@ fn validate_memory_access(a: &UserMemoryAccess) -> Result<(), String> {
     Ok(())
 }
 
+/// Channel-name keys are written verbatim into `config.toml` and matched
+/// against channel-adapter identifiers (`telegram`, `slack`, `discord`,
+/// `whatsapp`, `feishu`, `dingtalk`, …). The trim-then-empty check alone
+/// lets through embedded newlines, control chars, multi-KB blobs, and
+/// non-ASCII keys that would either corrupt the TOML round-trip or never
+/// match a real adapter. Cap length and lock the charset here at the same
+/// boundary that already validates the inner allow/deny lists.
+const MAX_CHANNEL_NAME_LEN: usize = 64;
+
 fn validate_channel_rules(rules: &HashMap<String, ChannelToolPolicy>) -> Result<(), String> {
     for (channel, rule) in rules {
         let trimmed = channel.trim();
         if trimmed.is_empty() {
             return Err("channel_tool_rules contains an empty channel name".to_string());
+        }
+        if trimmed.len() > MAX_CHANNEL_NAME_LEN {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 longer than {MAX_CHANNEL_NAME_LEN} chars"
+            ));
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 embedded control characters are not allowed"
+            ));
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 must match [a-zA-Z0-9_-]+"
+            ));
         }
         validate_string_list(
             &format!("channel_tool_rules['{trimmed}'].allowed_tools"),

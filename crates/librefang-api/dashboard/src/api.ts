@@ -3531,6 +3531,11 @@ export interface UserItem {
   role: string;
   channel_bindings: Record<string, string>;
   has_api_key: boolean;
+  // Summary flags — true when the user overrides the role default for
+  // that slot. Bodies stay on the per-user detail endpoints.
+  has_policy: boolean;
+  has_memory_access: boolean;
+  has_budget: boolean;
 }
 
 export interface UserUpsertPayload {

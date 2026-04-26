@@ -70,7 +70,6 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -782,6 +781,262 @@ async fn users_policy_put_validates_no_empty_tool_strings() {
     assert!(
         body["error"].as_str().unwrap_or("").contains("empty"),
         "error must mention the empty entry: {body:?}"
+    );
+}
+
+/// `channel_tool_rules` keys land verbatim in `config.toml` and are
+/// matched against channel-adapter identifiers (`telegram`, `slack`,
+/// `feishu`, …). The original `trim().is_empty()` check let through:
+///   - embedded newlines / control chars (`"foo\nbar"` survives `trim`)
+///   - 10 KB blobs that bloat the TOML round-trip
+///   - non-ASCII or whitespace-bearing names that never match an adapter
+/// Each invalid shape must be rejected at the PUT boundary; valid slugs
+/// like `feishu` must still round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_validates_channel_rules_keys() {
+    use std::collections::HashMap;
+    let seed = UserConfig {
+        name: "Channel".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    // (1) empty after trim — confirms the existing branch still fires.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "   ": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("empty"),
+        "error must mention empty channel name: {body:?}"
+    );
+
+    // (2) embedded newline — survives `trim()` but must be rejected.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "foo\nbar": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "newline: {body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("control characters"),
+        "error must mention control characters: {body:?}"
+    );
+
+    // (3) overlong key — adapter names are short slugs; cap at 64 chars.
+    let long_name = "a".repeat(65);
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                long_name.clone(): { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "long: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("longer than"),
+        "error must mention length cap: {body:?}"
+    );
+
+    // (4) non-ASCII / spaces — must match the printable slug charset.
+    for bad in ["telegram channel", "电报", "slack!"] {
+        let (status, body) = json_request(
+            &h,
+            Method::PUT,
+            "/api/users/Channel/policy",
+            Some(serde_json::json!({
+                "channel_tool_rules": {
+                    bad: { "allowed_tools": ["web_search"], "denied_tools": [] }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "charset {bad:?}: {body:?}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("[a-zA-Z0-9_-]+"),
+            "error must mention the slug charset for {bad:?}: {body:?}"
+        );
+    }
+
+    // (5) valid `feishu` — sanity check that the new validators don't
+    // over-reject real adapter names.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "feishu": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid feishu: {body:?}");
+    assert_eq!(
+        body["channel_tool_rules"]["feishu"]["allowed_tools"],
+        serde_json::json!(["web_search"]),
+        "valid rule must round-trip: {body:?}"
+    );
+}
+
+/// Follow-up to PR #3229 — the user-list view must surface presence
+/// flags so the dashboard can render "Policy / Memory / Budget" badges
+/// without an extra round-trip per row. A bare user must report all
+/// three flags as `false`; a customized user must report `true` for the
+/// slots that are actually set.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_list_summary_flags_reflect_policy_state() {
+    use librefang_types::config::UserBudgetConfig;
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let bare = UserConfig {
+        name: "Bare".into(),
+        role: "user".into(),
+        ..Default::default()
+    };
+    let customized = UserConfig {
+        name: "Custom".into(),
+        role: "admin".into(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec![],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        budget: Some(UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 10.0,
+            max_monthly_usd: 100.0,
+            ..Default::default()
+        }),
+        channel_tool_rules: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![bare, customized]).await;
+
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("array");
+    let bare_row = rows.iter().find(|r| r["name"] == "Bare").expect("Bare");
+    let custom_row = rows.iter().find(|r| r["name"] == "Custom").expect("Custom");
+
+    assert_eq!(bare_row["has_policy"], false, "{bare_row}");
+    assert_eq!(bare_row["has_memory_access"], false, "{bare_row}");
+    assert_eq!(bare_row["has_budget"], false, "{bare_row}");
+
+    assert_eq!(custom_row["has_policy"], true, "{custom_row}");
+    assert_eq!(custom_row["has_memory_access"], true, "{custom_row}");
+    assert_eq!(custom_row["has_budget"], true, "{custom_row}");
+}
+
+/// Sanity check on the M3 follow-up — the list view's three summary
+/// booleans must NOT be accompanied by the underlying contents. The
+/// per-user detail endpoints (`/api/users/{name}/policy`, the budget
+/// API) are the only paths that should expose policy bodies; leaking
+/// `tool_policy` / `memory_access` / `budget` from the list would (a)
+/// inflate response size proportionally to user count and (b) widen
+/// the disclosure surface for callers that only have list-read.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_list_summary_does_not_leak_policy_contents() {
+    use librefang_types::config::UserBudgetConfig;
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let seed = UserConfig {
+        name: "Spy".into(),
+        role: "user".into(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access: true,
+            export_allowed: false,
+            delete_allowed: false,
+        }),
+        budget: Some(UserBudgetConfig {
+            max_hourly_usd: 0.5,
+            max_daily_usd: 5.0,
+            max_monthly_usd: 50.0,
+            ..Default::default()
+        }),
+        channel_tool_rules: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = body
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["name"] == "Spy"))
+        .expect("row")
+        .as_object()
+        .expect("object");
+
+    // The summary booleans must be present so the dashboard can render
+    // badges. The actual policy bodies must NOT — they only belong on
+    // the per-user detail endpoints.
+    assert!(row.contains_key("has_policy"));
+    assert!(row.contains_key("has_memory_access"));
+    assert!(row.contains_key("has_budget"));
+    assert!(
+        !row.contains_key("tool_policy"),
+        "tool_policy contents leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("tool_categories"),
+        "tool_categories leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("memory_access"),
+        "memory_access body leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("channel_tool_rules"),
+        "channel_tool_rules leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("budget"),
+        "budget body leaked into list view: {row:?}"
+    );
+    assert!(
+        !row.contains_key("api_key_hash"),
+        "api_key_hash leaked into list view: {row:?}"
     );
 }
 

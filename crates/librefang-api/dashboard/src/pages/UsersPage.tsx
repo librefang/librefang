@@ -25,6 +25,9 @@ import {
   Shield,
   RefreshCw,
   Copy,
+  ListChecks,
+  Database,
+  Wallet,
 } from "lucide-react";
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
@@ -238,13 +241,49 @@ export function UsersPage() {
             <Card key={u.name} hover padding="md">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <p className="text-sm font-bold truncate">{u.name}</p>
                     <Badge variant={roleVariant(u.role)}>{u.role}</Badge>
                     {u.has_api_key ? (
                       <Badge variant="brand">
                         <KeyRound className="h-3 w-3 mr-1 inline" />
                         {t("users.api_key", "API key")}
+                      </Badge>
+                    ) : null}
+                    {u.has_policy ? (
+                      <Badge
+                        variant="info"
+                        title={t(
+                          "users.has_policy_title",
+                          "User has a per-user tool policy / categories / channel rules override.",
+                        )}
+                      >
+                        <ListChecks className="h-3 w-3 mr-1 inline" />
+                        {t("users.has_policy_badge", "Policy")}
+                      </Badge>
+                    ) : null}
+                    {u.has_memory_access ? (
+                      <Badge
+                        variant="info"
+                        title={t(
+                          "users.has_memory_title",
+                          "User has a custom memory namespace ACL.",
+                        )}
+                      >
+                        <Database className="h-3 w-3 mr-1 inline" />
+                        {t("users.has_memory_badge", "Memory")}
+                      </Badge>
+                    ) : null}
+                    {u.has_budget ? (
+                      <Badge
+                        variant="info"
+                        title={t(
+                          "users.has_budget_title",
+                          "User has a per-user spend cap configured.",
+                        )}
+                      >
+                        <Wallet className="h-3 w-3 mr-1 inline" />
+                        {t("users.has_budget_badge", "Budget")}
                       </Badge>
                     ) : null}
                   </div>
