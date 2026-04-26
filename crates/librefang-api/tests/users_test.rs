@@ -70,7 +70,6 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -588,6 +587,200 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
     assert!(
         on_disk.contains("this is not [[ valid TOML"),
         "config.toml was overwritten despite parse failure: {on_disk}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RBAC M3 (#3205) per-user policy GET / PUT — exercises the M6 follow-up
+// that wires the dashboard's matrix editor to the real daemon endpoint.
+// ---------------------------------------------------------------------------
+
+/// Seed a user with non-default `tool_policy` + `memory_access`. GET must
+/// surface every field verbatim so the dashboard can render the editor
+/// without a second round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_get_round_trip() {
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let seed = UserConfig {
+        name: "Bob".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        api_key_hash: None,
+        budget: None,
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_*".into()],
+            denied_tools: vec!["shell_exec".into()],
+        }),
+        tool_categories: None,
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into(), "kv:bob".into()],
+            writable_namespaces: vec!["kv:bob".into()],
+            pii_access: true,
+            export_allowed: false,
+            delete_allowed: true,
+        }),
+        channel_tool_rules: HashMap::new(),
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(&h, Method::GET, "/api/users/Bob/policy", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["tool_policy"]["allowed_tools"],
+        serde_json::json!(["web_*"])
+    );
+    assert_eq!(
+        body["tool_policy"]["denied_tools"],
+        serde_json::json!(["shell_exec"])
+    );
+    assert_eq!(
+        body["memory_access"]["readable_namespaces"],
+        serde_json::json!(["proactive", "kv:bob"])
+    );
+    assert_eq!(
+        body["memory_access"]["writable_namespaces"],
+        serde_json::json!(["kv:bob"])
+    );
+    assert_eq!(body["memory_access"]["pii_access"], true);
+    assert_eq!(body["memory_access"]["delete_allowed"], true);
+    assert_eq!(body["memory_access"]["export_allowed"], false);
+    assert!(body["tool_categories"].is_null(), "{body:?}");
+    assert_eq!(body["channel_tool_rules"], serde_json::json!({}));
+}
+
+/// PUT with `tool_policy: null` must clear that slot but leave
+/// `memory_access` (which the request body never mentioned) untouched.
+/// Pins the absent-vs-null distinction the handler relies on.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_replaces_only_specified_fields() {
+    use librefang_types::user_policy::{UserMemoryAccess, UserToolPolicy};
+    use std::collections::HashMap;
+
+    let seed_memory = UserMemoryAccess {
+        readable_namespaces: vec!["proactive".into()],
+        writable_namespaces: vec![],
+        pii_access: false,
+        export_allowed: false,
+        delete_allowed: false,
+    };
+    let seed = UserConfig {
+        name: "Carol".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        api_key_hash: None,
+        budget: None,
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_*".into()],
+            denied_tools: vec![],
+        }),
+        tool_categories: None,
+        memory_access: Some(seed_memory.clone()),
+        channel_tool_rules: HashMap::new(),
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    // PUT clears tool_policy, leaves memory_access alone (key absent).
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Carol/policy",
+        Some(serde_json::json!({ "tool_policy": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(body["tool_policy"].is_null(), "tool_policy must be cleared");
+
+    // Verify in-kernel state — memory_access must still match the seed.
+    let after = h
+        ._state
+        .kernel
+        .config_ref()
+        .users
+        .iter()
+        .find(|u| u.name == "Carol")
+        .cloned()
+        .expect("Carol must still exist");
+    assert!(
+        after.tool_policy.is_none(),
+        "tool_policy was not cleared: {:?}",
+        after.tool_policy
+    );
+    assert_eq!(
+        after.memory_access,
+        Some(seed_memory),
+        "memory_access was clobbered despite being absent from PUT body"
+    );
+}
+
+/// `writable_namespaces` MUST be a subset of `readable_namespaces`. There
+/// is no upstream enforcement for this invariant today; the handler is the
+/// first gate. Pins the new validation so a refactor doesn't silently drop it.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_validates_writable_subset_of_readable() {
+    use std::collections::HashMap;
+    let seed = UserConfig {
+        name: "Dan".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Dan/policy",
+        Some(serde_json::json!({
+            "memory_access": {
+                "readable_namespaces": [],
+                "writable_namespaces": ["proactive"],
+                "pii_access": false,
+                "export_allowed": false,
+                "delete_allowed": false
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("subset") || err.contains("readable"),
+        "error must mention the readable/writable subset rule: {err}"
+    );
+}
+
+/// Empty / whitespace-only tool entries are rejected — without this an
+/// operator can paste a stray newline into the matrix editor and grant
+/// `""` (matches every tool via the glob layer).
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_validates_no_empty_tool_strings() {
+    use std::collections::HashMap;
+    let seed = UserConfig {
+        name: "Eve".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Eve/policy",
+        Some(serde_json::json!({
+            "tool_policy": {
+                "allowed_tools": ["", "web_search"],
+                "denied_tools": []
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("empty"),
+        "error must mention the empty entry: {body:?}"
     );
 }
 

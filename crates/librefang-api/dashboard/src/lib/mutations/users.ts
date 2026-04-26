@@ -14,7 +14,7 @@ import {
   rotateUserKey,
   updateUserPolicy,
   type UserUpsertPayload,
-  type PermissionPolicy,
+  type PermissionPolicyUpdate,
   type BulkImportResult,
   type RotateUserKeyResponse,
 } from "../http/client";
@@ -99,18 +99,21 @@ export function useRotateUserKey() {
   });
 }
 
-// M3 / #3205 stub. Wired to the future endpoint via `updateUserPolicy`;
-// callers that try to invoke this against pre-M3 daemons will get a 404
-// from the daemon, which the consuming page surfaces as "feature pending".
+// RBAC M3 (#3205) — per-user policy upsert. Invalidates the policy detail
+// AND the user detail/list caches because policy fields are part of the
+// `UserConfig` row and could surface in any user-listing widget that grows
+// to render policy badges.
 export function useUpdateUserPolicy() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { name: string; policy: PermissionPolicy }) =>
+    mutationFn: (vars: { name: string; policy: PermissionPolicyUpdate }) =>
       updateUserPolicy(vars.name, vars.policy),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({
         queryKey: permissionPolicyKeys.detail(variables.name),
       });
+      qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
+      qc.invalidateQueries({ queryKey: userKeys.lists() });
     },
   });
 }

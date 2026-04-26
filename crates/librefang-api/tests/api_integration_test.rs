@@ -114,7 +114,6 @@ async fn start_test_server_with_provider(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1609,8 +1608,6 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         kernel.config_ref().api_key.clone(),
     ));
 
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -1630,7 +1627,6 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1639,7 +1635,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: Arc::new(Vec::new()),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
         // open-server path to keep them green.
@@ -2781,8 +2777,6 @@ async fn start_test_server_with_rbac_users(
 
     let audit_log = kernel.audit().clone();
 
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
-
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -2802,7 +2796,6 @@ async fn start_test_server_with_rbac_users(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -2811,7 +2804,7 @@ async fn start_test_server_with_rbac_users(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: Arc::new(api_user_records),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
         // without a Bearer header and need them to flow through to the
@@ -2826,10 +2819,13 @@ async fn start_test_server_with_rbac_users(
         // these tests. Other RBAC layers (channel bindings, tool policy)
         // are exercised by the kernel-level tests. The authz router is
         // mounted alongside audit/budget so the effective-permissions
-        // tests can hit it through the same auth middleware.
+        // tests can hit it through the same auth middleware. The users
+        // router is mounted so M3 (#3205) policy PUT/GET tests run the
+        // full middleware stack (owner-only gate).
         .nest("/api", routes::audit::router())
         .nest("/api", routes::budget::router())
         .nest("/api", routes::authz::router())
+        .nest("/api", routes::users::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -3079,8 +3075,6 @@ async fn start_test_server_with_full_user_configs(
 
     let audit_log = kernel.audit().clone();
 
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
-
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -3100,7 +3094,6 @@ async fn start_test_server_with_full_user_configs(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -3109,7 +3102,7 @@ async fn start_test_server_with_full_user_configs(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: Arc::new(api_user_records),
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(audit_log),
@@ -3866,6 +3859,55 @@ async fn test_user_budget_put_unknown_user_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// RBAC M3 (#3205) follow-up — `PUT /api/users/{name}/policy` rewrites the
+/// caller's authorization surface, so it must travel through the same
+/// owner-only gate as `POST /api/users` and `DELETE /api/users/{name}`.
+/// An Admin api key has to be 403'd here; otherwise an Admin could
+/// silently grant themselves `denied_tools = []` and bypass downstream
+/// per-user denials.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_owner_only() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "admin", "alice-admin-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!("{}/api/users/Alice/policy", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "tool_policy": { "allowed_tools": ["web_*"], "denied_tools": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must be denied PUT /api/users/{{name}}/policy by the owner-only middleware gate"
+    );
+
+    let resp = client
+        .put(format!("{}/api/users/Alice/policy", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({
+            "tool_policy": { "allowed_tools": ["web_*"], "denied_tools": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "Owner must be allowed to upsert per-user policy"
+    );
 }
 
 // ---------------------------------------------------------------------------

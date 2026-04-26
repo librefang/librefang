@@ -3312,6 +3312,7 @@ impl LibreFangKernel {
                                                 let resolved_workspaces = ensure_named_workspaces(
                                                     &cfg.effective_workspaces_dir(),
                                                     &entry.manifest.workspaces,
+                                                    &cfg.allowed_mount_roots,
                                                 );
                                                 if entry.manifest.generate_identity_files {
                                                     generate_identity_files(
@@ -3835,8 +3836,11 @@ system_prompt = "You are a helpful assistant."
         )?;
         ensure_workspace(&workspace_dir)?;
         migrate_identity_files(&workspace_dir);
-        let resolved_workspaces =
-            ensure_named_workspaces(&cfg.effective_workspaces_dir(), &manifest.workspaces);
+        let resolved_workspaces = ensure_named_workspaces(
+            &cfg.effective_workspaces_dir(),
+            &manifest.workspaces,
+            &cfg.allowed_mount_roots,
+        );
         if manifest.generate_identity_files {
             generate_identity_files(&workspace_dir, &manifest, &resolved_workspaces);
         }
@@ -11246,6 +11250,7 @@ system_prompt = "You are a helpful assistant."
                         let resolved_ws = ensure_named_workspaces(
                             &cfg.effective_workspaces_dir(),
                             &agent.manifest.workspaces,
+                            &cfg.allowed_mount_roots,
                         );
                         generate_identity_files(&workspace, &agent.manifest, &resolved_ws);
                     }
@@ -17063,20 +17068,21 @@ impl KernelHandle for LibreFangKernel {
         if entry.manifest.workspaces.is_empty() {
             return vec![];
         }
-        let workspaces_root = self.config.load().effective_workspaces_dir();
+        let cfg = self.config.load();
+        let workspaces_root = cfg.effective_workspaces_dir();
+        let canonical_mount_roots =
+            workspace_setup::canonicalize_allowed_mount_roots(&cfg.allowed_mount_roots);
         entry
             .manifest
             .workspaces
-            .values()
-            .filter_map(|decl| {
-                if decl.path.is_absolute() || has_unsafe_relative_components(&decl.path) {
-                    return None;
-                }
-                workspaces_root
-                    .join(&decl.path)
-                    .canonicalize()
-                    .ok()
-                    .map(|p| (p, decl.mode.clone()))
+            .iter()
+            .filter_map(|(name, decl)| {
+                workspace_setup::resolve_workspace_decl(
+                    name,
+                    decl,
+                    &workspaces_root,
+                    &canonical_mount_roots,
+                )
             })
             .collect()
     }

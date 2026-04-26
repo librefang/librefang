@@ -1,8 +1,8 @@
-// Per-user policy queries (M3 / #3205 stub).
+// Per-user policy queries (RBAC M3 / #3205, wired to the live daemon).
 //
-// The endpoint `/api/users/{name}/policy` is owned by RBAC M3. The hook
-// ships now so the matrix-editor page only needs the placeholder swap when
-// M3 lands.
+// `GET /api/users/{name}/policy` returns the per-user `tool_policy` /
+// `tool_categories` / `memory_access` / `channel_tool_rules` slice. The
+// matrix editor in `UserPolicyPage` reads this to populate the form.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getUserPolicy } from "../http/client";

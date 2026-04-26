@@ -953,13 +953,39 @@ pub enum WorkspaceMode {
 }
 
 /// Declaration of a named workspace in `agent.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Exactly one of `path` or `mount` must be set:
+/// * `path` — relative to the configured `workspaces_dir`. The kernel
+///   creates the directory if it does not exist. This is the original
+///   shared-workspace mechanism and is the right choice for directories
+///   that LibreFang owns.
+/// * `mount` — an absolute path to a directory that already exists on
+///   the host (e.g. an Obsidian vault). The kernel never creates the
+///   target. The path must canonicalize to a prefix of one of the
+///   `allowed_mount_roots` entries in `config.toml`; otherwise the
+///   declaration is rejected at boot. See issue #3230.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceDecl {
     /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
-    pub path: PathBuf,
+    /// Mutually exclusive with `mount`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Absolute path to an existing host directory (e.g. an Obsidian
+    /// vault). Mutually exclusive with `path`. Must be whitelisted via
+    /// `config.toml: allowed_mount_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<PathBuf>,
     /// Access mode. Defaults to read-write.
     #[serde(default)]
     pub mode: WorkspaceMode,
+}
+
+impl WorkspaceDecl {
+    /// Whether this declaration targets a directory outside `workspaces_dir`.
+    /// External targets require an entry in `config.toml: allowed_mount_roots`.
+    pub fn is_external_mount(&self) -> bool {
+        self.mount.is_some()
+    }
 }
 
 fn default_true() -> bool {
@@ -2293,5 +2319,57 @@ model = "llama-3.3-70b-versatile"
         let a = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
         let b = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
         assert_eq!(a, b);
+    }
+
+    // ── WorkspaceDecl: path / mount mutual-exclusion (#3230) ──────────────
+
+    #[test]
+    fn workspace_decl_path_only_deserializes() {
+        let s = r#"path = "shared/library"
+mode = "rw"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.path.as_deref(),
+            Some(std::path::Path::new("shared/library"))
+        );
+        assert!(d.mount.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadWrite);
+        assert!(!d.is_external_mount());
+    }
+
+    #[test]
+    fn workspace_decl_mount_only_deserializes() {
+        let s = r#"mount = "/Users/me/Obsidian"
+mode = "r"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.mount.as_deref(),
+            Some(std::path::Path::new("/Users/me/Obsidian"))
+        );
+        assert!(d.path.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadOnly);
+        assert!(d.is_external_mount());
+    }
+
+    /// Both fields can deserialize together — the kernel rejects the
+    /// combination at boot (see `resolve_workspace_decl`). Schema-level
+    /// rejection would break agent.toml hot-reload from the dashboard
+    /// (the user couldn't even see the validation error in context).
+    #[test]
+    fn workspace_decl_both_fields_deserialize_runtime_rejects() {
+        let s = r#"path = "rel"
+mount = "/abs"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_some() && d.mount.is_some());
+    }
+
+    #[test]
+    fn workspace_decl_neither_field_deserializes() {
+        let s = "mode = \"r\"\n";
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_none() && d.mount.is_none());
     }
 }

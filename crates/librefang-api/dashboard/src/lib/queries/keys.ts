@@ -307,8 +307,9 @@ export const userBudgetKeys = {
   detail: (name: string) => [...userBudgetKeys.details(), name] as const,
 };
 
-// M3 / #3205 — per-user tool/memory policy. Endpoint stubbed; the matrix
-// editor consumes it once M3 ships.
+// RBAC M3 (#3205) — per-user tool/memory policy. Lives at
+// `/api/users/{name}/policy`; the matrix editor in `UserPolicyPage`
+// consumes this hierarchy.
 export const permissionPolicyKeys = {
   all: ["permissionPolicy"] as const,
   details: () => [...permissionPolicyKeys.all, "detail"] as const,
