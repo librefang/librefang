@@ -53,6 +53,7 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
 import { useAuditQuery } from "../lib/queries/audit";
+import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
@@ -444,16 +445,24 @@ export function AuditPage() {
     [t],
   );
 
-  // Channel Select options: a fixed seed of well-known adapter names +
-  // any other channel value actually present in the current result set,
-  // so the operator can both pick from common ones up-front AND drill
-  // into a one-off channel that showed up in the log (e.g. a webhook
-  // adapter the seed doesn't list). "(any)" stays the empty-value
-  // first option; "Custom…" reveals a free-text input for channels
-  // that haven't been recorded yet.
+  // Channel Select options: every adapter the daemon ships
+  // (`/api/channels` returns all 44 — telegram, discord, feishu, voice,
+  // wechat, mastodon, …) UNION the kernel-internal channel identifiers
+  // the audit log uses (`api / dashboard / cli / system / cron`) UNION
+  // any channel value actually present in the current result set, so
+  // even a webhook-style channel name we don't know about up front
+  // appears once it shows up in the log. The hardcoded seed of 8 was
+  // visibly incomplete — operators couldn't pick `feishu`, `wechat`,
+  // `voice`, etc until they had data for them. "(any)" stays the
+  // empty-value first option; "Custom…" reveals a free-text input
+  // for channels that don't exist anywhere yet.
+  const channelsQuery = useChannels();
   const channelOptions = useMemo(() => {
-    const seed = ["api", "dashboard", "cli", "telegram", "discord", "slack", "matrix", "feishu"];
-    const seen = new Set<string>(seed);
+    const internal = ["api", "dashboard", "cli", "system", "cron"];
+    const seen = new Set<string>(internal);
+    for (const c of channelsQuery.data ?? []) {
+      seen.add(c.name);
+    }
     for (const e of query.data?.entries ?? []) {
       if (e.channel) seen.add(e.channel);
     }
@@ -463,7 +472,7 @@ export function AuditPage() {
       ...list.map((c) => ({ value: c, label: c })),
       { value: "__custom__", label: t("audit.range_custom") },
     ];
-  }, [query.data?.entries, t]);
+  }, [channelsQuery.data, query.data?.entries, t]);
 
   // True when the active channel filter doesn't match any known option
   // (operator typed something custom, or filtered via row-click for a
