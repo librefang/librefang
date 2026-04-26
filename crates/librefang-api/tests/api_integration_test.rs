@@ -2815,11 +2815,14 @@ async fn start_test_server_with_rbac_users(
     };
 
     let app = Router::new()
-        // Wire ONLY the M5 routes under `/api/` — sufficient for these
-        // tests. Other RBAC layers (channel bindings, tool policy) are
-        // exercised by the kernel-level tests.
+        // Wire the admin-gated RBAC routes under `/api/` — sufficient for
+        // these tests. Other RBAC layers (channel bindings, tool policy)
+        // are exercised by the kernel-level tests. The authz router is
+        // mounted alongside audit/budget so the effective-permissions
+        // tests can hit it through the same auth middleware.
         .nest("/api", routes::audit::router())
         .nest("/api", routes::budget::router())
+        .nest("/api", routes::authz::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -2991,4 +2994,463 @@ async fn test_user_budget_detail_includes_enforced_true() {
     assert!(body["daily"]["spend"].is_number());
     assert!(body["monthly"]["spend"].is_number());
     assert!(body["alert_breach"].is_boolean());
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Effective-permissions snapshot — `/api/authz/effective/{user_id}`
+//
+// Pins:
+//   1. Admin GET returns 200 with every documented section populated for
+//      a user that was seeded with non-default tool_policy / memory_access
+//      / budget. Catches a regression where the kernel-side getter starts
+//      collapsing slices to None or the route serialiser drops fields.
+//   2. Viewer GET is rejected at the in-handler `require_admin` gate
+//      (403). The middleware lets Viewer through GETs by default — only
+//      the handler stops them.
+//   3. Unknown user IDs return 404 (NOT a synthesised "guest defaults"
+//      payload — the simulator's job is to show what's configured).
+//   4. Anonymous (no Bearer header) is rejected — same model as audit.
+// ───────────────────────────────────────────────────────────────────────
+
+use librefang_types::user_policy::{
+    ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
+};
+
+/// Variant of `start_test_server_with_rbac_users` that lets the caller
+/// inject pre-built `UserConfig` rows so per-user policy fields
+/// (`tool_policy`, `memory_access`, `budget`, …) can be seeded for
+/// the effective-permissions tests.
+async fn start_test_server_with_full_user_configs(
+    api_key: &str,
+    users: Vec<(UserConfig, &str)>,
+) -> TestServer {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
+    let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
+    for (cfg, key) in &users {
+        let hash =
+            librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
+        let mut cfg = cfg.clone();
+        cfg.api_key_hash = Some(hash.clone());
+        api_user_records.push(middleware::ApiUserAuth {
+            name: cfg.name.clone(),
+            role: KernelUserRole::from_str_role(&cfg.role),
+            api_key_hash: hash,
+            user_id: librefang_types::agent::UserId::from_name(&cfg.name),
+        });
+        user_configs.push(cfg);
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        users: user_configs,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
+        kernel.config_ref().api_key.clone(),
+    ));
+
+    let audit_log = kernel.audit().clone();
+
+    let state = Arc::new(AppState {
+        kernel,
+        started_at: Instant::now(),
+        peer_registry: None,
+        bridge_manager: tokio::sync::Mutex::new(None),
+        channels_config: tokio::sync::RwLock::new(Default::default()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        skillhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: api_key_lock.clone(),
+        provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let api_key_state = middleware::AuthState {
+        api_key_lock,
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: Arc::new(api_user_records),
+        require_auth_for_reads: false,
+        allow_no_auth: true,
+        audit_log: Some(audit_log),
+    };
+
+    let app = Router::new()
+        .nest("/api", routes::audit::router())
+        .nest("/api", routes::budget::router())
+        .nest("/api", routes::authz::router())
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn(middleware::request_logging))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    TestServer {
+        base_url: format!("http://{}", addr),
+        config_path,
+        state,
+        _tmp: tmp,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_admin_returns_200_with_full_payload() {
+    // Seed Alice with non-default values for every per-user RBAC slice
+    // so the snapshot must surface each one. A regression that drops a
+    // slice from the response (e.g. forgetting to expose `budget` or
+    // collapsing `memory_access` to `None`) will fail one of the
+    // assertions below.
+    let mut alice_bindings = std::collections::HashMap::new();
+    alice_bindings.insert("telegram".to_string(), "555111".to_string());
+    alice_bindings.insert("discord".to_string(), "8001".to_string());
+
+    let mut alice_channel_rules = std::collections::HashMap::new();
+    alice_channel_rules.insert(
+        "telegram".to_string(),
+        ChannelToolPolicy {
+            allowed_tools: vec!["web_*".to_string()],
+            denied_tools: vec!["shell_*".to_string()],
+        },
+    );
+
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: alice_bindings,
+        api_key_hash: None,
+        budget: Some(librefang_types::config::UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 10.0,
+            max_monthly_usd: 100.0,
+            alert_threshold: 0.75,
+        }),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["read_*".to_string(), "list_*".to_string()],
+            denied_tools: vec!["dangerous_tool".to_string()],
+        }),
+        tool_categories: Some(UserToolCategories {
+            allowed_groups: vec!["safe".to_string()],
+            denied_groups: vec!["destructive".to_string()],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".to_string(), "kv:*".to_string()],
+            writable_namespaces: vec!["kv:*".to_string()],
+            pii_access: true,
+            export_allowed: false,
+            delete_allowed: true,
+        }),
+        channel_tool_rules: alice_channel_rules,
+    };
+
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Admin must receive 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Identity fields
+    assert_eq!(body["name"], "Alice");
+    assert_eq!(body["role"], "admin");
+    assert!(
+        body["user_id"].is_string() && !body["user_id"].as_str().unwrap().is_empty(),
+        "user_id must be a non-empty stringified UUID"
+    );
+
+    // Per-user tool policy round-trip
+    assert_eq!(
+        body["tool_policy"]["allowed_tools"],
+        serde_json::json!(["read_*", "list_*"])
+    );
+    assert_eq!(
+        body["tool_policy"]["denied_tools"],
+        serde_json::json!(["dangerous_tool"])
+    );
+
+    // Tool categories
+    assert_eq!(
+        body["tool_categories"]["allowed_groups"],
+        serde_json::json!(["safe"])
+    );
+    assert_eq!(
+        body["tool_categories"]["denied_groups"],
+        serde_json::json!(["destructive"])
+    );
+
+    // Memory access (PII flag is the load-bearing one for the dashboard
+    // badge — pin it)
+    assert_eq!(body["memory_access"]["pii_access"], serde_json::json!(true));
+    assert_eq!(
+        body["memory_access"]["readable_namespaces"],
+        serde_json::json!(["proactive", "kv:*"])
+    );
+    assert_eq!(
+        body["memory_access"]["writable_namespaces"],
+        serde_json::json!(["kv:*"])
+    );
+    assert_eq!(
+        body["memory_access"]["export_allowed"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        body["memory_access"]["delete_allowed"],
+        serde_json::json!(true)
+    );
+
+    // Budget
+    assert_eq!(body["budget"]["max_hourly_usd"], serde_json::json!(1.0));
+    assert_eq!(body["budget"]["max_daily_usd"], serde_json::json!(10.0));
+    assert_eq!(body["budget"]["max_monthly_usd"], serde_json::json!(100.0));
+    assert_eq!(body["budget"]["alert_threshold"], serde_json::json!(0.75));
+
+    // Channel rules
+    assert_eq!(
+        body["channel_tool_rules"]["telegram"]["allowed_tools"],
+        serde_json::json!(["web_*"])
+    );
+    assert_eq!(
+        body["channel_tool_rules"]["telegram"]["denied_tools"],
+        serde_json::json!(["shell_*"])
+    );
+
+    // Channel bindings (cross-platform identity)
+    assert_eq!(
+        body["channel_bindings"]["telegram"],
+        serde_json::json!("555111")
+    );
+    assert_eq!(
+        body["channel_bindings"]["discord"],
+        serde_json::json!("8001")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_viewer_rejected_403() {
+    // Pins the in-handler `require_admin` gate. The middleware lets
+    // Viewer GET through; only the handler stops them with 403. A
+    // refactor that drops that gate must surface here, not in
+    // production where the leak would be silent.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let eve = UserConfig {
+        name: "Eve".to_string(),
+        role: "viewer".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (eve, "eve-viewer-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Viewer must be denied by the in-handler require_admin gate"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_unknown_user_404() {
+    // Unknown user → 404 with a useful message. We deliberately do NOT
+    // synthesise "guest defaults" — the simulator's job is to show what
+    // an admin configured, not to invent inputs that no AuthManager
+    // entry actually carries.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Nobody", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "Unknown user must be 404, not a synthesised guest payload"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_rejects_anonymous() {
+    // Anonymous (no Bearer header) callers MUST be denied. Same
+    // contract as `/api/audit/query` — the snapshot exposes per-user
+    // policy and channel bindings, which is too sensitive to leak even
+    // on loopback. With both `api_key` and `user_api_keys` configured,
+    // the middleware short-circuits to 401 before reaching the handler;
+    // either status code (401 / 403) is an acceptable rejection.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/authz/effective must be rejected at the middleware (401)"
+    );
+}
+
+/// Pins the "raw Option" discrimination on the snapshot. A user that
+/// declared `tool_policy: None` (omitted in TOML) and a user that
+/// declared `tool_policy: Some(UserToolPolicy::default())` (explicit
+/// empty allow/deny lists) MUST surface distinctly in the JSON:
+/// `null` vs `{"allowed_tools": [], "denied_tools": []}`. Same for
+/// `tool_categories` and `memory_access`.
+///
+/// Regression: an earlier draft collapsed both shapes to `None` by
+/// comparing the resolved struct to its `Default::default()` after
+/// `populate`'s `unwrap_or_default()`. That made the "Configured /
+/// Not configured" badge in the simulator silently lie about
+/// explicit-empty configs. This test fails closed if `populate`
+/// drops the raw `Option<...>` again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_distinguishes_none_from_empty() {
+    let bare = UserConfig {
+        name: "Bare".to_string(),
+        role: "user".to_string(),
+        // tool_policy / tool_categories / memory_access default to None.
+        ..Default::default()
+    };
+    let explicit_empty = UserConfig {
+        name: "Empty".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy::default()),
+        tool_categories: Some(UserToolCategories::default()),
+        memory_access: Some(UserMemoryAccess::default()),
+        ..Default::default()
+    };
+    let admin = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![
+            (admin, "alice-admin-key"),
+            (bare, "bare-key"),
+            (explicit_empty, "empty-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let bare_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Bare", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        bare_body["tool_policy"].is_null(),
+        "tool_policy must be null when UserConfig.tool_policy = None, got {:?}",
+        bare_body["tool_policy"]
+    );
+    assert!(
+        bare_body["tool_categories"].is_null(),
+        "tool_categories must be null when omitted"
+    );
+    assert!(
+        bare_body["memory_access"].is_null(),
+        "memory_access must be null when omitted"
+    );
+
+    let empty_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Empty", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        empty_body["tool_policy"].is_object(),
+        "tool_policy must be an object (not null) when UserConfig.tool_policy = Some(default), got {:?}",
+        empty_body["tool_policy"]
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["allowed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["denied_tools"],
+        serde_json::json!([])
+    );
+    assert!(empty_body["tool_categories"].is_object());
+    assert!(empty_body["memory_access"].is_object());
 }
