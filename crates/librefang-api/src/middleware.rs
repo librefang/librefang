@@ -509,10 +509,7 @@ pub async fn auth(
     // Loopback already short-circuits above for the single-user dev UX, so
     // reaching this branch means the caller is on the LAN/WAN.
     let api_key = api_key.trim();
-    if api_key.is_empty()
-        && user_api_keys.is_empty()
-        && !auth_state.dashboard_auth_enabled
-    {
+    if api_key.is_empty() && user_api_keys.is_empty() && !auth_state.dashboard_auth_enabled {
         // Re-check ConnectInfo defensively — if it is missing for any reason
         // we MUST treat the origin as non-loopback (fail closed, never open).
         let is_loopback = request

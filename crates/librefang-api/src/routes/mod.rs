@@ -134,8 +134,7 @@ pub struct AppState {
     /// reads from, so swapping the inner Vec via `rotate_user_key` (or any
     /// future user-mutation endpoint) makes the change visible to the very
     /// next request without a daemon restart.
-    pub user_api_keys:
-        Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
+    pub user_api_keys: Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
     /// Media generation driver cache for image/TTS/video/music.
     pub media_drivers: librefang_runtime::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.

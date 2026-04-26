@@ -598,8 +598,8 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
 /// Seed a single user with an Argon2id hash of `plaintext_key` so the
 /// auth-state snapshot the rotation endpoint mutates has something to swap.
 fn seed_user_with_key(name: &str, plaintext_key: &str) -> UserConfig {
-    let hash =
-        librefang_api::password_hash::hash_password(plaintext_key).expect("seed hash should succeed");
+    let hash = librefang_api::password_hash::hash_password(plaintext_key)
+        .expect("seed hash should succeed");
     UserConfig {
         name: name.to_string(),
         role: "admin".to_string(),
@@ -617,13 +617,7 @@ fn seed_user_with_key(name: &str, plaintext_key: &str) -> UserConfig {
 async fn users_rotate_key_returns_new_plaintext() {
     let h = boot_with_seed_users(vec![seed_user_with_key("Alice", "old-plaintext")]).await;
 
-    let (status, body) = json_request(
-        &h,
-        Method::POST,
-        "/api/users/Alice/rotate-key",
-        None,
-    )
-    .await;
+    let (status, body) = json_request(&h, Method::POST, "/api/users/Alice/rotate-key", None).await;
     assert_eq!(status, StatusCode::OK, "rotate failed: {body:?}");
     assert_eq!(body["status"], "ok");
     let new_key = body["new_api_key"].as_str().unwrap_or("");
@@ -718,13 +712,8 @@ async fn users_rotate_key_invalidates_existing_session() {
     // Sanity — the old plaintext verifies against the seeded hash before
     // rotation. If this assertion fails the test setup is wrong and the
     // post-rotation assertion below is meaningless.
-    let pre_swap_old_token_verifies = h
-        ._state
-        .user_api_keys
-        .read()
-        .await
-        .iter()
-        .any(|u| {
+    let pre_swap_old_token_verifies =
+        h._state.user_api_keys.read().await.iter().any(|u| {
             librefang_api::password_hash::verify_password("carol-plaintext", &u.api_key_hash)
         });
     assert!(
@@ -738,13 +727,8 @@ async fn users_rotate_key_invalidates_existing_session() {
     // The actual revocation. After rotation, NO entry in the live snapshot
     // verifies against the old plaintext — the in-memory state the auth
     // middleware reads from has been swapped, not just the on-disk file.
-    let post_swap_old_token_verifies = h
-        ._state
-        .user_api_keys
-        .read()
-        .await
-        .iter()
-        .any(|u| {
+    let post_swap_old_token_verifies =
+        h._state.user_api_keys.read().await.iter().any(|u| {
             librefang_api::password_hash::verify_password("carol-plaintext", &u.api_key_hash)
         });
     assert!(
@@ -801,9 +785,7 @@ async fn users_rotate_key_preserves_other_fields() {
         name: "Dan".into(),
         role: "viewer".into(),
         channel_bindings: bindings.clone(),
-        api_key_hash: Some(
-            librefang_api::password_hash::hash_password("seed-key").expect("seed"),
-        ),
+        api_key_hash: Some(librefang_api::password_hash::hash_password("seed-key").expect("seed")),
         budget: None,
         tool_policy: Some(UserToolPolicy {
             allowed_tools: vec!["web_search".into()],
