@@ -137,6 +137,22 @@ pub struct UserIdentity {
     /// budgets. When `Some`, [`MeteringEngine::check_user_budget`]
     /// enforces the listed windows after every LLM call.
     pub budget: Option<librefang_types::config::UserBudgetConfig>,
+    /// Raw `Option<UserToolPolicy>` as declared in `UserConfig`, preserved
+    /// for the diagnostic snapshot path
+    /// ([`AuthManager::effective_permissions`]). The gate path reads
+    /// `policy.tool_policy` (default-filled); this field exists so the
+    /// simulator can faithfully report "no per-user policy declared" vs
+    /// "explicit empty allow-list" — `populate`'s `unwrap_or_default()`
+    /// would otherwise collapse those two cases together.
+    pub raw_tool_policy: Option<UserToolPolicy>,
+    /// Raw `Option<UserToolCategories>` as declared in `UserConfig`. Same
+    /// rationale as [`Self::raw_tool_policy`].
+    pub raw_tool_categories: Option<UserToolCategories>,
+    /// Raw `Option<UserMemoryAccess>` as declared in `UserConfig`. Same
+    /// rationale as [`Self::raw_tool_policy`]; the simulator surfaces
+    /// `None` distinctly from "configured-but-empty" so admins can spot
+    /// users still on the role-default ACL.
+    pub raw_memory_access: Option<UserMemoryAccess>,
 }
 
 /// Diagnostic snapshot of every RBAC input that contributes to a user's
@@ -263,6 +279,13 @@ impl AuthManager {
             // Build the per-user policy snapshot. Optional fields fall
             // back to default (no opinion) so `evaluate` returns
             // NeedsRoleEscalation everywhere — i.e. existing behaviour.
+            //
+            // We also keep the *raw* `Option<...>` from `UserConfig`
+            // alongside the resolved struct. The gate path reads the
+            // resolved (default-filled) form; the diagnostic /
+            // simulator path reads the raw form so it can faithfully
+            // report "not declared" vs "configured-but-empty" without
+            // having to guess from default-equality.
             let policy = ResolvedUserPolicy {
                 tool_policy: config.tool_policy.clone().unwrap_or_default(),
                 channel_tool_rules: config.channel_tool_rules.clone(),
@@ -276,6 +299,9 @@ impl AuthManager {
                 role,
                 policy,
                 budget: config.budget.clone(),
+                raw_tool_policy: config.tool_policy.clone(),
+                raw_tool_categories: config.tool_categories.clone(),
+                raw_memory_access: config.memory_access.clone(),
             };
 
             self.users.insert(user_id, identity);
@@ -579,20 +605,14 @@ impl AuthManager {
     pub fn effective_permissions(&self, user_id: UserId) -> Option<EffectivePermissions> {
         let identity = self.users.get(&user_id)?.value().clone();
 
-        // The raw `UserConfig` was consumed at boot/reload (see
-        // `populate`); reconstruct the per-slice `Option<...>` shape
-        // by treating the resolved policy's defaults as "unset". A
-        // user that explicitly declared an empty allow-list still
-        // reaches here as default-equal — that's fine for the
-        // simulator's purpose (tell the operator they have no opinion
-        // configured), and matches the `serde(skip_serializing_if =
-        // "Option::is_none")` round-trip on `UserConfig`.
-        let tool_policy = (identity.policy.tool_policy != UserToolPolicy::default())
-            .then(|| identity.policy.tool_policy.clone());
-        let tool_categories = (identity.policy.tool_categories != UserToolCategories::default())
-            .then(|| identity.policy.tool_categories.clone());
-        let memory_access = (!identity.policy.memory_access.is_unconfigured())
-            .then(|| identity.policy.memory_access.clone());
+        // Read the raw `Option<...>` slices preserved on `UserIdentity`
+        // by `populate`. This is the only way to faithfully report
+        // "not declared" vs "configured-but-empty": the resolved
+        // policy on `identity.policy.*` was default-filled at boot, so
+        // those two cases would be indistinguishable from there.
+        let tool_policy = identity.raw_tool_policy.clone();
+        let tool_categories = identity.raw_tool_categories.clone();
+        let memory_access = identity.raw_memory_access.clone();
 
         // `channel_index` is a flat key→user_id map; rebuild the per-
         // user bindings by filtering entries that point at us. Cost

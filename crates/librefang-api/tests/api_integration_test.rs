@@ -3360,3 +3360,97 @@ async fn test_effective_permissions_rejects_anonymous() {
         "anonymous /api/authz/effective must be rejected at the middleware (401)"
     );
 }
+
+/// Pins the "raw Option" discrimination on the snapshot. A user that
+/// declared `tool_policy: None` (omitted in TOML) and a user that
+/// declared `tool_policy: Some(UserToolPolicy::default())` (explicit
+/// empty allow/deny lists) MUST surface distinctly in the JSON:
+/// `null` vs `{"allowed_tools": [], "denied_tools": []}`. Same for
+/// `tool_categories` and `memory_access`.
+///
+/// Regression: an earlier draft collapsed both shapes to `None` by
+/// comparing the resolved struct to its `Default::default()` after
+/// `populate`'s `unwrap_or_default()`. That made the "Configured /
+/// Not configured" badge in the simulator silently lie about
+/// explicit-empty configs. This test fails closed if `populate`
+/// drops the raw `Option<...>` again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_distinguishes_none_from_empty() {
+    let bare = UserConfig {
+        name: "Bare".to_string(),
+        role: "user".to_string(),
+        // tool_policy / tool_categories / memory_access default to None.
+        ..Default::default()
+    };
+    let explicit_empty = UserConfig {
+        name: "Empty".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy::default()),
+        tool_categories: Some(UserToolCategories::default()),
+        memory_access: Some(UserMemoryAccess::default()),
+        ..Default::default()
+    };
+    let admin = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![
+            (admin, "alice-admin-key"),
+            (bare, "bare-key"),
+            (explicit_empty, "empty-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let bare_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Bare", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        bare_body["tool_policy"].is_null(),
+        "tool_policy must be null when UserConfig.tool_policy = None, got {:?}",
+        bare_body["tool_policy"]
+    );
+    assert!(
+        bare_body["tool_categories"].is_null(),
+        "tool_categories must be null when omitted"
+    );
+    assert!(
+        bare_body["memory_access"].is_null(),
+        "memory_access must be null when omitted"
+    );
+
+    let empty_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Empty", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        empty_body["tool_policy"].is_object(),
+        "tool_policy must be an object (not null) when UserConfig.tool_policy = Some(default), got {:?}",
+        empty_body["tool_policy"]
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["allowed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["denied_tools"],
+        serde_json::json!([])
+    );
+    assert!(empty_body["tool_categories"].is_object());
+    assert!(empty_body["memory_access"].is_object());
+}
