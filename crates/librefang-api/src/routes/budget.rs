@@ -447,44 +447,51 @@ pub async fn update_agent_budget(
 // RBAC M5 — per-user budget endpoints
 // ---------------------------------------------------------------------------
 
-/// Reject the request unless the caller is at least `Admin`. Loopback /
-/// unauthenticated callers (no `AuthenticatedApiUser` extension) are
-/// trusted as Owner — same trust level the dirty middleware already
-/// applies to `/api/config/set`.
+/// Reject the request unless the caller is an authenticated `Admin`+.
+///
+/// Anonymous callers (loopback / `LIBREFANG_ALLOW_NO_AUTH=1`) are denied:
+/// per-user spend exposes who-spent-what attribution, which is sensitive
+/// enough that we don't blanket-trust an unauthenticated origin even on
+/// loopback. To use these endpoints in a no-auth deployment, configure at
+/// least one user with an admin api_key.
 fn require_admin_for_user_budget(
     state: &AppState,
     api_user: Option<&crate::middleware::AuthenticatedApiUser>,
 ) -> Option<Response> {
-    let role = api_user.map(|u| u.role).unwrap_or(UserRole::Owner);
-    if role < UserRole::Admin {
-        let user_id = api_user.map(|u| u.user_id);
-        state.kernel.audit().record_with_context(
-            "system",
-            librefang_runtime::audit::AuditAction::PermissionDenied,
-            format!("user budget endpoint denied for role {role}"),
-            "denied",
-            user_id,
-            Some("api".to_string()),
-        );
-        return Some(
-            ApiErrorResponse::forbidden("Admin role required for user budget access")
+    match api_user {
+        Some(u) if u.role >= UserRole::Admin => None,
+        Some(u) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                format!("user budget endpoint denied for role {}", u.role),
+                "denied",
+                Some(u.user_id),
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden("Admin role required for user budget access")
+                    .into_response(),
+            )
+        }
+        None => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                "user budget endpoint denied for anonymous caller",
+                "denied",
+                None,
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden(
+                    "Authenticated Admin role required for user budget access (configure an admin api_key)",
+                )
                 .into_response(),
-        );
+            )
+        }
     }
-    None
 }
-
-/// 5-second freshness window for the per-user spend cache.
-///
-/// Per design decision #7: per-user spend is cached so dashboard polling
-/// doesn't pummel SQLite, but stays fresh enough to spot a mid-burn alert
-/// breach. The cache lives on `AppState` via the existing `DashMap`
-/// pattern used by `clawhub_cache` etc., except for budget queries we
-/// reach into the kernel each time — SQLite query time is in the low
-/// millisecond range for indexed reads on a single user's rows. The
-/// 5-second contract is documented; if the dashboard hot-reloads we can
-/// lift this into an explicit cache later.
-const _USER_SPEND_FRESHNESS_SECS: u64 = 5;
 
 /// GET /api/budget/users — admin-only per-user spend ranking.
 ///
@@ -658,6 +665,13 @@ pub async fn user_budget_detail(
         },
         "alert_threshold": alert_threshold,
         "alert_breach": alert_breach,
+        // RBAC M5 deferred: per-user budget *enforcement* is not yet wired
+        // into the metering pipeline (only global / per-agent / per-provider
+        // caps trip a denial). The dashboard MUST surface `enforced=false`
+        // so operators don't assume `alert_breach` is also a hard stop.
+        // Flip this to `true` once the M5-followup enforcement arm in
+        // `kernel/mod.rs::execute_llm_agent` is implemented.
+        "enforced": false,
     }))
     .into_response()
 }

@@ -19,6 +19,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::{DateTime, Utc};
 use librefang_kernel::auth::UserRole;
 use librefang_runtime::audit::AuditEntry;
 use librefang_types::agent::UserId;
@@ -35,9 +36,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// Filter parameters shared by `/api/audit/query` and `/api/audit/export`.
 ///
 /// Every filter is optional — an empty query string returns the most
-/// recent rows. `from` / `to` accept ISO-8601 timestamps; the SQLite
-/// `timestamp` column already stores RFC-3339 so a lexicographic
-/// comparison is correct.
+/// recent rows. `from` / `to` accept RFC-3339 timestamps; both the entry
+/// timestamp and the bounds are parsed to `DateTime<Utc>` and compared as
+/// instants, so `Z` and `+00:00` (and any other valid offset) round-trip
+/// equivalently.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AuditFilter {
     pub user: Option<String>,
@@ -49,49 +51,85 @@ pub struct AuditFilter {
     pub limit: Option<u32>,
 }
 
+/// Pre-parsed time bounds for the filter pass. Computed once per request
+/// in the handler and passed to [`apply_filter`] so we don't re-parse
+/// `from` / `to` for every entry in the in-memory pool.
+type TimeBounds = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+/// Parse `from` / `to` strings as RFC-3339 instants. Returns an `Err`
+/// with a human-readable message if either side is malformed — the
+/// handler turns that into a 400 instead of silently dropping rows the
+/// way the previous lexicographic-string comparison did when offsets
+/// disagreed (`Z` vs `+00:00` collated differently).
+fn parse_time_bounds(filter: &AuditFilter) -> Result<TimeBounds, String> {
+    fn parse(label: &str, s: &str) -> Result<DateTime<Utc>, String> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| format!("invalid RFC-3339 timestamp for `{label}` ({s:?}): {e}"))
+    }
+    let from = filter
+        .from
+        .as_deref()
+        .map(|s| parse("from", s))
+        .transpose()?;
+    let to = filter.to.as_deref().map(|s| parse("to", s)).transpose()?;
+    Ok((from, to))
+}
+
 /// Default cap on result-set size — matches `/api/audit/recent` and keeps
 /// JSON responses below the dashboard's 1MB axum body limit even when
 /// every detail string is large.
 const DEFAULT_AUDIT_QUERY_LIMIT: u32 = 200;
 const MAX_AUDIT_QUERY_LIMIT: u32 = 5000;
 
-/// Reject the request unless the caller is at least `Admin`.
+/// Reject the request unless the caller is an authenticated `Admin`+.
 ///
-/// We could rely on the auth middleware role gate, but that layer maps
-/// "Admin can do POST" not "audit access is admin-only" — and admin-
-/// gating GETs requires the handler to know about it. Returns `Some(...)`
-/// when the request should be aborted with 403.
+/// **Anonymous callers are rejected outright.** The middleware allows
+/// loopback / `LIBREFANG_ALLOW_NO_AUTH=1` requests through without an
+/// `AuthenticatedApiUser`; for low-value endpoints like `/api/config/set`
+/// we trust those as Owner, but the hash-chained audit log carries every
+/// past attribution and detail string and is too sensitive for that
+/// blanket trust — a co-resident process at `127.0.0.1` would otherwise
+/// be able to exfiltrate the entire chain. Operators that want audit
+/// access in a no-auth deployment must configure at least one user with
+/// an admin api_key.
+///
+/// Returns `Some(response)` when the request should be aborted with 403.
 fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> Option<Response> {
-    let role = match api_user {
-        Some(u) => u.role,
-        None => {
-            // Loopback / unauthenticated callers reach this handler when no
-            // API key is configured (`LIBREFANG_ALLOW_NO_AUTH=1` or local CLI).
-            // Default to Owner — same trust level as `/api/config/set`.
-            UserRole::Owner
+    match api_user {
+        Some(u) if u.role >= UserRole::Admin => None,
+        Some(u) => {
+            // Authenticated but under-privileged — record with attribution.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                format!("audit endpoint denied for role {}", u.role),
+                "denied",
+                Some(u.user_id),
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden("Admin role required for audit access").into_response(),
+            )
         }
-    };
-    if role < UserRole::Admin {
-        // Hash-chain audit: a denied admin endpoint is itself an event.
-        let user_id = api_user.map(|u| u.user_id);
-        state.kernel.audit().record_with_context(
-            "system",
-            librefang_runtime::audit::AuditAction::PermissionDenied,
-            format!(
-                "audit endpoint denied for role {}",
-                api_user
-                    .map(|u| u.role.to_string())
-                    .unwrap_or_else(|| "anonymous".to_string())
-            ),
-            "denied",
-            user_id,
-            Some("api".to_string()),
-        );
-        return Some(
-            ApiErrorResponse::forbidden("Admin role required for audit access").into_response(),
-        );
+        None => {
+            // Anonymous (loopback / no-auth mode) — record without attribution.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                "audit endpoint denied for anonymous caller",
+                "denied",
+                None,
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden(
+                    "Authenticated Admin role required for audit access (configure an admin api_key)",
+                )
+                .into_response(),
+            )
+        }
     }
-    None
 }
 
 /// In-memory filter pass.
@@ -108,7 +146,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
 /// SQL injection surface is zero because we never build SQL from user
 /// input here. `rusqlite::params!` is used in `librefang-memory` for
 /// the DB-backed paths.
-fn apply_filter(entry: &AuditEntry, f: &AuditFilter) -> bool {
+fn apply_filter(entry: &AuditEntry, f: &AuditFilter, bounds: TimeBounds) -> bool {
     if let Some(ref u) = f.user {
         let uid_str = entry.user_id.map(|u| u.to_string()).unwrap_or_default();
         if uid_str != *u && !user_matches_loose(u, &uid_str) {
@@ -130,14 +168,26 @@ fn apply_filter(entry: &AuditEntry, f: &AuditFilter) -> bool {
             return false;
         }
     }
-    if let Some(ref from) = f.from {
-        if entry.timestamp.as_str() < from.as_str() {
-            return false;
+    let (from_dt, to_dt) = bounds;
+    if from_dt.is_some() || to_dt.is_some() {
+        // Entry timestamps come from `Utc::now().to_rfc3339()` so this
+        // parse should never fail on entries we wrote ourselves; a row
+        // we cannot parse is treated as outside any explicit range so
+        // operators don't get garbage matches when corruption is the
+        // real story.
+        let entry_dt = match DateTime::parse_from_rfc3339(&entry.timestamp) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(_) => return false,
+        };
+        if let Some(from) = from_dt {
+            if entry_dt < from {
+                return false;
+            }
         }
-    }
-    if let Some(ref to) = f.to {
-        if entry.timestamp.as_str() > to.as_str() {
-            return false;
+        if let Some(to) = to_dt {
+            if entry_dt > to {
+                return false;
+            }
         }
     }
     true
@@ -178,6 +228,11 @@ pub async fn audit_query(
         return deny;
     }
 
+    let bounds = match parse_time_bounds(&filter) {
+        Ok(b) => b,
+        Err(msg) => return ApiErrorResponse::bad_request(msg).into_response(),
+    };
+
     let limit = filter
         .limit
         .unwrap_or(DEFAULT_AUDIT_QUERY_LIMIT)
@@ -190,7 +245,10 @@ pub async fn audit_query(
     let pool_size = (MAX_AUDIT_QUERY_LIMIT as usize).saturating_mul(4);
     let pool = state.kernel.audit().recent(pool_size);
 
-    let mut filtered: Vec<&AuditEntry> = pool.iter().filter(|e| apply_filter(e, &filter)).collect();
+    let mut filtered: Vec<&AuditEntry> = pool
+        .iter()
+        .filter(|e| apply_filter(e, &filter, bounds))
+        .collect();
     // `recent` returns oldest-first within the slice; reverse for newest-first.
     filtered.reverse();
     filtered.truncate(limit as usize);
@@ -258,8 +316,14 @@ pub async fn audit_export(
         return deny;
     }
 
+    let bounds = match parse_time_bounds(&filter) {
+        Ok(b) => b,
+        Err(msg) => return ApiErrorResponse::bad_request(msg).into_response(),
+    };
+
     // Export tolerates a higher row cap than `/query` because the result
-    // is streamed — no risk of buffering 50k rows of JSON in memory.
+    // is chunked over the wire (note: the body is still materialised in
+    // memory before streaming — see `stream_json` / `stream_csv`).
     const EXPORT_DEFAULT: u32 = 5_000;
     const EXPORT_MAX: u32 = 50_000;
     let limit = filter.limit.unwrap_or(EXPORT_DEFAULT).clamp(1, EXPORT_MAX);
@@ -267,7 +331,7 @@ pub async fn audit_export(
     let pool = state.kernel.audit().recent(EXPORT_MAX as usize * 2);
     let mut filtered: Vec<AuditEntry> = pool
         .into_iter()
-        .filter(|e| apply_filter(e, &filter))
+        .filter(|e| apply_filter(e, &filter, bounds))
         .collect();
     filtered.reverse();
     filtered.truncate(limit as usize);
@@ -435,6 +499,10 @@ mod tests {
         }
     }
 
+    fn no_bounds() -> TimeBounds {
+        (None, None)
+    }
+
     #[test]
     fn test_filter_by_user_uuid_and_name() {
         let alice = UserId::from_name("Alice");
@@ -452,21 +520,21 @@ mod tests {
             user: Some(alice.to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f));
+        assert!(apply_filter(&e, &f, no_bounds()));
 
         // Name match (re-derived via UserId::from_name)
         let f = AuditFilter {
             user: Some("Alice".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f));
+        assert!(apply_filter(&e, &f, no_bounds()));
 
         // Different name must NOT match
         let f = AuditFilter {
             user: Some("Bob".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f));
+        assert!(!apply_filter(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -476,12 +544,12 @@ mod tests {
             action: Some("permissiondenied".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f));
+        assert!(apply_filter(&e, &f, no_bounds()));
         let f = AuditFilter {
             action: Some("ToolInvoke".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f));
+        assert!(!apply_filter(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -501,27 +569,66 @@ mod tests {
             channel: Some("telegram".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f));
+        assert!(apply_filter(&e, &f, no_bounds()));
 
         // Agent mismatch
         let f = AuditFilter {
             agent: Some("agent-9".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f));
+        assert!(!apply_filter(&e, &f, no_bounds()));
 
-        // Time range — `from` is inclusive (string compare on RFC-3339)
+        // Time range — `from` is inclusive, compared as parsed instants.
         let f = AuditFilter {
             from: Some("2026-04-26T00:00:00+00:00".to_string()),
             to: Some("2026-04-26T00:00:10+00:00".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f));
+        let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
+        assert!(apply_filter(&e, &f, bounds));
         let f = AuditFilter {
             from: Some("2027-01-01T00:00:00+00:00".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f));
+        let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
+        assert!(!apply_filter(&e, &f, bounds));
+    }
+
+    #[test]
+    fn test_time_range_normalises_z_and_offset_suffix() {
+        // Regression: lexicographic compare of RFC-3339 strings classifies
+        // `Z` (0x5A) as greater than `+00:00` (0x2B), so an operator that
+        // pasted `from=…T00:00:05Z` would silently miss entries written
+        // with the `+00:00` offset that chrono emits. Parsed-instant
+        // compare must treat both as the same wall-clock moment.
+        let e = entry(
+            5, // → "2026-04-26T00:00:05+00:00"
+            "agent-7",
+            AuditAction::ToolInvoke,
+            "x",
+            None,
+            None,
+        );
+        // Bound exactly equal to the entry's instant, expressed with `Z`.
+        let f = AuditFilter {
+            from: Some("2026-04-26T00:00:05Z".to_string()),
+            to: Some("2026-04-26T00:00:05Z".to_string()),
+            ..Default::default()
+        };
+        let bounds = parse_time_bounds(&f).expect("Z-suffixed RFC-3339 must parse");
+        assert!(
+            apply_filter(&e, &f, bounds),
+            "Z-suffixed bound equal to entry instant must include the entry"
+        );
+    }
+
+    #[test]
+    fn test_parse_time_bounds_rejects_garbage() {
+        let f = AuditFilter {
+            from: Some("not a date".to_string()),
+            ..Default::default()
+        };
+        assert!(parse_time_bounds(&f).is_err());
     }
 
     #[test]
@@ -564,6 +671,6 @@ mod tests {
             agent: Some("' OR 1=1 --".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f));
+        assert!(!apply_filter(&e, &f, no_bounds()));
     }
 }

@@ -50,7 +50,6 @@ pub struct AuthState {
     /// middleware can record `PermissionDenied` events when a request is
     /// rejected by the role gate. Wrapped in `Option` because some test
     /// harnesses construct `AuthState` without a kernel attached.
-    #[allow(clippy::type_complexity)]
     pub audit_log: Option<Arc<librefang_runtime::audit::AuditLog>>,
 }
 

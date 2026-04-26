@@ -928,13 +928,13 @@ impl UsageStore {
 
         // Aggregate three time windows in a single round-trip via
         // CASE-when sums, then sort by daily desc — the interesting
-        // signal for "who spent the most today".
-        let limit_clause = match limit {
-            Some(n) => format!(" LIMIT {}", n.min(1000)),
-            None => String::new(),
-        };
-        let sql = format!(
-            "SELECT user_id, \
+        // signal for "who spent the most today". `LIMIT` is bound as a
+        // parameter (rather than format!()'d into the SQL) to match the
+        // rest of this module — the value is a clamped u32 so injection
+        // isn't a real risk, but keeping the convention uniform avoids
+        // future copy-paste from this site landing on user-controlled
+        // input.
+        const RANKING_SQL: &str = "SELECT user_id, \
                 COALESCE(SUM(CASE WHEN timestamp > datetime('now', '-1 hour') THEN cost_usd ELSE 0 END), 0.0) AS hourly, \
                 COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of day') THEN cost_usd ELSE 0 END), 0.0) AS daily, \
                 COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of month') THEN cost_usd ELSE 0 END), 0.0) AS monthly, \
@@ -942,15 +942,20 @@ impl UsageStore {
              FROM usage_events \
              WHERE user_id IS NOT NULL \
              GROUP BY user_id \
-             ORDER BY daily DESC, monthly DESC{}",
-            limit_clause
-        );
+             ORDER BY daily DESC, monthly DESC \
+             LIMIT ?1";
+        // SQLite treats a negative LIMIT as "no limit" — so `None` maps to
+        // -1 and `Some(n)` clamps to 1000 (same hard cap the call sites use).
+        let bound_limit: i64 = match limit {
+            Some(n) => n.min(1000) as i64,
+            None => -1,
+        };
 
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(RANKING_SQL)
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![bound_limit], |row| {
                 Ok(UserSpendRanking {
                     user_id: row.get::<_, String>(0)?,
                     hourly_cost_usd: row.get(1)?,
