@@ -12090,6 +12090,36 @@
         }
       ]
     },
+    "UserBudgetConfig": {
+      "description": "RBAC M5: per-user spending budget.\n\nMirrors the global [`BudgetConfig`] window structure (hourly / daily / monthly) so the same cost-attribution pipeline can enforce both. Set any limit to `0.0` for \"unlimited on that window\". `alert_threshold` is the fraction of any limit at which the metering layer should emit a `BudgetExceeded` audit pre-warning (default 0.8, clamped to 0..=1).",
+      "properties": {
+        "alert_threshold": {
+          "default": 0.8,
+          "description": "Alert threshold (0..=1). Metering surfaces a BudgetExceeded audit when *any* window reaches this fraction of its limit. Defaults to 0.8 — same default as the global budget — for consistency.",
+          "format": "double",
+          "type": "number"
+        },
+        "max_daily_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per day for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        },
+        "max_hourly_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per hour for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        },
+        "max_monthly_usd": {
+          "default": 0.0,
+          "description": "Maximum cost in USD per month for this user (0.0 = unlimited).",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "UserConfig": {
       "description": "User configuration for RBAC multi-user support.",
       "properties": {
@@ -12100,6 +12130,17 @@
             "string",
             "null"
           ]
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UserBudgetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "RBAC M5: per-user spend caps. `None` means \"no per-user cap\" — the user is still bounded by global / per-agent / per-provider budgets. See [`UserBudgetConfig`] for the supported windows."
         },
         "channel_bindings": {
           "additionalProperties": {
