@@ -9,9 +9,11 @@
 
 use chrono::Utc;
 use librefang_types::agent::UserId;
+use librefang_types::config::AuditRetentionConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Categories of auditable actions within the agent runtime.
@@ -51,6 +53,13 @@ pub enum AuditAction {
     /// RBAC M5: a per-user, per-agent, or global spend cap was hit. Detail
     /// carries `<window>=$<spend>/$<limit>` (e.g. `daily=$5.20/$5.00`).
     BudgetExceeded,
+    /// Retention M7: the audit retention trim job ran and dropped a
+    /// prefix of the in-memory window. Detail carries a JSON document
+    /// listing per-action drop counts and the new chain anchor hash so
+    /// the trim itself is auditable. By construction this entry is the
+    /// most recent at the moment it is written and therefore survives
+    /// every future trim.
+    RetentionTrim,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -164,6 +173,36 @@ pub struct AuditLog {
     /// `verify_integrity()` compare the in-DB tip against the anchor's
     /// contents and refuse to return success if they diverge.
     anchor_path: Option<std::path::PathBuf>,
+    /// Hash of the most recent **dropped** entry — set when the
+    /// retention trim job removes a prefix of the chain. Verification
+    /// checks the first surviving entry's `prev_hash` against this
+    /// anchor instead of expecting the genesis sentinel, so the chain
+    /// stays verifiable across trim boundaries.
+    ///
+    /// Held in-memory only and recomputed on `with_db()` boot from the
+    /// surviving rows: if the lowest-seq entry's `prev_hash` is not the
+    /// genesis sentinel, that `prev_hash` IS the anchor (it points at
+    /// the dropped predecessor). No new schema column required.
+    chain_anchor: Mutex<Option<String>>,
+}
+
+/// Per-trim summary returned by [`AuditLog::trim`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrimReport {
+    /// Per-`AuditAction` Display string -> number of entries dropped.
+    pub dropped_by_action: BTreeMap<String, usize>,
+    /// Total entries dropped (sum of `dropped_by_action`).
+    pub total_dropped: usize,
+    /// Hash of the last dropped entry, recorded as the new chain anchor.
+    /// `None` when no entries were dropped.
+    pub new_chain_anchor: Option<String>,
+}
+
+impl TrimReport {
+    /// Whether this trim removed any entries.
+    pub fn is_empty(&self) -> bool {
+        self.total_dropped == 0
+    }
 }
 
 /// On-disk format of the audit anchor file: `<seq> <hex-hash>\n`. Parsed
@@ -190,6 +229,7 @@ impl AuditLog {
             tip: Mutex::new("0".repeat(64)),
             db: None,
             anchor_path: None,
+            chain_anchor: Mutex::new(None),
         }
     }
 
@@ -346,6 +386,7 @@ impl AuditLog {
                         "RoleChange" => AuditAction::RoleChange,
                         "PermissionDenied" => AuditAction::PermissionDenied,
                         "BudgetExceeded" => AuditAction::BudgetExceeded,
+                        "RetentionTrim" => AuditAction::RetentionTrim,
                         _ => AuditAction::ToolInvoke, // fallback
                     };
                     let seq_raw: i64 = row.get(0)?;
@@ -377,11 +418,25 @@ impl AuditLog {
         }
 
         let count = entries.len();
+
+        // Recover any chain anchor left behind by a prior trim cycle.
+        // If the surviving entries' lowest seq is N>0, OR the first
+        // entry's `prev_hash` is non-genesis, the predecessor was dropped
+        // and that prev_hash IS the anchor — no separate persisted column
+        // needed because the anchor is just "what the surviving prefix
+        // already points at". This keeps verification working across
+        // restarts without schema changes.
+        let recovered_anchor = match entries.first() {
+            Some(first) if first.prev_hash != "0".repeat(64) => Some(first.prev_hash.clone()),
+            _ => None,
+        };
+
         let log = Self {
             entries: Mutex::new(entries),
             tip: Mutex::new(tip),
             db: Some(conn),
             anchor_path: None,
+            chain_anchor: Mutex::new(recovered_anchor),
         };
 
         // Verify chain integrity on load
@@ -434,7 +489,11 @@ impl AuditLog {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut tip = self.tip.lock().unwrap_or_else(|e| e.into_inner());
 
-        let seq = entries.len() as u64;
+        // Derive the next seq from the last entry, not `entries.len()`,
+        // because a retention trim may have dropped a prefix — using
+        // `len()` would re-issue a seq the surviving entries already
+        // hold and would also collide with the SQLite PRIMARY KEY.
+        let seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
         let prev_hash = tip.clone();
 
         let hash = compute_entry_hash(
@@ -514,7 +573,16 @@ impl AuditLog {
     /// the first inconsistency found.
     pub fn verify_integrity(&self) -> Result<(), String> {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut expected_prev = "0".repeat(64);
+        // When the retention trim job has dropped a prefix, the first
+        // surviving entry's `prev_hash` points at the last dropped
+        // entry rather than the genesis sentinel. Seed the walk from
+        // the chain anchor so the trim boundary verifies cleanly.
+        let anchor = self
+            .chain_anchor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut expected_prev = anchor.unwrap_or_else(|| "0".repeat(64));
 
         for entry in entries.iter() {
             if entry.prev_hash != expected_prev {
@@ -616,10 +684,164 @@ impl AuditLog {
         entries[start..].to_vec()
     }
 
+    /// Apply the per-action retention `policy` against the in-memory
+    /// audit window, dropping a prefix and updating the chain anchor so
+    /// the surviving entries still verify.
+    ///
+    /// Drop logic per entry (top-down, in seq order):
+    ///   1. If `max_in_memory_entries` is set and non-zero, drop oldest
+    ///      until the survivor count <= cap.
+    ///   2. Then for each remaining entry: if its action has a
+    ///      configured retention window AND the entry is older than the
+    ///      window, drop it. Actions without a configured window are
+    ///      kept forever ("default = preserve").
+    ///
+    /// **Prefix-only:** to keep the chain anchor logic sound, dropping
+    /// is a contiguous prefix only. The first action whose retention
+    /// keeps it stops the trim — newer entries (even of the "should
+    /// drop" actions) survive. This matches how the chain works: you
+    /// can't punch holes in a Merkle list. In practice the in-memory
+    /// log is append-ordered by time, so per-action retention rules
+    /// trim exactly the rows the operator expects.
+    ///
+    /// Returns a [`TrimReport`] describing what was removed.
+    pub fn trim(
+        &self,
+        policy: &AuditRetentionConfig,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> TrimReport {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Decide the prefix length to drop. We compute `drop_count`
+        // first without mutating, then apply both the DB delete and the
+        // in-memory truncation atomically below.
+        let total = entries.len();
+        if total == 0 {
+            return TrimReport::default();
+        }
+
+        // Pass 1: enforce max_in_memory_entries cap. This is independent
+        // of action and acts as a hard floor on memory pressure.
+        let cap = policy.max_in_memory_entries.unwrap_or(0);
+        let mut drop_count: usize = if cap > 0 && total > cap {
+            total - cap
+        } else {
+            0
+        };
+
+        // Pass 2: walk forward from the current `drop_count` index and
+        // extend the prefix as long as the next entry is eligible
+        // (action has a retention rule + entry is older than its
+        // window). Stop at the first survivor — the chain is contiguous,
+        // so we cannot drop holes.
+        while drop_count < total {
+            let entry = &entries[drop_count];
+            let action_str = entry.action.to_string();
+            let retention_days = match policy.retention_days_by_action.get(&action_str) {
+                Some(d) if *d > 0 => *d,
+                // No rule (or 0 = unlimited) -> keep forever, stop here.
+                _ => break,
+            };
+            let cutoff = now - chrono::Duration::days(retention_days as i64);
+            // Entry timestamps are RFC-3339; parse failure means we keep
+            // the entry to avoid dropping rows we can't reason about.
+            let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+                Ok(t) => t.with_timezone(&chrono::Utc),
+                Err(_) => break,
+            };
+            if ts < cutoff {
+                drop_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if drop_count == 0 {
+            return TrimReport::default();
+        }
+
+        // Tally per-action drops for the report and capture the new
+        // anchor (hash of the last dropped entry).
+        let mut report = TrimReport::default();
+        for entry in &entries[..drop_count] {
+            *report
+                .dropped_by_action
+                .entry(entry.action.to_string())
+                .or_insert(0) += 1;
+        }
+        report.total_dropped = drop_count;
+        report.new_chain_anchor = Some(entries[drop_count - 1].hash.clone());
+
+        // Persist: drop the same prefix from SQLite so a restart sees a
+        // consistent view. We delete by seq < first-survivor.seq —
+        // works whether or not seq starts at 0.
+        let first_survivor_seq = if drop_count < total {
+            entries[drop_count].seq
+        } else {
+            // Reachable when every action has a per-action retention
+            // rule and every entry is older than its window. Drop the
+            // tail row from the DB too so the on-disk view matches the
+            // empty in-memory log; otherwise a restart would load an
+            // orphan row whose `prev_hash` points at a hash no `with_db`
+            // anchor recovery can reconstruct, and `verify_integrity`
+            // would fail on the next boot. The next `record()` call
+            // (typically the self-audit `RetentionTrim` written by the
+            // caller) re-anchors against the chain_anchor we set below.
+            entries[total - 1].seq + 1
+        };
+        if let Some(ref db) = self.db {
+            if let Ok(conn) = db.lock() {
+                let _ = conn.execute(
+                    "DELETE FROM audit_entries WHERE seq < ?1",
+                    rusqlite::params![first_survivor_seq as i64],
+                );
+            }
+        }
+
+        // Mutate in-memory state. Order matters: anchor before drain
+        // so a concurrent verify_integrity (blocked on the entries
+        // lock) sees a consistent (anchor, first_survivor) pair when
+        // it acquires.
+        {
+            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            *anchor = report.new_chain_anchor.clone();
+        }
+        entries.drain(..drop_count);
+
+        // Refresh the external anchor file so its `seq` column tracks
+        // the new (post-trim) `entries.len()`. The tip hash itself does
+        // NOT change — trimming a prefix never moves the tail — but the
+        // seq does, and `verify_integrity` insists they agree. Failing
+        // to rewrite the anchor here would surface as a spurious
+        // "audit anchor mismatch" on the very next verification.
+        if let Some(ref anchor_path) = self.anchor_path {
+            let new_len = entries.len() as u64;
+            let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Err(e) = Self::write_anchor(anchor_path, new_len, &tip) {
+                tracing::warn!(
+                    path = ?anchor_path,
+                    "Failed to refresh audit anchor after trim: {e}"
+                );
+            }
+        }
+
+        report
+    }
+
     /// Remove audit entries older than `retention_days` days.
     ///
     /// Returns the number of entries pruned. When `retention_days` is 0 the
     /// call is a no-op (unlimited retention).
+    ///
+    /// Like [`AuditLog::trim`], this is **prefix-only**: it walks forward
+    /// from the oldest entry and stops at the first whose timestamp is
+    /// inside the retention window, so the surviving log stays a
+    /// contiguous suffix of the original chain. The `chain_anchor` is
+    /// updated to the hash of the last dropped entry so
+    /// [`AuditLog::verify_integrity`] keeps verifying across the prune
+    /// boundary — without this the next verify would fail with a chain
+    /// break at the new first survivor (whose `prev_hash` no longer
+    /// points at any in-DB row).
     pub fn prune(&self, retention_days: u32) -> usize {
         if retention_days == 0 {
             return 0;
@@ -627,32 +849,71 @@ impl AuditLog {
 
         let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
         let cutoff_str = cutoff.to_rfc3339();
-        let mut pruned = 0;
 
-        // Prune from database
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let total = entries.len();
+        if total == 0 {
+            return 0;
+        }
+
+        // Walk the oldest contiguous prefix of expired entries. Stops at
+        // the first entry whose timestamp is inside the retention window
+        // — even if later entries are also expired (they shouldn't be in
+        // an append-ordered log, but guard anyway so we never punch a
+        // hole in the chain).
+        let mut drop_count = 0usize;
+        while drop_count < total && entries[drop_count].timestamp < cutoff_str {
+            drop_count += 1;
+        }
+        if drop_count == 0 {
+            return 0;
+        }
+
+        // Update the in-memory chain anchor BEFORE draining so a verify
+        // racing against this prune (blocked on the entries lock) sees a
+        // consistent (anchor, first_survivor) pair on the next acquire.
+        let new_anchor = entries[drop_count - 1].hash.clone();
+        {
+            let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+            *anchor = Some(new_anchor);
+        }
+
+        // Persist: delete the same prefix from SQLite using `seq` rather
+        // than `timestamp` so DB and in-memory share one source of truth
+        // for what survived. When we drop everything, bump past the last
+        // seq so the tail row is not orphaned (mirrors the fix in
+        // `AuditLog::trim`).
+        let first_survivor_seq = if drop_count < total {
+            entries[drop_count].seq
+        } else {
+            entries[total - 1].seq + 1
+        };
         if let Some(ref db) = self.db {
             if let Ok(conn) = db.lock() {
-                if let Ok(n) = conn.execute(
-                    "DELETE FROM audit_entries WHERE timestamp < ?1",
-                    rusqlite::params![cutoff_str],
-                ) {
-                    pruned = n;
-                }
+                let _ = conn.execute(
+                    "DELETE FROM audit_entries WHERE seq < ?1",
+                    rusqlite::params![first_survivor_seq as i64],
+                );
             }
         }
 
-        // Prune from in-memory list
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let before = entries.len();
-        entries.retain(|e| e.timestamp >= cutoff_str);
-        let mem_pruned = before - entries.len();
+        entries.drain(..drop_count);
 
-        // Prefer DB count (authoritative), fall back to in-memory count
-        if pruned > 0 {
-            pruned
-        } else {
-            mem_pruned
+        // Refresh the external anchor file's `seq` column so the next
+        // verify_integrity() does not trip the "anchor seq mismatch"
+        // guard. Tip itself does not move (we only drop a prefix).
+        if let Some(ref anchor_path) = self.anchor_path {
+            let new_len = entries.len() as u64;
+            let tip = self.tip.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Err(e) = Self::write_anchor(anchor_path, new_len, &tip) {
+                tracing::warn!(
+                    path = ?anchor_path,
+                    "Failed to refresh audit anchor after prune: {e}"
+                );
+            }
         }
+
+        drop_count
     }
 }
 
@@ -856,6 +1117,14 @@ mod tests {
             Some(alice),
             Some("api".to_string()),
         );
+        // M7: RetentionTrim joins the locked-name set so the trim
+        // self-audit row also survives a daemon restart.
+        log.record(
+            "system",
+            AuditAction::RetentionTrim,
+            r#"{"dropped":{"ToolInvoke":3}}"#,
+            "ok",
+        );
         assert!(log.verify_integrity().is_ok(), "new variants must verify");
 
         // Lock the on-disk display of every variant. Renaming any of these
@@ -868,6 +1137,7 @@ mod tests {
             "PermissionDenied"
         );
         assert_eq!(AuditAction::BudgetExceeded.to_string(), "BudgetExceeded");
+        assert_eq!(AuditAction::RetentionTrim.to_string(), "RetentionTrim");
     }
 
     #[test]
@@ -1116,6 +1386,586 @@ mod tests {
         assert!(
             result.unwrap_err().contains("missing"),
             "error message should mention the missing anchor"
+        );
+    }
+
+    // ── Retention trim (M7) ──────────────────────────────────────────────
+    //
+    // These tests cover the per-action retention policy. The crucial
+    // invariant is that the chain still verifies after a prefix is
+    // dropped — that's what the in-memory `chain_anchor` exists to
+    // prove. See `AuditLog::trim` for the design notes.
+
+    /// Push an entry whose timestamp the test controls, by recording it
+    /// normally and then back-dating the timestamp + recomputing hashes.
+    /// The post-edit chain still verifies because we re-link properly.
+    fn push_aged_entry(
+        log: &AuditLog,
+        agent_id: &str,
+        action: AuditAction,
+        detail: &str,
+        outcome: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
+        log.record(agent_id, action, detail, outcome);
+        let mut entries = log.entries.lock().unwrap();
+        let last_idx = entries.len() - 1;
+        entries[last_idx].timestamp = timestamp.to_rfc3339();
+        // Recompute the last entry's hash with the new timestamp + same prev_hash.
+        let new_hash = compute_entry_hash(
+            entries[last_idx].seq,
+            &entries[last_idx].timestamp,
+            &entries[last_idx].agent_id,
+            &entries[last_idx].action,
+            &entries[last_idx].detail,
+            &entries[last_idx].outcome,
+            entries[last_idx].user_id.as_ref(),
+            entries[last_idx].channel.as_deref(),
+            &entries[last_idx].prev_hash,
+        );
+        entries[last_idx].hash = new_hash.clone();
+        drop(entries);
+        // Update the tip so the next record links to the right hash.
+        *log.tip.lock().unwrap() = new_hash;
+    }
+
+    #[test]
+    fn test_trim_drops_old_entries_by_action() {
+        let log = AuditLog::new();
+        let now = chrono::Utc::now();
+        let two_days_ago = now - chrono::Duration::days(2);
+        let one_hour_ago = now - chrono::Duration::hours(1);
+
+        push_aged_entry(
+            &log,
+            "agent-1",
+            AuditAction::ToolInvoke,
+            "old tool call",
+            "ok",
+            two_days_ago,
+        );
+        push_aged_entry(
+            &log,
+            "agent-1",
+            AuditAction::ToolInvoke,
+            "another old tool call",
+            "ok",
+            two_days_ago,
+        );
+        push_aged_entry(
+            &log,
+            "agent-1",
+            AuditAction::RoleChange,
+            "from=user to=admin",
+            "ok",
+            two_days_ago,
+        );
+        push_aged_entry(
+            &log,
+            "agent-1",
+            AuditAction::ToolInvoke,
+            "recent tool call",
+            "ok",
+            one_hour_ago,
+        );
+
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 1);
+        // Note: RoleChange has no policy entry -> kept forever.
+
+        let report = log.trim(&policy, now);
+        // Trim is prefix-only: the first two ToolInvoke (2d old) drop;
+        // then the third entry is RoleChange, which has no rule, so
+        // the trim stops. The recent ToolInvoke survives because trim
+        // halts at the first kept row.
+        assert_eq!(report.total_dropped, 2);
+        assert_eq!(report.dropped_by_action.get("ToolInvoke"), Some(&2));
+        assert_eq!(log.len(), 2);
+        assert!(
+            log.verify_integrity().is_ok(),
+            "chain must still verify after prefix trim"
+        );
+
+        let survivors = log.recent(10);
+        assert!(matches!(survivors[0].action, AuditAction::RoleChange));
+        assert!(matches!(survivors[1].action, AuditAction::ToolInvoke));
+        assert_eq!(survivors[1].detail, "recent tool call");
+    }
+
+    #[test]
+    fn test_trim_preserves_chain_via_anchor() {
+        let log = AuditLog::new();
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(30);
+
+        for i in 0..5 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("old call {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Recent entries that should survive.
+        log.record("agent-1", AuditAction::ToolInvoke, "fresh", "ok");
+        log.record("agent-1", AuditAction::ToolInvoke, "fresher", "ok");
+
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 7);
+
+        let dropped_predecessor_hash = log.entries.lock().unwrap()[4].hash.clone();
+        let first_survivor_prev = log.entries.lock().unwrap()[5].prev_hash.clone();
+        // Sanity: the first survivor's prev_hash IS the predecessor's
+        // hash before trim — the anchor approach exploits exactly this.
+        assert_eq!(dropped_predecessor_hash, first_survivor_prev);
+
+        let report = log.trim(&policy, now);
+        assert_eq!(report.total_dropped, 5);
+        assert_eq!(
+            report.new_chain_anchor.as_deref(),
+            Some(dropped_predecessor_hash.as_str()),
+            "anchor should be the last dropped entry's hash"
+        );
+        assert!(
+            log.verify_integrity().is_ok(),
+            "verify_integrity must succeed via anchor after prefix trim"
+        );
+
+        // Subsequent record() calls must keep the chain intact across
+        // the trim boundary — the new entry links to the (unchanged)
+        // tip, and verification still uses the anchor for the first
+        // survivor.
+        log.record("agent-1", AuditAction::ToolInvoke, "post-trim", "ok");
+        assert!(log.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn test_trim_records_self_audit_via_caller() {
+        // The trim() method itself doesn't write a self-audit row —
+        // that's the caller's job (the kernel periodic task) so trim()
+        // stays a pure data-mutation primitive that's easy to test.
+        // This test exercises the contract the kernel relies on:
+        // record() AFTER trim() lands a RetentionTrim row that
+        // survives by construction (it's the newest entry).
+        let log = AuditLog::new();
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(3);
+
+        for _ in 0..3 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                "noise",
+                "ok",
+                old_ts,
+            );
+        }
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 1);
+
+        let report = log.trim(&policy, now);
+        assert_eq!(report.total_dropped, 3);
+
+        // Caller writes the self-audit row.
+        let detail = serde_json::to_string(&report.dropped_by_action).unwrap();
+        log.record("system", AuditAction::RetentionTrim, detail, "ok");
+
+        let entries = log.recent(10);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].action, AuditAction::RetentionTrim));
+        assert!(entries[0].detail.contains("ToolInvoke"));
+        assert!(log.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn test_max_in_memory_cap_enforced() {
+        let log = AuditLog::new();
+        // 200 RoleChange entries (no per-action retention rule) so only
+        // the cap applies. Use recent timestamps so no per-action rule
+        // could possibly drop them anyway.
+        for i in 0..200 {
+            log.record(
+                "agent-1",
+                AuditAction::RoleChange,
+                format!("change #{i}"),
+                "ok",
+            );
+        }
+        assert_eq!(log.len(), 200);
+
+        let policy = AuditRetentionConfig {
+            max_in_memory_entries: Some(100),
+            ..Default::default()
+        };
+
+        let report = log.trim(&policy, chrono::Utc::now());
+        assert_eq!(report.total_dropped, 100);
+        assert_eq!(log.len(), 100);
+        assert!(log.verify_integrity().is_ok());
+
+        // The most recent 100 entries must survive — verify by
+        // checking the tail's detail string.
+        let survivors = log.recent(100);
+        assert_eq!(survivors.first().unwrap().detail, "change #100");
+        assert_eq!(survivors.last().unwrap().detail, "change #199");
+    }
+
+    #[test]
+    fn test_default_config_is_no_op() {
+        let log = AuditLog::new();
+        log.record("agent-1", AuditAction::ToolInvoke, "x", "ok");
+        log.record("agent-1", AuditAction::ToolInvoke, "y", "ok");
+
+        let policy = AuditRetentionConfig::default();
+        let report = log.trim(&policy, chrono::Utc::now());
+        assert!(report.is_empty());
+        assert_eq!(report.total_dropped, 0);
+        assert!(report.new_chain_anchor.is_none());
+        assert_eq!(log.len(), 2);
+        assert!(log.chain_anchor.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_trim_persists_to_db_and_recovers_anchor_on_reload() {
+        // The chain_anchor is in-memory only — but when the daemon
+        // restarts we recompute it from the surviving rows. Verify
+        // that round-trip works: trim, drop the AuditLog, reopen
+        // against the same DB, and check verify_integrity() passes
+        // because with_db() recovered the anchor from the survivors'
+        // first prev_hash.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(30);
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        for i in 0..5 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("old {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Persist the back-dated rows by re-syncing — push_aged_entry
+        // mutates in-memory only, so re-write the DB rows manually.
+        {
+            let entries = log.entries.lock().unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM audit_entries", []).unwrap();
+            for e in entries.iter() {
+                conn.execute(
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        e.seq as i64,
+                        &e.timestamp,
+                        &e.agent_id,
+                        e.action.to_string(),
+                        &e.detail,
+                        &e.outcome,
+                        e.user_id.map(|u| u.to_string()),
+                        e.channel.as_deref(),
+                        &e.prev_hash,
+                        &e.hash,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        log.record("agent-1", AuditAction::RoleChange, "keep me", "ok");
+
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 7);
+
+        let report = log.trim(&policy, now);
+        assert_eq!(report.total_dropped, 5);
+        let anchor_after_trim = report.new_chain_anchor.clone().unwrap();
+        drop(log);
+
+        // Reopen — anchor must be reconstructed from the survivor's
+        // prev_hash so verify_integrity() succeeds.
+        let log2 = AuditLog::with_db(Arc::clone(&db));
+        assert_eq!(log2.len(), 1);
+        let recovered = log2.chain_anchor.lock().unwrap().clone();
+        assert_eq!(
+            recovered.as_deref(),
+            Some(anchor_after_trim.as_str()),
+            "with_db() should recover the anchor from the surviving prefix"
+        );
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "verify_integrity must succeed after restart with anchor recovered"
+        );
+    }
+
+    #[test]
+    fn test_trim_drops_all_persists_consistently_across_restart() {
+        // Regression: when every entry in the log has a per-action
+        // retention rule and is older than its window, pass-2 advances
+        // drop_count all the way to total. The DB delete must remove
+        // every row (matching the empty in-memory state) — leaving the
+        // tail behind would orphan a row whose prev_hash points at a
+        // dropped predecessor, breaking verify_integrity on the next
+        // boot. The next record() (typically the self-audit
+        // RetentionTrim row) re-anchors against chain_anchor.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(30);
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        for i in 0..4 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("noise {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Re-sync the back-dated rows into the DB (push_aged_entry
+        // mutates in-memory only).
+        {
+            let entries = log.entries.lock().unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM audit_entries", []).unwrap();
+            for e in entries.iter() {
+                conn.execute(
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        e.seq as i64,
+                        &e.timestamp,
+                        &e.agent_id,
+                        e.action.to_string(),
+                        &e.detail,
+                        &e.outcome,
+                        e.user_id.map(|u| u.to_string()),
+                        e.channel.as_deref(),
+                        &e.prev_hash,
+                        &e.hash,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut policy = AuditRetentionConfig::default();
+        policy
+            .retention_days_by_action
+            .insert("ToolInvoke".to_string(), 1);
+
+        // Every entry is ToolInvoke, every entry is 30 days old, rule
+        // is 1 day -> pass-2 drops all four.
+        let report = log.trim(&policy, now);
+        assert_eq!(report.total_dropped, 4);
+        assert_eq!(log.len(), 0);
+
+        // No orphan row left in the DB.
+        let db_count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            db_count, 0,
+            "drop-everything trim must clear DB, not leave the tail row behind"
+        );
+
+        // Caller records the self-audit row — the kernel periodic task
+        // does this after every non-empty trim.
+        log.record("system", AuditAction::RetentionTrim, "all", "ok");
+        assert!(log.verify_integrity().is_ok());
+        drop(log);
+
+        // Restart: only the RetentionTrim row exists. Anchor must be
+        // recovered from its prev_hash so verify_integrity walks
+        // cleanly across the trim boundary.
+        let log2 = AuditLog::with_db(Arc::clone(&db));
+        assert_eq!(log2.len(), 1);
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "verify_integrity must succeed after restart when trim dropped every prior entry"
+        );
+    }
+
+    #[test]
+    fn test_prune_updates_chain_anchor_so_verify_passes() {
+        // Regression: the legacy day-based `prune` runs in parallel
+        // with the new per-action `trim`. After this PR introduced
+        // chain_anchor as the seed for verify_integrity(), prune had to
+        // start updating it too — otherwise dropping an old prefix
+        // would leave the surviving first entry with prev_hash pointing
+        // at a now-deleted predecessor while the anchor stayed None,
+        // and verify_integrity() would fail with "chain break at seq N"
+        // on the very next call.
+        let log = AuditLog::new();
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(120);
+
+        for i in 0..3 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("ancient {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Recent entries that should survive a 90-day retention.
+        log.record("agent-1", AuditAction::RoleChange, "fresh", "ok");
+        log.record("agent-1", AuditAction::ToolInvoke, "fresher", "ok");
+
+        let last_dropped_hash = log.entries.lock().unwrap()[2].hash.clone();
+
+        let pruned = log.prune(90);
+        assert_eq!(pruned, 3);
+        assert_eq!(log.len(), 2);
+        let anchor = log.chain_anchor.lock().unwrap().clone();
+        assert_eq!(
+            anchor.as_deref(),
+            Some(last_dropped_hash.as_str()),
+            "prune must set chain_anchor to the last dropped entry's hash"
+        );
+        assert!(
+            log.verify_integrity().is_ok(),
+            "verify_integrity must succeed via chain_anchor after prune"
+        );
+    }
+
+    #[test]
+    fn test_prune_drops_all_persists_consistently_across_restart() {
+        // Regression: parity with the trim drop-everything edge case.
+        // When every entry is expired, prune must clear the DB tail
+        // too — otherwise an orphan row survives in SQLite while the
+        // in-memory log is empty, and the next boot's
+        // verify_integrity() trips at the orphan.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let now = chrono::Utc::now();
+        let old_ts = now - chrono::Duration::days(120);
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        for i in 0..3 {
+            push_aged_entry(
+                &log,
+                "agent-1",
+                AuditAction::ToolInvoke,
+                &format!("ancient {i}"),
+                "ok",
+                old_ts,
+            );
+        }
+        // Re-sync back-dated rows into the DB.
+        {
+            let entries = log.entries.lock().unwrap();
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM audit_entries", []).unwrap();
+            for e in entries.iter() {
+                conn.execute(
+                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    rusqlite::params![
+                        e.seq as i64,
+                        &e.timestamp,
+                        &e.agent_id,
+                        e.action.to_string(),
+                        &e.detail,
+                        &e.outcome,
+                        e.user_id.map(|u| u.to_string()),
+                        e.channel.as_deref(),
+                        &e.prev_hash,
+                        &e.hash,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let pruned = log.prune(90);
+        assert_eq!(pruned, 3);
+        assert_eq!(log.len(), 0);
+
+        let db_count: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            db_count, 0,
+            "drop-everything prune must clear DB, not leave the tail row behind"
+        );
+
+        log.record("system", AuditAction::RoleChange, "post-prune", "ok");
+        assert!(log.verify_integrity().is_ok());
+        drop(log);
+
+        let log2 = AuditLog::with_db(Arc::clone(&db));
+        assert_eq!(log2.len(), 1);
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "verify_integrity must succeed after restart when prune dropped every prior entry"
         );
     }
 

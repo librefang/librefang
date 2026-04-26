@@ -3618,6 +3618,249 @@ async fn test_authz_check_rejects_anonymous() {
         "anonymous /api/authz/check must be 401'd at the middleware (same as other admin endpoints)"
     );
 }
+/// Round-trip: PUT a budget, GET reflects the new limits, DELETE clears
+/// it back to "no cap" (limit = 0 in the response).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_get_delete_round_trip() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // Initial GET — no cap configured, all limits are 0.
+    let initial: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial["hourly"]["limit"], serde_json::json!(0.0));
+
+    // PUT a real cap.
+    let put_resp = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.5,
+            "max_daily_usd": 12.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.75,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
+
+    // GET should reflect the new caps.
+    let after_put: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_put["hourly"]["limit"], serde_json::json!(1.5));
+    assert_eq!(after_put["daily"]["limit"], serde_json::json!(12.0));
+    assert_eq!(after_put["monthly"]["limit"], serde_json::json!(100.0));
+    assert_eq!(after_put["alert_threshold"], serde_json::json!(0.75));
+
+    // DELETE clears.
+    let del_resp = client
+        .delete(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), 200, "DELETE should clear the cap");
+
+    // GET again — back to limit = 0.
+    let after_delete: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after_delete["hourly"]["limit"],
+        serde_json::json!(0.0),
+        "DELETE must reset limit back to 0 (no cap)"
+    );
+}
+
+/// Validation: PUT with negative or out-of-range values is rejected
+/// before touching disk. Each case is a full-shape payload with exactly
+/// one offending field — proves the per-field validators fire, not just
+/// the "missing key" gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_invalid_payload() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    let base = serde_json::json!({
+        "max_hourly_usd": 1.0,
+        "max_daily_usd": 10.0,
+        "max_monthly_usd": 100.0,
+        "alert_threshold": 0.8,
+    });
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("max_hourly_usd", serde_json::json!(-1.0)),
+        ("alert_threshold", serde_json::json!(1.5)),
+        ("alert_threshold", serde_json::json!(-0.1)),
+    ] {
+        let mut body = base.clone();
+        body[field] = value;
+        cases.push(body);
+    }
+
+    for bad in cases {
+        let resp = client
+            .put(&url)
+            .header("authorization", "Bearer alice-admin-key")
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "expected 400 for invalid payload {bad:?}"
+        );
+    }
+}
+
+/// Regression: a partial body must NOT be accepted as an upsert. Without
+/// this guard, `UserBudgetConfig`'s `#[serde(default)]` would silently
+/// fill missing fields with `0.0` / `0.8` and clear an existing cap on
+/// the windows the caller didn't mention.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_partial_payload() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // Seed a real cap so we can confirm it stays put when a partial PUT
+    // gets rejected.
+    let put_full = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 2.0,
+            "max_daily_usd": 20.0,
+            "max_monthly_usd": 200.0,
+            "alert_threshold": 0.6,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_full.status(), 200);
+
+    // Each partial body omits at least one required key and must be
+    // rejected with 400.
+    for partial in [
+        serde_json::json!({"max_hourly_usd": 5.0}),
+        serde_json::json!({"max_daily_usd": 50.0, "max_monthly_usd": 500.0}),
+        serde_json::json!({}),
+        // Wrong type should also 400, not be coerced to 0.
+        serde_json::json!({
+            "max_hourly_usd": "1.0",
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }),
+    ] {
+        let resp = client
+            .put(&url)
+            .header("authorization", "Bearer alice-admin-key")
+            .json(&partial)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "expected 400 for partial / wrong-typed payload {partial:?}"
+        );
+    }
+
+    // Original cap survived all rejected partials.
+    let after: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["hourly"]["limit"], serde_json::json!(2.0));
+    assert_eq!(after["daily"]["limit"], serde_json::json!(20.0));
+    assert_eq!(after["monthly"]["limit"], serde_json::json!(200.0));
+    assert_eq!(after["alert_threshold"], serde_json::json!(0.6));
+}
+
+/// Authz: a non-admin caller is rejected even when the URL is well-formed.
+/// The body is intentionally partial — the admin gate must fire before
+/// body validation, so a viewer's request never reaches the parser.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_viewer_with_403() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "admin", "alice-admin-key"),
+            ("Bob", "viewer", "bob-viewer-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer bob-viewer-key")
+        .json(&serde_json::json!({"max_hourly_usd": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not write user budget");
+}
+
+/// 404 path: PUT against an unknown user surfaces a real error (not a
+/// silent insert). Requires a full-shape body so the request reaches the
+/// persist step (a partial body would be 400'd earlier).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_unknown_user_returns_404() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/NonExistent", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
 /// RBAC M3 (#3205) follow-up — `PUT /api/users/{name}/policy` rewrites the
 /// caller's authorization surface, so it must travel through the same
 /// owner-only gate as `POST /api/users` and `DELETE /api/users/{name}`.
@@ -3636,7 +3879,6 @@ async fn users_policy_put_owner_only() {
     .await;
     let client = reqwest::Client::new();
 
-    // Admin is denied at the middleware before reaching the handler.
     let resp = client
         .put(format!("{}/api/users/Alice/policy", server.base_url))
         .header("authorization", "Bearer alice-admin-key")
@@ -3652,9 +3894,6 @@ async fn users_policy_put_owner_only() {
         "Admin must be denied PUT /api/users/{{name}}/policy by the owner-only middleware gate"
     );
 
-    // Owner sails through. Used to confirm the route IS wired — without
-    // this assertion a 404 from a missing route would also produce a 4xx
-    // and pretend the gate was working.
     let resp = client
         .put(format!("{}/api/users/Alice/policy", server.base_url))
         .header("authorization", "Bearer owner-key")
