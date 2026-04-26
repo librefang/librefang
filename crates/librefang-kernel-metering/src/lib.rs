@@ -483,6 +483,7 @@ mod tests {
                 cost_usd: 0.001,
                 tool_calls: 0,
                 latency_ms: 150,
+                ..Default::default()
             })
             .unwrap();
 
@@ -508,6 +509,7 @@ mod tests {
                 cost_usd: 0.05,
                 tool_calls: 0,
                 latency_ms: 300,
+                ..Default::default()
             })
             .unwrap();
 
@@ -537,6 +539,7 @@ mod tests {
                 cost_usd: 100.0,
                 tool_calls: 0,
                 latency_ms: 500,
+                ..Default::default()
             })
             .unwrap();
 
@@ -725,6 +728,7 @@ mod tests {
                 cost_usd: 0.005,
                 tool_calls: 3,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -746,6 +750,7 @@ mod tests {
                 cost_usd: cost,
                 tool_calls: 0,
                 latency_ms: 50,
+                ..Default::default()
             })
             .unwrap();
     }
@@ -851,6 +856,7 @@ mod tests {
             cost_usd: 0.10,
             tool_calls: 0,
             latency_ms: 10,
+            ..Default::default()
         };
         let err = engine
             .check_all_and_record(&record, &quota, &budget)
@@ -891,6 +897,7 @@ mod tests {
             cost_usd: 0.0,
             tool_calls: 0,
             latency_ms: 10,
+            ..Default::default()
         };
         assert!(engine
             .check_all_and_record(&record, &quota, &budget)
