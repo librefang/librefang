@@ -15,6 +15,12 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 /// Categories of auditable actions within the agent runtime.
+///
+/// **Hash-chain stability:** the variant name is folded into the per-entry
+/// SHA-256 via `Display` (which derives from `Debug`). Adding a new variant
+/// is safe — old entries keep verifying because their action string is
+/// unchanged. Renaming or reordering is a breaking change that invalidates
+/// every persisted hash, so treat this enum as append-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditAction {
     ToolInvoke,
@@ -32,6 +38,19 @@ pub enum AuditAction {
     /// Auto-dream memory consolidation events (start / complete / fail /
     /// abort). The detail string carries the lifecycle phase and task id.
     DreamConsolidation,
+    /// RBAC M5: a user authenticated successfully against the API surface.
+    /// Recorded on every credential exchange that yields a session token.
+    UserLogin,
+    /// RBAC M5: a user's role was changed (config edit or admin action).
+    /// Detail carries `from=<role> to=<role>`.
+    RoleChange,
+    /// RBAC M5: a request was rejected by the role-check layer (HTTP 403 or
+    /// kernel-level `authorize()` denial). Detail carries the resource that
+    /// was denied (path / tool / capability).
+    PermissionDenied,
+    /// RBAC M5: a per-user, per-agent, or global spend cap was hit. Detail
+    /// carries `<window>=$<spend>/$<limit>` (e.g. `daily=$5.20/$5.00`).
+    BudgetExceeded,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -323,6 +342,10 @@ impl AuditLog {
                         "WireConnect" => AuditAction::WireConnect,
                         "ConfigChange" => AuditAction::ConfigChange,
                         "DreamConsolidation" => AuditAction::DreamConsolidation,
+                        "UserLogin" => AuditAction::UserLogin,
+                        "RoleChange" => AuditAction::RoleChange,
+                        "PermissionDenied" => AuditAction::PermissionDenied,
+                        "BudgetExceeded" => AuditAction::BudgetExceeded,
                         _ => AuditAction::ToolInvoke, // fallback
                     };
                     let seq_raw: i64 = row.get(0)?;
@@ -789,6 +812,62 @@ mod tests {
         let entries = log2.recent(2);
         assert_eq!(entries[1].user_id, Some(bob));
         assert_eq!(entries[1].channel.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn test_new_rbac_variants_preserve_chain() {
+        // RBAC M5: UserLogin / RoleChange / PermissionDenied / BudgetExceeded
+        // must hash like every other variant — adding them MUST NOT shift the
+        // hash of pre-existing rows. We verify two things:
+        //   1. Mixing the new variants into a fresh chain still verifies.
+        //   2. The variant names round-trip through `Display` exactly so
+        //      `with_db()` can decode them after a daemon restart.
+        let log = AuditLog::new();
+        let alice = UserId::from_name("Alice");
+        log.record_with_context(
+            "system",
+            AuditAction::UserLogin,
+            "alice via api key",
+            "ok",
+            Some(alice),
+            Some("api".to_string()),
+        );
+        log.record_with_context(
+            "system",
+            AuditAction::RoleChange,
+            "from=user to=admin",
+            "ok",
+            Some(alice),
+            Some("api".to_string()),
+        );
+        log.record_with_context(
+            "system",
+            AuditAction::PermissionDenied,
+            "/api/budget/users",
+            "denied",
+            Some(alice),
+            Some("api".to_string()),
+        );
+        log.record_with_context(
+            "system",
+            AuditAction::BudgetExceeded,
+            "daily=$5.20/$5.00",
+            "denied",
+            Some(alice),
+            Some("api".to_string()),
+        );
+        assert!(log.verify_integrity().is_ok(), "new variants must verify");
+
+        // Lock the on-disk display of every variant. Renaming any of these
+        // would invalidate every persisted hash that mentions them — the
+        // assertions exist so a casual refactor surfaces as a test failure.
+        assert_eq!(AuditAction::UserLogin.to_string(), "UserLogin");
+        assert_eq!(AuditAction::RoleChange.to_string(), "RoleChange");
+        assert_eq!(
+            AuditAction::PermissionDenied.to_string(),
+            "PermissionDenied"
+        );
+        assert_eq!(AuditAction::BudgetExceeded.to_string(), "BudgetExceeded");
     }
 
     #[test]
