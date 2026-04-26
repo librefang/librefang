@@ -19,8 +19,4 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
-rand = { workspace = true }
 dashmap = { workspace = true }
-
-[dev-dependencies]
-tokio-test = { workspace = true }

@@ -6735,7 +6735,7 @@ system_prompt = "You are a helpful assistant."
         // we must not touch the `force_session_wipe` / `resume_pending` flags
         // that belong to the persistent session path.
         {
-            use crate::session_policy::SessionResetPolicy as KernelPolicy;
+            use crate::session_policy::SessionResetPolicyExt;
             let effective_mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
             // `New` mode creates a fresh ephemeral session_id on every call;
             // there is nothing persistent to reset, and mutating
@@ -6743,7 +6743,7 @@ system_prompt = "You are a helpful assistant."
             // for future persistent-mode invocations.
             let skip_reset = matches!(effective_mode, librefang_types::agent::SessionMode::New);
             if !skip_reset {
-                let policy: KernelPolicy = cfg.session.reset.clone().into();
+                let policy = cfg.session.reset.clone();
                 let last_active: std::time::SystemTime = entry.last_active.into();
                 if let Some(reason) = policy.should_reset(last_active, entry.force_session_wipe) {
                     tracing::info!(
@@ -6768,10 +6768,7 @@ system_prompt = "You are a helpful assistant."
                             "Failed to persist session after auto-reset"
                         );
                     }
-                    let types_reason: librefang_types::config::SessionResetReason = reason.into();
-                    let _ = self
-                        .registry
-                        .update_session_reset_state(agent_id, types_reason);
+                    let _ = self.registry.update_session_reset_state(agent_id, reason);
                     // Persist the updated entry so the reset state survives a crash.
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.

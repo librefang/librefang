@@ -3414,7 +3414,7 @@ fn validate_plugin_name(name: &str) -> LibreFangResult<()> {
     Ok(())
 }
 
-pub fn load_plugin(
+fn load_plugin(
     plugin_name: &str,
 ) -> LibreFangResult<(
     librefang_types::config::PluginManifest,
@@ -3557,25 +3557,6 @@ pub fn load_plugin(
     );
 
     Ok((manifest, resolved_hooks))
-}
-
-/// List all installed plugins in `~/.librefang/plugins/`.
-pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> {
-    let dir = plugins_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.file_type().ok()?.is_dir() {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            load_plugin(&name).ok().map(|(manifest, _)| manifest)
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -4808,14 +4789,6 @@ printf '{"type":"ingest_result","memories":[{"content":"full-path-runtime"}]}\n'
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"));
-    }
-
-    #[test]
-    fn test_list_installed_plugins_empty() {
-        // Should not panic even if the plugins dir doesn't exist
-        let plugins = list_installed_plugins();
-        // May or may not be empty depending on the environment
-        let _ = plugins;
     }
 
     #[test]

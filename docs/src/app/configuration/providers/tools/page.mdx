@@ -12,6 +12,19 @@ This page covers providers that integrate through local assistant tooling or CLI
 - Gemini CLI
 - Qwen Code
 
+## CLI logins as first-class default providers
+
+When you have not set a provider API key but **do** have a working CLI login (`claude`, `codex`, `gemini`, `qwen` available on `PATH` and authenticated), LibreFang will pick the CLI provider as the default model for new agents. The detection runs at startup and is rechecked when the daemon refreshes provider availability.
+
+Detection priority (in order, first match wins):
+
+1. `claude-code` — `claude` binary on `PATH`, `claude auth status` reports an active session.
+2. `codex-cli` — `codex` binary on `PATH`, with `OPENAI_API_KEY` (which the Codex CLI itself needs) set.
+3. `gemini-cli` — `gemini` binary on `PATH`, authenticated via `gemini auth login`.
+4. `qwen-code` — `qwen` binary on `PATH`, authenticated.
+
+This behaviour replaced the previous "fallback when API providers fail" heuristic — CLI providers are now treated like any other remote provider. To explicitly override the auto-pick, set `[default_model] provider = "anthropic"` (or whichever) in `config.toml`.
+
 ---
 
 ## Claude Code

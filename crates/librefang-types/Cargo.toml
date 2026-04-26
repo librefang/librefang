@@ -17,7 +17,7 @@ async-trait = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-rand = { workspace = true }
+zeroize = { workspace = true }
 fluent = { workspace = true }
 unic-langid = { workspace = true }
 regex-lite = { workspace = true }

@@ -3741,7 +3741,7 @@ fn patch_agent_mcp_servers(body: &serde_json::Value) -> Result<Option<Vec<String
 
 /// Request body for updating agent visual identity.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct UpdateIdentityRequest {
+pub(crate) struct UpdateIdentityRequest {
     pub emoji: Option<String>,
     pub avatar_url: Option<String>,
     pub color: Option<String>,
@@ -3764,6 +3764,7 @@ pub struct UpdateIdentityRequest {
         (status = 200, description = "Update an agent's visual identity", body = serde_json::Value)
     )
 )]
+#[allow(private_interfaces)]
 pub async fn update_agent_identity(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -3844,7 +3845,8 @@ pub async fn update_agent_identity(
 
 /// Request body for patching agent config (name, description, prompt, identity, model).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct PatchAgentConfigRequest {
+#[allow(dead_code)]
+pub(crate) struct PatchAgentConfigRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
@@ -3880,6 +3882,7 @@ pub struct PatchAgentConfigRequest {
         (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = serde_json::Value)
     )
 )]
+#[allow(private_interfaces)]
 pub async fn patch_agent_config(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -4356,7 +4359,7 @@ pub async fn delete_hand_agent_runtime_config(
 
 /// Request body for cloning an agent.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct CloneAgentRequest {
+pub(crate) struct CloneAgentRequest {
     pub new_name: String,
     /// Whether to copy skills from the source agent (default: true).
     #[serde(default = "default_clone_true")]
@@ -4407,6 +4410,7 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
         (status = 200, description = "Clone an agent with its workspace files", body = serde_json::Value)
     )
 )]
+#[allow(private_interfaces)]
 pub async fn clone_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -4761,7 +4765,7 @@ pub async fn get_agent_file(
 
 /// Request body for writing a workspace identity file.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct SetAgentFileRequest {
+pub(crate) struct SetAgentFileRequest {
     pub content: String,
 }
 
@@ -4779,6 +4783,7 @@ pub struct SetAgentFileRequest {
         (status = 200, description = "Write a workspace identity file", body = serde_json::Value)
     )
 )]
+#[allow(private_interfaces)]
 pub async fn set_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
