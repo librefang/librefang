@@ -1,0 +1,261 @@
+# Built-in Tool Reference
+
+LibreFang ships with a wide built-in tool catalog beyond the file / shell / web tools that show up in standard agent templates. This page covers the families that historically lived only in source code — browser automation, subprocess lifecycle, runtime scheduling, knowledge graphs, media, and inter-agent messaging.
+
+Per-agent capability grants control which families an agent can actually call. Use `agent.toml` `[capabilities]` (or the `librefang agent grant` CLI) to opt agents into the tool families below.
+
+## Meta-Tools (Lazy Loading)
+
+Two meta-tools let an agent discover and load tools on demand instead of carrying the full schema in every prompt.
+
+| Tool | Purpose |
+|---|---|
+| `tool_search(query)` | Returns tools matching `query` (name, description, tag). Cheap to call — no side effects. |
+| `tool_load(name)` | Pulls a tool's full schema into the active session. Subsequent turns can call it. |
+
+Lazy loading is opt-in per agent via `lazy_tools = true` in the manifest. Disable to restore the legacy "all tools always loaded" behaviour. This is what the **Lazy Tool Loading** mention on [Agent Templates](/agent/templates) refers to.
+
+---
+
+## Inter-Agent Messaging (A2A)
+
+Agents in different LibreFang instances can discover and message each other over the A2A protocol.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `a2a_discover` | `url` | Probe a remote A2A endpoint, return the agent card (`/.well-known/agent.json`). |
+| `a2a_send` | `agent_id`, `message`, optional `task_id` | Send a task to a remote A2A agent and wait for the reply. |
+
+`a2a_send` is synchronous from the calling agent's perspective — it blocks until the remote turn completes (or the task TTL expires). For fire-and-forget delivery, use `notify_owner` or a webhook target instead.
+
+---
+
+## Same-Daemon Inter-Agent Tools
+
+For talking to other agents **inside the same LibreFang daemon** (no A2A protocol overhead) — spawn, list, find, kill, and send messages directly.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `agent_send` | `agent_id`, `message` | Send a message to another agent in this daemon and wait for the reply. Uses the in-process kernel router; respects the agent_call depth limit. |
+| `agent_spawn` | `template`, optional `name`, `goal` | Spawn a child agent from a template. Returns the new `agent_id`. Sub-agents are denied `agent_spawn` and `agent_kill` by default to prevent fork bombs. |
+| `agent_list` | — | List accessible agents (id, name, status). |
+| `agent_find` | `query` | Search agents by name, ID, or tag. |
+| `agent_kill` | `agent_id` | Terminate a running agent. Forbidden in sub-agent context by default. |
+| `goal_update` | `goal` | Update **this** agent's goal/objective mid-turn. The new goal is written into the agent's manifest and surfaces in subsequent prompts. |
+
+`max_agent_call_depth` in `[kernel]` (default `5`) caps how deep an `agent_send` chain can recurse — prevents A→B→A loops from ever reaching production.
+
+---
+
+## Memory Tools (per-agent)
+
+Direct access to the agent's proactive-memory store from inside the loop. Distinct from the auto-recall machinery — these are the tools the agent can call explicitly.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `memory_store` | `content`, optional `category`, `scope` | Persist a custom memory entry. `scope` ∈ `user_memory` / `session_memory` / `agent_memory`. |
+| `memory_recall` | `query`, optional `limit`, `scope` | Semantic search over the agent's memories. |
+| `memory_list` | optional `category`, `scope`, `limit` | Enumerate memories without a search query. |
+
+See [Memory System](/agent/memory#proactive-memory) for the entry schema, scopes, decay formula, and consolidation trigger.
+
+---
+
+## Task Queue Tools
+
+The shared task board lets agents post work that other agents can claim. Useful for fan-out, oncall handoff, and long-running async jobs.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `task_post` | `title`, `body`, optional `assignee`, `priority` | Create a new task in the shared queue. |
+| `task_claim` | optional `priority_filter` | Claim ownership of the highest-priority pending task. The TTL is `[task_board] claim_ttl_secs` (default 600s). |
+| `task_complete` | `task_id`, optional `result` | Mark a claimed task done. |
+| `task_list` | optional `status`, `assignee` | List tasks with optional filters. |
+
+The claim TTL exists to recover from worker crashes — if the claimer doesn't `task_complete` within the TTL, the sweeper resets the task to `pending` so another worker can pick it up.
+
+---
+
+## Channel Tools
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `channel_send` | `channel`, `target`, `content` (text / image / file / poll) | Send a message, image, file, or poll to a channel user — **without going through the agent loop**. Useful for pushing alerts, async results, or out-of-band notifications. |
+
+`channel_send` is what `[deliver_only]` webhook mode uses internally; agents can also call it directly. Capability: `channel.*`.
+
+---
+
+## Workflow / Event Tools
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `workflow_run` | `workflow_id`, optional `inputs` | Execute a stored workflow synchronously and return its result. |
+| `event_publish` | `event_type`, `payload` | Publish a structured event onto the event bus. Triggers (`[[trigger]]` blocks on agent manifests) listening on `event_type` will fire. |
+| `system_time` | — | Get the daemon's current wall-clock time (RFC3339 UTC). Cheap; no external clock call. |
+
+`event_publish` is the bridge between agents and the trigger system — an agent that detects "a new file landed in /inbox" can publish `inbox.new_file`, and any trigger configured on that event runs.
+
+---
+
+## Skill Evolution (extended)
+
+In addition to `skill_evolve_patch` (documented above with its 5-strategy fuzzy matcher) and `skill_read_file`:
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `skill_evolve_create` | `name`, `manifest`, optional `body` | Create a brand-new skill from scratch. |
+| `skill_evolve_update` | `name`, `body` | Replace a skill's body wholesale (no fuzzy match — just overwrite). |
+| `skill_evolve_delete` | `name` | Delete a skill entirely. |
+| `skill_evolve_rollback` | `name`, optional `version` | Revert a skill to a prior version. Without `version`, rolls back one step. |
+| `skill_evolve_write_file` | `skill`, `path`, `body` | Add a supporting file under `references/` / `templates/` / `scripts/` / `assets/`. |
+| `skill_evolve_remove_file` | `skill`, `path` | Remove a supporting file. |
+
+Every `skill_evolve_*` operation appends to the skill's evolution history; `GET /api/skills/{name}` returns the full audit trail.
+
+---
+
+## Browser Automation
+
+Eight tools wrap a Playwright-controlled headless browser. All of them require the agent to have the `browser.*` capability and a configured `[browser]` section in `config.toml` (see [Core Configuration](/configuration/core#browser)).
+
+| Tool | Purpose |
+|---|---|
+| `browser_navigate(url)` | Open or navigate the active tab. |
+| `browser_back()` | Navigate back one step in the tab's history stack. |
+| `browser_click(selector)` | Click the element matching the CSS / text selector. |
+| `browser_type(selector, text)` | Focus the element and type text (key-by-key, debounced). |
+| `browser_scroll(direction, amount?)` | Scroll up / down / to selector. |
+| `browser_wait(condition, timeout_ms?)` | Wait for selector / network-idle / time. |
+| `browser_screenshot(full_page?)` | Capture the viewport (or full page) as a `ContentBlock::ImageFile`. |
+| `browser_read_page()` | Extract the page's full text + structural outline (cheaper than a screenshot when the model just needs text). |
+| `browser_run_js(script)` | Run arbitrary JS in the page context, return the JSON-serialised result. |
+| `browser_close()` | Close the active tab and release the slot. |
+
+Pages opened by an agent are scoped to that agent's tab pool (default 4). When the pool is full, `browser_navigate` rejects with `ToolError::ResourceExhausted` rather than silently evicting another tab.
+
+---
+
+## Process Lifecycle
+
+Five tools manage long-running subprocesses (build watches, test loops, log tailers, sidecar daemons). They expose stdin / stdout / stderr as a stream the agent can poll.
+
+| Tool | Purpose |
+|---|---|
+| `process_start(command, cwd?, env?)` | Spawn a subprocess. Returns a `process_id`. |
+| `process_write(process_id, data)` | Write bytes to the subprocess's stdin. |
+| `process_list()` | List active processes for this agent (id, cmd, age, pid). |
+| `process_poll(process_id, max_bytes?)` | Read up to `max_bytes` of new output since the last poll. Non-blocking. |
+| `process_kill(process_id, signal?)` | Send a signal (default `SIGTERM`); the runtime escalates to `SIGKILL` after the grace period. |
+
+Subprocesses inherit the agent's workspace as `cwd` by default, the agent's environment minus other providers' secrets, and are stopped on agent shutdown. Total wall-clock budget is enforced via the `[exec_policy]` section.
+
+---
+
+## Runtime Scheduling
+
+Manifest `[[cron]]` entries are the static way to schedule turns. These tools let an agent **dynamically** create / list / cancel scheduled work from the loop itself.
+
+| Tool | Purpose |
+|---|---|
+| `schedule_create(when, prompt, channel?)` | Schedule a single future turn at a one-shot timestamp. |
+| `schedule_list()` | List the agent's scheduled turns. |
+| `schedule_delete(schedule_id)` | Cancel a scheduled turn. |
+| `cron_create(expression, prompt, channel?)` | Schedule a recurring turn (5-field cron). |
+| `cron_list()` | List the agent's runtime-created cron jobs. |
+| `cron_cancel(cron_id)` | Cancel a runtime cron job. |
+
+Runtime jobs created with these tools are persisted in the same store as manifest crons — they survive daemon restarts. Their `cron_id` / `schedule_id` is opaque; round-trip through `cron_list()` to discover it.
+
+---
+
+## Knowledge Graph
+
+The agent-private knowledge graph stores entities and typed relations between them. Use it for structured recall ("which projects use which library") that's awkward to express as flat memory entries.
+
+| Tool | Purpose |
+|---|---|
+| `knowledge_add_entity(name, type, attributes?)` | Insert or update an entity. |
+| `knowledge_add_relation(from, to, type, weight?)` | Add a directed relation between two entities. |
+| `knowledge_query(start, depth?, relation_filter?)` | BFS from `start`, return reachable nodes + edges. |
+
+The graph is per-agent and persisted in SQLite alongside the agent's session history. Use the proactive-memory tools for unstructured recall.
+
+---
+
+## Media Generation & Analysis
+
+Tool calls into provider-specific media APIs. Per-tool capability grants required.
+
+| Tool | Purpose |
+|---|---|
+| `image_generate(prompt, size?, style?)` | Generate an image (OpenAI / Replicate / Vertex). |
+| `image_analyze(image, question)` | Vision Q&A on an existing image. |
+| `media_describe(image_or_video)` | Caption / describe an existing media asset. |
+| `media_transcribe(audio)` | Speech-to-text on an audio file. |
+| `speech_to_text(audio)` | Alias of `media_transcribe`. |
+| `text_to_speech(text, voice?)` | TTS synthesis. |
+| `music_generate(prompt, lyrics?)` | Music generation (Suno / Replicate). |
+| `video_generate(prompt, duration_secs?)` | Submit a video-generation task; returns `task_id`. |
+| `video_status(task_id)` | Poll a video task. |
+| `canvas_present(html)` | Render an interactive HTML canvas in the dashboard. |
+
+Cost and latency vary widely between providers — check `[media] providers` in `config.toml` to control which provider serves each tool.
+
+---
+
+## Owner Notifications
+
+| Tool | Purpose |
+|---|---|
+| `notify_owner(reason, summary, urgency?)` | Send a private notice to the agent's owner without posting to chat. |
+
+`notify_owner` writes to the owner's `inbox` and optionally fans out to a configured side channel (Telegram, email). Distinct from a regular reply — the message stays out of the active chat history, so it won't pollute downstream summarisation. See `ReplyEnvelope.owner_notice` in the API reference for the wire shape.
+
+---
+
+## Geolocation, Docker, Skills
+
+| Tool | Purpose |
+|---|---|
+| `location_get()` | Current location (IP-based by default; can be overridden per-agent). |
+| `docker_exec(container, command)` | Run a command inside a running Docker container the agent has been granted access to. |
+| `skill_read_file(skill, file)` | Read a skill's supporting file (`references/`, `templates/`, `scripts/`, `assets/`). Companion to `skill_evolve_*`. |
+
+`docker_exec` requires the agent to be in `[capabilities]` `docker.*` allowlist plus the container name in `[exec_policy] docker_allowlist`. Without both, calls reject with `ToolError::Forbidden`.
+
+---
+
+## `apply_patch` Move Semantics
+
+`apply_patch` accepts an `UpdateFile { path, move_to, hunks }` shape. When `move_to` is set, the patch first renames `path` to `move_to`, then applies the hunks against the new path. This collapses a rename + edit into a single tool call so the patch is atomic — readers never see the file at the old path post-rename.
+
+Empty `hunks` with a non-null `move_to` is a pure rename. Useful when refactoring multiple files where one of them changes path but not contents.
+
+---
+
+## `skill_evolve_patch` Fuzzy Matching
+
+`skill_evolve_patch` modifies installed skills in-place. To survive small upstream drift, the matcher walks 5 strategies in order, first match wins:
+
+1. **Exact** — bytewise identical (Levenshtein 0).
+2. **Line-trimmed** — strip trailing whitespace and CRLFs from every line, then compare.
+3. **Whitespace-normalised** — collapse runs of intra-line whitespace; ignores tab vs. spaces drift.
+4. **Indent-flexible** — strip leading whitespace per line; ignores reformat-to-different-indent changes.
+5. **Block-anchor** — find a contiguous run of N anchor lines (default 3) in the target, splice the new content around them.
+
+If all five fail, the patch is rejected with the exact diff context so the next turn can see what drifted. There's no automatic "best-effort" merge — fuzzy matching is bounded.
+
+The companion tools `skill_evolve_write_file` and `skill_evolve_remove_file` manage skill supporting files (`references/`, `templates/`, `scripts/`, `assets/`) without going through patch semantics.
+
+---
+
+## Where to Look in Code
+
+- **Tool registry** — `crates/librefang-runtime/src/tools/` — every `register_tool!` call.
+- **Schema serialisation** — `librefang-runtime::tools::schema` — JSON schemas the LLM sees.
+- **Capability gating** — `librefang-runtime::capability` — which agents can call which tools.
+- **Browser pool** — `crates/librefang-runtime/src/tools/browser/`.
+- **Schedule / cron runtime tools** — `crates/librefang-runtime/src/tools/scheduler/`.
+
+When in doubt, the rustdoc on the tool struct is the canonical specification. The dashboard's "Tools" inspector also renders the live, agent-resolved tool set with current capability grants applied.

@@ -1,0 +1,261 @@
+# 内置工具大全
+
+LibreFang 自带的工具目录远不止标准 agent 模板里看到的 file / shell / web 工具。本页覆盖那些一直只活在源码里的家族 —— 浏览器自动化、子进程生命周期、运行时调度、知识图谱、媒体生成、agent 间消息。
+
+Per-agent capability 授权决定一个 agent 实际能调哪些家族。在 `agent.toml` `[capabilities]` 里(或用 `librefang agent grant` CLI)给 agent 开下面这些工具家族的权限。
+
+## 元工具(Lazy Loading)
+
+两个元工具让 agent 按需发现并加载工具,而不是每次 prompt 都带全部 schema。
+
+| 工具 | 用途 |
+|---|---|
+| `tool_search(query)` | 返回名字/描述/标签匹配 `query` 的工具。无副作用,调用便宜。 |
+| `tool_load(name)` | 把某工具的完整 schema 拉进当前 session。后续轮次可以调它。 |
+
+Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则恢复"所有工具一直加载"的旧行为。这就是 [Agent 模板](/zh/agent/templates) 里 **Lazy Tool Loading** 提到的机制。
+
+---
+
+## Agent 间消息(A2A)
+
+不同 LibreFang 实例上的 agent 可以通过 A2A 协议互发任务。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `a2a_discover` | `url` | 探测远端 A2A 端点,返回 agent card(`/.well-known/agent.json`)。 |
+| `a2a_send` | `agent_id`、`message`、可选 `task_id` | 给远端 A2A agent 发任务并等回复。 |
+
+`a2a_send` 从调用方视角是同步的 —— 阻塞到远端轮次完成(或任务 TTL 到)。要 fire-and-forget 投递,用 `notify_owner` 或 webhook target。
+
+---
+
+## 同 daemon 内 agent 间工具
+
+跟**同一 LibreFang daemon 里**别的 agent 通话(无 A2A 协议开销) —— 直接 spawn、list、find、kill、发消息。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `agent_send` | `agent_id`、`message` | 给本 daemon 内别的 agent 发消息并等回复。走进程内 kernel 路由器;受 agent_call 深度上限约束。 |
+| `agent_spawn` | `template`、可选 `name`、`goal` | 从模板 spawn 子 agent。返回新的 `agent_id`。子 agent 默认禁 `agent_spawn` 和 `agent_kill` 防止 fork 炸弹。 |
+| `agent_list` | — | 列出可访问 agent(id、name、status)。 |
+| `agent_find` | `query` | 按名字、ID 或 tag 搜 agent。 |
+| `agent_kill` | `agent_id` | 终止运行中的 agent。子 agent 上下文里默认禁。 |
+| `goal_update` | `goal` | 中途更新**当前** agent 的目标。新目标写进 agent 的 manifest,后续 prompt 看得到。 |
+
+`[kernel]` 里的 `max_agent_call_depth`(默认 `5`)封顶 `agent_send` 链能递归多深 —— 让 A→B→A 循环根本到不了生产。
+
+---
+
+## Memory 工具(per-agent)
+
+从循环里直接访问 agent 的主动记忆存储。和自动召回机制不同 —— 这些是 agent 显式调的工具。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `memory_store` | `content`、可选 `category`、`scope` | 持久化一条自定义记忆。`scope` ∈ `user_memory` / `session_memory` / `agent_memory`。 |
+| `memory_recall` | `query`、可选 `limit`、`scope` | 在该 agent 的记忆上做语义搜索。 |
+| `memory_list` | 可选 `category`、`scope`、`limit` | 不带搜索条件枚举记忆。 |
+
+条目 schema、scope、衰减公式、整合触发器见[内存系统](/zh/agent/memory#主动记忆proactive-memory)。
+
+---
+
+## 任务队列工具
+
+共享任务板让 agent 发布工作给别的 agent 认领。适合 fan-out、oncall 交接、长跑异步任务。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `task_post` | `title`、`body`、可选 `assignee`、`priority` | 在共享队列创建新任务。 |
+| `task_claim` | 可选 `priority_filter` | 认领最高优先级 pending 任务。TTL 是 `[task_board] claim_ttl_secs`(默认 600s)。 |
+| `task_complete` | `task_id`、可选 `result` | 标记已认领任务为完成。 |
+| `task_list` | 可选 `status`、`assignee` | 带可选过滤条件列出任务。 |
+
+claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_complete`,sweeper 把任务重置回 `pending` 给别的 worker 接手。
+
+---
+
+## Channel 工具
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `channel_send` | `channel`、`target`、`content`(文本 / 图 / 文件 / poll) | 给某 channel 用户发消息、图片、文件或 poll —— **不走 agent 循环**。适合推告警、异步结果、带外通知。 |
+
+`channel_send` 是 `[deliver_only]` webhook 模式内部用的工具;agent 也能直接调。Capability:`channel.*`。
+
+---
+
+## Workflow / Event 工具
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `workflow_run` | `workflow_id`、可选 `inputs` | 同步执行存好的 workflow 并返回结果。 |
+| `event_publish` | `event_type`、`payload` | 把结构化事件发到事件总线。监听该 `event_type` 的 trigger(agent manifest 里的 `[[trigger]]` 块)会触发。 |
+| `system_time` | — | 取 daemon 当前墙钟时间(RFC3339 UTC)。便宜,不调外部 clock。 |
+
+`event_publish` 是 agent 与 trigger 系统的桥梁 —— 检测到"/inbox 落了新文件"的 agent 可以发 `inbox.new_file`,任何配在该事件上的 trigger 就跑起来。
+
+---
+
+## 技能进化(扩展)
+
+除了上面文档化的 `skill_evolve_patch`(带 5 策略模糊匹配器)和 `skill_read_file`,还有:
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `skill_evolve_create` | `name`、`manifest`、可选 `body` | 从零创建新 skill。 |
+| `skill_evolve_update` | `name`、`body` | 整体替换 skill body(不模糊匹配,直接覆盖)。 |
+| `skill_evolve_delete` | `name` | 删除整个 skill。 |
+| `skill_evolve_rollback` | `name`、可选 `version` | 回退 skill 到之前的版本。不指定 `version` 就回退一步。 |
+| `skill_evolve_write_file` | `skill`、`path`、`body` | 在 `references/` / `templates/` / `scripts/` / `assets/` 加支持文件。 |
+| `skill_evolve_remove_file` | `skill`、`path` | 删支持文件。 |
+
+每次 `skill_evolve_*` 操作都追加到 skill 的进化历史;`GET /api/skills/{name}` 返回完整审计轨迹。
+
+---
+
+## 浏览器自动化
+
+8 个工具包了一个 Playwright 控制的无头浏览器。所有工具都需要 agent 有 `browser.*` capability,且 `config.toml` 里配了 `[browser]` 段(见[核心配置](/zh/configuration/core#browser))。
+
+| 工具 | 用途 |
+|---|---|
+| `browser_navigate(url)` | 在活跃 tab 打开/导航 URL。 |
+| `browser_back()` | 在 tab 历史栈里后退一步。 |
+| `browser_click(selector)` | 点 CSS / 文本选择器匹配的元素。 |
+| `browser_type(selector, text)` | 聚焦元素后逐键 debounced 输入文本。 |
+| `browser_scroll(direction, amount?)` | 上/下滚动或滚到某选择器。 |
+| `browser_wait(condition, timeout_ms?)` | 等选择器/network-idle/时间。 |
+| `browser_screenshot(full_page?)` | 截屏(viewport 或整页)为 `ContentBlock::ImageFile`。 |
+| `browser_read_page()` | 抽取页面完整文本 + 结构化大纲(模型只要文本时比 screenshot 便宜)。 |
+| `browser_run_js(script)` | 在页面上下文跑任意 JS,返回 JSON 序列化结果。 |
+| `browser_close()` | 关闭活跃 tab,释放 slot。 |
+
+Agent 打开的页面绑在该 agent 的 tab 池里(默认 4)。池满时 `browser_navigate` 用 `ToolError::ResourceExhausted` 拒绝,而不是悄悄 evict 别的 tab。
+
+---
+
+## 子进程生命周期
+
+5 个工具管长跑子进程(build watch、test loop、log tailer、sidecar daemon)。stdin / stdout / stderr 暴露成 agent 可 poll 的流。
+
+| 工具 | 用途 |
+|---|---|
+| `process_start(command, cwd?, env?)` | spawn 子进程。返回 `process_id`。 |
+| `process_write(process_id, data)` | 给子进程 stdin 写字节。 |
+| `process_list()` | 列出该 agent 的活跃子进程(id、cmd、age、pid)。 |
+| `process_poll(process_id, max_bytes?)` | 自上次 poll 起读最多 `max_bytes` 新输出。非阻塞。 |
+| `process_kill(process_id, signal?)` | 发信号(默认 `SIGTERM`);超过宽限期 runtime 升级到 `SIGKILL`。 |
+
+子进程默认继承 agent 的 workspace 作为 `cwd`、agent 的环境变量(去除其他 provider 的 secret),agent 关闭时一并停掉。墙钟预算由 `[exec_policy]` 段强制。
+
+---
+
+## 运行时调度
+
+manifest `[[cron]]` 是静态的安排方式。这些工具让 agent **从循环里动态**创建/列出/取消调度。
+
+| 工具 | 用途 |
+|---|---|
+| `schedule_create(when, prompt, channel?)` | 在某未来时间戳调度一次性轮次。 |
+| `schedule_list()` | 列出 agent 已调度的轮次。 |
+| `schedule_delete(schedule_id)` | 取消已调度的轮次。 |
+| `cron_create(expression, prompt, channel?)` | 5 字段 cron 调度循环轮次。 |
+| `cron_list()` | 列出 agent 运行时创建的 cron 任务。 |
+| `cron_cancel(cron_id)` | 取消运行时 cron 任务。 |
+
+这些工具创建的运行时任务和 manifest cron 共用持久化存储 —— 跨 daemon 重启依然存在。`cron_id` / `schedule_id` 是不透明的;通过 `cron_list()` 往返获取。
+
+---
+
+## 知识图谱
+
+每个 agent 私有的知识图谱存实体和带类型的关系。适合做结构化召回("哪些项目用哪些库"),用扁平 memory 记录不好表达的那种。
+
+| 工具 | 用途 |
+|---|---|
+| `knowledge_add_entity(name, type, attributes?)` | 插入或更新实体。 |
+| `knowledge_add_relation(from, to, type, weight?)` | 在两个实体之间加有向关系。 |
+| `knowledge_query(start, depth?, relation_filter?)` | 从 `start` 做 BFS,返回可达节点 + 边。 |
+
+图谱按 agent 私有,与 agent 的 session 历史一起持久化在 SQLite。非结构化召回用 proactive-memory 工具。
+
+---
+
+## 媒体生成与分析
+
+调用 provider 专属媒体 API 的工具。需要按工具单独授权 capability。
+
+| 工具 | 用途 |
+|---|---|
+| `image_generate(prompt, size?, style?)` | 文生图(OpenAI / Replicate / Vertex)。 |
+| `image_analyze(image, question)` | 对已有图像做 vision Q&A。 |
+| `media_describe(image_or_video)` | 给已有媒体素材生成 caption / 描述。 |
+| `media_transcribe(audio)` | 音频转文本。 |
+| `speech_to_text(audio)` | `media_transcribe` 的别名。 |
+| `text_to_speech(text, voice?)` | TTS 合成。 |
+| `music_generate(prompt, lyrics?)` | 音乐生成(Suno / Replicate)。 |
+| `video_generate(prompt, duration_secs?)` | 提交视频生成任务,返回 `task_id`。 |
+| `video_status(task_id)` | poll 视频任务。 |
+| `canvas_present(html)` | 在 dashboard 渲染交互式 HTML canvas。 |
+
+provider 间成本和延迟差别很大 —— 在 `config.toml` 里配 `[media] providers` 控制每个工具走哪个 provider。
+
+---
+
+## Owner 通知
+
+| 工具 | 用途 |
+|---|---|
+| `notify_owner(reason, summary, urgency?)` | 给 agent owner 发私信,不进 chat。 |
+
+`notify_owner` 写到 owner 的 `inbox`,可选地扇出到配好的旁路通道(Telegram、email)。和正常回复不同 —— 消息不进活跃 chat 历史,不会污染下游摘要。线上结构见 API 参考里的 `ReplyEnvelope.owner_notice`。
+
+---
+
+## 地理定位、Docker、Skills
+
+| 工具 | 用途 |
+|---|---|
+| `location_get()` | 当前位置(默认 IP 基础;可按 agent 覆盖)。 |
+| `docker_exec(container, command)` | 在 agent 已被授权访问的运行中 Docker 容器内跑命令。 |
+| `skill_read_file(skill, file)` | 读 skill 的支持文件(`references/`、`templates/`、`scripts/`、`assets/`)。和 `skill_evolve_*` 配套。 |
+
+`docker_exec` 要求 agent 在 `[capabilities]` `docker.*` 允许列表里,**且**容器名在 `[exec_policy] docker_allowlist`。两者缺一,调用以 `ToolError::Forbidden` 拒绝。
+
+---
+
+## `apply_patch` 移动语义
+
+`apply_patch` 接受 `UpdateFile { path, move_to, hunks }` 形状。`move_to` 设了时,patch 先把 `path` 重命名为 `move_to`,然后对新路径应用 hunks。这把 rename + edit 折叠成单次工具调用,patch 是原子的 —— 读者不会看到改名后的旧路径文件。
+
+`hunks` 空、`move_to` 非空 = 纯重命名。在重构多文件、其中一个文件改路径但内容不变时有用。
+
+---
+
+## `skill_evolve_patch` 模糊匹配
+
+`skill_evolve_patch` 就地修改已装的 skill。为了能扛住上游小幅漂移,匹配器按 5 个策略走,首匹配胜:
+
+1. **Exact** — 字节级相同(Levenshtein 0)。
+2. **Line-trimmed** — 去每行尾空白和 CRLF 后再比。
+3. **Whitespace-normalised** — 把行内连续空白合并;忽略 tab vs space 漂移。
+4. **Indent-flexible** — 去每行行首空白;忽略重排成不同缩进的修改。
+5. **Block-anchor** — 在目标里找连续 N 行 anchor(默认 3 行),把新内容拼到锚周围。
+
+5 个全失败时,patch 用精确 diff 上下文拒绝,下一轮就能看到漂移在哪。没有自动"尽力"合并 —— 模糊匹配是有界的。
+
+配套工具 `skill_evolve_write_file` 和 `skill_evolve_remove_file` 不走 patch 语义,直接管 skill 支持文件(`references/`、`templates/`、`scripts/`、`assets/`)。
+
+---
+
+## 在源码里去哪看
+
+- **Tool registry** — `crates/librefang-runtime/src/tools/` —— 所有 `register_tool!` 调用。
+- **Schema 序列化** — `librefang-runtime::tools::schema` —— LLM 看到的 JSON schema。
+- **Capability 把关** — `librefang-runtime::capability` —— 哪些 agent 能调哪些工具。
+- **浏览器池** — `crates/librefang-runtime/src/tools/browser/`。
+- **Schedule / cron 运行时工具** — `crates/librefang-runtime/src/tools/scheduler/`。
+
+不确定的时候,工具结构体上的 rustdoc 是权威规约。Dashboard 的 "Tools" inspector 也会按当前 capability 授权渲染实际可用的工具集。

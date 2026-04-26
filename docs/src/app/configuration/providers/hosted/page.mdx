@@ -15,12 +15,12 @@ This page covers internet-hosted model providers that authenticate with an API k
 - Fireworks AI
 - Perplexity AI
 - Cohere
-- AI21 Labs
 - Cerebras
 - SambaNova
 - Hugging Face
 - xAI
 - Alibaba Coding Plan
+- Moonshot (Kimi)
 - Novita AI
 - AWS Bedrock
 
@@ -316,29 +316,6 @@ This page covers internet-hosted model providers that authenticate with an API k
 
 ---
 
-## AI21 Labs
-
-| | |
-|---|---|
-| **Display Name** | AI21 Labs |
-| **Driver** | OpenAI-compatible |
-| **Env Var** | `AI21_API_KEY` |
-| **Base URL** | `https://api.ai21.com/studio/v1` |
-| **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
-| **Auth** | `Authorization: Bearer` header |
-| **Models** | 1 |
-
-**Available Models:**
-- `jamba-1.5-large` (Smart)
-
-**Setup:**
-1. Sign up at [studio.ai21.com](https://studio.ai21.com)
-2. Create an API key
-3. `export AI21_API_KEY="..."`
-
----
-
 ## Cerebras
 
 | | |
@@ -477,6 +454,38 @@ This page covers internet-hosted model providers that authenticate with an API k
 - Monitor request quotas via Alibaba Cloud console
 - Not for automated scripts or batch API calls — coding tools only
 - For more info: [Official Documentation](https://www.alibabacloud.com/help/en/model-studio/coding-plan)
+
+---
+
+## Moonshot (Kimi)
+
+| | |
+|---|---|
+| **Display Name** | Moonshot / Kimi |
+| **Provider ID** | `moonshot` (aliases: `kimi`, `kimi2`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MOONSHOT_API_KEY` |
+| **Base URL** | `https://api.moonshot.ai/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at [Moonshot Platform](https://platform.moonshot.cn) (mainland) or [Moonshot AI](https://platform.moonshot.ai) (international)
+2. Create an API key from the console
+3. `export MOONSHOT_API_KEY="sk-..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "moonshot"
+model = "moonshot-v1-128k"
+```
+
+**Capabilities:** Chat completions, tool use, vision (on `kimi-latest` / vision-capable models), and large-context windows up to 128K. File uploads supported via the `/files` endpoint for multi-document RAG.
+
+**Notes:** Kimi models are operated by Moonshot AI. Use the `kimi` alias for shorter config.
 
 ---
 
