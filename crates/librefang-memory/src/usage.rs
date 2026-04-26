@@ -45,6 +45,13 @@ impl UsageRecord {
     /// Convenience constructor for tests and call sites that do not yet
     /// attribute usage to a user / channel. Keeps the new optional fields
     /// out of every existing struct literal in the kernel.
+    ///
+    /// Eight positional args is over the clippy default of seven, but the
+    /// shape mirrors the metering record schema 1:1 and grouping into a
+    /// builder would push call-site noise into ~20 internal kernel paths
+    /// that touch this constructor without gaining type safety. Suppression
+    /// is local to this fn.
+    #[allow(clippy::too_many_arguments)]
     pub fn anonymous(
         agent_id: AgentId,
         provider: impl Into<String>,

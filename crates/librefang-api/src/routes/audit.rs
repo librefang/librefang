@@ -369,13 +369,35 @@ pub(crate) fn stream_csv(entries: Vec<AuditEntry>) -> Response {
 /// RFC 4180 cell escaping. A cell is wrapped in double quotes when it
 /// contains any of `, " \r \n` and any embedded `"` is doubled. Cells
 /// without those characters are emitted verbatim.
+///
+/// Additionally, cells whose first character is one of `=`, `+`, `-`, `@`,
+/// TAB, or CR are prefixed with a single quote `'` *inside* the quoted
+/// value to neutralise CSV-formula injection (CWE-1236). Without this, a
+/// username like `=cmd|"calc"!A1` round-trips through Excel/Google Sheets
+/// as a live formula. The leading-quote workaround is the OWASP-recommended
+/// mitigation; downstream consumers that genuinely need the literal value
+/// can strip the leading quote.
 fn csv_escape(s: &str) -> String {
-    let needs_quoting = s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
+    let needs_formula_guard = s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let needs_quoting = needs_formula_guard
+        || s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r');
     if !needs_quoting {
         return s.to_string();
     }
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(s.len() + 3);
     out.push('"');
+    if needs_formula_guard {
+        // Prepend an apostrophe inside the quoted value: spreadsheet apps
+        // strip the leading apostrophe on display but treat the cell as
+        // text rather than a formula.
+        out.push('\'');
+    }
     for ch in s.chars() {
         if ch == '"' {
             out.push('"');
@@ -512,6 +534,24 @@ mod tests {
         assert_eq!(csv_escape("He said \"hi\""), "\"He said \"\"hi\"\"\"");
         // Newline — wrapped.
         assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn test_csv_escape_neutralises_formula_injection() {
+        // CWE-1236: a cell whose first character is =, +, -, @, TAB, or CR
+        // is interpreted as a formula by Excel and Google Sheets. The
+        // OWASP-recommended mitigation is to prepend an apostrophe inside
+        // a quoted cell — the spreadsheet strips the apostrophe on display
+        // but treats the value as text.
+        assert_eq!(csv_escape("=cmd|\"calc\"!A1"), "\"'=cmd|\"\"calc\"\"!A1\"");
+        assert_eq!(csv_escape("=SUM(A1:A2)"), "\"'=SUM(A1:A2)\"");
+        assert_eq!(csv_escape("+1234567890"), "\"'+1234567890\"");
+        assert_eq!(csv_escape("-1+1"), "\"'-1+1\"");
+        assert_eq!(csv_escape("@SUM(1,1)"), "\"'@SUM(1,1)\"");
+        assert_eq!(csv_escape("\thidden"), "\"'\thidden\"");
+        // Inner-position formula sentinels are NOT prefixed (only first char).
+        assert_eq!(csv_escape("a=b"), "a=b");
+        assert_eq!(csv_escape("foo+bar"), "foo+bar");
     }
 
     #[test]

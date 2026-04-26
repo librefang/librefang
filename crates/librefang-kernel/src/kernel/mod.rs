@@ -7502,6 +7502,14 @@ system_prompt = "You are a helpful assistant."
             // Fall back to plain record so the cost is not lost from tracking
             let _ = self.metering.record(&usage_record);
         }
+        // TODO(M5-followup): per-user budget enforcement. UserConfig.budget
+        // and the /api/budget/users/{id} endpoint expose the cap as
+        // read-only data, but check_all_and_record above does not consult
+        // it — only global / per-agent / per-provider budgets are enforced.
+        // Wiring the per-user check requires looking up the resolved
+        // UserConfig (via attribution_user_id) and calling a new
+        // metering.check_user_budget(user_id, &user_config.budget) arm.
+        // Tracked in the M5 PR body's "What's deferred" section.
 
         // Populate cost on the result based on usage_footer mode
         let mut result = result;
