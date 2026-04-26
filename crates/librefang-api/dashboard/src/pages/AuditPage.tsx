@@ -706,64 +706,86 @@ export function AuditPage() {
         </Card>
       )}
 
-      {/* Filter bar — collapsible; chips show what's active when closed.
-          Sticks to the top of the scroll container so it stays usable
-          when a long log is open. */}
-      <div className="sticky top-0 z-10 -mx-1 px-1 py-1 backdrop-blur supports-[backdrop-filter]:bg-surface/60">
-      <Card padding="md">
-        <div className="flex items-center gap-3 flex-wrap">
+      {/* Slim filter strip — single inline row, no card chrome. The
+          form itself moved into a right-docked drawer so it stops
+          owning vertical real estate above every result. The strip
+          carries the "Filters" trigger (with count badge), the
+          drilled-in active chips, and the Clear-all shortcut so the
+          operator never has to open the drawer just to read what's
+          currently filtering. */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setFiltersOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-border-subtle bg-surface px-3 py-1.5 text-xs font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors shadow-sm"
+        >
+          <Filter className="h-3.5 w-3.5" />
+          {t("audit.filters")}
+          {activeFilterEntries.length > 0 && (
+            <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-black text-white">
+              {activeFilterEntries.length}
+            </span>
+          )}
+        </button>
+        {activeFilterEntries.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+            {activeFilterEntries.map((e) => (
+              <ActiveChip
+                key={e.key as string}
+                label={e.label}
+                value={e.value}
+                onClear={() => dropFilter(e.key)}
+              />
+            ))}
+          </div>
+        )}
+        {activeFilterEntries.length > 0 && (
           <button
             type="button"
-            onClick={() => setFiltersOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-border-subtle bg-main/40 px-3 py-1.5 text-xs font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
-            aria-expanded={filtersOpen}
+            onClick={onClearAll}
+            className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-text-dim hover:text-error transition-colors"
           >
-            <Filter className="h-3.5 w-3.5" />
-            {t("audit.filters")}
-            {activeFilterEntries.length > 0 && (
-              <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-black text-white">
-                {activeFilterEntries.length}
-              </span>
-            )}
+            <RotateCcw className="h-3 w-3" />
+            {t("audit.clear_all")}
           </button>
-          {activeFilterEntries.length > 0 && !filtersOpen && (
-            <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
-              {activeFilterEntries.map((e) => (
-                <ActiveChip
-                  key={e.key as string}
-                  label={e.label}
-                  value={e.value}
-                  onClear={() => dropFilter(e.key)}
-                />
-              ))}
-            </div>
-          )}
-          {activeFilterEntries.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearAll}
-              className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-text-dim hover:text-error transition-colors"
-            >
-              <RotateCcw className="h-3 w-3" />
-              {t("audit.clear_all")}
-            </button>
-          )}
-        </div>
+        )}
+      </div>
 
-        {filtersOpen && (
-          <>
-            {/* Datetime quick-picks — apply immediately, save the
-                operator from fighting the native datetime-local picker
-                for the common "everything in the last hour/day" case. */}
-            <div className="flex items-center gap-2 flex-wrap mt-4 pb-3 border-b border-border-subtle">
-              <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                {t("audit.quick_range")}
-              </span>
+      {/* Filter drawer — right-docked panel. `panel-right` (not
+          `drawer-right`) because the form is modal: tweaks aren't
+          live, the operator commits via Apply. The dim backdrop
+          signals that and gives Esc / click-outside as the standard
+          dismiss paths. */}
+      <Modal
+        isOpen={filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        title={t("audit.filters")}
+        size="md"
+        variant="panel-right"
+      >
+        <form
+          onSubmit={(e) => {
+            onApply(e);
+            setFiltersOpen(false);
+          }}
+          className="flex flex-col gap-4 p-5"
+        >
+          {/* Datetime quick-picks — apply immediately AND close the
+              drawer so the operator sees the filtered result without
+              an extra click. */}
+          <div className="flex flex-col gap-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+              {t("audit.quick_range")}
+            </span>
+            <div className="flex items-center gap-2 flex-wrap">
               {DATE_PRESETS.map((p) => (
                 <button
                   key={p.key}
                   type="button"
-                  onClick={() => applyDatePreset(p)}
+                  onClick={() => {
+                    applyDatePreset(p);
+                    setFiltersOpen(false);
+                  }}
                   className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-main/40 px-2 py-1 text-[10px] font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
                 >
                   <Clock className="h-3 w-3" />
@@ -771,97 +793,103 @@ export function AuditPage() {
                 </button>
               ))}
             </div>
-          <form onSubmit={onApply} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
-            <Input
-              label={t("audit.f_user")}
-              value={draft.user ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, user: e.target.value || undefined }))
-              }
-              placeholder={t("audit.f_user_placeholder")}
-              leftIcon={<Users className="h-3.5 w-3.5" />}
-            />
+          </div>
+
+          <div className="h-px bg-border-subtle/60" />
+
+          {/* Drawer is narrow — single column instead of the old 3-col
+              grid. Reads top-down naturally without horizontal
+              scanning. */}
+          <Input
+            label={t("audit.f_user")}
+            value={draft.user ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, user: e.target.value || undefined }))
+            }
+            placeholder={t("audit.f_user_placeholder")}
+            leftIcon={<Users className="h-3.5 w-3.5" />}
+          />
+          <Select
+            label={t("audit.f_action")}
+            value={draft.action ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({
+                ...d,
+                action: e.target.value || undefined,
+              }))
+            }
+            options={actionOptions}
+          />
+          <Input
+            label={t("audit.f_agent")}
+            value={draft.agent ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, agent: e.target.value || undefined }))
+            }
+            placeholder={t("audit.f_agent_placeholder")}
+            leftIcon={<Activity className="h-3.5 w-3.5" />}
+          />
+          <div className="flex flex-col gap-1.5">
             <Select
-              label={t("audit.f_action")}
-              value={draft.action ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  action: e.target.value || undefined,
-                }))
-              }
-              options={actionOptions}
+              label={t("audit.f_channel")}
+              value={channelIsCustom ? "__custom__" : (draft.channel ?? "")}
+              onChange={(e) => onChannelChange(e.target.value)}
+              options={channelOptions}
             />
-            <Input
-              label={t("audit.f_agent")}
-              value={draft.agent ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, agent: e.target.value || undefined }))
-              }
-              placeholder={t("audit.f_agent_placeholder")}
-              leftIcon={<Activity className="h-3.5 w-3.5" />}
-            />
-            <div className="flex flex-col gap-1.5">
-              <Select
-                label={t("audit.f_channel")}
-                value={channelIsCustom ? "__custom__" : (draft.channel ?? "")}
-                onChange={(e) => onChannelChange(e.target.value)}
-                options={channelOptions}
+            {channelIsCustom && (
+              <Input
+                value={draft.channel ?? ""}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    channel: e.target.value || undefined,
+                  }))
+                }
+                placeholder={t("audit.f_channel_placeholder")}
+                leftIcon={<Plug className="h-3.5 w-3.5" />}
               />
-              {channelIsCustom && (
-                <Input
-                  value={draft.channel ?? ""}
-                  onChange={(e) =>
-                    setDraft((d) => ({
-                      ...d,
-                      channel: e.target.value || undefined,
-                    }))
-                  }
-                  placeholder={t("audit.f_channel_placeholder")}
-                  leftIcon={<Plug className="h-3.5 w-3.5" />}
-                />
-              )}
-            </div>
-            <Input
-              label={t("audit.f_from")}
-              type="datetime-local"
-              value={draft.from ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  from: e.target.value || undefined,
-                }))
-              }
-              leftIcon={<Clock className="h-3.5 w-3.5" />}
-            />
-            <Input
-              label={t("audit.f_to")}
-              type="datetime-local"
-              value={draft.to ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, to: e.target.value || undefined }))
-              }
-              leftIcon={<Clock className="h-3.5 w-3.5" />}
-            />
-            <div className="sm:col-span-2 lg:col-span-3 flex items-center justify-end gap-2 pt-1">
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={onClearAll}
-                disabled={activeFilterEntries.length === 0}
-              >
-                {t("audit.reset")}
-              </Button>
-              <Button type="submit" size="sm" leftIcon={<Search className="h-3.5 w-3.5" />}>
-                {t("audit.apply")}
-              </Button>
-            </div>
-          </form>
-          </>
-        )}
-      </Card>
-      </div>
+            )}
+          </div>
+          <Input
+            label={t("audit.f_from")}
+            type="datetime-local"
+            value={draft.from ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({
+                ...d,
+                from: e.target.value || undefined,
+              }))
+            }
+            leftIcon={<Clock className="h-3.5 w-3.5" />}
+          />
+          <Input
+            label={t("audit.f_to")}
+            type="datetime-local"
+            value={draft.to ?? ""}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, to: e.target.value || undefined }))
+            }
+            leftIcon={<Clock className="h-3.5 w-3.5" />}
+          />
+
+          {/* Sticky footer keeps Reset / Apply reachable even when the
+              field stack overflows on shorter viewports. */}
+          <div className="sticky bottom-0 -mx-5 -mb-5 mt-2 flex items-center justify-end gap-2 border-t border-border-subtle bg-surface px-5 py-3">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={onClearAll}
+              disabled={activeFilterEntries.length === 0}
+            >
+              {t("audit.reset")}
+            </Button>
+            <Button type="submit" size="sm" leftIcon={<Search className="h-3.5 w-3.5" />}>
+              {t("audit.apply")}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       {isForbidden && (
         <Card padding="lg">
