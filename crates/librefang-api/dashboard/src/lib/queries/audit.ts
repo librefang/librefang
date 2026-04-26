@@ -1,9 +1,5 @@
-// Audit-trail queries.
-//
-// `useAuditQuery` wires the dashboard layer to the searchable `/api/audit/query`
-// endpoint that ships with M5 / #3203. Until that endpoint exists the daemon
-// returns 404; the AuditPage component renders a placeholder rather than
-// surfacing the failure. When M5 lands, only the placeholder swap is needed.
+// Audit-trail queries — wires the dashboard layer to the searchable
+// `/api/audit/query` endpoint shipped in M5.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { queryAudit, type AuditQueryFilters } from "../http/client";

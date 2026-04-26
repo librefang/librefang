@@ -3612,36 +3612,37 @@ export async function rotateUserKey(name: string): Promise<RotateUserKeyResponse
 }
 
 // ---------------------------------------------------------------------------
-// Audit query (M5 / #3203 — endpoint stubbed; the hook stays wired so the
-// dashboard layer is ready when the daemon ships the route).
+// Audit query (RBAC M5 / #3203). Shape mirrors `routes/audit.rs::audit_query`
+// — keep field names in lockstep, the server returns raw `serde_json::Value`
+// so a drift here is silently wrong wire-format on the page.
 // ---------------------------------------------------------------------------
 
 export interface AuditQueryFilters {
-  limit?: number;
-  offset?: number;
-  user?: string;
-  action?: string;
-  status?: string;
-  since?: string;
-  until?: string;
+  user?: string; // UUID or configured name
+  action?: string; // AuditAction variant name, case-insensitive
+  agent?: string;
+  channel?: string;
+  from?: string; // ISO-8601 lower bound (inclusive)
+  to?: string; // ISO-8601 upper bound (inclusive)
+  limit?: number; // default 200, hard cap 5000
 }
 
-// Distinct from `AuditEntry` (recent-tail / hash-chain shape) — the M5
-// `/api/audit/query` endpoint returns a flatter, search-friendly shape with
-// the user dimension promoted to a first-class field.
 export interface AuditQueryEntry {
+  seq: number;
   timestamp: string;
-  agent: string;
-  user?: string | null;
+  agent_id: string;
   action: string;
-  status: string;
-  details?: string | null;
+  detail: string;
+  outcome: string;
+  user_id: string | null;
+  channel: string | null;
+  hash: string;
 }
 
 export interface AuditQueryResponse {
   entries: AuditQueryEntry[];
-  total: number;
-  has_more: boolean;
+  count: number;
+  limit: number;
 }
 
 export async function queryAudit(

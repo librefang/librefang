@@ -114,7 +114,6 @@ async fn start_test_server_with_provider(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1608,9 +1607,6 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
         kernel.config_ref().api_key.clone(),
     ));
-    let user_api_keys_lock: std::sync::Arc<
-        tokio::sync::RwLock<Vec<middleware::ApiUserAuth>>,
-    > = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     let state = Arc::new(AppState {
         kernel,
@@ -1631,7 +1627,6 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1640,7 +1635,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: state.user_api_keys.clone(),
+        user_api_keys: Arc::new(Vec::new()),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
         // open-server path to keep them green.
@@ -2779,9 +2774,6 @@ async fn start_test_server_with_rbac_users(
     let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
         kernel.config_ref().api_key.clone(),
     ));
-    let user_api_keys_lock: std::sync::Arc<
-        tokio::sync::RwLock<Vec<middleware::ApiUserAuth>>,
-    > = std::sync::Arc::new(tokio::sync::RwLock::new(api_user_records));
 
     let audit_log = kernel.audit().clone();
 
@@ -2804,7 +2796,6 @@ async fn start_test_server_with_rbac_users(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -2813,7 +2804,7 @@ async fn start_test_server_with_rbac_users(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock,
+        user_api_keys: Arc::new(api_user_records),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
         // without a Bearer header and need them to flow through to the
@@ -3078,9 +3069,6 @@ async fn start_test_server_with_full_user_configs(
     let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
         kernel.config_ref().api_key.clone(),
     ));
-    let user_api_keys_lock: std::sync::Arc<
-        tokio::sync::RwLock<Vec<middleware::ApiUserAuth>>,
-    > = std::sync::Arc::new(tokio::sync::RwLock::new(api_user_records));
 
     let audit_log = kernel.audit().clone();
 
@@ -3103,7 +3091,6 @@ async fn start_test_server_with_full_user_configs(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -3112,7 +3099,7 @@ async fn start_test_server_with_full_user_configs(
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock,
+        user_api_keys: Arc::new(api_user_records),
         require_auth_for_reads: false,
         allow_no_auth: true,
         audit_log: Some(audit_log),
@@ -3122,11 +3109,6 @@ async fn start_test_server_with_full_user_configs(
         .nest("/api", routes::audit::router())
         .nest("/api", routes::budget::router())
         .nest("/api", routes::authz::router())
-        // Mounted so the owner-only gate on `/api/users/{name}/rotate-key`
-        // and other RBAC-M6 routes can be exercised end-to-end through
-        // the real auth middleware. Same router as `server.rs` mounts in
-        // production.
-        .nest("/api", routes::users::router())
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             middleware::auth,
@@ -3471,6 +3453,167 @@ async fn test_effective_permissions_distinguishes_none_from_empty() {
     );
     assert!(empty_body["tool_categories"].is_object());
     assert!(empty_body["memory_access"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_allow_for_permitted_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec![],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "allow");
+    assert_eq!(body["allowed"], true);
+    assert!(body["reason"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_deny_for_blocked_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec![],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "deny");
+    assert_eq!(body["allowed"], false);
+    assert!(body["reason"].as_str().unwrap_or("").contains("shell_exec"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_unknown_user_returns_404() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Nobody&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "unknown user must surface as 404 — silent guest fallback would mask config gaps"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_viewer_caller_rejected_403() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let viewer = UserConfig {
+        name: "Vince".to_string(),
+        role: "viewer".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (viewer, "vince-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer vince-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not query authz/check");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_rejects_anonymous() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/authz/check must be 401'd at the middleware (same as other admin endpoints)"
+    );
 }
 
 // ---------------------------------------------------------------------------

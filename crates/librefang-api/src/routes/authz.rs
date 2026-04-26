@@ -24,19 +24,23 @@
 use super::AppState;
 use crate::middleware::AuthenticatedApiUser;
 use crate::types::ApiErrorResponse;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
+use librefang_types::user_policy::UserToolGate;
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// Build admin-gated authz / effective-permissions routes.
 pub fn router() -> axum::Router<Arc<AppState>> {
-    axum::Router::new().route(
-        "/authz/effective/{user_id}",
-        axum::routing::get(effective_permissions),
-    )
+    axum::Router::new()
+        .route(
+            "/authz/effective/{user_id}",
+            axum::routing::get(effective_permissions),
+        )
+        .route("/authz/check", axum::routing::get(check))
 }
 
 /// Reject the request unless the caller is an authenticated `Admin`+.
@@ -127,4 +131,94 @@ pub async fn effective_permissions(
         ))
         .into_response(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckQuery {
+    /// User UUID or configured name. Required.
+    pub user: String,
+    /// Tool / action name to evaluate. Required.
+    pub action: String,
+    /// Optional channel context (e.g. `telegram`, `slack`, `api`). When
+    /// omitted the user's per-channel rules are skipped — same as a call
+    /// from a context that doesn't carry a channel.
+    pub channel: Option<String>,
+}
+
+/// GET /api/authz/check — admin-only single-decision permission query.
+///
+/// Answers "can user X invoke tool Y on channel Z right now?" by calling
+/// the same `AuthManager::resolve_user_tool_decision` the runtime gate
+/// path uses. **Production single source of truth** — this endpoint
+/// returns whatever the dispatcher would return, no parallel
+/// re-implementation that could drift.
+///
+/// Returns 404 when the user can't be matched, so external callers can
+/// distinguish "not registered" from "registered but denied". The
+/// runtime gate path treats unknown senders as guests; the diagnostic
+/// surface here surfaces the configuration gap explicitly.
+#[utoipa::path(
+    get,
+    path = "/api/authz/check",
+    tag = "system",
+    params(
+        ("user" = String, Query, description = "User UUID or configured name"),
+        ("action" = String, Query, description = "Tool / action name"),
+        ("channel" = Option<String>, Query, description = "Channel context (telegram, slack, api, ...)"),
+    ),
+    responses(
+        (status = 200, description = "Decision payload", body = serde_json::Value),
+        (status = 404, description = "Unknown user"),
+    )
+)]
+pub async fn check(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CheckQuery>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin(&state, api_user_ref) {
+        return deny;
+    }
+
+    let user_id: UserId = q
+        .user
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&q.user));
+
+    // Bail out 404 BEFORE asking the gate, so an unknown user isn't
+    // silently returned as the guest decision (which would mask a
+    // misconfigured channel binding from the operator).
+    let auth = state.kernel.auth_manager();
+    if auth.effective_permissions(user_id).is_none() {
+        return ApiErrorResponse::not_found(format!(
+            "no user matches '{}' (try a configured name or canonical UUID)",
+            q.user
+        ))
+        .into_response();
+    }
+
+    // We already have the canonical UserId — call the user-direct
+    // resolver instead of the sender/channel-keyed entry point. The
+    // latter requires a channel-bound sender lookup that the diagnostic
+    // surface doesn't have, and would silently fall back to the guest
+    // gate (returning `needs_approval`) for users whose policy actually
+    // hard-denies the action.
+    let gate = auth.resolve_decision_for_user(user_id, &q.action, q.channel.as_deref());
+
+    let (decision, allowed, reason) = match gate {
+        UserToolGate::Allow => ("allow", true, None),
+        UserToolGate::Deny { reason } => ("deny", false, Some(reason)),
+        UserToolGate::NeedsApproval { reason } => ("needs_approval", false, Some(reason)),
+    };
+
+    Json(serde_json::json!({
+        "user": q.user,
+        "action": q.action,
+        "channel": q.channel,
+        "decision": decision,
+        "allowed": allowed,
+        "reason": reason,
+    }))
+    .into_response()
 }
