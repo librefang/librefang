@@ -137,6 +137,71 @@ mod tests {
     }
 
     #[test]
+    fn channel_role_mapping_full_toml_roundtrip() {
+        // All three platforms populated.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+creator_role = "owner"
+member_role = "user"
+
+[channel_role_mapping.discord]
+role_map = { "Moderator" = "admin", "Member" = "user", "Guest" = "viewer" }
+
+[channel_role_mapping.slack]
+admin_role = "admin"
+member_role = "user"
+guest_role = "viewer"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).expect("toml parse");
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert_eq!(tg.creator_role.as_deref(), Some("owner"));
+        assert_eq!(tg.member_role.as_deref(), Some("user"));
+
+        let dc = cfg.channel_role_mapping.discord.as_ref().unwrap();
+        assert_eq!(dc.role_map.get("Moderator"), Some(&"admin".to_string()));
+        assert_eq!(dc.role_map.get("Guest"), Some(&"viewer".to_string()));
+
+        let sl = cfg.channel_role_mapping.slack.as_ref().unwrap();
+        assert_eq!(sl.admin_role.as_deref(), Some("admin"));
+        assert_eq!(sl.guest_role.as_deref(), Some("viewer"));
+        assert!(sl.owner_role.is_none()); // Not set in source.
+
+        // Round-trip back to TOML and reparse — survives serialization.
+        let serialized = toml::to_string(&cfg).expect("toml serialize");
+        let reparsed: KernelConfig = toml::from_str(&serialized).expect("toml reparse");
+        assert!(!reparsed.channel_role_mapping.is_empty());
+    }
+
+    #[test]
+    fn channel_role_mapping_partial_toml() {
+        // Only Telegram configured — other platforms fall through to None.
+        let toml_src = r#"
+[channel_role_mapping.telegram]
+admin_role = "admin"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src).unwrap();
+        let tg = cfg.channel_role_mapping.telegram.as_ref().unwrap();
+        assert_eq!(tg.admin_role.as_deref(), Some("admin"));
+        assert!(tg.creator_role.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+    }
+
+    #[test]
+    fn channel_role_mapping_empty_default() {
+        let cfg = KernelConfig::default();
+        assert!(cfg.channel_role_mapping.is_empty());
+        assert!(cfg.channel_role_mapping.telegram.is_none());
+        assert!(cfg.channel_role_mapping.discord.is_none());
+        assert!(cfg.channel_role_mapping.slack.is_none());
+        // Empty mapping serialises to empty TOML output (skip_serializing_if).
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("[channel_role_mapping"));
+    }
+
+    #[test]
     fn test_user_config_serde() {
         let uc = UserConfig {
             name: "Alice".to_string(),

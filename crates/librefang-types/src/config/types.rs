@@ -358,6 +358,90 @@ fn default_role() -> String {
     "user".to_string()
 }
 
+/// Maps platform-native group/server roles (Telegram admin, Discord guild role,
+/// Slack workspace owner, etc.) to LibreFang `UserRole` values.
+///
+/// Resolution order in `AuthManager::resolve_role_for_sender` is:
+/// 1. Explicit `UserConfig.role` for a registered user — wins outright.
+/// 2. Channel-derived role from this mapping — applied when the user is
+///    recognised on a platform but has no explicit `UserConfig` role.
+/// 3. Default-deny — fall through to `guest`.
+///
+/// All sub-tables are optional — a missing channel just means "no
+/// channel-derived role" for that platform. Each per-channel struct keeps
+/// platform-shaped fields rather than a single uniform schema because the
+/// underlying APIs disagree about role granularity (Telegram has 3 fixed
+/// statuses, Discord has named guild roles, Slack collapses to
+/// owner/admin/member/guest).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ChannelRoleMapping {
+    /// Telegram chat-status → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramRoleMapping>,
+    /// Discord guild-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordRoleMapping>,
+    /// Slack workspace-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackRoleMapping>,
+}
+
+impl ChannelRoleMapping {
+    /// Returns true when no platform mapping is configured.
+    pub fn is_empty(&self) -> bool {
+        self.telegram.is_none() && self.discord.is_none() && self.slack.is_none()
+    }
+}
+
+/// Telegram-side mapping. Telegram exposes three statuses for a member of a
+/// chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/
+/// `kicked` which we collapse into "no derived role").
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TelegramRoleMapping {
+    /// LibreFang role assigned when Telegram reports `status = "administrator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "creator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "member"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+}
+
+/// Discord-side mapping. The user can have any number of guild roles; the
+/// resolver walks `role_map` in declaration order and returns the first match
+/// (deployers should list higher-privilege roles first in `config.toml`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DiscordRoleMapping {
+    /// Discord role name → LibreFang role.
+    /// Use an `IndexMap`-friendly TOML inline table to preserve declaration
+    /// order on disk; iteration order at runtime is whatever `HashMap`
+    /// provides, but the resolver is order-stable per call.
+    pub role_map: HashMap<String, String>,
+}
+
+/// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
+/// `is_admin` / regular member / guest; we honour the precedence
+/// owner > admin > member > guest with each step being optional.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SlackRoleMapping {
+    /// LibreFang role for `is_owner = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_role: Option<String>,
+    /// LibreFang role for `is_admin = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role for regular workspace members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+    /// LibreFang role for single/multi-channel guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_role: Option<String>,
+}
+
 /// Web search provider selection.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
@@ -2146,6 +2230,12 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
+    /// Maps platform-native channel roles (Telegram admin, Discord guild
+    /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
+    /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
+    /// is consulted (explicit beats channel-derived; both beat default-deny).
+    #[serde(default, skip_serializing_if = "ChannelRoleMapping::is_empty")]
+    pub channel_role_mapping: ChannelRoleMapping,
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
@@ -4009,6 +4099,7 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
