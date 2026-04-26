@@ -186,6 +186,36 @@ impl AuthManager {
     pub fn list_users(&self) -> Vec<UserIdentity> {
         self.users.iter().map(|r| r.value().clone()).collect()
     }
+
+    /// Replace the entire user set + channel-binding index in place.
+    ///
+    /// Used by the hot-reload path when `[[users]]` changes in
+    /// `config.toml`. The two DashMaps are cleared then repopulated from
+    /// the new `UserConfig` list. Concurrent `identify` / `authorize`
+    /// callers may briefly observe an empty index between `clear()` and
+    /// the re-insert; this is acceptable because the alternative (locking
+    /// every read) costs more than the once-per-write gap, and the
+    /// dashboard write path already serializes itself behind
+    /// `config_write_lock`.
+    pub fn replace_users(&self, user_configs: &[UserConfig]) {
+        self.users.clear();
+        self.channel_index.clear();
+        for config in user_configs {
+            let user_id = UserId::from_name(&config.name);
+            let role = UserRole::from_str_role(&config.role);
+            let identity = UserIdentity {
+                id: user_id,
+                name: config.name.clone(),
+                role,
+            };
+            self.users.insert(user_id, identity);
+            for (channel_type, platform_id) in &config.channel_bindings {
+                let key = format!("{channel_type}:{platform_id}");
+                self.channel_index.insert(key, user_id);
+            }
+        }
+        info!(count = user_configs.len(), "Reloaded RBAC users");
+    }
 }
 
 #[cfg(test)]

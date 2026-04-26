@@ -9826,6 +9826,13 @@ system_prompt = "You are a helpful assistant."
                          restart required for the new filter to take effect"
                     ),
                 },
+                HotAction::ReloadUsers => {
+                    info!(
+                        "Hot-reload: rebuilding RBAC user index ({} entries)",
+                        new_config.users.len()
+                    );
+                    self.auth.replace_users(&new_config.users);
+                }
             }
         }
 

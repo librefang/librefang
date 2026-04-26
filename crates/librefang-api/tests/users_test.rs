@@ -1,0 +1,297 @@
+//! Integration tests for the RBAC user-management endpoints.
+//!
+//! These exercise the real `users` router against a freshly-booted kernel
+//! backed by a temp-dir `config.toml`, then walk through CRUD and the CSV-
+//! style bulk import preview/commit dance. We avoid the full router so the
+//! tests stay fast and don't need any LLM credentials.
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use axum::Router;
+use librefang_api::routes::{self, AppState};
+use librefang_kernel::LibreFangKernel;
+use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::sync::Arc;
+use std::time::Instant;
+use tower::ServiceExt;
+
+struct Harness {
+    app: Router,
+    _state: Arc<AppState>,
+    _tmp: tempfile::TempDir,
+}
+
+async fn boot() -> Harness {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    // Persist the seed config so persist_users round-trips through a real
+    // file on disk (mirrors how the daemon runs in production).
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let state = Arc::new(AppState {
+        kernel,
+        started_at: Instant::now(),
+        peer_registry: None,
+        bridge_manager: tokio::sync::Mutex::new(None),
+        channels_config: tokio::sync::RwLock::new(Default::default()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        skillhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-users-{}.json", uuid::Uuid::new_v4()),
+        )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let app = Router::new()
+        .nest("/api", routes::users::router())
+        .with_state(state.clone());
+
+    Harness {
+        app,
+        _state: state,
+        _tmp: tmp,
+    }
+}
+
+async fn json_request(
+    h: &Harness,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder().method(method).uri(path);
+    let body_bytes = match body {
+        Some(v) => {
+            builder = builder.header("content-type", "application/json");
+            serde_json::to_vec(&v).unwrap()
+        }
+        None => Vec::new(),
+    };
+    let req = builder.body(Body::from(body_bytes)).unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_list_starts_empty() {
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_create_then_get_then_delete_round_trips() {
+    let h = boot().await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({
+            "name": "Alice",
+            "role": "admin",
+            "channel_bindings": {"telegram": "111"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create: {body:?}");
+    assert_eq!(body["name"], "Alice");
+    assert_eq!(body["role"], "admin");
+    assert_eq!(body["channel_bindings"]["telegram"], "111");
+    assert_eq!(body["has_api_key"], false);
+
+    // GET single
+    let (status, body) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Alice");
+
+    // Reload picked it up — list should now contain Alice
+    let (status, body) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    // DELETE
+    let (status, _) = json_request(&h, Method::DELETE, "/api/users/Alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_create_rejects_invalid_role() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({"name": "Bob", "role": "wizard"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("invalid role"),
+        "got: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_create_rejects_duplicate() {
+    let h = boot().await;
+    let payload = serde_json::json!({"name": "Carol", "role": "user"});
+    let (status, _) = json_request(&h, Method::POST, "/api/users", Some(payload.clone())).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = json_request(&h, Method::POST, "/api/users", Some(payload)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "got: {body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_update_changes_role_and_bindings() {
+    let h = boot().await;
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({"name": "Dan", "role": "user"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Dan",
+        Some(serde_json::json!({
+            "name": "Dan",
+            "role": "viewer",
+            "channel_bindings": {"discord": "222"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update: {body:?}");
+    assert_eq!(body["role"], "viewer");
+    assert_eq!(body["channel_bindings"]["discord"], "222");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_update_unknown_returns_404() {
+    let h = boot().await;
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Ghost",
+        Some(serde_json::json!({"name": "Ghost", "role": "user"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_dry_run_reports_counts() {
+    let h = boot().await;
+    // Seed one user so we can confirm "updated" counting.
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({"name": "Eve", "role": "user"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({
+            "dry_run": true,
+            "rows": [
+                {"name": "Eve", "role": "admin"},
+                {"name": "Frank", "role": "user", "channel_bindings": {"slack": "U999"}},
+                {"name": "BadRole", "role": "wizard"},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["dry_run"], true);
+    assert_eq!(body["created"], 1);
+    assert_eq!(body["updated"], 1);
+    assert_eq!(body["failed"], 1);
+
+    // Dry run must not have written anything.
+    let (_, list) = json_request(&h, Method::GET, "/api/users", None).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_commit_persists_rows() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users/import",
+        Some(serde_json::json!({
+            "dry_run": false,
+            "rows": [
+                {"name": "Gina", "role": "admin", "channel_bindings": {"telegram": "11"}},
+                {"name": "Hank", "role": "user"},
+                {"name": "Bad", "role": "nope"},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["created"], 2);
+    assert_eq!(body["failed"], 1);
+
+    let (_, list) = json_request(&h, Method::GET, "/api/users", None).await;
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Gina"));
+    assert!(names.contains(&"Hank"));
+}

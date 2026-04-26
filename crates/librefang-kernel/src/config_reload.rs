@@ -60,6 +60,10 @@ pub enum HotAction {
     /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
     /// since the kernel doesn't keep the parsed filter around.
     ReloadLogLevel(String),
+    /// `[[users]]` (RBAC) changed — rebuild the AuthManager channel index
+    /// in place so identity resolution and the dashboard view both pick up
+    /// the new set immediately.
+    ReloadUsers,
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +341,14 @@ pub fn build_reload_plan_with_caps(
         plan.noop_changes.push(
             "sanitize config changed (effective on next message via config swap)".to_string(),
         );
+    }
+
+    // Users (RBAC). The `users` array drives the `AuthManager` channel
+    // index. We rebuild the index in place via `HotAction::ReloadUsers`,
+    // so dashboard CRUD takes effect immediately for both `config_ref()`
+    // reads and identity-resolution at chat time.
+    if field_changed(&old.users, &new.users) {
+        plan.hot_actions.push(HotAction::ReloadUsers);
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {

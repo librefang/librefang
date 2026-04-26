@@ -51,6 +51,7 @@ type Client struct {
 	Skills *SkillsResource
 	System *SystemResource
 	Tools *ToolsResource
+	Users *UsersResource
 	Webhooks *WebhooksResource
 	Workflows *WorkflowsResource
 }
@@ -82,6 +83,7 @@ func New(baseURL string) *Client {
 		c.Skills = &SkillsResource{client: c}
 		c.System = &SystemResource{client: c}
 		c.Tools = &ToolsResource{client: c}
+		c.Users = &UsersResource{client: c}
 		c.Webhooks = &WebhooksResource{client: c}
 		c.Workflows = &WorkflowsResource{client: c}
 	return c
@@ -1190,6 +1192,34 @@ type ToolsResource struct{ client *Client }
 
 func (r *ToolsResource) InvokeTool(name string, data map[string]interface{}, query map[string]string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/tools/%s/invoke", name), data, query)
+}
+
+// ── Users Resource
+
+type UsersResource struct{ client *Client }
+
+func (r *UsersResource) ListUsers() (interface{}, error) {
+	return r.client.request("GET", "/api/users", nil, nil)
+}
+
+func (r *UsersResource) CreateUser(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/users", data, nil)
+}
+
+func (r *UsersResource) ImportUsers(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/users/import", data, nil)
+}
+
+func (r *UsersResource) GetUser(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s", name), nil, nil)
+}
+
+func (r *UsersResource) UpdateUser(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/users/%s", name), data, nil)
+}
+
+func (r *UsersResource) DeleteUser(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/users/%s", name), nil, nil)
 }
 
 // ── Webhooks Resource

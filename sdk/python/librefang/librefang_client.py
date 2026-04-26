@@ -59,6 +59,7 @@ class LibreFang:
         self.skills = _SkillsResource(self)
         self.system = _SystemResource(self)
         self.tools = _ToolsResource(self)
+        self.users = _UsersResource(self)
         self.webhooks = _WebhooksResource(self)
         self.workflows = _WorkflowsResource(self)
 
@@ -870,6 +871,29 @@ class _ToolsResource(_Resource):
 
     def invoke_tool(self, name: str, agent_id: Any = None, **data):
         return self._c._request("POST", f"/api/tools/{name}/invoke", data, query={"agent_id": agent_id})
+
+
+# ── Users Resource ─────────────────────────────────────────────
+
+class _UsersResource(_Resource):
+
+    def list_users(self):
+        return self._c._request("GET", "/api/users")
+
+    def create_user(self, **data):
+        return self._c._request("POST", "/api/users", data)
+
+    def import_users(self, **data):
+        return self._c._request("POST", "/api/users/import", data)
+
+    def get_user(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}")
+
+    def update_user(self, name: str, **data):
+        return self._c._request("PUT", f"/api/users/{name}", data)
+
+    def delete_user(self, name: str):
+        return self._c._request("DELETE", f"/api/users/{name}")
 
 
 # ── Webhooks Resource ──────────────────────────────────────────
