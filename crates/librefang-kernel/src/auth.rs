@@ -109,14 +109,11 @@ pub struct AuthManager {
     users: DashMap<UserId, UserIdentity>,
     /// Channel binding index: "channel_type:platform_id" → UserId.
     channel_index: DashMap<String, UserId>,
-    /// Sender-id index: any platform-id string in any channel binding maps
-    /// to the owning UserId. Used by the runtime tool dispatcher to
-    /// resolve a `sender_id` (which doesn't carry a channel prefix) to a
-    /// known user. First write wins on collision.
-    sender_index: DashMap<String, UserId>,
     /// Tool groups (categories) referenced by per-user policies. Cloned
     /// from `KernelConfig.tool_policy.groups` at construction.
-    tool_groups: Vec<ToolGroup>,
+    /// Wrapped in RwLock so config_reload can swap the cached groups
+    /// without rebuilding the entire AuthManager.
+    tool_groups: std::sync::RwLock<Vec<ToolGroup>>,
 }
 
 impl AuthManager {
@@ -135,10 +132,13 @@ impl AuthManager {
         let manager = Self {
             users: DashMap::new(),
             channel_index: DashMap::new(),
-            sender_index: DashMap::new(),
-            tool_groups: tool_groups.to_vec(),
+            tool_groups: std::sync::RwLock::new(tool_groups.to_vec()),
         };
+        manager.populate(user_configs);
+        manager
+    }
 
+    fn populate(&self, user_configs: &[UserConfig]) {
         for config in user_configs {
             let user_id = UserId::from_name(&config.name);
             let role = UserRole::from_str_role(&config.role);
@@ -160,19 +160,18 @@ impl AuthManager {
                 policy,
             };
 
-            manager.users.insert(user_id, identity);
+            self.users.insert(user_id, identity);
 
-            // Index channel bindings
+            // Index channel bindings. Only the explicit (channel_type,
+            // platform_id) tuple is registered — there is **no** bare
+            // `platform_id` fallback. RBAC M3 (#3054) closes the cross-
+            // channel attribution leak where two users sharing the same
+            // platform-id on different channels would alias to whichever
+            // was registered first, with the worst case granting Owner
+            // rights to an unrelated inbound on a third channel.
             for (channel_type, platform_id) in &config.channel_bindings {
                 let key = format!("{channel_type}:{platform_id}");
-                manager.channel_index.insert(key, user_id);
-                // Also expose the bare platform id as a sender-id alias
-                // so the runtime can resolve users when a `sender_id`
-                // arrives without a channel-type prefix.
-                manager
-                    .sender_index
-                    .entry(platform_id.clone())
-                    .or_insert(user_id);
+                self.channel_index.insert(key, user_id);
             }
 
             info!(
@@ -182,8 +181,30 @@ impl AuthManager {
                 "Registered user"
             );
         }
+    }
 
-        manager
+    /// Replace the in-memory user/channel indexes from a fresh
+    /// `KernelConfig`. Used by the config hot-reload path
+    /// (`HotAction::ReloadAuth`) so policy edits to `[[users]]`,
+    /// `[users.tool_policy]`, and `[tool_policy.groups]` take effect
+    /// without a daemon restart.
+    ///
+    /// This is intentionally a "stop-the-world" replace inside the
+    /// `config_reload_lock` write guard — concurrent `identify`/
+    /// `resolve_user_tool_decision` calls will observe a clean snapshot
+    /// either before or after the swap, never a torn one.
+    pub fn reload(&self, user_configs: &[UserConfig], tool_groups: &[ToolGroup]) {
+        self.users.clear();
+        self.channel_index.clear();
+        if let Ok(mut guard) = self.tool_groups.write() {
+            *guard = tool_groups.to_vec();
+        }
+        self.populate(user_configs);
+        info!(
+            users = self.users.len(),
+            tool_groups = tool_groups.len(),
+            "AuthManager reloaded from config"
+        );
     }
 
     /// Identify a user from a channel identity.
@@ -237,30 +258,29 @@ impl AuthManager {
 
     /// Resolve a `sender_id` and `channel` pair to a known user, if any.
     ///
-    /// Resolution order:
-    /// 1. Channel bindings (`channel:sender_id` exact key)
-    /// 2. Sender-only fallback (any user whose channel_bindings contain
-    ///    this platform_id verbatim)
+    /// Requires an explicit `(channel, sender_id)` tuple. The bare-`sender_id`
+    /// fallback was removed in RBAC M3 (#3054) because it silently aliased
+    /// users that share a platform-id on different channels — first writer
+    /// won the attribution and any inbound from that platform-id on a
+    /// third unbound channel inherited the first user's role. Callers
+    /// that don't know the channel must either supply one or accept that
+    /// the user is unrecognised.
     pub fn resolve_user(&self, sender_id: Option<&str>, channel: Option<&str>) -> Option<UserId> {
-        if let (Some(ch), Some(sid)) = (channel, sender_id) {
-            let key = format!("{ch}:{sid}");
-            if let Some(uid) = self.channel_index.get(&key) {
-                return Some(*uid);
-            }
-        }
-        if let Some(sid) = sender_id {
-            if let Some(uid) = self.sender_index.get(sid) {
-                return Some(*uid);
-            }
-        }
-        None
+        let (Some(ch), Some(sid)) = (channel, sender_id) else {
+            return None;
+        };
+        let key = format!("{ch}:{sid}");
+        self.channel_index.get(&key).map(|r| *r.value())
     }
 
-    /// Reference to the kernel's tool groups (used for per-user category
-    /// evaluation). Borrows the cached `Vec`; not cheap to keep across
-    /// awaits — clone if needed.
-    pub fn tool_groups(&self) -> &[ToolGroup] {
-        &self.tool_groups
+    /// A snapshot clone of the kernel's tool groups (used for per-user
+    /// category evaluation). Behind a `RwLock` so config reload can swap
+    /// the cached vec — clone the slice instead of holding the guard.
+    pub fn tool_groups(&self) -> Vec<ToolGroup> {
+        self.tool_groups
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Get the resolved per-user RBAC policy for a user, if registered.
@@ -286,11 +306,21 @@ impl AuthManager {
     /// See [`KernelHandle::resolve_user_tool_decision`] for the contract.
     /// This is the kernel-side implementation; the trait method is a
     /// thin wrapper that calls into here.
+    ///
+    /// `system_call=true` opts the call out of RBAC entirely. ONLY use
+    /// this for kernel-internal call sites where there is no end-user
+    /// causally responsible for the invocation — cron fires, fork turns,
+    /// internal event triggers, etc. Channel messages and direct user
+    /// invocations MUST always pass `false` so an unrecognised sender
+    /// fails closed (RBAC M3, #3054). The flag exists so every escape
+    /// hatch is visible at compile time / grep — no implicit fail-open
+    /// based on `sender_id.is_none()` like the previous implementation.
     pub fn resolve_user_tool_decision(
         &self,
         tool_name: &str,
         sender_id: Option<&str>,
         channel: Option<&str>,
+        system_call: bool,
     ) -> UserToolGate {
         // No registered users → guest mode (default-allow with minimal
         // perms — design decision #2). The runtime keeps its existing
@@ -299,27 +329,30 @@ impl AuthManager {
             return UserToolGate::Allow;
         }
 
+        // Explicit system-internal invocations bypass RBAC. The set of
+        // call sites that may set this flag is curated in the kernel
+        // (see `kernel::is_system_call_context`).
+        if system_call {
+            return UserToolGate::Allow;
+        }
+
         let Some(user_id) = self.resolve_user(sender_id, channel) else {
-            // RBAC is enabled but the sender isn't recognised. Treat as
-            // guest: hard-deny for tools that require a higher role,
-            // pass-through otherwise. The role used here is `Viewer`
-            // (the most restrictive) — this matches the principle of
-            // least surprise without breaking system-internal calls
-            // where sender_id is `None`.
-            if sender_id.is_none() {
-                return UserToolGate::Allow;
-            }
+            // RBAC is enabled but the sender isn't recognised. Default-deny
+            // for tools that don't appear on the read-only safe list, route
+            // everything else through an admin approval. We no longer
+            // fall-OPEN when `sender_id.is_none()` — design decision #2 is
+            // default-deny, and an internal call without a sender ID must
+            // be marked `system_call=true` explicitly.
             return guest_gate(tool_name);
         };
 
+        let groups = self.tool_groups();
         let Some(identity) = self.get_user(user_id) else {
             return UserToolGate::Allow;
         };
 
         // Layer A — apply the user's own policy.
-        let user_decision = identity
-            .policy
-            .evaluate(tool_name, channel, &self.tool_groups);
+        let user_decision = identity.policy.evaluate(tool_name, channel, &groups);
 
         match user_decision {
             UserToolDecision::Allow => UserToolGate::Allow,
@@ -620,7 +653,8 @@ mod tests {
             HashMap::new(),
         );
         let mgr = AuthManager::with_tool_groups(&[bob], &[]);
-        let gate = mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+        let gate =
+            mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
         match gate {
             UserToolGate::Deny { reason } => assert!(reason.contains("Bob")),
             other => panic!("expected Deny, got {other:?}"),
@@ -634,7 +668,8 @@ mod tests {
         // NeedsApproval.
         let bob = user_with_policy("Bob", "user", "111", None, None, None, HashMap::new());
         let mgr = AuthManager::with_tool_groups(&[bob], &[]);
-        let gate = mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+        let gate =
+            mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
         assert!(matches!(gate, UserToolGate::NeedsApproval { .. }));
     }
 
@@ -642,7 +677,8 @@ mod tests {
     fn rbac_m3_admin_role_passes_through_unconfigured() {
         let admin = user_with_policy("Admin", "admin", "999", None, None, None, HashMap::new());
         let mgr = AuthManager::with_tool_groups(&[admin], &[]);
-        let gate = mgr.resolve_user_tool_decision("shell_exec", Some("999"), Some("telegram"));
+        let gate =
+            mgr.resolve_user_tool_decision("shell_exec", Some("999"), Some("telegram"), false);
         assert_eq!(gate, UserToolGate::Allow);
     }
 
@@ -656,15 +692,23 @@ mod tests {
                 denied_tools: vec!["shell_exec".into()],
             },
         );
-        let bob = user_with_policy("Bob", "admin", "111", None, None, None, rules);
+        // RBAC M3 #3054 H6: bind Bob on BOTH telegram and discord so the
+        // discord case can be attributed to Bob without the (now-removed)
+        // bare-platform-id fallback. Without explicit bindings, an
+        // unbound channel correctly fails closed via the guest gate.
+        let mut bob = user_with_policy("Bob", "admin", "111", None, None, None, rules);
+        bob.channel_bindings
+            .insert("discord".to_string(), "111".to_string());
         let mgr = AuthManager::with_tool_groups(&[bob], &[]);
 
         // From telegram → channel rule denies even though admin role would.
-        let from_tg = mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+        let from_tg =
+            mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
         assert!(matches!(from_tg, UserToolGate::Deny { .. }));
 
         // From a different channel → no rule, admin role allows.
-        let from_dc = mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("discord"));
+        let from_dc =
+            mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("discord"), false);
         assert_eq!(from_dc, UserToolGate::Allow);
     }
 
@@ -687,10 +731,11 @@ mod tests {
             HashMap::new(),
         );
         let mgr = AuthManager::with_tool_groups(&[bob], &groups);
-        let gate = mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"));
+        let gate =
+            mgr.resolve_user_tool_decision("shell_exec", Some("111"), Some("telegram"), false);
         assert!(matches!(gate, UserToolGate::Deny { .. }));
         // Tool outside the denied group is fine.
-        let ok = mgr.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));
+        let ok = mgr.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"), false);
         assert_eq!(ok, UserToolGate::Allow);
     }
 
@@ -708,11 +753,88 @@ mod tests {
             )],
             &[],
         );
-        let safe = mgr.resolve_user_tool_decision("file_read", Some("guest42"), Some("telegram"));
+        let safe =
+            mgr.resolve_user_tool_decision("file_read", Some("guest42"), Some("telegram"), false);
         assert_eq!(safe, UserToolGate::Allow);
         let unsafe_ =
-            mgr.resolve_user_tool_decision("shell_exec", Some("guest42"), Some("telegram"));
+            mgr.resolve_user_tool_decision("shell_exec", Some("guest42"), Some("telegram"), false);
         assert!(matches!(unsafe_, UserToolGate::NeedsApproval { .. }));
+    }
+
+    /// H6 regression: two users sharing the same platform-id on
+    /// different channels MUST NOT alias on a third unbound channel.
+    /// The bare-`platform_id` index that previously did first-write-wins
+    /// was removed; resolution now requires an explicit (channel, sid)
+    /// tuple, so the third channel returns `None` (guest gate kicks in)
+    /// rather than silently inheriting the first user's role.
+    #[test]
+    fn rbac_m3_platform_id_collision_no_longer_aliases_across_channels() {
+        let alice = user_with_policy("Alice", "owner", "shared", None, None, None, HashMap::new());
+        // Bob also uses platform-id "shared", but on Discord.
+        let mut bob = user_with_policy("Bob", "user", "shared", None, None, None, HashMap::new());
+        bob.channel_bindings.clear();
+        bob.channel_bindings
+            .insert("discord".to_string(), "shared".to_string());
+
+        let mgr = AuthManager::with_tool_groups(&[alice, bob], &[]);
+
+        // Alice on telegram → owner.
+        assert_eq!(
+            mgr.identify("telegram", "shared"),
+            Some(UserId::from_name("Alice"))
+        );
+        // Bob on discord → user.
+        assert_eq!(
+            mgr.identify("discord", "shared"),
+            Some(UserId::from_name("Bob"))
+        );
+
+        // Inbound on a THIRD channel (e.g. slack) carrying platform-id
+        // "shared" must NOT silently attribute to whichever user was
+        // registered first — must return None so the guest gate handles it.
+        assert_eq!(
+            mgr.resolve_user(Some("shared"), Some("slack")),
+            None,
+            "platform-id from a third channel must not alias to a registered user"
+        );
+
+        // shell_exec from that unattributed sender must therefore go
+        // through the guest gate (NeedsApproval), not silently get
+        // Alice's owner role.
+        let gate =
+            mgr.resolve_user_tool_decision("shell_exec", Some("shared"), Some("slack"), false);
+        assert!(
+            matches!(gate, UserToolGate::NeedsApproval { .. }),
+            "third-channel inbound must NOT inherit Alice's role, got {gate:?}"
+        );
+    }
+
+    /// H7 regression: when `sender_id` is `None` and `system_call=false`,
+    /// the kernel must NOT silently fail-OPEN. Previously, the
+    /// `sender_id.is_none()` branch returned `UserToolGate::Allow`,
+    /// bypassing RBAC for any internal call that forgot to mark itself.
+    /// Now the guest gate applies, and a tool that isn't on the read-
+    /// only allowlist gets escalated to approval. The explicit
+    /// `system_call=true` opt-out still works for cron / forks.
+    #[test]
+    fn rbac_m3_sender_none_no_system_flag_does_not_fail_open() {
+        let alice = user_with_policy("Alice", "owner", "1", None, None, None, HashMap::new());
+        let mgr = AuthManager::with_tool_groups(&[alice], &[]);
+
+        // sender_id=None + system_call=false → guest gate (default-deny).
+        let gate = mgr.resolve_user_tool_decision("shell_exec", None, None, false);
+        assert!(
+            matches!(gate, UserToolGate::NeedsApproval { .. }),
+            "no sender + no system flag must NOT silently allow shell_exec, got {gate:?}"
+        );
+
+        // Read-only safe tool is still permitted via the guest gate.
+        let safe = mgr.resolve_user_tool_decision("file_read", None, None, false);
+        assert_eq!(safe, UserToolGate::Allow);
+
+        // system_call=true preserves the legacy escape hatch for cron / forks.
+        let cron = mgr.resolve_user_tool_decision("shell_exec", None, None, true);
+        assert_eq!(cron, UserToolGate::Allow);
     }
 
     #[test]
@@ -721,7 +843,7 @@ mod tests {
         // No registered users → guest mode (default-allow with minimal
         // perms). Existing approval gates take over.
         assert_eq!(
-            mgr.resolve_user_tool_decision("shell_exec", Some("anyone"), Some("telegram")),
+            mgr.resolve_user_tool_decision("shell_exec", Some("anyone"), Some("telegram"), false),
             UserToolGate::Allow
         );
     }

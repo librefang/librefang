@@ -5,22 +5,36 @@
 //! taint labels in [`crate::taint`]. They do NOT replace those — a tool
 //! call has to clear every layer (fail-closed AND).
 //!
-//! ## Resolution order (`UserToolPolicy::evaluate`)
+//! ## Resolution order (`ResolvedUserPolicy::evaluate`)
 //!
-//! For a given `tool_name`, after the per-agent `ToolPolicy` and the
-//! existing `ApprovalPolicy::channel_rules` have already returned an
-//! intermediate decision, the per-user policy is consulted in this order:
+//! After the per-agent `ToolPolicy` and the existing
+//! `ApprovalPolicy::channel_rules` have been consulted, the per-user
+//! policy runs three layers in this fixed order. Within each layer
+//! `denied_*` always wins over `allowed_*`. The first layer to produce
+//! `Allow`/`Deny` short-circuits — subsequent layers are not consulted.
 //!
-//! 1. `denied_tools` glob match → `Deny`
-//! 2. `allowed_tools` glob match (when non-empty) → `Allow`
-//! 3. `channel_tool_rules[channel]` (`ChannelToolPolicy`) → `Deny`/`Allow`
-//! 4. `tool_categories.denied_groups` (matched against `ToolGroup::tools`)
-//!    → `Deny`
-//! 5. `tool_categories.allowed_groups` (when non-empty) → `Allow`
-//! 6. Otherwise → `NeedsRoleEscalation`. The kernel translates that into
-//!    an [`crate::approval::ApprovalRequest`] when an admin role would
-//!    have allowed the call, or into a hard `Deny` when no role escalation
-//!    is possible.
+//! 1. **`tool_policy`** (`UserToolPolicy`) — flat per-user allow/deny
+//!    lists.
+//!    1a. `denied_tools` glob match → `Deny`
+//!    1b. `allowed_tools` non-empty + glob match → `Allow`
+//!    1c. otherwise → fall through to the next layer
+//! 2. **`channel_tool_rules[channel]`** (`ChannelToolPolicy`) — only when
+//!    the call carries a `Some(channel)`. `denied_tools` → `Deny`;
+//!    `allowed_tools` non-empty + glob match → `Allow`.
+//! 3. **`tool_categories`** (`UserToolCategories`) — bulk allow/deny by
+//!    `ToolGroup` name. `denied_groups` whose tools list matches → `Deny`;
+//!    `allowed_groups` non-empty + match → `Allow`; allow-list configured
+//!    but no match → `Deny`.
+//!
+//! If every layer abstains the result is [`UserToolDecision::NeedsRoleEscalation`].
+//! The kernel translates that into an
+//! [`crate::approval::ApprovalRequest`] when an admin role would have
+//! allowed the call, or into a hard `Deny` when no role escalation is
+//! possible.
+//!
+//! This precedence is the canonical contract. Earlier drafts reversed
+//! the order — the implementation in [`ResolvedUserPolicy::evaluate`]
+//! and the `evaluate_layering_*` tests are authoritative.
 //!
 //! Resolution is purely functional and side-effect free. The kernel owns
 //! the cache (`AuthManager`) so we don't need a per-call hashmap here.
@@ -264,6 +278,16 @@ impl UserMemoryAccess {
     /// Returns true when no fields have been customised — i.e. the
     /// struct was just default-constructed during config load. The
     /// kernel uses this to fall back to the role-default ACL.
+    ///
+    /// Note: this is intentionally an all-or-nothing sentinel. If an
+    /// admin sets `pii_access = true` but leaves the namespace lists
+    /// empty, the struct is treated as **configured** (i.e. role
+    /// default is NOT applied). That's the correct semantics — the
+    /// admin has expressed intent ("this user may see PII") even if
+    /// only one field is non-default — but it can surprise. Callers
+    /// expecting "fall back to role default unless namespaces are
+    /// declared" should check `readable_namespaces.is_empty()`
+    /// directly instead.
     pub fn is_unconfigured(&self) -> bool {
         self.readable_namespaces.is_empty()
             && self.writable_namespaces.is_empty()
@@ -524,6 +548,32 @@ mod tests {
         assert_eq!(
             policy.evaluate("anything", None, &[]),
             UserToolDecision::NeedsRoleEscalation
+        );
+    }
+
+    /// Precedence regression (PR #3205 review feedback): when the user-level
+    /// `denied_tools` and the channel-level `allowed_tools` both name the
+    /// same tool, the user-level deny MUST win because layer 1
+    /// (`tool_policy`) is consulted before layer 2 (`channel_tool_rules`)
+    /// — see the module docstring. Earlier drafts had the precedence
+    /// reversed; this test pins the canonical contract so a later refactor
+    /// can't silently flip it.
+    #[test]
+    fn evaluate_user_deny_beats_channel_allow_for_same_tool() {
+        let mut policy = ResolvedUserPolicy::default();
+        policy.tool_policy.denied_tools = vec!["foo".into()];
+        policy.channel_tool_rules.insert(
+            "telegram".into(),
+            ChannelToolPolicy {
+                allowed_tools: vec!["foo".into()],
+                denied_tools: vec![],
+            },
+        );
+        // Layer 1's deny short-circuits — the channel allow never gets a vote.
+        assert_eq!(
+            policy.evaluate("foo", Some("telegram"), &[]),
+            UserToolDecision::Deny,
+            "layer 1 (user.denied_tools) must win over layer 2 (channel.allowed_tools)"
         );
     }
 
