@@ -321,6 +321,41 @@ library = { path = "shared/library", mode = "r" }   # 只读
 
 **访问模式**：`rw`（读写，默认）或 `r`（只读）。路径相对于 `workspaces_dir`，不能是绝对路径或包含 `..`。
 
+### 实时上下文（`context.md`）
+
+如果 agent workspace 里有 `context.md` 文件，**每个 agent 回合都会重新读取**，并以 `## Live Context` section 注入 system prompt。这让外部工具（cron 任务、脚本、dashboard）能把新数据 — 行情、项目状态、值班表 — 推给 agent，无需重启。
+
+**路径解析**：优先 `{workspace}/.identity/context.md`；为兼容未迁移的 workspace，回退到 `{workspace}/context.md`。
+
+**行为：**
+- 每回合读一次，prompt 组装前。
+- 读取上限 32 KB；超大文件截断并打 warn。
+- 之前能读到、现在突然失败（比如外部进程在替换文件）时，使用上次缓存的内容，避免对话中途丢失上下文。
+- 文件不存在时不添加 `## Live Context` section。
+
+**关闭实时重读**：`agent.toml` 里设 `cache_context = true` 恢复 2026 年 4 月前的行为 — `context.md` 在 session 启动时读一次并缓存到 session 结束。
+
+```toml
+# agent.toml
+cache_context = true   # 默认 false（每回合重读）
+```
+
+### 懒加载 tool（`tool_search` / `tool_load`）
+
+默认 agent 回答 "hi" 之前要把每个内置 tool 的 JSON schema 都发出去 —— ~75 个 tool × ~90 token ≈ 6,000 token 每回合白送。懒加载把它砍到大多数回合实际会用的 ~19 个 tool，长尾用两个 meta-tool 按需取：
+
+- **`tool_search(query)`** — 在 catalog（名 + 描述 + 提示）做关键字匹配。返回匹配的 tool 和它们的一行提示。
+- **`tool_load(name)`** — 取某个 tool 的完整 schema。该 tool 从下一回合开始可调（schema 被加入到之后的请求里）。
+
+完整 catalog 仍以"每行一个 tool 的提示"列表渲染进 system prompt，模型知道有哪些 tool 而不必为完整 schema 付费。**runtime 分类为 "always native" 的 tool**（file_read、shell_exec、cron tools 等）每回合都带完整 schema —— 没必要让模型 `tool_load` 它几乎肯定会用的东西。
+
+如果某个模型对 `tool_search` 链不擅长，按 agent 关掉：
+
+```toml
+# agent.toml —— 关闭懒加载；每回合发送所有 tool schema
+lazy_tools = false
+```
+
 ---
 
 ## 理解 Temperature
@@ -440,3 +475,85 @@ api_key_env = "GROQ_API_KEY"         # 保存 API 密钥的环境变量
 ```
 
 任何未显式指定 model 的 Agent，生成时都会使用这份默认配置。
+
+---
+
+## Agent Manifest 字段参考
+
+`agent.toml` 接受不少在标准 quick-start 模板里看不到的顶层字段。把完整集列出来,知道字段名时就能找到。除非标"必填",否则全部可选。
+
+### 工具 / skill 范围
+
+```toml
+tool_allowlist = ["web_search", "web_fetch", "file_read", "file_write"]
+tool_blocklist = ["shell_exec"]
+tools_disabled = false             # 显式总开关 —— 比所有别的设置优先
+allowed_plugins = ["truncate", "redact"]   # 插件名;空 = 所有可用插件
+mcp_servers    = ["github", "linear"]     # MCP server 名;空 = 所有已连接 server
+skills_disabled = false            # skill 的显式总开关
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `tool_allowlist` | `Vec<string>` | `[]`(= 所有工具) | 此 agent 能调的工具白名单。空列表 = 不限制。 |
+| `tool_blocklist` | `Vec<string>` | `[]` | 此 agent **不能**调的工具。在 `tool_allowlist` **之后**应用 —— 同时在两个列表里的会被禁。 |
+| `tools_disabled` | bool | `false` | 总开关 —— `true` 时无视 allowlist / profile,agent 没有任何工具。 |
+| `allowed_plugins` | `Vec<string>` | `[]`(= 所有插件) | 此 agent 的插件白名单。 |
+| `mcp_servers` | `Vec<string>` | `[]`(= 所有 server) | MCP server 白名单。某 corp server 有危险工具,只想给少数 agent 用时实用。 |
+| `skills_disabled` | bool | `false` | skill 总开关。 |
+
+### 身份 & spawn 行为
+
+```toml
+generate_identity_files = true     # 首次 spawn 时创建 SOUL.md / IDENTITY.md / TOOLS.md
+inherit_parent_context  = true     # 子 agent 默认继承父 agent context
+auto_evolve             = true     # 每轮后台跑 skill-evolution review
+is_hand                 = false    # 由 Hand spawn 时自动置位
+pinned_model            = "anthropic/claude-sonnet-4"   # Stable kernel 模式下锁定模型
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `generate_identity_files` | bool | `true` | 首次 spawn 时在 `.identity/` 创建 `SOUL.md` / `IDENTITY.md` / `TOOLS.md` / `USER.md`。临时 agent 不需要进化身份时设 `false`。 |
+| `inherit_parent_context` | bool | `true` | 此 agent 作为 workflow 子 agent 跑时,继承父 agent 的会话上下文。`false` 给一个干净的上下文窗。 |
+| `auto_evolve` | bool | `true` | 每轮 agent 之后跑后台 skill-evolution review(找重复模式提议新 skill)。禁掉就让 skill 库冻结。 |
+| `is_hand` | bool | `false` | Hand spawn 此 agent 时自动填。不要手动设。 |
+| `pinned_model` | `Option<string>` | `None` | kernel 在 **Stable** 模式时,无视全局默认用此模型。Normal 模式无效。 |
+
+### Channel & exec policy 覆盖(per-agent)
+
+```toml
+[channel_overrides]
+dm_policy = "always"
+group_policy = "trigger_only"
+group_trigger_patterns = ["(?i)\\bmy-bot\\b"]
+
+[exec_policy]
+shell_allowlist = ["git", "cargo"]
+deny = ["rm -rf"]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `[channel_overrides]` | `Option<ChannelOverrides>` | `None`(继承 channel 级) | per-agent 的 `dm_policy` / `group_policy` / `model` / `system_prompt` 等覆盖。解析顺序:agent 级 → channel 级 → 内置默认。完整 schema 见 [Channels](/zh/integrations/channels#channel-overrides)。 |
+| `[exec_policy]` | `Option<ExecPolicy>` | `None`(继承 kernel 默认) | per-agent shell / exec policy 覆盖。可以是字符串简写(`"strict"` / `"trusted"`)或带 `shell_allowlist` / `deny` / `cwd_allowlist` 的完整表。 |
+
+### 响应整形与增强
+
+```toml
+show_progress = true
+response_format = "json_object"   # 或 { type = "json_schema", schema = "..." }
+web_search_augmentation = "auto"  # "off" | "auto" | "always"
+
+[[context_injection]]
+name = "rules"
+content = "保持简洁。永远不用 emoji。"
+position = "system"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `show_progress` | bool | `true` | 在 channel 回复里显示工具执行进度(如"🔧 running shell_exec…")。生产/面向客户的 agent 关掉。 |
+| `response_format` | `Option<ResponseFormat>` | `None` | 约束 LLM 输出。选项:`"text"`、`"json_object"`、或 `{ type = "json_schema", schema = … }`。Provider 必须支持结构化输出(OpenAI / Gemini / Mistral)。 |
+| `web_search_augmentation` | enum | provider 默认 | 模型本身没工具支持时,自动把 web 搜索结果注入 prompt。`"off"` / `"auto"` / `"always"`。 |
+| `[[context_injection]]` | `Vec<ContextInjection>` | `[]` | 每次会话开始合并进 prompt 的静态片段。每条有 `name`、`content`、`position`(`system` / `before_user` / `after_reset`)、可选 `condition` 表达式。 |

@@ -34,6 +34,28 @@ librefang doctor
 - 端口可用性
 - 工具依赖项（Python、signal-cli 等）
 
+#### 审计检查（Audit checks）
+
+`librefang doctor` 还会跑一组注册的 `AuditCheck` — 针对实际中最常见误配置的有主见 lint。每个检查返回 `pass` / `warn` / `fail` 之一；`--json` 输出机器可读 bundle。
+
+| 检查 | 断言什么 |
+|---|---|
+| `VaultKeyCheck` | 设了 `LIBREFANG_VAULT_KEY` 时，base64 解码后**正好 32 字节**。经典的 32 个 ASCII 字符的错误产生的是 32 字符串而不解码成 32 字节 key。 |
+| `ApiListenAddrCheck` | `api_listen` 从配置的 `LIBREFANG_PORT` 可达，且非 loopback 绑定时 `api_key` 已设，避免 daemon 意外暴露给无认证访问。 |
+| `ConfigTomlSchemaCheck` | `config.toml` 能干净地按当前 `KernelConfig` schema 解析；未知 key、类型不符、范围越界都在 daemon 启动前被标出来。 |
+
+新增检查：在 `crates/librefang-cli/src/doctor.rs` 里实现 `AuditCheck` trait，在 `registered_checks()` 里注册即可。
+
+#### 前台守护进程日志文件
+
+`librefang start --foreground`（`just dev` 和很多 supervisor 用的模式）现在**把 stdout 同时输出到终端和按日轮转的日志文件** `~/.librefang/logs/daemon-YYYY-MM-DD.log`。当天重启追加进同一文件；新一天起一个新文件。daemon 下次启动时会清掉 7 天以上的旧文件。
+
+之前前台路径只写终端，supervisor 把日志滚出去就丢了。
+
+```bash
+tail -f ~/.librefang/logs/daemon-$(date +%F).log
+```
+
 ### 检查守护进程状态
 
 ```bash

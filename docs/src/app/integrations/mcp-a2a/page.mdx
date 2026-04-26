@@ -93,6 +93,30 @@ async def call_tool(name: str, arguments: dict):
     return [TextContent(type="text", text="result")]
 ```
 
+### MCP Taint Policy
+
+Outbound payloads to MCP tools are scanned for sensitive data (tokens, API keys, well-known secret prefixes, PII) by an outbound taint detector. By default every detector rule fires; specific rules can be muted **per tool** or **per path** when a particular MCP server legitimately needs to receive that data class.
+
+```toml
+# config.toml — global mute by tool-name pattern
+[[mcp_taint_policy]]
+tool = "mcp__github__create_pr"
+skip_rules = ["AuthorizationLiteral"]   # let GitHub MCP forward bearer tokens
+```
+
+**Available rule ids** (the `TaintRuleId` enum):
+
+| Rule | Detects |
+|---|---|
+| `AuthorizationLiteral` | `Authorization: Bearer ...` / `Authorization: Basic ...` headers in payloads |
+| `KeyValueSecret` | `password=...`, `token=...`, `api_key=...` patterns |
+| `WellKnownPrefix` | `sk-`, `ghp_`, `xoxb-`, etc. — known token prefixes |
+| `OpaqueToken` | Long high-entropy strings without a known prefix |
+| `PiiEmail` / `PiiPhone` / `PiiCreditCard` / `PiiSsn` | Personal info classes |
+| `SensitiveKeyName` | JSON keys named `password`, `secret`, `private_key`, etc. |
+
+**API**: callers can also use `check_outbound_text_violation_with_skip(payload, sink, skip_rules)` directly to skip rules per call. The original `check_outbound_text_violation` delegates with an empty skip set, so existing callers keep their current behaviour.
+
 ---
 
 ## A2A (Agent to Agent)

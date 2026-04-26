@@ -357,24 +357,116 @@ librefang cost export --format csv
 
 ### 知识图谱
 
+知识图谱是 **per-agent** 的,不是全局 REST 接口。用 per-agent 端点:
+
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/memory/kg/entities` | GET | 列出实体 |
-| `/api/memory/kg/relations` | GET | 列出关系 |
-| `/api/memory/kg/query` | POST | 查询图谱 |
+| `/api/memory/agents/{id}/relations` | GET | 查询该 agent 的知识图谱(实体 + 关系) |
+| `/api/memory/agents/{id}/relations` | POST | 给该 agent 的图谱存新关系 |
+
+Agent 也可以从循环里直接用 [`knowledge_add_entity` / `knowledge_add_relation` / `knowledge_query` 工具](/zh/agent/tools#knowledge-graph) 构建图谱。早期文档列的 `/api/memory/kg/*` 端点从未发布过 —— 调那些路径会 404。
 
 ### 主动记忆（Proactive Memory）
 
-主动记忆允许 agent 自主地浮现、整合和召回长期知识，无需显式工具调用。
+主动记忆让 agent 自主浮现、整合、召回长期知识,不用显式工具调用。每条记忆同时存三份 —— 语义存储(文本 + embedding)、结构化 KV(`memory:{id}`)、知识图谱(抽取的 entity / relation 三元组) —— 所以 agent 可以按相似度、按 ID、或从已知 entity 沿图谱遍历来召回。
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/memory/proactive` | GET | 列出所有主动记忆条目 |
-| `/api/memory/proactive` | POST | 创建主动记忆条目 |
-| `/api/memory/proactive/{id}` | GET | 获取主动记忆条目 |
-| `/api/memory/proactive/{id}` | DELETE | 删除主动记忆条目 |
-| `/api/memory/proactive/search` | GET | 对主动记忆做语义搜索 |
-| `/api/memory/proactive/consolidate` | POST | 触发近期记忆的整合 |
+#### 条目 schema
+
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `id` | UUID | 唯一记忆 ID |
+| `agent_id` | UUID | 所有 agent —— 条目**严格按 agent 隔离**,不会跨 agent 泄漏 |
+| `content` | text | 记忆文本 / 事实 |
+| `source` | enum | 来源:`auto_memorize`、`manual_add` 等 |
+| `scope` | enum | 级别:`user_memory`、`session_memory`、`agent_memory` |
+| `confidence` | f64(0.0–1.0) | 相关度分数;随时间衰减 |
+| `metadata` | JSON | 自由 KV;含 `category`(见下) |
+| `created_at` | RFC3339 时间戳 | 创建时间 |
+| `accessed_at` | RFC3339 时间戳 | 最近访问 —— 驱动衰减 |
+| `access_count` | int | 被召回的次数 |
+| `deleted` | bool | 软删除标志 |
+| `embedding` | vector(独立表) | 余弦相似度搜索用 |
+
+#### 作用域(Scope)
+
+| 作用域 | 生命期 | 用途 |
+|---|---|---|
+| `user_memory` | 跨 session 持久化 | 用户级事实和偏好(可在该用户的多个 agent 间共享)。 |
+| `session_memory` | `session_ttl_hours`(默认 `24`)后自动删除 | 当前对话的工作笔记。 |
+| `agent_memory` | per-agent 持久化 | Agent 学到的行为和技能,严格隔离。 |
+
+#### 类别(Category)
+
+类别住在 `metadata.category`。`auto_memorize` 默认抽取的有:`communication_style`、`preference`、`expertise`、`work_style`、`project_context`、`personal_detail`、`frustration`。类别列表可配置。
+
+#### 自动整合
+
+每个 agent 每 **10** 次 `auto_memorize` 自动触发一次(无需显式 cron / 用户操作)。整合器:
+
+1. 用分级相似度梯队找重复或近似条目:
+   - **子串包含**(完全 / 超集 / 子集)
+   - **向量余弦**(存了 embedding 时)
+   - **Jaccard 词重叠**(回退)
+2. 每个重复簇里**保留最近创建的**那条。
+3. 软删除其余,记日志方便审计。
+
+整合器只扫最近 **100** 条,以让 dedup 循环在热路径上保持 O(n²)-安全。要扫完整历史,手动调 `POST /api/memory/agents/{id}/consolidate`。
+
+#### 衰减
+
+未访问超过 1 天的记忆:
+
+```
+decayed_conf = original_conf × e^(-decay_rate × days_since_access)
+final_conf   = min(decayed_conf × (1 + log2(access_count)), 1.0)
+```
+
+衰减扫描**每小时最多一次**(在 `auto_retrieve` 顶部检查)。默认值:`confidence_decay_rate = 0.01`(很慢 —— 大约 70 天减半)、`session_ttl_hours = 24`。一条记忆"过期"的条件是:(a)超过一天没访问,**或** (b)scope 是 `session_memory` 且 TTL 到了。
+
+#### per-agent vs 跨 agent
+
+除 `user_memory` 外,所有条目严格按 agent 隔离。Search、consolidate、eviction 都按 `agent_id` 过滤 —— 一个 agent 没有路径读到另一个 agent 的 `agent_memory` 或 `session_memory`。Per-agent 上限默认 **1000** 条;超过时按"最旧 / 最低 confidence"逐出。
+
+#### API 端点
+
+主动记忆端点分两类 —— 全局和 per-agent。(KV memory 在 `/api/memory/agents/{id}/kv/*`,是另一个子系统,不在此列。)
+
+**全局 / 跨 agent:**
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/memory` | 列出所有主动记忆(分页,可选 `?category=`) |
+| POST | `/api/memory` | 新增记忆条目 |
+| GET | `/api/memory/search?q=&limit=` | 跨所有条目语义搜索 |
+| GET | `/api/memory/stats` | 全局统计 |
+| GET | `/api/memory/config` | 获取记忆配置 |
+| PATCH | `/api/memory/config` | 更新记忆配置 |
+| POST | `/api/memory/cleanup` | 手动跑 session-TTL 清理 |
+| POST | `/api/memory/decay` | 手动跑 confidence 衰减 |
+| POST | `/api/memory/bulk-delete` | 批量删除 |
+| PUT | `/api/memory/items/{id}` | 更新单条记忆 |
+| DELETE | `/api/memory/items/{id}` | 删除单条记忆 |
+| GET | `/api/memory/items/{id}/history` | 记忆编辑历史 |
+| GET | `/api/memory/user/{user_id}` | 该用户跨所有 agent 的 user-level 记忆 |
+
+**Per-agent:**
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/memory/agents/{id}` | 列出该 agent 的记忆 |
+| DELETE | `/api/memory/agents/{id}` | 重置(清空)该 agent 的全部记忆 |
+| GET | `/api/memory/agents/{id}/search?q=` | 限制在此 agent 范围的语义搜索 |
+| GET | `/api/memory/agents/{id}/stats` | 该 agent 的统计 |
+| DELETE | `/api/memory/agents/{id}/level/{level}` | 按 scope 清(`session`、`agent`、`user`) |
+| GET | `/api/memory/agents/{id}/duplicates` | 找近似条目但不删 |
+| POST | `/api/memory/agents/{id}/consolidate` | 对完整历史触发整合 |
+| GET | `/api/memory/agents/{id}/count` | 记忆数量 |
+| GET | `/api/memory/agents/{id}/relations` | 查询该 agent 的知识图谱 |
+| POST | `/api/memory/agents/{id}/relations` | 存关系 |
+| GET | `/api/memory/agents/{id}/export` | 导出该 agent 的记忆(JSON) |
+| POST | `/api/memory/agents/{id}/import` | 导入记忆(JSON) |
+
+之前的 `/api/memory/proactive/*` 命名空间是一个从未发布的草稿端点 —— 用上面这套。如果客户端还在调旧路径,会得到 404。
 
 ---
 

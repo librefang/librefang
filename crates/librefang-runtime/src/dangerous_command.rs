@@ -280,18 +280,6 @@ impl DangerousCommandChecker {
 }
 
 // ---------------------------------------------------------------------------
-// Convenience free function
-// ---------------------------------------------------------------------------
-
-/// One-shot check with no session state.
-///
-/// Useful for quick call-sites that do not maintain a [`DangerousCommandChecker`].
-pub fn detect_dangerous_command(command: &str) -> CheckResult {
-    let checker = DangerousCommandChecker::new(ApprovalMode::Manual);
-    checker.check(command)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -299,12 +287,16 @@ pub fn detect_dangerous_command(command: &str) -> CheckResult {
 mod tests {
     use super::*;
 
+    fn check(cmd: &str) -> CheckResult {
+        DangerousCommandChecker::new(ApprovalMode::Manual).check(cmd)
+    }
+
     fn safe(cmd: &str) -> bool {
-        matches!(detect_dangerous_command(cmd), CheckResult::Safe)
+        matches!(check(cmd), CheckResult::Safe)
     }
 
     fn dangerous(cmd: &str) -> bool {
-        matches!(detect_dangerous_command(cmd), CheckResult::Dangerous { .. })
+        matches!(check(cmd), CheckResult::Dangerous { .. })
     }
 
     #[test]

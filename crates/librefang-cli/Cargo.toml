@@ -9,7 +9,7 @@ description = "CLI tool for the LibreFang Agent OS"
 default = ["librefang-api/all-channels", "telemetry"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
-telemetry = ["librefang-api/telemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 [[bin]]
 name = "librefang"
@@ -23,13 +23,15 @@ librefang-channels = { path = "../librefang-channels", default-features = false 
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-extensions = { path = "../librefang-extensions" }
+librefang-memory = { path = "../librefang-memory" }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tracing = { workspace = true }
+tracing-core = "0.1"
 tracing-subscriber = { workspace = true }
-serde = { workspace = true }
+arc-swap = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
@@ -48,6 +50,7 @@ unic-langid = "0.9"
 open = "5.3.4"
 toml_edit = "0.25.8"
 rustls = "0.23"
+opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 

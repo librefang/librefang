@@ -24,6 +24,20 @@ pub fn spawn_startup_check(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
+        // Probe the updater endpoint before invoking the plugin. When the
+        // release pipeline ships platform bundles but no `latest.json`
+        // manifest (current state — `TAURI_SIGNING_PRIVATE_KEY` is missing
+        // so `tauri-action` silently skips manifest generation), the plugin
+        // emits an `ERROR tauri_plugin_updater::updater: update endpoint
+        // did not respond with a successful status code` on every startup.
+        // Skipping the plugin call when the manifest 404s keeps the daemon
+        // log clean; once the release ships a manifest the probe passes and
+        // the plugin works normally.
+        if !manifest_reachable(&app_handle).await {
+            info!("Update manifest not reachable at endpoint; skipping startup update check");
+            return;
+        }
+
         match do_check(&app_handle).await {
             Ok(info) if info.available => {
                 let version = info.version.as_deref().unwrap_or("unknown");
@@ -73,6 +87,32 @@ pub async fn download_and_install_update(app_handle: &tauri::AppHandle) -> Resul
 
     info!("Update installed, restarting...");
     app_handle.restart()
+}
+
+/// Pre-flight HEAD against the configured updater endpoint. Returns false on
+/// any network error, non-2xx response (404 from GitHub when the release has
+/// no `latest.json`), missing config, or timeout.
+async fn manifest_reachable(app_handle: &tauri::AppHandle) -> bool {
+    let endpoint = app_handle
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|v| v.get("endpoints"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let Some(url) = endpoint else {
+        return false;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    else {
+        return false;
+    };
+    matches!(client.head(&url).send().await, Ok(r) if r.status().is_success())
 }
 
 async fn do_check(app_handle: &tauri::AppHandle) -> Result<UpdateInfo, String> {

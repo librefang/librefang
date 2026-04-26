@@ -24,17 +24,20 @@ use tracing::warn;
 // ── Request types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct ChatCompletionRequest {
+pub(crate) struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<OaiMessage>,
     #[serde(default)]
     pub stream: bool,
+    // OpenAI wire fields accepted but not yet plumbed through to the driver.
+    #[allow(dead_code)]
     pub max_tokens: Option<u32>,
+    #[allow(dead_code)]
     pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct OaiMessage {
+pub(crate) struct OaiMessage {
     pub role: String,
     #[serde(default)]
     pub content: OaiContent,
@@ -42,7 +45,7 @@ pub struct OaiMessage {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(untagged)]
-pub enum OaiContent {
+pub(crate) enum OaiContent {
     Text(String),
     Parts(Vec<OaiContentPart>),
     #[default]
@@ -51,7 +54,7 @@ pub enum OaiContent {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub enum OaiContentPart {
+pub(crate) enum OaiContentPart {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image_url")]
@@ -59,7 +62,7 @@ pub enum OaiContentPart {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct OaiImageUrlRef {
+pub(crate) struct OaiImageUrlRef {
     pub url: String,
 }
 
@@ -249,6 +252,7 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
 
 /// POST /v1/chat/completions
 #[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = serde_json::Value, responses((status = 200, description = "OpenAI-compatible chat completion", body = serde_json::Value)))]
+#[allow(private_interfaces)]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,

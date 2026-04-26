@@ -1652,7 +1652,7 @@ pub async fn get_approval(
 /// when an agent invokes a tool that requires approval. This endpoint exists
 /// for external integrations that need to inject approval gates.
 #[derive(serde::Deserialize)]
-pub struct CreateApprovalRequest {
+pub(crate) struct CreateApprovalRequest {
     pub agent_id: String,
     pub tool_name: String,
     #[serde(default)]
@@ -1666,6 +1666,7 @@ pub struct CreateApprovalRequest {
 }
 
 #[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
+#[allow(private_interfaces)]
 pub async fn create_approval(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApprovalRequest>,
@@ -1714,12 +1715,13 @@ pub async fn create_approval(
 ///
 /// When TOTP is enabled, the request body must include a `totp_code` field.
 #[derive(serde::Deserialize, Default)]
-pub struct ApproveRequestBody {
+pub(crate) struct ApproveRequestBody {
     #[serde(default)]
     totp_code: Option<String>,
 }
 
 #[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request approved", body = serde_json::Value)))]
+#[allow(private_interfaces)]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1895,12 +1897,13 @@ pub async fn reject_request(
 
 /// POST /api/approvals/{id}/modify — Return a pending request with feedback for modification.
 #[derive(serde::Deserialize)]
-pub struct ModifyRequestBody {
+pub(crate) struct ModifyRequestBody {
     #[serde(default)]
     feedback: String,
 }
 
 #[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request modified", body = serde_json::Value)))]
+#[allow(private_interfaces)]
 pub async fn modify_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1947,12 +1950,13 @@ pub async fn modify_request(
 
 /// POST /api/approvals/batch — Batch resolve multiple pending requests.
 #[derive(serde::Deserialize)]
-pub struct BatchResolveRequest {
+pub(crate) struct BatchResolveRequest {
     ids: Vec<String>,
     decision: String,
 }
 
 #[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Batch resolve results", body = serde_json::Value)))]
+#[allow(private_interfaces)]
 pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BatchResolveRequest>,
@@ -2109,7 +2113,7 @@ pub async fn list_approvals_for_session(
 /// resolve_all=True)`.  TOTP pre-check is enforced — if any pending request
 /// requires TOTP, the entire batch is rejected before any mutation.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-pub struct ApproveAllForSessionRequest {
+pub(crate) struct ApproveAllForSessionRequest {
     /// Optional count of approvals the caller expects to be pending.
     /// If provided, the server verifies the actual pending count matches
     /// before approving.  Returns 409 Conflict if the count changed.
@@ -2138,6 +2142,7 @@ pub struct ApproveAllForSessionRequest {
         (status = 409, description = "Pending set changed since request was issued", body = serde_json::Value),
     )
 )]
+#[allow(private_interfaces)]
 pub async fn approve_all_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,

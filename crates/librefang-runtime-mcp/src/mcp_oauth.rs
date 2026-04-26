@@ -14,6 +14,10 @@ use std::collections::HashMap;
 use tracing::{debug, warn};
 use url::Url;
 
+// Canonical OAuth token type lives in `librefang-types`.  Re-export so existing
+// callers can keep their `runtime::mcp_oauth::OAuthTokens` import path.
+pub use librefang_types::oauth::OAuthTokens;
+
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------
@@ -63,24 +67,6 @@ pub enum McpAuthState {
 
 /// Shared map of per-server MCP OAuth authentication states.
 pub type McpAuthStates = tokio::sync::Mutex<std::collections::HashMap<String, McpAuthState>>;
-
-/// OAuth token response from the token endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OAuthTokens {
-    pub access_token: String,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    #[serde(default = "default_token_type")]
-    pub token_type: String,
-    #[serde(default)]
-    pub expires_in: u64,
-    #[serde(default)]
-    pub scope: String,
-}
-
-fn default_token_type() -> String {
-    "Bearer".to_string()
-}
 
 // ---------------------------------------------------------------------------
 // WWW-Authenticate parsing

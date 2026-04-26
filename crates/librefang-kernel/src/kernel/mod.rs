@@ -528,6 +528,14 @@ pub struct LibreFangKernel {
     /// directory could not be resolved at boot.
     pub(crate) checkpoint_manager:
         Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
+    /// Pluggable hook that swaps the live tracing `EnvFilter` when
+    /// `config.log_level` changes via hot-reload. Injected by the binary
+    /// (`librefang-cli` for the daemon) post-construction; absent for
+    /// in-process callers that don't own a tracing subscriber, in which
+    /// case `log_level` changes still update `KernelConfig` in-memory but
+    /// don't take effect on the active filter (the hot-reload action is a
+    /// no-op with a warning).
+    pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -2877,6 +2885,7 @@ impl LibreFangKernel {
                     librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
                 ))
             },
+            log_reloader: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -6773,7 +6782,7 @@ system_prompt = "You are a helpful assistant."
         // we must not touch the `force_session_wipe` / `resume_pending` flags
         // that belong to the persistent session path.
         {
-            use crate::session_policy::SessionResetPolicy as KernelPolicy;
+            use crate::session_policy::SessionResetPolicyExt;
             let effective_mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
             // `New` mode creates a fresh ephemeral session_id on every call;
             // there is nothing persistent to reset, and mutating
@@ -6781,7 +6790,7 @@ system_prompt = "You are a helpful assistant."
             // for future persistent-mode invocations.
             let skip_reset = matches!(effective_mode, librefang_types::agent::SessionMode::New);
             if !skip_reset {
-                let policy: KernelPolicy = cfg.session.reset.clone().into();
+                let policy = cfg.session.reset.clone();
                 let last_active: std::time::SystemTime = entry.last_active.into();
                 if let Some(reason) = policy.should_reset(last_active, entry.force_session_wipe) {
                     tracing::info!(
@@ -6806,10 +6815,7 @@ system_prompt = "You are a helpful assistant."
                             "Failed to persist session after auto-reset"
                         );
                     }
-                    let types_reason: librefang_types::config::SessionResetReason = reason.into();
-                    let _ = self
-                        .registry
-                        .update_session_reset_state(agent_id, types_reason);
+                    let _ = self.registry.update_session_reset_state(agent_id, reason);
                     // Persist the updated entry so the reset state survives a crash.
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
@@ -9507,6 +9513,16 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Install a [`crate::log_reload::LogLevelReloader`].
+    ///
+    /// Idempotent: subsequent calls are silently ignored (the slot is a
+    /// `OnceLock`). The injected reloader is invoked when
+    /// [`crate::config_reload::HotAction::ReloadLogLevel`] fires during
+    /// hot-reload — see `apply_hot_actions_inner`.
+    pub fn set_log_reloader(&self, reloader: crate::log_reload::LogLevelReloaderArc) {
+        let _ = self.log_reloader.set(reloader);
+    }
+
     /// Set the weak self-reference for trigger dispatch.
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.
@@ -9574,9 +9590,7 @@ system_prompt = "You are a helpful assistant."
     /// apply hot-reloadable actions. Returns the reload plan for API response.
     pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
-        use crate::config_reload::{
-            build_reload_plan, should_apply_hot, validate_config_for_reload,
-        };
+        use crate::config_reload::{should_apply_hot, validate_config_for_reload};
 
         // Read and parse config file (using load_config to process $include directives)
         let config_path = self.home_dir_boot.join("config.toml");
@@ -9598,8 +9612,14 @@ system_prompt = "You are a helpful assistant."
             return Err(format!("Validation failed: {}", errors.join("; ")));
         }
 
-        // Build the reload plan
-        let plan = build_reload_plan(&old_cfg, &new_config);
+        // Build the reload plan against the live capability set so changes
+        // whose feasibility depends on optional reloaders get correctly
+        // routed to `restart_required` when the reloader isn't installed
+        // (e.g. embedded desktop boot doesn't wire the log reloader).
+        let caps = crate::config_reload::ReloadCapabilities {
+            log_reloader_installed: self.log_reloader.get().is_some(),
+        };
+        let plan = crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
         plan.log_summary();
 
         // Apply hot actions + store new config atomically under the same
@@ -9837,6 +9857,16 @@ system_prompt = "You are a helpful assistant."
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
+                HotAction::ReloadLogLevel(level) => match self.log_reloader.get() {
+                    Some(reloader) => match reloader.reload(level) {
+                        Ok(()) => info!("Hot-reload: log_level updated to {level}"),
+                        Err(e) => warn!("Hot-reload: log_level update to {level} failed: {e}"),
+                    },
+                    None => warn!(
+                        "Hot-reload: log_level changed to {level} but no reloader is installed; \
+                         restart required for the new filter to take effect"
+                    ),
+                },
             }
         }
 
