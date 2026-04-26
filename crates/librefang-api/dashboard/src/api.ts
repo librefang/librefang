@@ -3338,3 +3338,173 @@ export async function setAutoDreamEnabled(
     { enabled },
   );
 }
+
+// ---------------------------------------------------------------------------
+// RBAC users (Phase 4 / M6)
+// ---------------------------------------------------------------------------
+
+export type UserRoleName = "owner" | "admin" | "user" | "viewer";
+
+export interface UserItem {
+  name: string;
+  role: string;
+  channel_bindings: Record<string, string>;
+  has_api_key: boolean;
+}
+
+export interface UserUpsertPayload {
+  name: string;
+  role: string;
+  channel_bindings?: Record<string, string>;
+  api_key_hash?: string | null;
+}
+
+export interface BulkImportRow {
+  index: number;
+  name: string;
+  status: string;
+  error: string | null;
+}
+
+export interface BulkImportResult {
+  created: number;
+  updated: number;
+  failed: number;
+  dry_run: boolean;
+  rows: BulkImportRow[];
+}
+
+export async function listUsers(): Promise<UserItem[]> {
+  return get<UserItem[]>("/api/users");
+}
+
+export async function getUser(name: string): Promise<UserItem> {
+  return get<UserItem>(`/api/users/${encodeURIComponent(name)}`);
+}
+
+export async function createUser(payload: UserUpsertPayload): Promise<UserItem> {
+  return post<UserItem>("/api/users", payload);
+}
+
+export async function updateUser(
+  originalName: string,
+  payload: UserUpsertPayload,
+): Promise<UserItem> {
+  return put<UserItem>(
+    `/api/users/${encodeURIComponent(originalName)}`,
+    payload,
+  );
+}
+
+export async function deleteUser(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}`);
+}
+
+export async function importUsers(
+  rows: UserUpsertPayload[],
+  options: { dryRun?: boolean } = {},
+): Promise<BulkImportResult> {
+  return post<BulkImportResult>("/api/users/import", {
+    rows,
+    dry_run: options.dryRun ?? false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Audit query (M5 / #3203 — endpoint stubbed; the hook stays wired so the
+// dashboard layer is ready when the daemon ships the route).
+// ---------------------------------------------------------------------------
+
+export interface AuditQueryFilters {
+  limit?: number;
+  offset?: number;
+  user?: string;
+  action?: string;
+  status?: string;
+  since?: string;
+  until?: string;
+}
+
+// Distinct from `AuditEntry` (recent-tail / hash-chain shape) — the M5
+// `/api/audit/query` endpoint returns a flatter, search-friendly shape with
+// the user dimension promoted to a first-class field.
+export interface AuditQueryEntry {
+  timestamp: string;
+  agent: string;
+  user?: string | null;
+  action: string;
+  status: string;
+  details?: string | null;
+}
+
+export interface AuditQueryResponse {
+  entries: AuditQueryEntry[];
+  total: number;
+  has_more: boolean;
+}
+
+export async function queryAudit(
+  filters: AuditQueryFilters = {},
+): Promise<AuditQueryResponse> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters)) {
+    if (v === undefined || v === null || v === "") continue;
+    params.set(k, String(v));
+  }
+  const qs = params.toString();
+  return get<AuditQueryResponse>(
+    `/api/audit/query${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-user budget (M5 / #3203 — endpoint stubbed)
+// ---------------------------------------------------------------------------
+
+export interface UserBudgetEntry {
+  user: string;
+  spend_usd: number;
+  budget_usd: number | null;
+  tokens_in: number;
+  tokens_out: number;
+  requests: number;
+  period_start?: string;
+  period_end?: string;
+}
+
+export interface UserBudgetResponse extends UserBudgetEntry {
+  daily?: Array<{ date: string; spend_usd: number; tokens: number }>;
+}
+
+export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
+  return get<UserBudgetResponse>(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-user permission policy (M3 / #3205 — endpoint stubbed)
+// ---------------------------------------------------------------------------
+
+export interface PermissionPolicy {
+  tool_allowlist: string[] | null;
+  tool_blocklist: string[] | null;
+  memory_read: string[] | null;
+  memory_write: string[] | null;
+}
+
+export async function getUserPolicy(name: string): Promise<PermissionPolicy> {
+  return get<PermissionPolicy>(
+    `/api/users/${encodeURIComponent(name)}/policy`,
+  );
+}
+
+export async function updateUserPolicy(
+  name: string,
+  policy: PermissionPolicy,
+): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(
+    `/api/users/${encodeURIComponent(name)}/policy`,
+    policy,
+  );
+}
