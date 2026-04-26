@@ -1845,29 +1845,58 @@ impl LibreFangKernel {
                 config.default_model.model = model;
                 config.default_model.api_key_env = env_var.to_string();
             } else if is_ollama_reachable() {
-                // Ollama is running locally — use the catalog's default model, not a hardcoded one.
-                let model = librefang_runtime::model_catalog::ModelCatalog::default()
-                    .default_model_for_provider("ollama")
-                    .unwrap_or_else(|| {
-                        warn!("Model catalog has no default for ollama — falling back to gemma4");
-                        "gemma4".to_string()
-                    });
-                info!(
-                    model = %model,
-                    "No API keys detected — Ollama is running locally, using as default"
+                // Ollama is up — discover what's actually installed via /api/tags
+                // before trusting the static catalog. The catalog ships placeholder
+                // entries (e.g. the registry's historical "gemma4" stub, which is
+                // not a real Ollama tag) that confuse users when the chat call
+                // fails with "model not found". Probing live ensures we set a
+                // model the user actually has.
+                let probe = librefang_runtime::provider_health::probe_provider_blocking(
+                    "ollama",
+                    "http://127.0.0.1:11434/v1",
+                    None,
                 );
-                config.default_model.provider = "ollama".to_string();
-                config.default_model.model = model;
-                config.default_model.api_key_env = String::new();
-                if !config.provider_urls.contains_key("ollama") {
-                    // Use 127.0.0.1: on macOS `localhost` resolves to ::1 first
-                    // and Ollama only binds IPv4, so the IPv6 attempt fails
-                    // without reliable fallback. See PROVIDER_REGISTRY in
-                    // librefang-llm-drivers for the same reasoning.
-                    config.provider_urls.insert(
-                        "ollama".to_string(),
-                        "http://127.0.0.1:11434/v1".to_string(),
-                    );
+                let installed_default =
+                    librefang_runtime::provider_health::first_chat_model(&probe);
+                let catalog_default = librefang_runtime::model_catalog::ModelCatalog::default()
+                    .default_model_for_provider("ollama");
+
+                // Prefer an actually-installed model. Only fall back to the
+                // catalog default if the catalog default is also installed
+                // (probe lists it). Otherwise skip auto-set entirely: a stale
+                // catalog default that the user hasn't pulled would just
+                // produce the same "Model not found" error on first chat.
+                let chosen = installed_default.clone().or_else(|| {
+                    catalog_default.filter(|m| probe.discovered_models.iter().any(|n| n == m))
+                });
+
+                match chosen {
+                    Some(model) => {
+                        info!(
+                            model = %model,
+                            "No API keys detected — Ollama is running locally, using as default"
+                        );
+                        config.default_model.provider = "ollama".to_string();
+                        config.default_model.model = model;
+                        config.default_model.api_key_env = String::new();
+                        if !config.provider_urls.contains_key("ollama") {
+                            // Use 127.0.0.1: on macOS `localhost` resolves to ::1 first
+                            // and Ollama only binds IPv4, so the IPv6 attempt fails
+                            // without reliable fallback. See PROVIDER_REGISTRY in
+                            // librefang-llm-drivers for the same reasoning.
+                            config.provider_urls.insert(
+                                "ollama".to_string(),
+                                "http://127.0.0.1:11434/v1".to_string(),
+                            );
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "Ollama is reachable but no installed chat models were found via \
+                             /api/tags. Run `ollama pull <model>` (e.g. `ollama pull llama3.3`) \
+                             then set [default_model] in ~/.librefang/config.toml."
+                        );
+                    }
                 }
             } else {
                 warn!(

@@ -454,6 +454,65 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
     }
 }
 
+/// Synchronous wrapper around [`probe_provider`].
+///
+/// Spawns a dedicated OS thread with its own current-thread Tokio runtime so
+/// it can be called safely from anywhere — sync `fn main`, inside a
+/// multi-threaded async runtime, or inside a current-thread one — without
+/// risking the `block_in_place`-on-current-thread panic. Used by boot-time
+/// detection (`kernel::boot_with_config`) and the TUI setup wizard, both of
+/// which need a one-shot Ollama probe from a synchronous context.
+///
+/// On any error (thread spawn, runtime build) returns `ProbeResult::default()`
+/// — callers should treat that the same as "no models discovered".
+pub fn probe_provider_blocking(
+    provider: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> ProbeResult {
+    let provider = provider.to_string();
+    let base_url = base_url.to_string();
+    let api_key = api_key.map(str::to_string);
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return ProbeResult::default(),
+        };
+        rt.block_on(probe_provider(&provider, &base_url, api_key.as_deref()))
+    })
+    .join()
+    .unwrap_or_default()
+}
+
+/// Pick the first chat-capable model from a probe result.
+///
+/// Filters out embedding-only models (which can't be used as a default chat
+/// model) using the `capabilities` field discovered in `/api/tags`. Returns
+/// `None` if the probe failed or no chat-capable model was discovered.
+pub fn first_chat_model(probe: &ProbeResult) -> Option<String> {
+    if !probe.reachable {
+        return None;
+    }
+    // Prefer enriched info so we can filter out embedding models.
+    if !probe.discovered_model_info.is_empty() {
+        for m in &probe.discovered_model_info {
+            let is_embedding_only = !m.capabilities.is_empty()
+                && m.capabilities
+                    .iter()
+                    .all(|c| c.eq_ignore_ascii_case("embedding"));
+            if !is_embedding_only {
+                return Some(m.name.clone());
+            }
+        }
+        return None;
+    }
+    probe.discovered_models.first().cloned()
+}
+
 /// Probe a provider, returning a cached result when available.
 ///
 /// If the cache contains a non-expired entry the HTTP request is skipped
@@ -735,5 +794,105 @@ mod tests {
     fn test_infer_ollama_capabilities_chat_only() {
         let caps = infer_ollama_capabilities("llama3.2:latest", Some("llama"));
         assert_eq!(caps, vec!["completion"]);
+    }
+
+    #[test]
+    fn test_first_chat_model_unreachable_returns_none() {
+        let probe = ProbeResult::default();
+        assert_eq!(first_chat_model(&probe), None);
+    }
+
+    #[test]
+    fn test_first_chat_model_skips_embedding_only() {
+        // Two models reported, the first is embedding-only — picker must skip it.
+        let probe = ProbeResult {
+            reachable: true,
+            discovered_models: vec!["nomic-embed-text".to_string(), "llama3.3".to_string()],
+            discovered_model_info: vec![
+                DiscoveredModelInfo {
+                    name: "nomic-embed-text".to_string(),
+                    parameter_size: None,
+                    quantization_level: None,
+                    family: Some("bert".to_string()),
+                    families: None,
+                    size: None,
+                    capabilities: vec!["embedding".to_string()],
+                },
+                DiscoveredModelInfo {
+                    name: "llama3.3".to_string(),
+                    parameter_size: None,
+                    quantization_level: None,
+                    family: Some("llama".to_string()),
+                    families: None,
+                    size: None,
+                    capabilities: vec!["completion".to_string(), "tools".to_string()],
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(first_chat_model(&probe), Some("llama3.3".to_string()));
+    }
+
+    #[test]
+    fn test_first_chat_model_falls_back_to_names_when_info_missing() {
+        // Older Ollama / non-Ollama probes don't populate model_info — picker
+        // should still return the first listed name.
+        let probe = ProbeResult {
+            reachable: true,
+            discovered_models: vec!["llama3.3:latest".to_string(), "qwen2.5".to_string()],
+            discovered_model_info: vec![],
+            ..Default::default()
+        };
+        assert_eq!(
+            first_chat_model(&probe),
+            Some("llama3.3:latest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_first_chat_model_returns_none_when_only_embedding_models() {
+        // Probe succeeded but every model is embedding-only — no chat default
+        // available, caller should warn the user instead of guessing.
+        let probe = ProbeResult {
+            reachable: true,
+            discovered_models: vec!["nomic-embed-text".to_string()],
+            discovered_model_info: vec![DiscoveredModelInfo {
+                name: "nomic-embed-text".to_string(),
+                parameter_size: None,
+                quantization_level: None,
+                family: Some("bert".to_string()),
+                families: None,
+                size: None,
+                capabilities: vec!["embedding".to_string()],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(first_chat_model(&probe), None);
+    }
+
+    #[test]
+    fn test_probe_provider_blocking_unreachable_returns_default() {
+        // Sync wrapper must work outside any tokio runtime context — and
+        // must not panic on probe failure.
+        let result = probe_provider_blocking("ollama", "http://127.0.0.1:19997/v1", None);
+        assert!(!result.reachable);
+        assert!(result.discovered_models.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_probe_provider_blocking_inside_multi_thread_runtime() {
+        // Calling the sync wrapper from inside a multi-threaded tokio runtime
+        // must not deadlock — the dedicated-thread design is what makes this
+        // safe (block_in_place would panic on a current_thread runtime).
+        let result = probe_provider_blocking("ollama", "http://127.0.0.1:19996/v1", None);
+        assert!(!result.reachable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_probe_provider_blocking_inside_current_thread_runtime() {
+        // Same guarantee for current-thread runtimes (this is where naïve
+        // block_in_place + Handle::current().block_on() patterns blow up).
+        let result = probe_provider_blocking("ollama", "http://127.0.0.1:19995/v1", None);
+        assert!(!result.reachable);
     }
 }

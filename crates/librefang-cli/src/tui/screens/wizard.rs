@@ -13,7 +13,22 @@ use crate::tui::widgets;
 
 /// Return the first model ID for `provider` from the local catalog, falling
 /// back to `fallback` when the catalog is empty or unavailable.
+///
+/// For local providers (currently `ollama`) we probe the live endpoint first
+/// so the wizard prefills a model the user actually has installed instead of
+/// a catalog placeholder that may not match their setup.
 fn catalog_default_model(provider: &str, fallback: &str) -> String {
+    if provider == "ollama" {
+        let probe = librefang_runtime::provider_health::probe_provider_blocking(
+            "ollama",
+            "http://127.0.0.1:11434/v1",
+            None,
+        );
+        if let Some(model) = librefang_runtime::provider_health::first_chat_model(&probe) {
+            return model;
+        }
+    }
+
     let home = std::env::var("LIBREFANG_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -151,8 +166,13 @@ const PROVIDERS: &[ProviderInfo] = &[
     },
     ProviderInfo {
         name: "ollama",
+        // Empty fallback: ollama models are runtime-discovered (see
+        // `catalog_default_model`). If both the live probe and the catalog
+        // come back empty, leave the field blank so the user is forced to
+        // type their actually-installed model name rather than accepting a
+        // placeholder that doesn't exist on their box.
         env_var: "OLLAMA_API_KEY",
-        default_model: "gemma4",
+        default_model: "",
         needs_key: false,
     },
     ProviderInfo {
@@ -424,6 +444,18 @@ impl WizardState {
         } else {
             &self.model_input
         };
+
+        // Refuse to write `model = ""` — for providers without a hardcoded
+        // default (e.g. ollama, where the model depends on what the user
+        // pulled), we need the user to fill it in. Saving an empty string
+        // produces a daemon that can't actually call any model.
+        if model.is_empty() {
+            self.status_msg =
+                "Model name is required. Type the model ID (e.g. llama3.3, qwen2.5:7b)."
+                    .to_string();
+            self.step = WizardStep::Model;
+            return;
+        }
 
         let config = format!(
             r#"# LibreFang Agent OS configuration
