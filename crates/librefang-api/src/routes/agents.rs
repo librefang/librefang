@@ -3846,7 +3846,7 @@ pub async fn update_agent_identity(
 /// Request body for patching agent config (name, description, prompt, identity, model).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[allow(dead_code)]
-pub(crate) struct PatchAgentConfigRequest {
+pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
