@@ -2847,11 +2847,14 @@ async fn start_test_server_with_rbac_users(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_audit_query_rejects_anonymous_403() {
-    // Anonymous (no Bearer header) callers MUST be denied even when the
-    // server runs in `allow_no_auth = true` mode — the audit chain is
-    // too sensitive to leak via loopback. Documented contract from the
-    // `require_admin` doc-comment in `routes/audit.rs`.
+async fn test_audit_query_rejects_anonymous() {
+    // Anonymous (no Bearer header) callers MUST be denied — the audit
+    // chain is too sensitive to leak. With both `api_key` and
+    // `user_api_keys` configured, `allow_no_auth` no longer short-circuits
+    // (see middleware.rs:501-526) so the request is rejected at the
+    // middleware layer with 401 BEFORE reaching the in-handler
+    // `require_admin` gate. That's an earlier, stricter rejection — the
+    // safety property ("anonymous cannot read audit") still holds.
     let server =
         start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
             .await;
@@ -2863,14 +2866,8 @@ async fn test_audit_query_rejects_anonymous_403() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        403,
-        "anonymous /api/audit/query must be rejected with 403"
-    );
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let err = body["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("Admin"),
-        "403 body must mention Admin role: got {err:?}"
+        401,
+        "anonymous /api/audit/query must be rejected at the middleware (401)"
     );
 }
 
@@ -2965,12 +2962,12 @@ async fn test_audit_export_csv_emits_documented_headers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_user_budget_detail_includes_enforced_false() {
-    // M6 dashboard contract: `/api/budget/users/{id}` must surface
-    // `enforced: false` so the UI can warn users that `alert_breach` is
-    // informational until per-user budget enforcement (the M5-followup
-    // arm in `kernel/mod.rs::execute_llm_agent`) ships. Flip to `true`
-    // only when that wiring lands.
+async fn test_user_budget_detail_includes_enforced_true() {
+    // Per-user budget enforcement landed in commit 4a00a646 ("RBAC M5 —
+    // wire per-user budget enforcement"): AuthManager::budget_for,
+    // MeteringEngine::check_user_budget, and the post-call arm in
+    // kernel::execute_llm_agent now actually deny over-budget calls.
+    // `/api/budget/users/{id}` reports `enforced: true` accordingly.
     let server =
         start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
             .await;
@@ -2985,9 +2982,8 @@ async fn test_user_budget_detail_includes_enforced_false() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         body["enforced"],
-        serde_json::json!(false),
-        "enforced flag must remain `false` until per-user budget \
-         enforcement lands — flipping prematurely would mislead the UI"
+        serde_json::json!(true),
+        "enforced flag must be `true` now that per-user budget enforcement is wired"
     );
     // Defensive: the spend numerics must also be present so the
     // dashboard can render even on an empty database.
