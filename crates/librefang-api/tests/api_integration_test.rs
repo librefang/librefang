@@ -3184,17 +3184,11 @@ async fn test_effective_permissions_admin_returns_200_with_full_payload() {
         channel_tool_rules: alice_channel_rules,
     };
 
-    let server = start_test_server_with_full_user_configs(
-        "any-key",
-        vec![(alice, "alice-admin-key")],
-    )
-    .await;
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!(
-            "{}/api/authz/effective/Alice",
-            server.base_url
-        ))
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
         .header("authorization", "Bearer alice-admin-key")
         .send()
         .await
@@ -3300,10 +3294,7 @@ async fn test_effective_permissions_viewer_rejected_403() {
     .await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!(
-            "{}/api/authz/effective/Alice",
-            server.base_url
-        ))
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
         .header("authorization", "Bearer eve-viewer-key")
         .send()
         .await
@@ -3326,17 +3317,11 @@ async fn test_effective_permissions_unknown_user_404() {
         role: "admin".to_string(),
         ..Default::default()
     };
-    let server = start_test_server_with_full_user_configs(
-        "any-key",
-        vec![(alice, "alice-admin-key")],
-    )
-    .await;
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!(
-            "{}/api/authz/effective/Nobody",
-            server.base_url
-        ))
+        .get(format!("{}/api/authz/effective/Nobody", server.base_url))
         .header("authorization", "Bearer alice-admin-key")
         .send()
         .await
@@ -3361,17 +3346,11 @@ async fn test_effective_permissions_rejects_anonymous() {
         role: "admin".to_string(),
         ..Default::default()
     };
-    let server = start_test_server_with_full_user_configs(
-        "any-key",
-        vec![(alice, "alice-admin-key")],
-    )
-    .await;
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!(
-            "{}/api/authz/effective/Alice",
-            server.base_url
-        ))
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
         .send()
         .await
         .unwrap();
