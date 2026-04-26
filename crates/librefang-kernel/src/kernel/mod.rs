@@ -6040,6 +6040,34 @@ system_prompt = "You are a helpful assistant."
                             attribution_channel.clone(),
                         );
                         let _ = kernel_clone.metering.record(&usage_record);
+                    } else if let Some(uid) = attribution_user_id {
+                        // RBAC M5: per-user budget enforcement, post-call.
+                        // `check_all_and_record` already persisted the row,
+                        // so `query_user_*` reflects this call. A breach
+                        // doesn't roll back the current response (tokens
+                        // were already billed) — it trips BudgetExceeded
+                        // so the next call from this user gets denied at
+                        // the gate.
+                        if let Some(user_budget) = kernel_clone.auth.budget_for(uid) {
+                            if let Err(e) =
+                                kernel_clone.metering.check_user_budget(uid, &user_budget)
+                            {
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    user = %uid,
+                                    error = %e,
+                                    "Per-user budget check failed (streaming)"
+                                );
+                                kernel_clone.audit_log.record_with_context(
+                                    agent_id.to_string(),
+                                    librefang_runtime::audit::AuditAction::BudgetExceeded,
+                                    format!("{e}"),
+                                    "denied",
+                                    Some(uid),
+                                    attribution_channel.clone(),
+                                );
+                            }
+                        }
                     }
 
                     // Record experiment metrics if running an experiment.
@@ -7652,15 +7680,32 @@ system_prompt = "You are a helpful assistant."
             );
             // Fall back to plain record so the cost is not lost from tracking
             let _ = self.metering.record(&usage_record);
+        } else if let Some(uid) = attribution_user_id {
+            // RBAC M5: per-user budget enforcement, post-call (matches the
+            // global / per-agent / per-provider semantics — the row was
+            // already persisted above so `query_user_*` includes this
+            // call). A breach trips BudgetExceeded for downstream gating
+            // and dashboard visibility; the current response is returned
+            // unchanged because the tokens are already billed.
+            if let Some(user_budget) = self.auth.budget_for(uid) {
+                if let Err(e) = self.metering.check_user_budget(uid, &user_budget) {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        user = %uid,
+                        error = %e,
+                        "Per-user budget check failed"
+                    );
+                    self.audit_log.record_with_context(
+                        agent_id.to_string(),
+                        librefang_runtime::audit::AuditAction::BudgetExceeded,
+                        format!("{e}"),
+                        "denied",
+                        Some(uid),
+                        attribution_channel.clone(),
+                    );
+                }
+            }
         }
-        // TODO(M5-followup): per-user budget enforcement. UserConfig.budget
-        // and the /api/budget/users/{id} endpoint expose the cap as
-        // read-only data, but check_all_and_record above does not consult
-        // it — only global / per-agent / per-provider budgets are enforced.
-        // Wiring the per-user check requires looking up the resolved
-        // UserConfig (via attribution_user_id) and calling a new
-        // metering.check_user_budget(user_id, &user_config.budget) arm.
-        // Tracked in the M5 PR body's "What's deferred" section.
 
         // Populate cost on the result based on usage_footer mode
         let mut result = result;

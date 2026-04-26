@@ -665,13 +665,12 @@ pub async fn user_budget_detail(
         },
         "alert_threshold": alert_threshold,
         "alert_breach": alert_breach,
-        // RBAC M5 deferred: per-user budget *enforcement* is not yet wired
-        // into the metering pipeline (only global / per-agent / per-provider
-        // caps trip a denial). The dashboard MUST surface `enforced=false`
-        // so operators don't assume `alert_breach` is also a hard stop.
-        // Flip this to `true` once the M5-followup enforcement arm in
-        // `kernel/mod.rs::execute_llm_agent` is implemented.
-        "enforced": false,
+        // RBAC M5: per-user budget enforcement is wired through
+        // `metering::check_user_budget` (post-call, same semantics as
+        // global / per-agent / per-provider caps). When `alert_breach`
+        // flips true, the next LLM call from this user is denied at the
+        // BudgetExceeded gate.
+        "enforced": true,
     }))
     .into_response()
 }

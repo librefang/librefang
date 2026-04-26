@@ -1,7 +1,7 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
 
 use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
-use librefang_types::agent::{AgentId, ResourceQuota};
+use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::model_catalog::ModelCatalogEntry;
 use std::sync::Arc;
@@ -390,6 +390,56 @@ impl MeteringEngine {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly token budget: {} / {}",
                     provider, tokens, budget.max_tokens_per_hour
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// RBAC M5: check a per-user spending budget.
+    ///
+    /// Post-call: invoked AFTER `check_all_and_record` succeeds (the cost
+    /// of the just-finished call is already in the rolled-up totals
+    /// returned by `query_user_*`). Mirrors the global / per-agent /
+    /// per-provider semantics — the LLM call already happened, so
+    /// "exceeded" means the *next* call from this user must be denied,
+    /// not that the current one is rolled back.
+    ///
+    /// Each window with a `0.0` limit is treated as unlimited and
+    /// skipped. Returns `QuotaExceeded` when any non-zero window has
+    /// already been crossed.
+    pub fn check_user_budget(
+        &self,
+        user_id: UserId,
+        budget: &librefang_types::config::UserBudgetConfig,
+    ) -> LibreFangResult<()> {
+        if budget.max_hourly_usd > 0.0 {
+            let cost = self.store.query_user_hourly(user_id)?;
+            if cost >= budget.max_hourly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "User {} exceeded hourly cost budget: ${:.4} / ${:.4}",
+                    user_id, cost, budget.max_hourly_usd
+                )));
+            }
+        }
+
+        if budget.max_daily_usd > 0.0 {
+            let cost = self.store.query_user_daily(user_id)?;
+            if cost >= budget.max_daily_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "User {} exceeded daily cost budget: ${:.4} / ${:.4}",
+                    user_id, cost, budget.max_daily_usd
+                )));
+            }
+        }
+
+        if budget.max_monthly_usd > 0.0 {
+            let cost = self.store.query_user_monthly(user_id)?;
+            if cost >= budget.max_monthly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "User {} exceeded monthly cost budget: ${:.4} / ${:.4}",
+                    user_id, cost, budget.max_monthly_usd
                 )));
             }
         }
@@ -902,5 +952,95 @@ mod tests {
         assert!(engine
             .check_all_and_record(&record, &quota, &budget)
             .is_ok());
+    }
+
+    // ── RBAC M5: per-user budget enforcement ─────────────────────────
+
+    #[test]
+    fn test_check_user_budget_under_limit_passes() {
+        let engine = setup();
+        let alice = UserId::from_name("Alice");
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 0.10,
+                user_id: Some(alice),
+                ..Default::default()
+            })
+            .unwrap();
+        let budget = librefang_types::config::UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 10.0,
+            max_monthly_usd: 100.0,
+            alert_threshold: 0.8,
+        };
+        assert!(engine.check_user_budget(alice, &budget).is_ok());
+    }
+
+    #[test]
+    fn test_check_user_budget_zero_means_unlimited() {
+        // 0.0 on every window MUST be treated as "no cap" — even after
+        // a record larger than any plausible cap, the check passes.
+        let engine = setup();
+        let alice = UserId::from_name("Alice");
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 9_999.0,
+                user_id: Some(alice),
+                ..Default::default()
+            })
+            .unwrap();
+        let budget = librefang_types::config::UserBudgetConfig::default();
+        assert_eq!(budget.max_hourly_usd, 0.0);
+        assert!(engine.check_user_budget(alice, &budget).is_ok());
+    }
+
+    #[test]
+    fn test_check_user_budget_exceeds_hourly() {
+        let engine = setup();
+        let alice = UserId::from_name("Alice");
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 0.50,
+                user_id: Some(alice),
+                ..Default::default()
+            })
+            .unwrap();
+        let budget = librefang_types::config::UserBudgetConfig {
+            max_hourly_usd: 0.10,
+            max_daily_usd: 0.0,
+            max_monthly_usd: 0.0,
+            alert_threshold: 0.8,
+        };
+        let err = engine.check_user_budget(alice, &budget).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("hourly"), "expected 'hourly' in '{msg}'");
+        assert!(msg.contains(&alice.to_string()), "expected uid in '{msg}'");
+    }
+
+    #[test]
+    fn test_check_user_budget_isolates_users() {
+        // Bob's spend MUST NOT count against Alice's cap.
+        let engine = setup();
+        let alice = UserId::from_name("Alice");
+        let bob = UserId::from_name("Bob");
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 5.0,
+                user_id: Some(bob),
+                ..Default::default()
+            })
+            .unwrap();
+        let budget = librefang_types::config::UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 0.0,
+            max_monthly_usd: 0.0,
+            alert_threshold: 0.8,
+        };
+        assert!(engine.check_user_budget(alice, &budget).is_ok());
+        assert!(engine.check_user_budget(bob, &budget).is_err());
     }
 }
