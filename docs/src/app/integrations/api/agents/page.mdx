@@ -168,9 +168,12 @@ Send a message to an agent and receive the complete response.
 
 ```json
 {
-  "message": "What files are in the current directory?"
+  "message": "What files are in the current directory?",
+  "session_id": "optional-session-uuid"
 }
 ```
+
+**Optional `session_id`**: per-request override of which session this message lands in. When omitted, the agent's current session is used. When supplied, the call is routed into that specific session (the session must already exist for the agent), letting one agent serve many parallel chats from a single client without `POST /sessions/{id}/switch` round-trips first. Useful for fan-out backends and multi-tab dashboards.
 
 **Response** `200 OK`:
 
@@ -568,6 +571,29 @@ List execution history for a workflow.
 
 ## Trigger Endpoints
 
+### Trigger response routing
+
+Trigger-fired responses route to the **agent's home channel** — the channel the agent is registered against under `[channels]`. Earlier behaviour silently dropped the response when no caller channel was on the call path (cron-style fires, scheduler events). Now the response always lands somewhere visible: the user-facing surface the agent owns.
+
+### `assignee_match:self` filter on `task_posted` triggers
+
+A `task_posted` trigger can opt to fire only when the task is assigned to the agent itself (matching by agent id):
+
+```json
+{
+  "pattern": {
+    "task_posted": {
+      "assignee_match": "self"
+    }
+  }
+}
+```
+
+`assignee_match` accepts:
+
+- `"self"` — fire only when `task.assignee_id == agent.id`. Use this for "I should work on tasks assigned to me" agents.
+- `"any"` (default) — legacy behaviour; fires on every `task_posted` event regardless of assignee.
+
 ### GET /api/triggers
 
 List all triggers. Optionally filter by agent.
@@ -838,6 +864,8 @@ A `SessionInterrupt` is an `Arc<AtomicBool>` signal that the agent loop checks a
 tool-call boundary. Setting the flag causes the loop to exit cleanly after the current
 tool call completes — it does not forcibly kill threads or cancel in-flight network
 requests.
+
+**Cascade into `agent_send` subagents**: a parent `/stop` now propagates to every subagent the parent spawned via the `agent_send` tool. The cascade walks the parent → subagent edges built when each `agent_send` call ran, so a single `/stop` against the user-facing agent stops the entire fan-out tree it kicked off — no orphaned subagent loops continuing after the user gave up. Fully recursive: subagents that themselves called `agent_send` propagate further.
 
 ### Interrupt Endpoint
 

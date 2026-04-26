@@ -168,9 +168,12 @@
 
 ```json
 {
-  "message": "What files are in the current directory?"
+  "message": "What files are in the current directory?",
+  "session_id": "optional-session-uuid"
 }
 ```
+
+**可选 `session_id`**：按请求覆盖此消息落到哪个 session。省略时用 agent 当前 session。给了就路由到那个特定 session（必须是该 agent 已存在的 session），让一个 agent 从单个客户端同时服务多条平行 chat，不需要先 `POST /sessions/{id}/switch`。fan-out 后端和多 tab dashboard 用得上。
 
 **响应** `200 OK`：
 
@@ -568,6 +571,29 @@ curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?forma
 
 ## 触发器端点
 
+### 触发响应路由
+
+触发器触发的响应路由到**该 agent 的主通道** —— agent 在 `[channels]` 下注册的那个通道。之前的行为在调用路径上没有调用方通道时（cron 样的触发、调度器事件）会静默丢弃响应。现在响应总会落到可见的地方：agent 自己拥有的面向用户的表面。
+
+### `task_posted` 触发器的 `assignee_match:self` 过滤
+
+`task_posted` 触发器可以选择只在任务被指派给 agent 自己时触发（按 agent id 匹配）：
+
+```json
+{
+  "pattern": {
+    "task_posted": {
+      "assignee_match": "self"
+    }
+  }
+}
+```
+
+`assignee_match` 接受：
+
+- `"self"` — 仅当 `task.assignee_id == agent.id` 触发。"我应该处理分配给我的任务" 类 agent 用这个。
+- `"any"`（默认） — 旧行为；任何 `task_posted` 事件都触发，不看 assignee。
+
 ### GET /api/triggers
 
 列出所有触发器。可按 Agent 过滤。
@@ -835,6 +861,8 @@ curl 'http://127.0.0.1:4545/api/agents/$AGENT/sessions/$SESSION/trajectory?forma
 **源码：** `librefang-runtime/src/interrupt.rs`
 
 `SessionInterrupt` 是一个 `Arc<AtomicBool>` 信号，agent 循环在每个工具调用边界处检查它。设置该标志后，循环在当前工具调用完成后干净退出——不会强制终止线程或取消正在进行的网络请求。
+
+**级联到 `agent_send` 子 agent**：父 agent 的 `/stop` 现在会传播到它通过 `agent_send` tool 派出的每个子 agent。级联沿着 `agent_send` 调用时建立的父→子边走，所以对面向用户的 agent 单次 `/stop` 会停掉它启动的整个 fan-out 树 — 用户放弃后不会有孤儿子 agent 循环继续。完全递归：子 agent 自己又调了 `agent_send` 的话继续向下传。
 
 ### 中断端点
 

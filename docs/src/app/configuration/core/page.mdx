@@ -15,7 +15,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `log_level` | string | `"info"` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error`. |
 | `api_listen` | string | `"127.0.0.1:4545"` | Bind address for the HTTP/WebSocket/SSE API server. Alias: `listen_addr`. |
 | `network_enabled` | bool | `false` | Enable the OFP peer-to-peer network layer. |
-| `api_key` | string | `""` (empty) | API authentication key. When set, all endpoints except `/api/health` require `Authorization: Bearer <key>`. Empty means unauthenticated (local development only). |
+| `api_key` | string | `""` (empty) | API authentication key. When set, all endpoints except `/api/health` require `Authorization: Bearer <key>`. Empty plus `api_listen` on a loopback address (`127.0.0.1` / `::1` / `localhost`) means **unauthenticated localhost only** — non-loopback callers are rejected by the auth layer regardless. To accept unauthenticated traffic from non-loopback clients you must explicitly set the listen address and accept the risk; the empty-key + non-loopback bypass that previously existed has been closed. |
 | `cors_origin` | list of strings | `[]` | CORS allowed origins added to the allow list (in addition to localhost). E.g., `["https://dash.example.com"]`. |
 | `mode` | string | `"default"` | Kernel operating mode. See below. |
 | `language` | string | `"en"` | Language/locale code for CLI output and system messages. |

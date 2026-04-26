@@ -984,6 +984,8 @@ LibreFang ships an opt-in observability stack you can bring up with one `docker 
 - `librefang-tempo` — single-binary Grafana Tempo with local-filesystem storage and 24 h retention. Receiver on internal `:4317`, query API on `:3200`.
 - `librefang-grafana` — pre-provisioned Grafana with the Tempo data source wired.
 
+**Auto-start is opt-in.** The observability stack is **not** brought up automatically with `librefang start` — set `[telemetry] auto_start = true` in `config.toml` if you want the daemon to manage the lifecycle for you. Otherwise control it explicitly with `librefang observability up` / `down`. The bundled containers run under per-`home_dir` Docker labels so multiple LibreFang installs on the same host don't fight for the same names; teardown uses RAII-style cleanup that reaps containers even on abnormal daemon exit.
+
 **Bring it up:**
 
 ```bash

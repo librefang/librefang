@@ -118,3 +118,7 @@ For Ollama, LibreFang probes `/api/tags` at startup and on the periodic provider
 The dashboard's "Models" tab and the model-switcher dropdown show these badges per model, and they feed into the `model_catalog`'s `Modality` enum (`Text` / `Image` / `Audio`) — a caller asking for image-generation models filters cleanly without a hard-coded list.
 
 vLLM and LM Studio receive the same probe via their OpenAI-compat `/models` endpoint, but the Ollama path populates the most fields because the upstream API exposes the richest data.
+
+### Reprobe cadence
+
+Local providers are probed at startup and **re-probed every 60 seconds** in the background — so a model you `ollama pull` while the daemon is running shows up in the catalog without a daemon restart, and a stopped local server flips to `auth_status: "local_offline"` automatically. The dashboard's **"Test connection"** button on a provider card forces an immediate re-probe + cache refresh so you don't have to wait for the next periodic tick.
