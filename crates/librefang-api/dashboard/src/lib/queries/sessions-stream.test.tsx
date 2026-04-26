@@ -5,7 +5,15 @@ import { useSessionStream } from "./sessions";
 // Minimal in-test EventSource fake. Native EventSource exists in jsdom only
 // as a no-op stub; we drive our own so we can deterministically assert
 // open / message / error transitions.
-class FakeEventSource implements Partial<EventSource> {
+//
+// Intentionally NOT `implements Partial<EventSource>`: the real interface
+// declares add/removeEventListener with overloaded signatures that pin
+// MessageEvent on typed channels, which a plain `EventListener` arg cannot
+// satisfy (TS2416). The hook only depends on duck-typed access through
+// the `as unknown as typeof EventSource` cast at the call sites, so
+// formal interface conformance buys us nothing and just fights the
+// type checker.
+class FakeEventSource {
   static instances: FakeEventSource[] = [];
   url: string;
   withCredentials: boolean;
@@ -100,7 +108,11 @@ describe("useSessionStream", () => {
 
     act(() => es.emit("done", "{}"));
     expect(result.current.isAttached).toBe(false);
-    expect(result.current.events.at(-1)?.type).toBe("done");
+    // Indexed access instead of `.at(-1)` — tsconfig targets ES2020,
+    // and `Array.prototype.at` is ES2022.
+    expect(
+      result.current.events[result.current.events.length - 1]?.type,
+    ).toBe("done");
   });
 
   it("treats error-before-any-data as a silent no-op (404 / not-deployed)", () => {

@@ -316,6 +316,16 @@ export const permissionPolicyKeys = {
   detail: (name: string) => [...permissionPolicyKeys.details(), name] as const,
 };
 
+// Effective-permissions snapshot — backs the permission simulator. Read-only,
+// so only `all` and `effective(name)` are needed. Hierarchical so
+// invalidating `authzKeys.all` clears every cached snapshot at once (e.g.
+// after a config reload).
+export const authzKeys = {
+  all: ["authz"] as const,
+  effectives: () => [...authzKeys.all, "effective"] as const,
+  effective: (name: string) => [...authzKeys.effectives(), name] as const,
+};
+
 export const mediaKeys = {
   all: ["media"] as const,
   providers: () => [...mediaKeys.all, "providers"] as const,

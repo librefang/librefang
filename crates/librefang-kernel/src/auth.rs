@@ -6,12 +6,15 @@
 use dashmap::DashMap;
 use librefang_channels::types::{ChannelRoleQuery, SenderContext};
 use librefang_types::agent::UserId;
-use librefang_types::config::{ChannelRoleMapping, UserConfig};
+use librefang_types::config::{ChannelRoleMapping, UserBudgetConfig, UserConfig};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::tool_policy::ToolGroup;
 use librefang_types::user_policy::{
-    ResolvedUserPolicy, UserMemoryAccess, UserToolDecision, UserToolGate,
+    ChannelToolPolicy, ResolvedUserPolicy, UserMemoryAccess, UserToolCategories, UserToolDecision,
+    UserToolGate, UserToolPolicy,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use tracing::{debug, info, warn};
 
@@ -134,6 +137,65 @@ pub struct UserIdentity {
     /// budgets. When `Some`, [`MeteringEngine::check_user_budget`]
     /// enforces the listed windows after every LLM call.
     pub budget: Option<librefang_types::config::UserBudgetConfig>,
+    /// Raw `Option<UserToolPolicy>` as declared in `UserConfig`, preserved
+    /// for the diagnostic snapshot path
+    /// ([`AuthManager::effective_permissions`]). The gate path reads
+    /// `policy.tool_policy` (default-filled); this field exists so the
+    /// simulator can faithfully report "no per-user policy declared" vs
+    /// "explicit empty allow-list" — `populate`'s `unwrap_or_default()`
+    /// would otherwise collapse those two cases together.
+    pub raw_tool_policy: Option<UserToolPolicy>,
+    /// Raw `Option<UserToolCategories>` as declared in `UserConfig`. Same
+    /// rationale as [`Self::raw_tool_policy`].
+    pub raw_tool_categories: Option<UserToolCategories>,
+    /// Raw `Option<UserMemoryAccess>` as declared in `UserConfig`. Same
+    /// rationale as [`Self::raw_tool_policy`]; the simulator surfaces
+    /// `None` distinctly from "configured-but-empty" so admins can spot
+    /// users still on the role-default ACL.
+    pub raw_memory_access: Option<UserMemoryAccess>,
+}
+
+/// Diagnostic snapshot of every RBAC input that contributes to a user's
+/// effective permissions, returned by [`AuthManager::effective_permissions`].
+///
+/// This is a **read-only dump of the configured policy slices** — not a
+/// recomputation of the per-call gate decision. The four-layer
+/// intersection (per-agent `ToolPolicy` ⋂ per-user `tool_policy` ⋂
+/// per-user `tool_categories` ⋂ per-channel `ChannelToolPolicy`) lives
+/// inside the runtime / kernel gate path; reproducing it here would
+/// duplicate that logic and silently drift from production. The
+/// permission simulator UI shows operators each input separately so they
+/// can mentally compose the result, with the gate-path code remaining
+/// the single source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePermissions {
+    /// Canonical UUID-form `UserId` for this user, stringified.
+    pub user_id: String,
+    /// Configured display name (matches `[users.x] name = "..."`).
+    pub name: String,
+    /// Resolved role string, lowercase (`viewer` / `user` / `admin` / `owner`).
+    pub role: String,
+    /// Raw per-user `tool_policy` from `UserConfig` (RBAC M3). `None`
+    /// when the user has no per-user policy declared — gate calls fall
+    /// through to per-agent / role layers in that case.
+    pub tool_policy: Option<UserToolPolicy>,
+    /// Raw per-user `tool_categories` from `UserConfig` (RBAC M3).
+    pub tool_categories: Option<UserToolCategories>,
+    /// Raw per-user `memory_access` from `UserConfig` (RBAC M3). `None`
+    /// signals "use the role-default ACL"; the resolved default lives
+    /// in [`AuthManager::memory_acl_for`] and is intentionally NOT
+    /// folded in here — the simulator surfaces "no opinion" so admins
+    /// can spot users still on defaults.
+    pub memory_access: Option<UserMemoryAccess>,
+    /// Raw per-user spending cap from `UserConfig` (RBAC M5).
+    pub budget: Option<UserBudgetConfig>,
+    /// Per-channel tool overrides, keyed by channel adapter name (RBAC M3).
+    /// Empty map = no channel overrides configured.
+    pub channel_tool_rules: HashMap<String, ChannelToolPolicy>,
+    /// Configured channel bindings (RBAC M3) so admins can see the
+    /// cross-platform identity at a glance — same shape as
+    /// `UserConfig.channel_bindings`.
+    pub channel_bindings: HashMap<String, String>,
 }
 
 /// Cache key for resolved channel roles.
@@ -217,6 +279,13 @@ impl AuthManager {
             // Build the per-user policy snapshot. Optional fields fall
             // back to default (no opinion) so `evaluate` returns
             // NeedsRoleEscalation everywhere — i.e. existing behaviour.
+            //
+            // We also keep the *raw* `Option<...>` from `UserConfig`
+            // alongside the resolved struct. The gate path reads the
+            // resolved (default-filled) form; the diagnostic /
+            // simulator path reads the raw form so it can faithfully
+            // report "not declared" vs "configured-but-empty" without
+            // having to guess from default-equality.
             let policy = ResolvedUserPolicy {
                 tool_policy: config.tool_policy.clone().unwrap_or_default(),
                 channel_tool_rules: config.channel_tool_rules.clone(),
@@ -230,6 +299,9 @@ impl AuthManager {
                 role,
                 policy,
                 budget: config.budget.clone(),
+                raw_tool_policy: config.tool_policy.clone(),
+                raw_tool_categories: config.tool_categories.clone(),
+                raw_memory_access: config.memory_access.clone(),
             };
 
             self.users.insert(user_id, identity);
@@ -507,6 +579,66 @@ impl AuthManager {
     /// per-agent / per-provider budgets only.
     pub fn budget_for(&self, user_id: UserId) -> Option<librefang_types::config::UserBudgetConfig> {
         self.users.get(&user_id)?.value().budget.clone()
+    }
+
+    /// Read-only diagnostic snapshot of every RBAC input that contributes
+    /// to a user's permissions — backs the permission simulator UI.
+    ///
+    /// Returns `None` when `user_id` doesn't match any registered user;
+    /// callers (e.g. `/api/authz/effective/{user_id}`) surface that as a
+    /// 404 rather than synthesising "guest defaults", since the
+    /// simulator's job is to show the operator what they configured,
+    /// not to invent inputs.
+    ///
+    /// Per-user policy slices that an operator left unset are returned
+    /// as `None` (not as `Default::default()`) so the UI can distinguish
+    /// "explicitly empty allow-list" from "no policy declared — defer
+    /// to other layers". For the same reason, [`UserMemoryAccess`] is
+    /// surfaced as the raw configured value rather than the role-default
+    /// ACL — admins need to see which users are still on defaults.
+    ///
+    /// **This is NOT the per-call gate decision.** The four-layer
+    /// intersection happens at the runtime tool-gate site
+    /// ([`AuthManager::resolve_user_tool_decision`] + per-agent
+    /// `ToolPolicy::check_tool` + global `ApprovalPolicy.channel_rules`)
+    /// and is intentionally not duplicated here.
+    pub fn effective_permissions(&self, user_id: UserId) -> Option<EffectivePermissions> {
+        let identity = self.users.get(&user_id)?.value().clone();
+
+        // Read the raw `Option<...>` slices preserved on `UserIdentity`
+        // by `populate`. This is the only way to faithfully report
+        // "not declared" vs "configured-but-empty": the resolved
+        // policy on `identity.policy.*` was default-filled at boot, so
+        // those two cases would be indistinguishable from there.
+        let tool_policy = identity.raw_tool_policy.clone();
+        let tool_categories = identity.raw_tool_categories.clone();
+        let memory_access = identity.raw_memory_access.clone();
+
+        // `channel_index` is a flat key→user_id map; rebuild the per-
+        // user bindings by filtering entries that point at us. Cost
+        // is O(N_bindings_total), bounded by the number of configured
+        // users * 3-4 platforms — cheap and avoids carrying a parallel
+        // copy on `UserIdentity`.
+        let mut channel_bindings: HashMap<String, String> = HashMap::new();
+        for entry in self.channel_index.iter() {
+            if *entry.value() == user_id {
+                if let Some((channel, platform_id)) = entry.key().split_once(':') {
+                    channel_bindings.insert(channel.to_string(), platform_id.to_string());
+                }
+            }
+        }
+
+        Some(EffectivePermissions {
+            user_id: user_id.to_string(),
+            name: identity.name,
+            role: identity.role.to_string(),
+            tool_policy,
+            tool_categories,
+            memory_access,
+            budget: identity.budget,
+            channel_tool_rules: identity.policy.channel_tool_rules,
+            channel_bindings,
+        })
     }
 
     /// Get the memory namespace ACL for a user (if registered) merged
