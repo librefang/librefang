@@ -133,7 +133,7 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
-  // per-user budget / policy (M3+M5 stubs)
+  // per-user budget (M5 stub) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
 } from "../../api";
@@ -275,7 +275,7 @@ export {
   updateUser,
   deleteUser,
   importUsers,
-  // per-user policy (M3 stub)
+  // per-user policy (M3 #3205)
   updateUserPolicy,
 } from "../../api";
 
@@ -327,4 +327,9 @@ export type {
   UserBudgetEntry,
   UserBudgetResponse,
   PermissionPolicy,
+  PermissionPolicyUpdate,
+  UserToolPolicy,
+  UserToolCategories,
+  UserMemoryAccess,
+  ChannelToolPolicy,
 } from "../../api";

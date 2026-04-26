@@ -28,6 +28,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::config::UserConfig;
+use librefang_types::user_policy::{
+    ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
+};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
@@ -42,6 +45,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
                 .delete(delete_user),
         )
         .route("/users/import", axum::routing::post(import_users))
+        .route(
+            "/users/{name}/policy",
+            axum::routing::get(get_user_policy).put(update_user_policy),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -748,4 +755,318 @@ where
     );
 
     Ok(captured)
+}
+
+// ---------------------------------------------------------------------------
+// RBAC M3 — per-user policy GET / PUT (#3054 Phase 2 wiring)
+// ---------------------------------------------------------------------------
+
+/// View / wire shape for the per-user RBAC M3 policy slice.
+///
+/// Each top-level field is independently nullable so the dashboard can edit
+/// one section at a time without restating the others. On PUT a `None`
+/// clears that field; a missing key preserves the existing value (see
+/// [`update_user_policy`]). On GET every field is always present (`null`
+/// when the user has no opinion configured) so the client can render a
+/// stable form.
+// `utoipa::ToSchema` is intentionally NOT derived: the inner types
+// (`UserToolPolicy`, `UserMemoryAccess`, `ChannelToolPolicy`, …) live in
+// `librefang-types` and don't implement `ToSchema` to keep that crate
+// free of OpenAPI deps. The handler attribute below points utoipa at
+// `serde_json::Value` for documentation; the wire shape is still pinned
+// by serde so callers see the real JSON.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserPolicyView {
+    #[serde(default)]
+    pub tool_policy: Option<UserToolPolicy>,
+    #[serde(default)]
+    pub tool_categories: Option<UserToolCategories>,
+    #[serde(default)]
+    pub memory_access: Option<UserMemoryAccess>,
+    #[serde(default)]
+    pub channel_tool_rules: HashMap<String, ChannelToolPolicy>,
+}
+
+impl From<&UserConfig> for UserPolicyView {
+    fn from(cfg: &UserConfig) -> Self {
+        Self {
+            tool_policy: cfg.tool_policy.clone(),
+            tool_categories: cfg.tool_categories.clone(),
+            memory_access: cfg.memory_access.clone(),
+            channel_tool_rules: cfg.channel_tool_rules.clone(),
+        }
+    }
+}
+
+/// PUT body decoder. We accept the request as a raw JSON object so we can
+/// distinguish three states per key:
+///   * key absent       → preserve existing value
+///   * key present null → clear
+///   * key present obj  → replace
+///
+/// `Option<serde_json::Value>` would collapse `null` to `None` (serde's
+/// default behaviour for `Option<T>`), making absent and explicit-null
+/// indistinguishable. Using `serde_json::Map` directly preserves both via
+/// `Map::contains_key` + `Value::is_null`.
+const KNOWN_POLICY_KEYS: &[&str] = &[
+    "tool_policy",
+    "tool_categories",
+    "memory_access",
+    "channel_tool_rules",
+];
+
+/// Reject lists with empty/whitespace-only entries or duplicates so the
+/// resolver can never trip over a `""` glob (matches every tool) or a
+/// duplicate-as-typo that silently shadows the user's intended pattern.
+fn validate_string_list(label: &str, items: &[String]) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for item in items {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            return Err(format!(
+                "{label} contains an empty or whitespace-only entry"
+            ));
+        }
+        if !seen.insert(trimmed) {
+            return Err(format!("{label} contains duplicate entry '{trimmed}'"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_tool_policy(p: &UserToolPolicy) -> Result<(), String> {
+    validate_string_list("tool_policy.allowed_tools", &p.allowed_tools)?;
+    validate_string_list("tool_policy.denied_tools", &p.denied_tools)?;
+    Ok(())
+}
+
+fn validate_tool_categories(c: &UserToolCategories) -> Result<(), String> {
+    validate_string_list("tool_categories.allowed_groups", &c.allowed_groups)?;
+    validate_string_list("tool_categories.denied_groups", &c.denied_groups)?;
+    Ok(())
+}
+
+fn validate_memory_access(a: &UserMemoryAccess) -> Result<(), String> {
+    validate_string_list("memory_access.readable_namespaces", &a.readable_namespaces)?;
+    validate_string_list("memory_access.writable_namespaces", &a.writable_namespaces)?;
+    // RBAC invariant: a user can only write where they can read. Without
+    // this check an admin could grant `writable=["proactive"]` while
+    // leaving `readable=[]`, producing a write-only ACL the kernel's
+    // `can_read`/`can_write` paths can't reason about consistently
+    // (writes succeed, but the same user can't read the entry back).
+    // Enforced newly here — there is no upstream validation today; the
+    // kernel resolver assumes the config is well-formed.
+    for w in &a.writable_namespaces {
+        if !a.readable_namespaces.iter().any(|r| r == w) {
+            return Err(format!(
+                "memory_access.writable_namespaces['{w}'] is not in readable_namespaces \
+                 (writable must be a subset of readable)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_channel_rules(rules: &HashMap<String, ChannelToolPolicy>) -> Result<(), String> {
+    for (channel, rule) in rules {
+        let trimmed = channel.trim();
+        if trimmed.is_empty() {
+            return Err("channel_tool_rules contains an empty channel name".to_string());
+        }
+        validate_string_list(
+            &format!("channel_tool_rules['{trimmed}'].allowed_tools"),
+            &rule.allowed_tools,
+        )?;
+        validate_string_list(
+            &format!("channel_tool_rules['{trimmed}'].denied_tools"),
+            &rule.denied_tools,
+        )?;
+    }
+    Ok(())
+}
+
+/// Decode a single key out of the raw PUT body into one of three states.
+enum FieldUpdate<T> {
+    Absent,
+    Clear,
+    Set(T),
+}
+
+fn decode_field<T: serde::de::DeserializeOwned>(
+    label: &str,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Result<FieldUpdate<T>, String> {
+    match body.get(label) {
+        None => Ok(FieldUpdate::Absent),
+        Some(serde_json::Value::Null) => Ok(FieldUpdate::Clear),
+        Some(v) => serde_json::from_value::<T>(v.clone())
+            .map(FieldUpdate::Set)
+            .map_err(|e| format!("{label} payload is invalid: {e}")),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/users/{name}/policy",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    responses(
+        (status = 200, description = "Per-user policy slice", body = serde_json::Value),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn get_user_policy(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let cfg = state.kernel.config_ref();
+    match cfg.users.iter().find(|u| u.name == name) {
+        Some(u) => Json(UserPolicyView::from(u)).into_response(),
+        None => err_response(StatusCode::NOT_FOUND, format!("user '{name}' not found")),
+    }
+}
+
+/// PUT /api/users/{name}/policy — upsert the per-user RBAC M3 policy slice.
+///
+/// Body shape:
+/// ```json
+/// {
+///   "tool_policy":        {...} | null,
+///   "tool_categories":    {...} | null,
+///   "memory_access":      {...} | null,
+///   "channel_tool_rules": {"telegram": {...}, ...}
+/// }
+/// ```
+///
+/// Each top-level key is independently optional:
+///   * key absent       → preserve existing value (so a partial edit
+///                        from the dashboard never clobbers a section
+///                        the form didn't expose),
+///   * key present null → clear the field,
+///   * key present obj  → replace.
+///
+/// `channel_tool_rules` collapses absent/null to "preserve" (use an empty
+/// object `{}` to clear all rules), since a `null` map is rarely what an
+/// operator means.
+///
+/// Owner-only — covered by `middleware::is_owner_only_write` which gates
+/// every mutating call under `/api/users*`. Per-user policy edits change
+/// someone's authorization surface, which is unambiguously an Owner action.
+#[utoipa::path(
+    put,
+    path = "/api/users/{name}/policy",
+    tag = "users",
+    params(("name" = String, Path, description = "User name (case-sensitive)")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Updated user policy slice", body = serde_json::Value),
+        (status = 400, description = "Validation error"),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub async fn update_user_policy(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(raw): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let body = match raw {
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                "request body must be a JSON object",
+            )
+        }
+    };
+
+    // Reject unknown top-level keys early so a typo (e.g. `tool_polices`)
+    // doesn't silently no-op — without this the absent/null distinction
+    // turns every typo into "preserve existing".
+    for k in body.keys() {
+        if !KNOWN_POLICY_KEYS.iter().any(|known| known == k) {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown field '{k}' (expected one of: {})",
+                    KNOWN_POLICY_KEYS.join(", ")
+                ),
+            );
+        }
+    }
+
+    let tool_policy_update = match decode_field::<UserToolPolicy>("tool_policy", &body) {
+        Ok(v) => v,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    let tool_categories_update =
+        match decode_field::<UserToolCategories>("tool_categories", &body) {
+            Ok(v) => v,
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        };
+    let memory_access_update = match decode_field::<UserMemoryAccess>("memory_access", &body) {
+        Ok(v) => v,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+    };
+    let channel_rules_update =
+        match decode_field::<HashMap<String, ChannelToolPolicy>>("channel_tool_rules", &body) {
+            Ok(v) => v,
+            Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
+        };
+
+    if let FieldUpdate::Set(p) = &tool_policy_update {
+        if let Err(e) = validate_tool_policy(p) {
+            return err_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let FieldUpdate::Set(c) = &tool_categories_update {
+        if let Err(e) = validate_tool_categories(c) {
+            return err_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let FieldUpdate::Set(a) = &memory_access_update {
+        if let Err(e) = validate_memory_access(a) {
+            return err_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
+    if let FieldUpdate::Set(r) = &channel_rules_update {
+        if let Err(e) = validate_channel_rules(r) {
+            return err_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
+
+    let target = name.clone();
+    match persist_users(&state, move |users| -> Result<UserConfig, PersistError> {
+        let idx = users
+            .iter()
+            .position(|u| u.name == target)
+            .ok_or_else(|| PersistError::NotFound(format!("user '{target}' not found")))?;
+        match tool_policy_update {
+            FieldUpdate::Absent => {}
+            FieldUpdate::Clear => users[idx].tool_policy = None,
+            FieldUpdate::Set(p) => users[idx].tool_policy = Some(p),
+        }
+        match tool_categories_update {
+            FieldUpdate::Absent => {}
+            FieldUpdate::Clear => users[idx].tool_categories = None,
+            FieldUpdate::Set(c) => users[idx].tool_categories = Some(c),
+        }
+        match memory_access_update {
+            FieldUpdate::Absent => {}
+            FieldUpdate::Clear => users[idx].memory_access = None,
+            FieldUpdate::Set(a) => users[idx].memory_access = Some(a),
+        }
+        match channel_rules_update {
+            FieldUpdate::Absent | FieldUpdate::Clear => {}
+            FieldUpdate::Set(r) => users[idx].channel_tool_rules = r,
+        }
+        Ok(users[idx].clone())
+    })
+    .await
+    {
+        Ok(final_cfg) => (StatusCode::OK, Json(UserPolicyView::from(&final_cfg))).into_response(),
+        Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
+        Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
+        Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
+        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
+    }
 }
