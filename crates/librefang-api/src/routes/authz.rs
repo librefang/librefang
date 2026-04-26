@@ -199,12 +199,8 @@ pub async fn check(
     }
 
     let user_id_str = user_id.to_string();
-    let gate = auth.resolve_user_tool_decision(
-        &q.action,
-        Some(&user_id_str),
-        q.channel.as_deref(),
-        false,
-    );
+    let gate =
+        auth.resolve_user_tool_decision(&q.action, Some(&user_id_str), q.channel.as_deref(), false);
 
     let (decision, allowed, reason) = match gate {
         UserToolGate::Allow => ("allow", true, None),
