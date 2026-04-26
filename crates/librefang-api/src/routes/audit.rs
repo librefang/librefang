@@ -370,6 +370,7 @@ fn stream_json(entries: Vec<AuditEntry>) -> Response {
             "user_id": e.user_id.map(|u| u.to_string()),
             "channel": e.channel,
             "hash": e.hash,
+            "prev_hash": e.prev_hash,
         });
         let mut buf = Vec::with_capacity(256);
         if !first {
@@ -392,7 +393,7 @@ fn stream_json(entries: Vec<AuditEntry>) -> Response {
         })
 }
 
-/// Emit CSV with a fixed schema: `seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash`.
+/// Emit CSV with a fixed schema: `seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash,prev_hash`.
 /// Header row is first; every cell is wrapped in `"…"` if it contains a
 /// comma, quote, CR, or LF (RFC 4180). Existing quotes inside a cell are
 /// doubled. This pins the format so downstream parsers (Excel, csv-rs,
@@ -402,11 +403,15 @@ pub(crate) fn stream_csv(entries: Vec<AuditEntry>) -> Response {
 
     let mut chunks: Vec<Result<Vec<u8>, std::io::Error>> = Vec::with_capacity(entries.len() + 1);
     chunks.push(Ok(
-        b"seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash\n".to_vec(),
+        b"seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash,prev_hash\n".to_vec(),
     ));
     for e in entries {
+        // `prev_hash` is appended as the last column so a downstream
+        // verifier can replay the SHA-256 chain off the dump alone (see
+        // `librefang-runtime::audit::compute_hash`). Without it, the
+        // export is unverifiable — the whole point of the hash chain.
         let line = format!(
-            "{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{}\n",
             e.seq,
             csv_escape(&e.timestamp),
             csv_escape(&e.agent_id),
@@ -416,6 +421,7 @@ pub(crate) fn stream_csv(entries: Vec<AuditEntry>) -> Response {
             csv_escape(&e.user_id.map(|u| u.to_string()).unwrap_or_default()),
             csv_escape(e.channel.as_deref().unwrap_or("")),
             csv_escape(&e.hash),
+            csv_escape(&e.prev_hash),
         );
         chunks.push(Ok(line.into_bytes()));
     }
@@ -659,6 +665,65 @@ mod tests {
         // Inner-position formula sentinels are NOT prefixed (only first char).
         assert_eq!(csv_escape("a=b"), "a=b");
         assert_eq!(csv_escape("foo+bar"), "foo+bar");
+    }
+
+    /// Drain a streaming `Response` body to a UTF-8 `String`. Used by the
+    /// export-roundtrip tests below — `Body::from_stream` doesn't expose a
+    /// sync `to_bytes`, so we go through `http_body_util::BodyExt::collect`.
+    async fn body_to_string(resp: Response) -> String {
+        use http_body_util::BodyExt;
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect streaming body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("UTF-8")
+    }
+
+    /// JSON export must include `prev_hash` for every entry. Without it,
+    /// a downstream verifier can't replay the SHA-256 chain off the dump
+    /// — defeating the integrity guarantee the chain exists for.
+    #[tokio::test]
+    async fn test_stream_json_includes_prev_hash() {
+        let mut e = entry(7, "agent-1", AuditAction::ToolInvoke, "x", None, None);
+        e.prev_hash = "a".repeat(64);
+        e.hash = "b".repeat(64);
+
+        let resp = stream_json(vec![e]);
+        let body = body_to_string(resp).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON array");
+        let first = &parsed[0];
+        assert_eq!(
+            first["prev_hash"],
+            serde_json::Value::String("a".repeat(64)),
+            "prev_hash must round-trip on the JSON export so verifiers can replay the chain"
+        );
+        assert_eq!(first["hash"], serde_json::Value::String("b".repeat(64)));
+    }
+
+    /// CSV export must carry `prev_hash` as the last column. The header
+    /// row schema is part of the public download contract — pin both the
+    /// header and the per-row value here.
+    #[tokio::test]
+    async fn test_stream_csv_includes_prev_hash_column() {
+        let mut e = entry(7, "agent-1", AuditAction::ToolInvoke, "x", None, None);
+        e.prev_hash = "a".repeat(64);
+        e.hash = "b".repeat(64);
+
+        let resp = stream_csv(vec![e]);
+        let body = body_to_string(resp).await;
+        let mut lines = body.lines();
+        let header = lines.next().unwrap_or("");
+        assert_eq!(
+            header, "seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash,prev_hash",
+            "CSV header must end with `prev_hash` so the chain is verifiable"
+        );
+        let row = lines.next().unwrap_or("");
+        assert!(
+            row.ends_with(&format!(",{},{}", "b".repeat(64), "a".repeat(64))),
+            "CSV row must end with `…,hash,prev_hash`; got {row:?}"
+        );
     }
 
     #[test]

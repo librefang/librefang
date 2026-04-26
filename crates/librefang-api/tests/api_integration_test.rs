@@ -2962,8 +2962,9 @@ async fn test_audit_export_csv_emits_documented_headers() {
     let text = resp.text().await.unwrap();
     let first_line = text.lines().next().unwrap_or("");
     assert_eq!(
-        first_line, "seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash",
-        "CSV header row schema must remain stable for downstream parsers"
+        first_line, "seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash,prev_hash",
+        "CSV header row schema must remain stable for downstream parsers; \
+         `prev_hash` is the last column so a verifier can replay the chain"
     );
 }
 
