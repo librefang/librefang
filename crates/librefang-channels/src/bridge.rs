@@ -2515,11 +2515,7 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
-        if blocks.iter().any(|b| match b {
-            ContentBlock::ImageFile { .. } => true,
-            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
-            _ => false,
-        }) {
+        if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -2554,11 +2550,7 @@ async fn dispatch_message(
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
         let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
-        let saved = blocks.iter().any(|b| match b {
-            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
-            _ => false,
-        });
-        if saved {
+        if has_file_saved_block(&blocks) {
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
             // user-supplied caption survives the save-path replacement.
@@ -2567,6 +2559,120 @@ async fn dispatch_message(
                     format!("[Voice message ({duration_seconds}s)]\nCaption: {c}")
                 }
                 _ => format!("[Voice message ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
+    // For audio (music/podcast — distinct from voice memos): same pattern
+    // as Voice. Audio carries optional title/performer metadata which we
+    // surface in the prepended context block.
+    if let ChannelContent::Audio {
+        ref url,
+        ref caption,
+        duration_seconds,
+        ref title,
+        ref performer,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        if has_file_saved_block(&blocks) {
+            let mut header = format!("[Audio ({duration_seconds}s)");
+            match (title.as_deref(), performer.as_deref()) {
+                (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
+                    header.push_str(&format!(" — {t} by {p}"));
+                }
+                (Some(t), _) if !t.is_empty() => header.push_str(&format!(" — {t}")),
+                (_, Some(p)) if !p.is_empty() => header.push_str(&format!(" by {p}")),
+                _ => {}
+            }
+            header.push(']');
+            let context = match caption {
+                Some(c) if !c.is_empty() => format!("{header}\nCaption: {c}"),
+                _ => header,
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
+    // For video messages: same pattern as Voice. Prefer the channel-
+    // provided `filename` when present, otherwise derive from URL, then
+    // fall back to a stable default so the saved file always has an
+    // extension hint for `media_transcribe` / vision tools.
+    if let ChannelContent::Video {
+        ref url,
+        ref caption,
+        duration_seconds,
+        ref filename,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let resolved_filename = filename
+            .clone()
+            .or_else(|| filename_from_url(url))
+            .unwrap_or_else(|| "video.mp4".to_string());
+        let mut blocks =
+            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
+        if has_file_saved_block(&blocks) {
+            let context = match caption {
+                Some(c) if !c.is_empty() => {
+                    format!("[Video ({duration_seconds}s)]\nCaption: {c}")
+                }
+                _ => format!("[Video ({duration_seconds}s)]"),
             };
             blocks.insert(
                 0,
@@ -3514,6 +3620,27 @@ const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// Used both by `download_file_to_blocks` to produce the text and by
 /// `dispatch_message` to detect success vs failure.
 const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
+
+/// Returns `true` when [`download_file_to_blocks`] produced a block that
+/// represents a successfully saved download — either an inline `ImageFile`
+/// (when the response was image-typed) or a `Text` block whose content
+/// starts with [`FILE_SAVED_BLOCK_PREFIX`] (the canonical save-success
+/// marker).
+///
+/// All four media-download arms in `dispatch_message` (File, Voice, Audio,
+/// Video) use this single check so any future change to the success
+/// representation lands in one place. The check is intentionally broad:
+/// even when a non-image arm (Voice/Audio/Video) receives an image-typed
+/// response, the bytes are already on disk and the agent should still
+/// receive the dispatched block — falling through to the text fallback
+/// here would orphan the saved file.
+fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        ContentBlock::ImageFile { .. } => true,
+        ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+        _ => false,
+    })
+}
 
 /// Extract a basename-style filename from the path component of a URL.
 ///
