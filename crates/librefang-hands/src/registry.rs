@@ -1273,6 +1273,22 @@ fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
         return Err(e);
     }
 
+    // Fsync the parent directory so the rename's directory-entry update
+    // is durable. Without this, a power loss between `rename(2)` returning
+    // and the FS flushing the parent inode can leave the hand state file
+    // missing on the next boot, which the orphan-GC path treats as
+    // "first boot" and would otherwise wipe the surviving SQLite rows.
+    //
+    // Windows doesn't support opening directories via `std::fs::File`,
+    // and NTFS rename + write-through semantics make this far less
+    // critical there, so the fsync is unix-only.
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
     Ok(())
 }
 

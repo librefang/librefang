@@ -4313,7 +4313,7 @@ fn map_hand_runtime_override_err(
     params(("id" = String, Path, description = "Hand agent ID")),
     request_body(
         content = PatchAgentConfigRequest,
-        description = "Runtime override fields; empty strings for `api_key_env` / `base_url` clear the override"
+        description = "Runtime override fields. Whitespace is trimmed on all string fields. For `model` and `provider` an empty (or whitespace-only) string is ignored ('leave unchanged'); for the nullable secrets `api_key_env` and `base_url` an empty (or whitespace-only) string clears the override."
     ),
     responses(
         (status = 200, description = "Runtime override applied to the live manifest and persisted to hand_state.json", body = serde_json::Value),

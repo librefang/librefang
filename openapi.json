@@ -943,7 +943,7 @@
           }
         ],
         "requestBody": {
-          "description": "Runtime override fields; empty strings for `api_key_env` / `base_url` clear the override",
+          "description": "Runtime override fields. Whitespace is trimmed on all string fields. For `model` and `provider` an empty (or whitespace-only) string is ignored ('leave unchanged'); for the nullable secrets `api_key_env` and `base_url` an empty (or whitespace-only) string clears the override.",
           "content": {
             "application/json": {
               "schema": {
