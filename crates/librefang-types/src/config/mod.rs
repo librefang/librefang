@@ -147,6 +147,7 @@ mod tests {
                 m
             },
             api_key_hash: None,
+            budget: None,
         };
         let json = serde_json::to_string(&uc).unwrap();
         let back: UserConfig = serde_json::from_str(&json).unwrap();

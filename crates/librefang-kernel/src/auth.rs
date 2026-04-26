@@ -205,6 +205,7 @@ mod tests {
                     m
                 },
                 api_key_hash: None,
+                budget: None,
             },
             UserConfig {
                 name: "Guest".to_string(),
@@ -215,12 +216,14 @@ mod tests {
                     m
                 },
                 api_key_hash: None,
+                budget: None,
             },
             UserConfig {
                 name: "ReadOnly".to_string(),
                 role: "viewer".to_string(),
                 channel_bindings: HashMap::new(),
                 api_key_hash: None,
+                budget: None,
             },
         ]
     }
