@@ -680,14 +680,21 @@ pub async fn user_budget_detail(
 /// PUT /api/budget/users/{user_id} — admin-only per-user budget upsert.
 ///
 /// `user_id` accepts the same forms as the GET sibling (UUID or configured
-/// name). The request body mirrors `UserBudgetConfig`:
+/// name). The request body mirrors `UserBudgetConfig` and is a **full
+/// replacement** of the user's budget — all four keys are required, any
+/// missing key returns 400. Set a window to `0.0` to mean "unlimited on
+/// that window" (same semantics as the kernel-side metering check); this
+/// is **not** the same as omitting the key.
+///
 /// ```json
 /// { "max_hourly_usd": 1.0, "max_daily_usd": 10.0, "max_monthly_usd": 100.0,
 ///   "alert_threshold": 0.8 }
 /// ```
-/// Any window set to `0.0` is "unlimited on that window" (same semantics as
-/// the kernel-side metering check). Missing fields default to `0.0` /
-/// `0.8` so a partial payload upgrades cleanly.
+///
+/// Full-replace was chosen over PATCH semantics so `curl -X PUT` with a
+/// partial body cannot silently zero out other windows (`UserBudgetConfig`
+/// derives `#[serde(default)]`, which would otherwise default any omitted
+/// field to `0.0` / `0.8` and clear an existing cap).
 ///
 /// On success the cap takes effect on the **next** LLM call — already-
 /// billed responses are returned unchanged. Persists to `config.toml` via
@@ -700,7 +707,7 @@ pub async fn user_budget_detail(
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
         (status = 200, description = "Budget written and reloaded", body = serde_json::Value),
-        (status = 400, description = "Invalid budget payload (negative limit, threshold out of range)"),
+        (status = 400, description = "Invalid or partial budget payload"),
         (status = 403, description = "Caller is not an admin"),
         (status = 404, description = "No user matches the given id/name"),
     )
@@ -716,13 +723,37 @@ pub async fn update_user_budget(
         return deny;
     }
 
-    // Parse + validate. Anything that would make `MeteringEngine::
-    // check_user_budget` behave surprisingly is rejected here so the
-    // operator sees a 400 instead of a silently-wrong cap.
-    let max_hourly_usd = body["max_hourly_usd"].as_f64().unwrap_or(0.0);
-    let max_daily_usd = body["max_daily_usd"].as_f64().unwrap_or(0.0);
-    let max_monthly_usd = body["max_monthly_usd"].as_f64().unwrap_or(0.0);
-    let alert_threshold = body["alert_threshold"].as_f64().unwrap_or(0.8);
+    // Full replacement: every field is required. Reject missing or wrong-
+    // typed keys before disk so a partial body cannot silently zero out
+    // existing caps via `UserBudgetConfig`'s `#[serde(default)]`. A typo
+    // (`"max_hourly_usd": "1.0"` as a string) returns 400 instead of being
+    // coerced to 0.0.
+    let extract_f64 = |key: &str| -> Result<f64, ApiErrorResponse> {
+        match body.get(key) {
+            Some(v) => v.as_f64().ok_or_else(|| {
+                ApiErrorResponse::bad_request(format!("{key} must be a JSON number (got {v})"))
+            }),
+            None => Err(ApiErrorResponse::bad_request(format!(
+                "{key} is required (PUT is a full replacement, not a patch)"
+            ))),
+        }
+    };
+    let max_hourly_usd = match extract_f64("max_hourly_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let max_daily_usd = match extract_f64("max_daily_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let max_monthly_usd = match extract_f64("max_monthly_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let alert_threshold = match extract_f64("alert_threshold") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
 
     for (label, v) in [
         ("max_hourly_usd", max_hourly_usd),
@@ -761,13 +792,14 @@ pub async fn update_user_budget(
         .unwrap_or_else(|_| UserId::from_name(&user_id_param));
 
     let new_budget_for_closure = new_budget.clone();
+    let user_id_param_for_closure = user_id_param.clone();
     let result = super::users::persist_users(&state, move |users| {
         let idx = users
             .iter()
             .position(|u| UserId::from_name(&u.name) == target_user_id)
             .ok_or_else(|| {
                 super::users::PersistError::NotFound(format!(
-                    "no user matches '{user_id_param}'"
+                    "no user matches '{user_id_param_for_closure}'"
                 ))
             })?;
         users[idx].budget = Some(new_budget_for_closure);
@@ -779,9 +811,9 @@ pub async fn update_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::RoleChange,
+                librefang_runtime::audit::AuditAction::ConfigChange,
                 format!(
-                    "user budget updated: hourly={max_hourly_usd} daily={max_daily_usd} monthly={max_monthly_usd} alert={alert_threshold}"
+                    "user_budget updated for {user_id_param}: hourly={max_hourly_usd} daily={max_daily_usd} monthly={max_monthly_usd} alert={alert_threshold}"
                 ),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
@@ -842,13 +874,14 @@ pub async fn delete_user_budget(
         .parse()
         .unwrap_or_else(|_| UserId::from_name(&user_id_param));
 
+    let user_id_param_for_closure = user_id_param.clone();
     let result = super::users::persist_users(&state, move |users| {
         let idx = users
             .iter()
             .position(|u| UserId::from_name(&u.name) == target_user_id)
             .ok_or_else(|| {
                 super::users::PersistError::NotFound(format!(
-                    "no user matches '{user_id_param}'"
+                    "no user matches '{user_id_param_for_closure}'"
                 ))
             })?;
         users[idx].budget = None;
@@ -860,8 +893,8 @@ pub async fn delete_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::RoleChange,
-                "user budget cleared",
+                librefang_runtime::audit::AuditAction::ConfigChange,
+                format!("user_budget cleared for {user_id_param}"),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
