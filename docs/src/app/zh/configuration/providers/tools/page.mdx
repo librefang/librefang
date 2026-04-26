@@ -12,6 +12,19 @@
 - Gemini CLI
 - Qwen Code
 
+## CLI 登录作为一等默认 provider
+
+当你没设 provider API key 但**有**可用的 CLI 登录（`claude` / `codex` / `gemini` / `qwen` 在 `PATH` 上且已认证），LibreFang 会把 CLI provider 选成新 agent 的默认模型。检测在启动时跑，刷新 provider 可用性时也会重测。
+
+检测优先级（从前到后，先匹配先用）：
+
+1. `claude-code` — `claude` 在 `PATH`，`claude auth status` 报告 active session。
+2. `codex-cli` — `codex` 在 `PATH`，`OPENAI_API_KEY`（Codex CLI 自己需要的）已设。
+3. `gemini-cli` — `gemini` 在 `PATH`，`gemini auth login` 已认证。
+4. `qwen-code` — `qwen` 在 `PATH`，已认证。
+
+这个行为替代了之前 "API provider 失败时回退" 的启发式 — CLI provider 现在像普通远程 provider 一样被对待。要显式覆盖自动选择，在 `config.toml` 里设 `[default_model] provider = "anthropic"`（或其他）。
+
 ---
 
 ## Claude Code

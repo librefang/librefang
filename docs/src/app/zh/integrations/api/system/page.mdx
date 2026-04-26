@@ -205,6 +205,39 @@
 
 获取指定工具的详细信息，包括其输入模式（input schema）。
 
+### POST /api/tools/&lbrace;name&rbrace;/invoke
+
+直接调用 kernel 工具，不走 agent loop。给 MCP 桥、自动化脚本、带外集成用。
+
+**fail-closed**：每个请求都被拒绝，除非 `[tool_invoke] enabled = true` 且工具名出现在 `[tool_invoke] allowlist` 里。审批门控的工具还要求 `?agent_id=<uuid>`，让审批回调能解析回真正的 agent — 没带 `agent_id` 的此类调用会被拒，避免遗留的延后执行。
+
+**请求：** JSON body 是工具的 `input` 对象（按工具的 schema 校验）。
+
+**Query 参数：**
+
+- `agent_id`（可选，必须是合法 UUID）：审批门控工具的调用方 agent，用于审计归因。
+
+**响应状态：**
+
+- `200` — 工具执行；body 是工具的结果 JSON。
+- `400` — 输入未通过 schema 校验，或审批门控工具调用未带 `agent_id`。
+- `403` — 端点被禁用或工具不在 allowlist。
+- `404` — 工具未注册。
+
+```toml
+# config.toml
+[tool_invoke]
+enabled = true
+allowlist = ["http_get", "shell_exec"]   # 精确工具名
+```
+
+```bash
+curl -X POST 'http://127.0.0.1:4545/api/tools/http_get/invoke?agent_id=11111111-1111-1111-1111-111111111111' \
+  -H 'Authorization: Bearer $LIBREFANG_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'
+```
+
 ### GET /api/metrics
 
 Prometheus 格式的指标端点，用于集成 Grafana、Prometheus 或兼容的监控栈。

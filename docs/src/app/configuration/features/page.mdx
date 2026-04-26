@@ -954,6 +954,8 @@ Compression happens automatically — there is no configuration required to enab
 
 Summary messages are stored in the session history as regular `assistant` turns with a special internal tag. On subsequent compression passes, an existing summary is included in the material to be re-summarized rather than preserved verbatim. This means long-running sessions undergo iterative refinement — older summaries are folded into newer, more compact ones over time.
 
+The compactor system prompt now instructs the LLM to **write summaries in the same language the user was using** in the conversation. A Chinese conversation produces a Chinese summary; an Arabic conversation produces an Arabic summary. The instruction is applied to both the single-pass `summarize_messages` path and the merge step of `summarize_in_chunks` so chunked compaction is covered too — no surprise English-language insertions on long non-English sessions.
+
 #### Pluggable `ContextEngine`
 
 The compression algorithm is implemented behind a `ContextEngine` trait. The current implementation uses an LLM-based summarizer. Future versions of LibreFang will allow configuring alternative compression algorithms — including DAG-based compression and LCM (Latent Context Modeling) — once those implementations stabilize.
@@ -961,6 +963,56 @@ The compression algorithm is implemented behind a `ContextEngine` trait. The cur
 #### No configuration needed
 
 Context compression is always active for all agents. There are no knobs to enable, disable, or tune in `config.toml` today. The 80% threshold, hard-truncation fallback, and context guard ceiling are all enforced automatically by the runtime.
+
+---
+
+### Cron Scheduler
+
+Per-agent scheduled jobs (interval, one-shot, or 5-field cron expressions) trigger agent turns, system events, or workflow runs. The scheduler supports multi-destination delivery with failure isolation, pre-scripts that inject data into the LLM prompt, and a silent marker for runtime delivery suppression.
+
+See [Cron Scheduler](/configuration/features/cron) for the full schema, fan-out target variants (channel / webhook / local file / email), SSRF protection on webhook URLs, the `<home_dir>/scripts/` path allowlist for pre-scripts, and the wake-gate vs pre-script trade-off.
+
+---
+
+### Observability — Tempo + business spans
+
+LibreFang ships an opt-in observability stack you can bring up with one `docker compose` invocation. It captures HTTP requests **and** LibreFang's own work — agent turns, tool calls, channel sends, cron fires — as searchable Tempo traces.
+
+**Stack components** (all bundled in-binary; no external download required):
+
+- `librefang-otel-collector` — OTLP/gRPC collector on `:4317`. The daemon exports spans here.
+- `librefang-tempo` — single-binary Grafana Tempo with local-filesystem storage and 24 h retention. Receiver on internal `:4317`, query API on `:3200`.
+- `librefang-grafana` — pre-provisioned Grafana with the Tempo data source wired.
+
+**Auto-start is opt-in.** The observability stack is **not** brought up automatically with `librefang start` — set `[telemetry] auto_start = true` in `config.toml` if you want the daemon to manage the lifecycle for you. Otherwise control it explicitly with `librefang observability up` / `down`. The bundled containers run under per-`home_dir` Docker labels so multiple LibreFang installs on the same host don't fight for the same names; teardown uses RAII-style cleanup that reaps containers even on abnormal daemon exit.
+
+**Bring it up:**
+
+```bash
+librefang observability up      # starts the bundled compose stack
+librefang observability status  # health-checks each container
+librefang observability down    # tears it down
+```
+
+**Configure the daemon to export there:**
+
+```toml
+[telemetry]
+otlp_endpoint = "http://localhost:4317"
+service_name = "librefang"
+sample_rate = 1.0           # 0.0–1.0; lower for high-volume prod
+prometheus_enabled = true   # also expose /api/metrics
+```
+
+**Trace search**: open Grafana at `http://localhost:3000`, switch Explore to the Tempo data source, and search by trace ID, span name, or attribute. Business-level spans include `agent.turn`, `tool.call`, `channel.send`, `cron.fire`, and `provider.request` — each carrying agent id, channel name, model, and outcome as searchable attributes.
+
+**`cache_hit_ratio` metric:** for every `agent.turn` span the runtime computes
+
+```
+cache_hit_ratio = cache_read / (cache_read + cache_creation)   # in [0.0, 1.0]
+```
+
+`Some(1.0)` is a perfect prefix-cache hit; `Some(0.0)` is a cold start where caching was active but nothing was hit; `None` means caching wasn't active at all for the run. Surfaces in trajectory exports (`metadata.cache_hit_ratio`) and on the Grafana per-agent panel.
 
 ---
 

@@ -264,6 +264,41 @@ The kernel creates the directories on spawn and injects their resolved paths int
 
 **Modes**: `rw` (read-write, default) or `r` (read-only). Paths are relative to `workspaces_dir` and must not be absolute or contain `..`.
 
+### Live Context (`context.md`)
+
+If a `context.md` file is present in the agent's workspace, it is re-read **on every agent turn** and injected into the system prompt as a `## Live Context` section. This lets external tools (cron jobs, scripts, dashboards) push fresh data — market prices, project state, on-call rosters — into an agent without restarting it.
+
+**Path resolution**: `{workspace}/.identity/context.md` is preferred; `{workspace}/context.md` is used as a fallback for unmigrated workspaces.
+
+**Behavior**:
+- The file is read once per turn, right before the prompt is assembled.
+- Reads are capped at 32 KB; oversized files are truncated with a warning.
+- When a previously-successful read fails (e.g. the file is briefly replaced by an external writer), the most recent cached content is reused so the agent does not lose context mid-conversation.
+- If the file does not exist, no `## Live Context` section is added.
+
+**Opting out**: set `cache_context = true` in `agent.toml` to restore the pre-Apr-2026 behavior, where `context.md` is read once at session start and cached for the lifetime of the session.
+
+```toml
+# agent.toml
+cache_context = true   # default: false (re-read every turn)
+```
+
+### Lazy Tool Loading (`tool_search` / `tool_load`)
+
+A default agent answering "hi" used to ship the JSON schema of every built-in tool in every request — ~75 tools × ~90 tokens each ≈ 6 000 tokens of dead weight per turn. Lazy tool loading shrinks that to the ~19 tools the model actually needs in most turns and exposes the long tail through two meta-tools the LLM calls on demand:
+
+- **`tool_search(query)`** — keyword-match against the catalog (name + description + hint). Returns matching tools with their one-line hints.
+- **`tool_load(name)`** — fetch one tool's full schema. The tool becomes callable on the next turn (the schema is added to the request from then on).
+
+The full catalog is still rendered as a one-line-per-tool hint list in the system prompt, so the model knows what exists without paying for full schemas. **Tools the runtime classifies as "always native"** (file_read, shell_exec, the cron tools, …) keep their full schema in every request — there's no point making the model `tool_load` something it almost certainly will use.
+
+Opt out per agent if a model is bad at `tool_search` chains:
+
+```toml
+# agent.toml — disable lazy loading; ship every tool schema every turn
+lazy_tools = false
+```
+
 ---
 
 ## Spawning Agents
