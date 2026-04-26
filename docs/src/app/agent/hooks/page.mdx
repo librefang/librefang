@@ -162,6 +162,29 @@ environment (including `PATH`), so system tools are available without extra setu
 | `version` | string | LibreFang daemon version, e.g. `"2026.4.21-beta1"` |
 | `started_at` | string (ISO 8601) | UTC timestamp of boot completion |
 
+### `transform_tool_result`
+
+A **transformative** hook (unlike the others, which are observers): handlers can rewrite the raw tool-result string before it enters the conversation. Fires after `after_tool_call` but before sanitisation, so a returning rewriter sees the original tool output and the runtime sees the rewritten one.
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | string | Agent that ran the tool |
+| `tool_name` | string | Name of the executed tool |
+| `tool_input` | object | The input that was passed to the tool |
+| `tool_output` | string | The raw stringified result the tool returned |
+
+**Handler contract** (`HookHandler::transform`):
+
+```rust
+fn transform(&self, ctx: HookContext) -> Result<Option<String>, String>;
+```
+
+- `Ok(Some(replacement))` — replaces `tool_output` for the rest of the turn.
+- `Ok(None)` — handler abstains; the next handler in the chain gets a chance.
+- `Err(msg)` — `warn!`-logged and skipped (fail-open). Other handlers still run.
+
+`HookRegistry::fire_transform()` walks the chain in registration order and **the first `Ok(Some(_))` wins**. Use this for redaction (strip secrets from `git diff` output before the LLM sees it), summarisation (truncate a 5 MB JSON dump to a 200-line summary), or testing (inject a deterministic stub for an MCP tool you don't want to actually call).
+
 ---
 
 ## Example Script

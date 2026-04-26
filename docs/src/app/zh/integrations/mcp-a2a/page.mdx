@@ -93,6 +93,30 @@ async def call_tool(name: str, arguments: dict):
     return [TextContent(type="text", text="result")]
 ```
 
+### MCP 污点策略
+
+发往 MCP tool 的出站载荷会被出站污点检测器扫描敏感数据（token、API key、知名 secret 前缀、PII）。默认每条规则都触发；可以**按 tool** 或**按路径** mute 特定规则，给确实需要接收该类数据的 MCP server 开口子。
+
+```toml
+# config.toml —— 按 tool 名模式全局 mute
+[[mcp_taint_policy]]
+tool = "mcp__github__create_pr"
+skip_rules = ["AuthorizationLiteral"]   # 允许 GitHub MCP 转发 bearer token
+```
+
+**可用规则 id**（`TaintRuleId` enum）：
+
+| 规则 | 检测 |
+|---|---|
+| `AuthorizationLiteral` | 载荷中的 `Authorization: Bearer ...` / `Authorization: Basic ...` 头 |
+| `KeyValueSecret` | `password=...`、`token=...`、`api_key=...` 这类模式 |
+| `WellKnownPrefix` | `sk-`、`ghp_`、`xoxb-` 等已知 token 前缀 |
+| `OpaqueToken` | 没有已知前缀的长高熵字符串 |
+| `PiiEmail` / `PiiPhone` / `PiiCreditCard` / `PiiSsn` | 个人信息类 |
+| `SensitiveKeyName` | 名为 `password`、`secret`、`private_key` 等的 JSON 字段名 |
+
+**API**：调用方也可以直接 `check_outbound_text_violation_with_skip(payload, sink, skip_rules)` 按调用 skip 规则。原 `check_outbound_text_violation` 用空 skip 集合委托过去，所以现有调用方行为不变。
+
 ---
 
 ## A2A (Agent to Agent)

@@ -881,7 +881,7 @@ blocked_commands = []
 
 #### Command Policy
 
-Every channel ships with a set of built-in slash commands (`/agent`, `/new`, `/reboot`, `/model`, `/usage`, etc.) that let users switch agents, reset sessions, inspect usage, and trigger workflows. On **public-facing bots** (customer support, community assistants), exposing these to arbitrary users is a security hole — anyone can type `/agent admin` to switch to an internal agent, `/new` to wipe the session, or `/model` to change the model.
+Every channel ships with a set of built-in slash commands (`/agent`, `/new`, `/reboot`, `/model`, `/usage`, etc.) that let users switch agents, fork into a fresh session, inspect usage, and trigger workflows. On **public-facing bots** (customer support, community assistants), exposing these to arbitrary users is a security hole — anyone can type `/agent admin` to switch to an internal agent, `/new` to fork off into a new session (the prior conversation stays resumable on the channel), or `/model` to change the model.
 
 The three command-policy fields gate the built-in commands per channel. **Precedence:** `disable_commands` > `allowed_commands` (whitelist) > `blocked_commands` (blacklist).
 
