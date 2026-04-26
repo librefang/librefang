@@ -29,7 +29,9 @@ tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tracing = { workspace = true }
+tracing-core = "0.1"
 tracing-subscriber = { workspace = true }
+arc-swap = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }

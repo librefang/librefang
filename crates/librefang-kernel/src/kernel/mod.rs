@@ -521,6 +521,14 @@ pub struct LibreFangKernel {
     /// directory could not be resolved at boot.
     pub(crate) checkpoint_manager:
         Option<Arc<librefang_runtime::checkpoint_manager::CheckpointManager>>,
+    /// Pluggable hook that swaps the live tracing `EnvFilter` when
+    /// `config.log_level` changes via hot-reload. Injected by the binary
+    /// (`librefang-cli` for the daemon) post-construction; absent for
+    /// in-process callers that don't own a tracing subscriber, in which
+    /// case `log_level` changes still update `KernelConfig` in-memory but
+    /// don't take effect on the active filter (the hot-reload action is a
+    /// no-op with a warning).
+    pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -2800,6 +2808,7 @@ impl LibreFangKernel {
                     librefang_runtime::checkpoint_manager::CheckpointManager::new(cp_dir),
                 ))
             },
+            log_reloader: OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -9463,6 +9472,16 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Install a [`crate::log_reload::LogLevelReloader`].
+    ///
+    /// Idempotent: subsequent calls are silently ignored (the slot is a
+    /// `OnceLock`). The injected reloader is invoked when
+    /// [`crate::config_reload::HotAction::ReloadLogLevel`] fires during
+    /// hot-reload — see `apply_hot_actions_inner`.
+    pub fn set_log_reloader(&self, reloader: crate::log_reload::LogLevelReloaderArc) {
+        let _ = self.log_reloader.set(reloader);
+    }
+
     /// Set the weak self-reference for trigger dispatch.
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.
@@ -9793,6 +9812,16 @@ system_prompt = "You are a helpful assistant."
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
                 }
+                HotAction::ReloadLogLevel(level) => match self.log_reloader.get() {
+                    Some(reloader) => match reloader.reload(level) {
+                        Ok(()) => info!("Hot-reload: log_level updated to {level}"),
+                        Err(e) => warn!("Hot-reload: log_level update to {level} failed: {e}"),
+                    },
+                    None => warn!(
+                        "Hot-reload: log_level changed to {level} but no reloader is installed; \
+                         restart required for the new filter to take effect"
+                    ),
+                },
             }
         }
 

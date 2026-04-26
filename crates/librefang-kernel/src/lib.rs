@@ -19,6 +19,7 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod inbox;
 pub mod kernel;
+pub mod log_reload;
 pub mod mcp_oauth_provider;
 pub use librefang_kernel_metering as metering;
 pub mod orchestration;

@@ -12,6 +12,7 @@ pub mod doctor;
 mod http_client;
 pub mod i18n;
 mod launcher;
+mod log_filter;
 mod mcp;
 pub mod progress;
 pub mod table;
@@ -1670,16 +1671,20 @@ fn init_tracing_stderr(log_level: &str) {
     // INFO-level `#[instrument]` spans are filtered out before OTel ever
     // sees them). Per-layer filtering keeps stderr terse while OTel
     // receives the full span tree.
+    //
+    // The filter is wrapped in `ReloadableEnvFilter` so the daemon can swap
+    // it at runtime when `KernelConfig::log_level` changes via hot-reload.
     // Force stderr explicitly: machine-readable subcommands like
     // `doctor --json` expect a clean stdout stream. The fmt layer's
     // default writer is stdout, which would interleave tracing output
     // with the JSON payload and corrupt downstream parsers.
+    let reloadable_filter = log_filter::ReloadableEnvFilter::install(env_filter);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_target(false)
         .compact()
         .with_writer(std::io::stderr)
-        .with_filter(env_filter);
+        .with_filter(reloadable_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
@@ -3405,6 +3410,13 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
                 std::process::exit(1);
             }
         };
+
+        // Wire the live tracing filter into the kernel's hot-reload path so
+        // dashboard edits to `log_level` take effect immediately instead of
+        // requiring a daemon restart. Only the daemon path needs this — TUI
+        // / one-shot CLI commands route through `init_tracing_file` (no
+        // dashboard) so the slot stays unwired there.
+        kernel.set_log_reloader(std::sync::Arc::new(log_filter::CliLogLevelReloader));
 
         let cfg = kernel.config_ref();
         let listen_addr = cfg.api_listen.clone();

@@ -3,9 +3,8 @@
 //! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
 //! approval policy, cron settings, webhook triggers, extensions, tool policy,
 //! api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys,
-//! sanitize, default model, language, mode.
-//!
-//! **No-op** (informational only): log_level (reload handle not yet plumbed).
+//! sanitize, default model, language, mode, log_level (when a
+//! [`crate::log_reload::LogLevelReloader`] is installed by the binary).
 //!
 //! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault.
 
@@ -57,6 +56,10 @@ pub enum HotAction {
     ReloadProxy,
     /// Dashboard credentials (user/pass/hash) changed — config swap is sufficient.
     UpdateDashboardCredentials,
+    /// `log_level` changed — swap the live tracing `EnvFilter`. Carries the
+    /// new directive string (e.g. `"debug"`, `"librefang_kernel=trace,info"`)
+    /// since the kernel doesn't keep the parsed filter around.
+    ReloadLogLevel(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -300,10 +303,8 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
     // ----- No-op fields -----
 
     if old.log_level != new.log_level {
-        plan.noop_changes.push(format!(
-            "log_level: {} -> {} (requires restart — reload handle not yet plumbed)",
-            old.log_level, new.log_level
-        ));
+        plan.hot_actions
+            .push(HotAction::ReloadLogLevel(new.log_level.clone()));
     }
 
     if old.language != new.language {
@@ -637,7 +638,6 @@ mod tests {
         // Hot-reloadable
         b.usage_footer = UsageFooterMode::Tokens;
         b.max_cron_jobs = 100;
-        // No-op
         b.log_level = "debug".to_string();
 
         let plan = build_reload_plan(&a, &b);
@@ -647,7 +647,9 @@ mod tests {
         // so the caller knows what will need re-initialization after restart.
         assert!(plan.hot_actions.contains(&HotAction::UpdateUsageFooter));
         assert!(plan.hot_actions.contains(&HotAction::UpdateCronConfig));
-        assert!(plan.noop_changes.iter().any(|c| c.contains("log_level")));
+        assert!(plan
+            .hot_actions
+            .contains(&HotAction::ReloadLogLevel("debug".to_string())));
     }
 
     // -----------------------------------------------------------------------
@@ -659,17 +661,28 @@ mod tests {
         use librefang_types::config::KernelMode;
         let a = default_cfg();
         let mut b = default_cfg();
-        b.log_level = "debug".to_string();
         b.language = "de".to_string();
         b.mode = KernelMode::Dev;
 
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.is_empty());
-        assert_eq!(plan.noop_changes.len(), 3);
-        assert!(plan.noop_changes.iter().any(|c| c.contains("log_level")));
+        assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn test_log_level_hot_reloaded() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.log_level = "debug".to_string();
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required, "log_level should be hot-reloadable");
+        assert!(plan
+            .hot_actions
+            .contains(&HotAction::ReloadLogLevel("debug".to_string())));
     }
 
     // -----------------------------------------------------------------------
@@ -692,7 +705,7 @@ mod tests {
             restart_required: false,
             restart_reasons: vec![],
             hot_actions: vec![],
-            noop_changes: vec!["log_level: info -> debug".to_string()],
+            noop_changes: vec!["language: en -> de".to_string()],
         };
         assert!(plan.has_changes());
 

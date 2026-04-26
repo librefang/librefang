@@ -4164,6 +4164,7 @@ dependencies = [
 name = "librefang-cli"
 version = "2026.4.24-beta5"
 dependencies = [
+ "arc-swap",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -4193,6 +4194,7 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.25.11+spec-1.1.0",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
  "unic-langid",
  "uuid",
