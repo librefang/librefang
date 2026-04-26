@@ -198,6 +198,8 @@ pub struct SkillManifest {
     pub env_passthrough: Vec<String>,
 }
 
+pub use librefang_types::config::EnvPassthroughPolicy;
+
 /// Skill metadata section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMeta {

@@ -16933,6 +16933,13 @@ impl KernelHandle for LibreFangKernel {
         cfg.max_agent_call_depth
     }
 
+    fn skill_env_passthrough_policy(
+        &self,
+    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
+        let cfg = self.config.load();
+        Some(librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills))
+    }
+
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
         self.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,

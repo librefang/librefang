@@ -923,11 +923,13 @@ pub async fn execute_tool_raw(
                 if let Some(skill) = registry.find_tool_provider(other) {
                     debug!(tool = other, skill = %skill.manifest.skill.name, "Dispatching to skill");
                     let skill_dir = skill.path.clone();
+                    let env_policy = kernel.and_then(|k| k.skill_env_passthrough_policy());
                     match librefang_skills::loader::execute_skill_tool(
                         &skill.manifest,
                         &skill.path,
                         other,
                         input,
+                        env_policy.as_ref(),
                     )
                     .await
                     {

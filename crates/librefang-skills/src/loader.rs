@@ -1,10 +1,50 @@
 //! Skill loader — loads and executes skills from various runtimes.
 
-use crate::{SkillError, SkillManifest, SkillRuntime, SkillToolResult};
+use crate::{EnvPassthroughPolicy, SkillError, SkillManifest, SkillRuntime, SkillToolResult};
 use std::path::Path;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// Env vars that can never flow through to a skill subprocess regardless of
+/// skill manifest or operator config. These either inject code
+/// (`LD_PRELOAD`, `PYTHONSTARTUP`) or redirect imports/library lookup
+/// (`PYTHONPATH`, `NODE_PATH`, `LD_LIBRARY_PATH`) and would defeat the
+/// `env_clear` isolation by giving an attacker-controlled host environment a
+/// path to execute code inside any opted-in skill.
+const FORBIDDEN_PASSTHROUGH: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "PYTHONEXECUTABLE",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+];
+
+/// Env vars the kernel sets explicitly per-runtime. Skills cannot override
+/// these via `env_passthrough` — kernel settings (notably `PATH`, which the
+/// kernel may have deliberately narrowed) are non-negotiable.
+const KERNEL_RESERVED_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "SYSTEMROOT",
+    "PYTHONIOENCODING",
+    "NODE_NO_WARNINGS",
+    "SHELL",
+    "TERM",
+];
+
+fn name_matches(haystack: &str, needle: &str) -> bool {
+    haystack.eq_ignore_ascii_case(needle)
+}
 
 /// Validate that a resolved script path stays within the skill directory.
 /// Prevents path traversal attacks via `../` in entry names.
@@ -45,12 +85,77 @@ fn validate_script_path(skill_dir: &Path, entry: &str) -> Result<std::path::Path
     Ok(canonical_script)
 }
 
+/// Resolve the effective env-passthrough allowlist for a skill, applying
+/// (in order) the FORBIDDEN hard block, the kernel-reserved hard block, and
+/// the operator's `denied_patterns` (overridable per-skill via
+/// `per_skill_overrides`). Each rejection is logged so operators can debug
+/// why a declared var didn't reach the subprocess.
+pub fn resolve_effective_passthrough(
+    manifest_list: &[String],
+    skill_name: &str,
+    policy: Option<&EnvPassthroughPolicy>,
+) -> Vec<String> {
+    let denied: &[String] = policy.map(|p| p.denied_patterns.as_slice()).unwrap_or(&[]);
+    let overrides: Option<&Vec<String>> =
+        policy.and_then(|p| p.per_skill_overrides.get(skill_name));
+
+    manifest_list
+        .iter()
+        .filter(|name| {
+            if FORBIDDEN_PASSTHROUGH.iter().any(|f| name_matches(f, name)) {
+                warn!(
+                    skill = skill_name,
+                    var = %name,
+                    "skill env_passthrough request blocked: var is in FORBIDDEN_PASSTHROUGH \
+                     (would defeat subprocess isolation)"
+                );
+                return false;
+            }
+            if KERNEL_RESERVED_ENV.iter().any(|r| name_matches(r, name)) {
+                warn!(
+                    skill = skill_name,
+                    var = %name,
+                    "skill env_passthrough request blocked: var is kernel-reserved \
+                     (kernel sets it explicitly per-runtime)"
+                );
+                return false;
+            }
+            let blocked_by_deny = denied
+                .iter()
+                .any(|pattern| librefang_types::capability::glob_matches(pattern, name));
+            if blocked_by_deny {
+                let allowed_by_override = overrides
+                    .map(|v| v.iter().any(|n| name_matches(n, name)))
+                    .unwrap_or(false);
+                if !allowed_by_override {
+                    warn!(
+                        skill = skill_name,
+                        var = %name,
+                        "skill env_passthrough request blocked by operator deny pattern; \
+                         add to [skills].env_passthrough_per_skill if intended"
+                    );
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
 /// Execute a skill tool by spawning the appropriate runtime.
+///
+/// `env_policy` is the operator-side gate over the manifest's
+/// `env_passthrough` request. `None` means no operator gate is applied and
+/// only the built-in `FORBIDDEN_PASSTHROUGH` / `KERNEL_RESERVED_ENV` hard
+/// blocks remain — fine for CLI/dev paths, but production callers should
+/// supply a policy derived from `[skills]` config.
 pub async fn execute_skill_tool(
     manifest: &SkillManifest,
     skill_dir: &Path,
     tool_name: &str,
     input: &serde_json::Value,
+    env_policy: Option<&EnvPassthroughPolicy>,
 ) -> Result<SkillToolResult, SkillError> {
     // Verify the tool exists in the manifest
     let _tool_def = manifest
@@ -60,6 +165,9 @@ pub async fn execute_skill_tool(
         .find(|t| t.name == tool_name)
         .ok_or_else(|| SkillError::NotFound(format!("Tool {tool_name} not in skill manifest")))?;
 
+    let effective_passthrough =
+        resolve_effective_passthrough(&manifest.env_passthrough, &manifest.skill.name, env_policy);
+
     match manifest.runtime.runtime_type {
         SkillRuntime::Python => {
             execute_python(
@@ -68,7 +176,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
-                &manifest.env_passthrough,
+                &effective_passthrough,
             )
             .await
         }
@@ -79,7 +187,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
-                &manifest.env_passthrough,
+                &effective_passthrough,
             )
             .await
         }
@@ -90,7 +198,7 @@ pub async fn execute_skill_tool(
                 tool_name,
                 input,
                 &manifest.config,
-                &manifest.env_passthrough,
+                &effective_passthrough,
             )
             .await
         }
@@ -173,6 +281,12 @@ async fn execute_python(
     // public (visible in the manifest); only its host-side value crosses
     // the boundary.
     cmd.env_clear();
+    // Per-skill env passthrough is applied FIRST so the kernel-curated
+    // settings below (PATH, HOME, PYTHONIOENCODING, …) take precedence on
+    // last-write-wins. `apply_env_passthrough` already strips kernel-reserved
+    // and forbidden names defensively, but this ordering is the load-bearing
+    // guarantee: kernel settings are non-negotiable.
+    apply_env_passthrough(&mut cmd, env_passthrough);
     // Preserve PATH for binary resolution and platform essentials
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
@@ -191,9 +305,6 @@ async fn execute_python(
     }
     // Python needs PYTHONIOENCODING for UTF-8 output
     cmd.env("PYTHONIOENCODING", "utf-8");
-    // Per-skill env passthrough allowlist (default empty). Only forwards
-    // vars actually set in the host environment.
-    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -288,6 +399,9 @@ async fn execute_node(
 
     // SECURITY: Isolate environment (same as Python — prevent secret leakage)
     cmd.env_clear();
+    // Per-skill passthrough first; kernel-curated settings below win on
+    // last-write-wins (see Python runtime above for rationale).
+    apply_env_passthrough(&mut cmd, env_passthrough);
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
@@ -303,11 +417,7 @@ async fn execute_node(
             cmd.env("TEMP", tmp);
         }
     }
-    // Node needs NODE_PATH sometimes
     cmd.env("NODE_NO_WARNINGS", "1");
-    // Per-skill env passthrough allowlist (default empty). Only forwards
-    // vars actually set in the host environment.
-    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -396,6 +506,9 @@ async fn execute_shell(
 
     // SECURITY: Isolate environment (same as Python/Node — prevent secret leakage)
     cmd.env_clear();
+    // Per-skill passthrough first; kernel-curated settings below win on
+    // last-write-wins (see Python runtime above for rationale).
+    apply_env_passthrough(&mut cmd, env_passthrough);
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
@@ -417,9 +530,6 @@ async fn execute_shell(
             cmd.env("TEMP", tmp);
         }
     }
-    // Per-skill env passthrough allowlist (default empty). Only forwards
-    // vars actually set in the host environment.
-    apply_env_passthrough(&mut cmd, env_passthrough);
 
     let mut child = cmd
         .spawn()
@@ -474,16 +584,31 @@ async fn execute_shell(
 
 /// Apply a per-skill env passthrough allowlist to a subprocess command.
 ///
-/// For each variable name in `allowlist`, if the variable is set in the
-/// host environment, inject it into the child command. Variables not
-/// present in the host environment are silently skipped — the skill
-/// declared interest, but the host operator chose not to provide.
+/// Caller is expected to have pre-filtered the list via
+/// [`resolve_effective_passthrough`]; this function additionally enforces
+/// the FORBIDDEN and KERNEL_RESERVED hard blocks as defense-in-depth so
+/// that a buggy or test caller can never accidentally inject `LD_PRELOAD`
+/// or override the kernel's `PATH`.
 ///
-/// Mirrors the existing `[exec_policy].allowed_env_vars` mechanism for
-/// `shell_exec`. Default is empty (full `env_clear` isolation preserved
-/// for skills that don't opt in).
+/// For each surviving name, if the variable is set in the host environment,
+/// inject it into the child command. Variables not present in the host
+/// environment are silently skipped.
 fn apply_env_passthrough(cmd: &mut tokio::process::Command, allowlist: &[String]) {
     for var_name in allowlist {
+        if FORBIDDEN_PASSTHROUGH
+            .iter()
+            .any(|f| name_matches(f, var_name))
+            || KERNEL_RESERVED_ENV
+                .iter()
+                .any(|r| name_matches(r, var_name))
+        {
+            warn!(
+                var = %var_name,
+                "apply_env_passthrough: refusing to forward forbidden/kernel-reserved var \
+                 (resolve_effective_passthrough should have filtered this earlier)"
+            );
+            continue;
+        }
         if let Ok(val) = std::env::var(var_name) {
             cmd.env(var_name, val);
         }
@@ -539,6 +664,78 @@ fn find_node() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_passthrough_blocks_forbidden_var() {
+        let manifest = vec!["LD_PRELOAD".to_string(), "GOG_KEYRING_PASSWORD".to_string()];
+        let resolved = resolve_effective_passthrough(&manifest, "any-skill", None);
+        assert_eq!(resolved, vec!["GOG_KEYRING_PASSWORD".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_passthrough_blocks_kernel_reserved() {
+        let manifest = vec!["PATH".to_string(), "MY_VAR".to_string()];
+        let resolved = resolve_effective_passthrough(&manifest, "any-skill", None);
+        assert_eq!(resolved, vec!["MY_VAR".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_passthrough_forbidden_is_case_insensitive() {
+        let manifest = vec!["ld_preload".to_string(), "PythonPath".to_string()];
+        let resolved = resolve_effective_passthrough(&manifest, "any-skill", None);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_passthrough_operator_deny_pattern_blocks() {
+        let policy = EnvPassthroughPolicy {
+            denied_patterns: vec!["*_KEY".to_string(), "AWS_*".to_string()],
+            per_skill_overrides: std::collections::HashMap::new(),
+        };
+        let manifest = vec![
+            "OPENAI_API_KEY".to_string(),
+            "AWS_REGION".to_string(),
+            "GOG_KEYRING_PASSWORD".to_string(),
+        ];
+        let resolved = resolve_effective_passthrough(&manifest, "any-skill", Some(&policy));
+        // OPENAI_API_KEY matches *_KEY; AWS_REGION matches AWS_*; the keyring
+        // password is fine because *_PASSWORD isn't in this policy.
+        assert_eq!(resolved, vec!["GOG_KEYRING_PASSWORD".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_passthrough_per_skill_override_unblocks() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("gog".to_string(), vec!["GOG_KEYRING_PASSWORD".to_string()]);
+        let policy = EnvPassthroughPolicy {
+            denied_patterns: vec!["*_PASSWORD".to_string()],
+            per_skill_overrides: overrides,
+        };
+        let manifest = vec!["GOG_KEYRING_PASSWORD".to_string()];
+        // Without override, blocked.
+        assert!(resolve_effective_passthrough(&manifest, "other-skill", Some(&policy)).is_empty());
+        // With override (matched on skill name), allowed.
+        assert_eq!(
+            resolve_effective_passthrough(&manifest, "gog", Some(&policy)),
+            vec!["GOG_KEYRING_PASSWORD".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_passthrough_per_skill_override_cannot_unblock_forbidden() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("evil".to_string(), vec!["LD_PRELOAD".to_string()]);
+        let policy = EnvPassthroughPolicy {
+            denied_patterns: vec![],
+            per_skill_overrides: overrides,
+        };
+        let manifest = vec!["LD_PRELOAD".to_string()];
+        let resolved = resolve_effective_passthrough(&manifest, "evil", Some(&policy));
+        assert!(
+            resolved.is_empty(),
+            "operator override must not bypass FORBIDDEN_PASSTHROUGH"
+        );
+    }
 
     #[test]
     fn test_find_python() {
@@ -709,9 +906,10 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: Vec::new(),
         };
 
-        let result = execute_skill_tool(&manifest, dir.path(), "greet", &serde_json::json!({}))
-            .await
-            .unwrap();
+        let result =
+            execute_skill_tool(&manifest, dir.path(), "greet", &serde_json::json!({}), None)
+                .await
+                .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.output["greeting"], "hello from shell");
     }
@@ -761,9 +959,15 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: Vec::new(),
         };
 
-        let result = execute_skill_tool(&manifest, dir.path(), "echo_tool", &serde_json::json!({}))
-            .await
-            .unwrap();
+        let result = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "echo_tool",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.output["result"], "plain text output");
     }
@@ -813,9 +1017,15 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: Vec::new(),
         };
 
-        let result = execute_skill_tool(&manifest, dir.path(), "fail_tool", &serde_json::json!({}))
-            .await
-            .unwrap();
+        let result = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "fail_tool",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output["error"]
             .as_str()
@@ -866,6 +1076,7 @@ echo '{"greeting": "hello from shell"}'
             dir.path(),
             "missing_tool",
             &serde_json::json!({}),
+            None,
         )
         .await
         .unwrap_err();
@@ -910,9 +1121,15 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: Vec::new(),
         };
 
-        let result = execute_skill_tool(&manifest, dir.path(), "test_tool", &serde_json::json!({}))
-            .await
-            .unwrap();
+        let result = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "test_tool",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!result.is_error);
         let note = result.output["note"].as_str().unwrap();
         assert!(note.contains("system prompt"));
@@ -920,6 +1137,7 @@ echo '{"greeting": "hello from shell"}'
 
     #[tokio::test]
     #[cfg(unix)]
+    #[serial_test::serial(skill_env_passthrough)]
     async fn test_env_passthrough_allowlist_injects_var() {
         use crate::{
             SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
@@ -976,9 +1194,10 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: vec![allowed_var.to_string()],
         };
 
-        let result = execute_skill_tool(&manifest, dir.path(), "probe", &serde_json::json!({}))
-            .await
-            .unwrap();
+        let result =
+            execute_skill_tool(&manifest, dir.path(), "probe", &serde_json::json!({}), None)
+                .await
+                .unwrap();
 
         // Cleanup before assertions so a panic doesn't leak state.
         std::env::remove_var(allowed_var);
@@ -1041,9 +1260,15 @@ echo '{"greeting": "hello from shell"}'
             env_passthrough: Vec::new(),
         };
 
-        let err = execute_skill_tool(&manifest, dir.path(), "evil_tool", &serde_json::json!({}))
-            .await
-            .unwrap_err();
+        let err = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "evil_tool",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SkillError::ExecutionFailed(_)));
         assert!(
             err.to_string().contains("escapes skill directory"),

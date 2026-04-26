@@ -6922,6 +6922,7 @@ fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<Str
         &prepared.source_dir,
         &tool_name,
         &input_json,
+        None,
     ));
     match result {
         Ok(result) => {

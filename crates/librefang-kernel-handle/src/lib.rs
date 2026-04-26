@@ -582,6 +582,16 @@ pub trait KernelHandle: Send + Sync {
         5
     }
 
+    /// Operator-side gate over skill `env_passthrough` requests, derived from
+    /// `[skills]` config. `None` = no operator gate (only the built-in
+    /// FORBIDDEN/kernel-reserved hard blocks apply). Default impl returns
+    /// `None`; the kernel overrides this to pull from `KernelConfig.skills`.
+    fn skill_env_passthrough_policy(
+        &self,
+    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
+        None
+    }
+
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
     fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
