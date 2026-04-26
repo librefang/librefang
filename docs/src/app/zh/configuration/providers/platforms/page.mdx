@@ -10,10 +10,16 @@
 - Anyscale
 - DeepInfra
 - Azure OpenAI
-- Amazon Bedrock
 - Qwen (DashScope)
 - MiniMax
+- Qianfan(百度)
+- VolcEngine(豆包)
+- Zhipu(GLM)
+- Zhipu Coding(CodeGeex)
+- Z.ai
 - Vertex AI
+
+> **关于 Bedrock:** AWS Bedrock 已挪到 [托管 API](/zh/configuration/providers/hosted#aws-bedrock) 页面 —— 当前驱动用长效 bearer token(`AWS_BEARER_TOKEN_BEDROCK`)鉴权而不是逐请求 SigV4 签名。原本在本页的 SigV4 条目已删除。
 
 ---
 
@@ -146,30 +152,6 @@
 
 ---
 
-## Amazon Bedrock
-
-| | |
-|---|---|
-| **显示名称** | Amazon Bedrock |
-| **驱动** | OpenAI 兼容（通过 Bedrock Converse API） |
-| **环境变量** | `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION` |
-| **基础 URL** | AWS 区域端点 |
-| **需要密钥** | 是（AWS 凭证） |
-| **免费额度** | 无 |
-| **认证方式** | AWS Signature v4 |
-| **模型数** | 通过 Bedrock 使用 Claude、Llama、Titan、Mistral |
-
-**设置：**
-1. 在 [AWS Bedrock 控制台](https://console.aws.amazon.com/bedrock) 中启用模型访问
-2. 配置 AWS 凭证：
-   ```bash
-   export AWS_ACCESS_KEY_ID="AKIA..."
-   export AWS_SECRET_ACCESS_KEY="..."
-   export AWS_REGION="us-east-1"
-   ```
-
----
-
 ## Qwen (DashScope)
 
 | | |
@@ -249,6 +231,155 @@
 这些功能通过 `/api/media/*` 端点或 `image_generate`、`video_generate`、`music_generate`、`text_to_speech` 工具访问。
 
 **说明：** MiniMax 国际版（`minimax.io`）和中国版（`minimaxi.com`）使用不同的 API 密钥。选择 `china` 区域时，LibreFang 会自动从 `MINIMAX_CN_API_KEY` 而非 `MINIMAX_API_KEY` 读取密钥。
+
+---
+
+## Qianfan(百度)
+
+| | |
+|---|---|
+| **显示名称** | Qianfan |
+| **Provider ID** | `qianfan`(别名 `baidu`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `QIANFAN_API_KEY` |
+| **基础 URL** | `https://qianfan.baidubce.com/v2` |
+| **需要密钥** | 是 |
+| **免费额度** | 注册有限免费额度 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在[百度千帆控制台](https://console.bce.baidu.com/qianfan)注册
+2. 在 IAM 面板创建 API key
+3. `export QIANFAN_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "qianfan"
+model = "ernie-4.0-8k"
+```
+
+**说明:** 千帆是百度的 LLM 平台;`ernie-4.0`、`ernie-4.0-turbo`、`ernie-speed` 等系列通过 OpenAI 兼容的 v2 端点暴露。`ernie-4.0+` 支持工具与 function calling。
+
+---
+
+## VolcEngine(豆包)
+
+| | |
+|---|---|
+| **显示名称** | VolcEngine / Doubao |
+| **Provider ID** | `volcengine`(别名 `doubao`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `VOLCENGINE_API_KEY` |
+| **基础 URL** | `https://ark.cn-beijing.volces.com/api/v3` |
+| **需要密钥** | 是 |
+| **免费额度** | 注册赠送额度 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在[火山引擎控制台](https://console.volcengine.com)注册
+2. 在 **Ark > 推理接入点** 创建端点,记录其模型 ID(`ep-...`)
+3. 在 **Ark > API Keys** 生成 API key
+4. `export VOLCENGINE_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "volcengine"
+model = "ep-20240101120000-abcde"   # 端点 ID, 不是模型名
+```
+
+**说明:** 豆包是字节跳动的 LLM 产品,通过火山引擎 Ark 推理平台暴露。和大多 provider 不同,`model` 字段必须填**端点 ID**(`ep-...`),不是模型家族名。豆包 1.5 / 1.6 端点支持 vision 与工具。
+
+---
+
+## Zhipu(GLM)
+
+| | |
+|---|---|
+| **显示名称** | 智谱 GLM |
+| **Provider ID** | `zhipu`(别名 `glm`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `ZHIPU_API_KEY` |
+| **基础 URL** | `https://open.bigmodel.cn/api/paas/v4` |
+| **需要密钥** | 是 |
+| **免费额度** | 是(每月免费配额) |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在[智谱开放平台](https://open.bigmodel.cn)注册
+2. 在 **账户 > API Keys** 生成 API key
+3. `export ZHIPU_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "zhipu"
+model = "glm-4-plus"
+```
+
+**说明:** 智谱开发 GLM(General Language Model)系列。支持工具、vision、embedding。同一个 `ZHIPU_API_KEY` 可以同时用于下面的 `zhipu-coding` 和 `z.ai` —— 注册一次,跨端点复用。
+
+---
+
+## Zhipu Coding(CodeGeex)
+
+| | |
+|---|---|
+| **显示名称** | CodeGeex |
+| **Provider ID** | `zhipu-coding`(别名 `codegeex`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `ZHIPU_API_KEY`(与 Zhipu 共享 key) |
+| **基础 URL** | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| **需要密钥** | 是 |
+| **免费额度** | 是(算在同一个智谱配额里) |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 复用上面的智谱 API key
+2. `export ZHIPU_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "zhipu-coding"
+model = "codegeex-4"
+```
+
+**说明:** 服务 CodeGeex 模型的编码专用端点。鉴权同 Zhipu/GLM,但基础 URL 不同 —— 想要 fill-in-the-middle / 仓库感知的代码补全而不是通用 chat 时用这个 provider。
+
+---
+
+## Z.ai
+
+| | |
+|---|---|
+| **显示名称** | Z.ai |
+| **Provider ID** | `z.ai` |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `ZHIPU_API_KEY`(与 Zhipu 共享 key) |
+| **基础 URL** | `https://api.z.ai/api/paas/v4` |
+| **需要密钥** | 是 |
+| **免费额度** | 是(算在同一个智谱配额里) |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 复用智谱 API key
+2. `export ZHIPU_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "z.ai"
+model = "glm-4-plus"
+```
+
+**说明:** Z.ai 品牌端点 —— 后端是同一个智谱,做了海外流量路由。如果想用编码变体,设置 `[provider_urls]` 显式覆盖到 `https://api.z.ai/api/coding/paas/v4`。
 
 ---
 
