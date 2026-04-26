@@ -1,0 +1,38 @@
+name: Kernel Ignored Tests
+
+on:
+  pull_request:
+    paths:
+      - 'crates/librefang-kernel/**'
+      - 'crates/librefang-hands/**'
+      - '.github/workflows/kernel-ignored-tests.yml'
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kernel-ignored:
+    name: Kernel Ignored / Restart Override
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel-ignored-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install system deps for keyring/secret-service
+        # libdbus-sys (pulled in transitively by the keyring crate via
+        # secret-service on Linux) needs dbus-1 dev headers + pkg-config.
+        # Mirrors the install step in the OpenAPI Drift job in ci.yml.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libsecret-1-dev pkg-config
+      - name: Run ignored kernel restart override test
+        run: cargo test -p librefang-kernel --lib -- --ignored hand_runtime_override_survives_restart_via_start_background_agents

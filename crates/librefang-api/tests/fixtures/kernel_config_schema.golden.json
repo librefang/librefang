@@ -940,6 +940,45 @@
       },
       "type": "object"
     },
+    "ChannelRoleMapping": {
+      "description": "Maps platform-native group/server roles (Telegram admin, Discord guild role, Slack workspace owner, etc.) to LibreFang `UserRole` values.\n\nResolution order in `AuthManager::resolve_role_for_sender` is: 1. Explicit `UserConfig.role` for a registered user — wins outright. 2. Channel-derived role from this mapping — applied when the user is recognised on a platform but has no explicit `UserConfig` role. 3. Default-deny — fall through to `guest`.\n\nAll sub-tables are optional — a missing channel just means \"no channel-derived role\" for that platform. Each per-channel struct keeps platform-shaped fields rather than a single uniform schema because the underlying APIs disagree about role granularity (Telegram has 3 fixed statuses, Discord has named guild roles, Slack collapses to owner/admin/member/guest).",
+      "properties": {
+        "discord": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DiscordRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Discord guild-role → LibreFang role mapping."
+        },
+        "slack": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SlackRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Slack workspace-role → LibreFang role mapping."
+        },
+        "telegram": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TelegramRoleMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Telegram chat-status → LibreFang role mapping."
+        }
+      },
+      "type": "object"
+    },
     "ChannelToolPolicy": {
       "description": "Per-user, per-channel allow/deny lists.\n\nThis is a strictly more permissive variant of [`crate::approval::ChannelToolRule`]. The approval channel rule is global to the agent; this one is keyed off the LibreFang user identity resolved from the inbound message's channel binding. It allows statements like \"User Bob may run `shell_*` from his Telegram chat, but only `web_*` from Discord\".\n\nDeny-wins inside one rule (mirrors `ChannelToolRule::check_tool`).",
       "properties": {
@@ -2171,6 +2210,20 @@
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        }
+      },
+      "type": "object"
+    },
+    "DiscordRoleMapping": {
+      "description": "Discord-side mapping. A user may hold any number of guild roles simultaneously; the resolver walks **every** role the user has, looks each one up in `role_map`, and picks the **highest-privilege** match (`Owner` > `Admin` > `User` > `Viewer`). Declaration order in `config.toml` is irrelevant — the privilege ordering on the LibreFang side decides the winner. This protects against Discord- side role ordering (which is outside our control) deciding the effective LibreFang permissions.",
+      "properties": {
+        "role_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Discord role name → LibreFang role string (`owner` / `admin` / `user` / `viewer` / `guest`). Iteration order is irrelevant — the translator scans every match the user holds and returns the most privileged. Typo'd LibreFang role strings (e.g. `\"admn\"`) are silently skipped, falling back to default-deny `Viewer`.",
+          "type": "object"
         }
       },
       "type": "object"
@@ -11144,6 +11197,40 @@
       },
       "type": "object"
     },
+    "SlackRoleMapping": {
+      "description": "Slack-side mapping. Slack's `users.info` exposes `is_owner` / `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence (owner > admin > guest > member) is collapsed inside the channel adapter (`SlackAdapter::parse_users_info_response`) into a single platform token before this mapping ever sees it; the translator here is a flat lookup, not a precedence ladder. Each step is optional — leave a field unset to fall through to default-deny `Viewer` for that platform tier.",
+      "properties": {
+        "admin_role": {
+          "description": "LibreFang role for `is_admin = true` users.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_role": {
+          "description": "LibreFang role for single/multi-channel guests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "member_role": {
+          "description": "LibreFang role for regular workspace members.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_role": {
+          "description": "LibreFang role for `is_owner = true` users.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TaintRuleId": {
       "description": "Identifies a specific taint detection rule.\n\nUsed by [`check_outbound_text_violation_with_skip`] to let callers opt out of individual rules without touching the main code path.  Per-tool, per-path exemptions in `McpTaintPolicy` map directly to these variants.",
       "oneOf": [
@@ -11461,6 +11548,33 @@
           "default": {},
           "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "TelegramRoleMapping": {
+      "description": "Telegram-side mapping. Telegram exposes three statuses for a member of a chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/ `kicked` which we collapse into \"no derived role\").",
+      "properties": {
+        "admin_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"administrator\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "creator_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"creator\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "member_role": {
+          "description": "LibreFang role assigned when Telegram reports `status = \"member\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -13611,6 +13725,14 @@
         "max_html_bytes": 524288
       },
       "description": "Canvas (A2UI) configuration."
+    },
+    "channel_role_mapping": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ChannelRoleMapping"
+        }
+      ],
+      "description": "Maps platform-native channel roles (Telegram admin, Discord guild roles, Slack workspace roles) to LibreFang `UserRole`. Used by `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role` is consulted (explicit beats channel-derived; both beat default-deny)."
     },
     "channels": {
       "allOf": [

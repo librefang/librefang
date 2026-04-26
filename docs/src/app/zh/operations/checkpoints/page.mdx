@@ -1,8 +1,9 @@
 # 检查点管理器
 
-在每次 `file_write` 或 `apply_patch` 工具调用之前，LibreFang 会自动将受影响的工作目录快照到一个轻量级影子 Git 仓库中。如果某次 agent 运行出现问题，你可以查看完整的文件历史记录并恢复任意历史状态，而不会中断其他会话中正在进行的工作。
+在每次 `file_write` 或 `apply_patch` 工具调用之前，LibreFang 会自动将受影响的工作目录快照到一个轻量级影子 Git 仓库中。如果某次 agent 运行出现问题，你可以查看完整的文件历史并恢复任意历史状态，而不会中断其他会话中正在进行的工作。
 
 ## 目录
+
 - [存储布局](#storage-layout)
 - [快照命名规则](#snapshot-naming)
 - [查看快照](#viewing-snapshots)
@@ -17,23 +18,35 @@
 
 ```
 ~/.librefang/checkpoints/
-  a3f2b91c4d8e7f05/    ← /home/user/myproject 的影子仓库
+  a3f2b91c4d8e7f05/    ← shadow repo for /home/user/myproject
     .git/
-  8c14e30a2b9d6f71/    ← /tmp/scratch 的影子仓库
+  8c14e30a2b9d6f71/    ← shadow repo for /tmp/scratch
     .git/
 ```
+
+每个工作目录拥有独立的影子 Git 仓库。影子仓库只追踪 LibreFang 写过的文件——它不会在每次快照时镜像整个项目目录树。
 
 ---
 
 ## 快照命名规则
 
-子目录名称是工作目录绝对路径（UTF-8，无尾部斜杠）的 SHA-256 哈希值的前 16 个十六进制字符。
+子目录名称是工作目录绝对路径（UTF-8，无尾部斜杠）的 SHA-256 哈希值的前 **16 个十六进制字符**。例如：
+
+```
+SHA-256("/home/user/myproject") = a3f2b91c4d8e7f050e...
+→ directory: ~/.librefang/checkpoints/a3f2b91c4d8e7f05/
+```
+
+这种确定性映射意味着只要知道路径，无需查注册表就能定位到对应的影子仓库。
 
 ---
 
 ## 查看快照
 
+影子仓库就是标准 Git 仓库。直接用 `git log` 浏览历史：
+
 ```bash
+# Find the shadow repo for a project
 PROJECT_DIR="/home/user/myproject"
 HASH=$(python3 -c "
 import hashlib, sys
@@ -42,19 +55,33 @@ print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])
 
 SHADOW="$HOME/.librefang/checkpoints/$HASH"
 
+# List all snapshots
 git -C "$SHADOW" log --oneline
+
+# Show files changed in the latest snapshot
 git -C "$SHADOW" show --stat HEAD
+
+# Diff the last two snapshots
 git -C "$SHADOW" diff HEAD~1 HEAD
 ```
+
+每条 commit message 记录了 agent ID、会话 ID、工具名（`file_write` 或 `apply_patch`）以及目标路径的截断预览——足以将快照与具体的 agent 运行关联起来。
+
+当前版本没有专门列出检查点的 CLI 子命令。直接用 `git` 检视影子仓库是受支持的工作流。
 
 ---
 
 ## 恢复快照
 
+将工作目录恢复到某次快照所记录的状态，使用 `POST /api/checkpoints/restore` 端点：
+
 ```bash
 curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
   -H "Content-Type: application/json" \
-  -d '{"working_dir": "/home/user/myproject", "commit": "a3f2b91"}'
+  -d '{
+    "working_dir": "/home/user/myproject",
+    "commit":      "a3f2b91"
+  }'
 ```
 
 | 字段 | 是否必填 | 说明 |
@@ -62,33 +89,50 @@ curl -X POST http://127.0.0.1:4545/api/checkpoints/restore \
 | `working_dir` | 是 | 项目目录的绝对路径 |
 | `commit` | 是 | 影子仓库中的完整或缩写 commit SHA |
 
+恢复操作把影子仓库中的文件复制回 `working_dir`。它**不会**删除目标快照之后新增的文件——只覆盖快照时存在的文件。恢复前可执行 `git -C "$SHADOW" show --name-only <commit>` 查看具体哪些文件会被改动。
+
+未来版本将提供专门的 `librefang checkpoints restore` CLI 子命令。
+
 ---
 
 ## 排除项与大小限制
 
-硬性排除项：
+LibreFang 在两种情况下跳过快照：
+
+**硬性排除**——无论如何配置，始终跳过的目录：
+
 | 排除路径 | 原因 |
 |---|---|
-| `node_modules/` | 包缓存，可重新生成 |
+| `node_modules/` | 包缓存、可重新生成，通常上百 MB |
 | `target/` | Rust 构建产物 |
 | `.venv/`、`venv/`、`env/` | Python 虚拟环境 |
-| `.git/` | 嵌套 git 仓库 |
+| `.git/` | 否则会在影子仓库内嵌套 git 仓库 |
 | `__pycache__/` | Python 字节码缓存 |
-| `dist/`、`build/` | 编译输出 |
+| `dist/`、`build/` | 常见的编译输出目录 |
 
-单文件大小限制：50 KB。
+**单文件大小限制**——大于 **50 KB** 的单个文件不会被提交到影子仓库。LibreFang 会在跳过时记录一条 `DEBUG` 日志。`file_write` 工具仍正常完成，只是快照中省略掉超大文件。
+
+当前版本不支持自定义排除规则（`.librefangignore`）。如需排除更多路径，避免在 LibreFang 操作的工作目录中放置生成文件或二进制文件。
 
 ---
 
 ## 失败行为
 
-快照创建采用尽力而为策略。失败会记录为 WARN，工具调用照常继续执行。
+快照创建采用尽力而为策略：
+
+- 如果影子 Git 仓库无法初始化（例如磁盘已满、权限错误），会记录 `WARN` 日志，`file_write` 或 `apply_patch` 工具继续执行，不做快照。
+- 如果影子仓库中的 `git commit` 步骤失败，同样采用记录警告并继续的策略。
+- 失败的快照绝不会阻塞或回滚触发它的工具调用。
+- 后续的工具调用会重新尝试创建快照——一次性失败不会永久禁用某个目录的检查点管理。
 
 ---
 
 ## 最佳实践
 
-- 将影子仓库用作短期安全网，而非主要备份手段
-- 将工作目录聚焦于正在修改的具体子目录
-- 使用 `git log --grep` 将 commit 与 agent ID 关联
-- 在重新运行前先恢复快照，为 agent 提供干净的基线
+**把影子仓库当作安全网，而不是主备份。** 检查点管理器面向 agent 会话内的短期恢复。要保留长期历史，请定期为项目自身的 Git 仓库提交。
+
+**保持工作目录聚焦。** 由于排除是按路径前缀匹配的，把一个大型 monorepo 当作 agent 工作目录会导致很多文件落入排除路径。把 agent 工作区配置为正在修改的具体子目录。
+
+**将 commit 与 agent 运行关联。** 每条影子 commit message 都嵌入了 agent ID。如果出现意外改动，运行 `git -C "$SHADOW" log --grep="<agent-id>"` 即可找到该 agent 产生的快照。
+
+**重跑前先恢复。** 如果一次运行产生了不良输出，发送修正消息前先恢复到对应快照。这能确保 agent 看到干净的基线，不会从失败的运行中累积部分写入。

@@ -33,17 +33,6 @@ url = "https://mcp.example.com/sse"
 
 ```toml
 [[mcp_servers]]
-name = "cloud-tools"
-timeout_secs = 30
-
-[mcp_servers.transport]
-type = "http"
-url = "https://mcp.example.com/mcp"
-headers = [{name = "Authorization", value_env = "MCP_API_KEY"}]
-```
-
-```toml
-[[mcp_servers]]
 name = "my-http-backend"
 timeout_secs = 30
 
@@ -59,6 +48,18 @@ path = "/search"
 method = "post"
 ```
 
+#### Streamable HTTP
+
+```toml
+[[mcp_servers]]
+name = "remote-tools"
+
+[mcp_servers.transport.Http]
+url = "https://mcp.example.com/v1"
+```
+
+使用 Streamable HTTP 传输方式（MCP 规范 2025-03-26+）。与 SSE 不同，这是基于标准 HTTP POST 的更简单的请求/响应模式。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `name` | string | *必填* | MCP 服务器的显示名称。工具以 `mcp_{name}_{tool}` 的命名空间注册。 |
@@ -71,7 +72,7 @@ method = "post"
 |--------|------|------|
 | `stdio` | `command`（string）、`args`（list of strings，默认 `[]`） | 启动子进程，通过 stdin/stdout 上的 JSON-RPC 通信。 |
 | `sse` | `url`（string） | 连接到 HTTP Server-Sent Events 端点。 |
-| `http` | `url`（string）、`headers`（header 配置列表，可选） | Streamable HTTP 传输方式（MCP 规范 2025-03-26+）。客户端通过单个 HTTP 端点使用 POST 发送 JSON-RPC 请求，服务器可选择以 SSE 流或普通 JSON 响应。相比 `sse` 传输方式，`http` 不需要专用的 SSE 通道，更适合无状态部署和 serverless 环境。 |
+| `Http` | `url`（string） | Streamable HTTP 传输方式（MCP 规范 2025-03-26+）。基于 HTTP POST 的简单请求/响应。 |
 | `http_compat` | `base_url`（string）、`headers`（header 配置列表）、`tools`（工具配置列表） | 内置兼容适配器，用于没有原生 MCP 服务器的纯 HTTP/JSON 工具后端。每个工具映射到一个 HTTP 端点。 |
 
 **`http_compat` header 配置：**
@@ -200,6 +201,7 @@ slack = "U0ABCDEFG"
 
 ```toml
 [browser]
+enabled = true
 headless = true
 viewport_width = 1280
 viewport_height = 720
@@ -211,6 +213,7 @@ max_sessions = 5
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `enabled` | bool | `true` | 启用内置 CDP 浏览器工具。设为 `false` 关闭所有 `browser_*` 工具。 |
 | `headless` | bool | `true` | 以无头模式运行浏览器（不显示窗口）。 |
 | `viewport_width` | u32 | `1280` | 浏览器视口宽度（像素）。 |
 | `viewport_height` | u32 | `720` | 浏览器视口高度（像素）。 |

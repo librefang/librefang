@@ -129,6 +129,13 @@ export {
   // audit
   listAuditRecent,
   verifyAuditChain,
+  queryAudit,
+  // users (RBAC M6)
+  listUsers,
+  getUser,
+  // per-user budget / policy (M3+M5 stubs)
+  getUserBudget,
+  getUserPolicy,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -145,6 +152,8 @@ export {
   clearAgentHistory,
   patchAgent,
   patchAgentConfig,
+  patchHandAgentRuntimeConfig,
+  clearHandAgentRuntimeConfig,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -261,6 +270,13 @@ export {
   triggerAutoDream,
   abortAutoDream,
   setAutoDreamEnabled,
+  // users (RBAC M6)
+  createUser,
+  updateUser,
+  deleteUser,
+  importUsers,
+  // per-user policy (M3 stub)
+  updateUserPolicy,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -298,4 +314,17 @@ export type {
   SpeechResult,
   TerminalHealth,
   TerminalWindow,
+  // users / RBAC
+  UserItem,
+  UserUpsertPayload,
+  UserRoleName,
+  BulkImportRow,
+  BulkImportResult,
+  // audit / per-user budget / policy
+  AuditQueryEntry,
+  AuditQueryFilters,
+  AuditQueryResponse,
+  UserBudgetEntry,
+  UserBudgetResponse,
+  PermissionPolicy,
 } from "../../api";
