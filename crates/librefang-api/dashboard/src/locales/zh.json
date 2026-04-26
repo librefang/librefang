@@ -2607,6 +2607,7 @@
     "show_less": "收起",
     "today": "今天",
     "yesterday": "昨天",
-    "unknown_date": "未知日期"
+    "unknown_date": "未知日期",
+    "range_custom": "自定义…"
   }
 }

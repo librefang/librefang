@@ -2641,6 +2641,7 @@
     "show_less": "Show less",
     "today": "Today",
     "yesterday": "Yesterday",
-    "unknown_date": "Unknown"
+    "unknown_date": "Unknown",
+    "range_custom": "Custom…"
   }
 }

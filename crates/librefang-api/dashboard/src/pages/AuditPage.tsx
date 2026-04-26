@@ -381,6 +381,13 @@ export function AuditPage() {
     });
   };
 
+  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
+  // the bare datetime-local format. Same for export URL.
+  // NOTE: must be declared before any hook that reads `query.data` —
+  // `useMemo` bodies run synchronously on first render and would hit
+  // a TDZ ReferenceError if `query` were declared below them.
+  const query = useAuditQuery(normaliseFilters(active));
+
   // Action options for the Select — the empty-value "(any)" gets the
   // localised label; the rest are pinned to their server-side enum
   // names. Memo'd because Select shallow-compares its `options` prop
@@ -393,21 +400,44 @@ export function AuditPage() {
     [t],
   );
 
-  // Datetime-preset click. Sets `from` to now-N, clears `to`, applies
-  // immediately so the operator sees the result without a second click.
-  const applyDatePreset = (preset: DatePreset) => {
-    const next: AuditQueryFilters = {
-      ...active,
-      from: preset.since(),
-      to: undefined,
-    };
-    setActive(next);
-    setDraft(next);
-  };
+  // Channel Select options: a fixed seed of well-known adapter names +
+  // any other channel value actually present in the current result set,
+  // so the operator can both pick from common ones up-front AND drill
+  // into a one-off channel that showed up in the log (e.g. a webhook
+  // adapter the seed doesn't list). "(any)" stays the empty-value
+  // first option; "Custom…" reveals a free-text input for channels
+  // that haven't been recorded yet.
+  const channelOptions = useMemo(() => {
+    const seed = ["api", "dashboard", "cli", "telegram", "discord", "slack", "matrix", "feishu"];
+    const seen = new Set<string>(seed);
+    for (const e of query.data?.entries ?? []) {
+      if (e.channel) seen.add(e.channel);
+    }
+    const list = Array.from(seen).sort();
+    return [
+      { value: "", label: t("audit.any") },
+      ...list.map((c) => ({ value: c, label: c })),
+      { value: "__custom__", label: t("audit.range_custom") },
+    ];
+  }, [query.data?.entries, t]);
 
-  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
-  // the bare datetime-local format. Same for export URL.
-  const query = useAuditQuery(normaliseFilters(active));
+  // True when the active channel filter doesn't match any known option
+  // (operator typed something custom, or filtered via row-click for a
+  // channel not in the seed). The Select snaps to "Custom…" and the
+  // free-text input below stays visible.
+  const channelIsCustom = useMemo(() => {
+    if (!draft.channel) return false;
+    return !channelOptions.some((o) => o.value === draft.channel);
+  }, [draft.channel, channelOptions]);
+
+  const onChannelChange = (value: string) => {
+    if (value === "__custom__") {
+      // Stay on whatever was typed; if blank, just open the input.
+      setDraft((d) => ({ ...d, channel: d.channel ?? "" }));
+      return;
+    }
+    setDraft((d) => ({ ...d, channel: value || undefined }));
+  };
 
   const onApply = (e: React.FormEvent) => {
     e.preventDefault();
@@ -633,18 +663,27 @@ export function AuditPage() {
               placeholder={t("audit.f_agent_placeholder")}
               leftIcon={<Activity className="h-3.5 w-3.5" />}
             />
-            <Input
-              label={t("audit.f_channel")}
-              value={draft.channel ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  channel: e.target.value || undefined,
-                }))
-              }
-              placeholder={t("audit.f_channel_placeholder")}
-              leftIcon={<Plug className="h-3.5 w-3.5" />}
-            />
+            <div className="flex flex-col gap-1.5">
+              <Select
+                label={t("audit.f_channel")}
+                value={channelIsCustom ? "__custom__" : (draft.channel ?? "")}
+                onChange={(e) => onChannelChange(e.target.value)}
+                options={channelOptions}
+              />
+              {channelIsCustom && (
+                <Input
+                  value={draft.channel ?? ""}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      channel: e.target.value || undefined,
+                    }))
+                  }
+                  placeholder={t("audit.f_channel_placeholder")}
+                  leftIcon={<Plug className="h-3.5 w-3.5" />}
+                />
+              )}
+            </div>
             <Input
               label={t("audit.f_from")}
               type="datetime-local"

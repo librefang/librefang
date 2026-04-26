@@ -425,8 +425,12 @@ pub async fn auth(
                     }
                     return next.run(request).await;
                 }
-                if let Some(user) = auth_state
-                    .user_api_keys
+                // Use the local `user_api_keys` snapshot taken at the top
+                // of `auth()` (line ~363) — `auth_state.user_api_keys` is
+                // an `Arc<RwLock<Vec<…>>>` since the rotate-key fix and
+                // does not expose `iter()` directly. The snapshot is the
+                // single source of truth for this request.
+                if let Some(user) = user_api_keys
                     .iter()
                     .find(|user| {
                         crate::password_hash::verify_password(&token_str, &user.api_key_hash)
