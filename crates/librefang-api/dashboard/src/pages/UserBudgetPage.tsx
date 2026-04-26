@@ -107,7 +107,7 @@ export function UserBudgetPage() {
         subtitle={name}
         badge={
           query.data?.alert_breach ? (
-            <Badge variant="warn">
+            <Badge variant="warning">
               {t("user_budget.alert_breach", "alert breach")}
             </Badge>
           ) : query.data?.enforced ? (
@@ -240,7 +240,7 @@ export function UserBudgetPage() {
             <Button
               type="submit"
               disabled={updateMut.isPending}
-              icon={<Check className="h-3.5 w-3.5" />}
+              leftIcon={<Check className="h-3.5 w-3.5" />}
             >
               {updateMut.isPending
                 ? t("user_budget.saving", "Saving…")

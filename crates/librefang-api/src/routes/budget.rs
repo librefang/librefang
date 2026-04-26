@@ -42,6 +42,88 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// Audit-detail diff formatters
+// ---------------------------------------------------------------------------
+//
+// These render `old → new` strings used in the audit `detail` field for budget
+// mutations. Goal: a single audit row tells an operator what was rotated, so
+// forensics don't need to correlate across multiple entries to reconstruct the
+// change. Each helper renders only the fields that actually changed plus the
+// alert/threshold context — unchanged fields are still emitted so the row is
+// self-describing (the diff is the key, not the new value alone).
+//
+// A `None` budget renders as the literal `none` token. Numeric formatting
+// uses Rust's default `Display` so callers see exactly what was written
+// (no rounding).
+
+fn fmt_user_budget_diff(
+    old: Option<&librefang_types::config::UserBudgetConfig>,
+    new: Option<&librefang_types::config::UserBudgetConfig>,
+) -> String {
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "none".to_string(),
+        }
+    }
+    let h_old = show(old.map(|b| b.max_hourly_usd));
+    let h_new = show(new.map(|b| b.max_hourly_usd));
+    let d_old = show(old.map(|b| b.max_daily_usd));
+    let d_new = show(new.map(|b| b.max_daily_usd));
+    let m_old = show(old.map(|b| b.max_monthly_usd));
+    let m_new = show(new.map(|b| b.max_monthly_usd));
+    let a_old = show(old.map(|b| b.alert_threshold));
+    let a_new = show(new.map(|b| b.alert_threshold));
+    format!(
+        "hourly: {h_old}→{h_new} daily: {d_old}→{d_new} monthly: {m_old}→{m_new} alert: {a_old}→{a_new}"
+    )
+}
+
+fn fmt_agent_resources_diff(
+    old: Option<&librefang_types::agent::ResourceQuota>,
+    new: Option<&librefang_types::agent::ResourceQuota>,
+) -> String {
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "none".to_string(),
+        }
+    }
+    let h_old = show(old.map(|r| r.max_cost_per_hour_usd));
+    let h_new = show(new.map(|r| r.max_cost_per_hour_usd));
+    let d_old = show(old.map(|r| r.max_cost_per_day_usd));
+    let d_new = show(new.map(|r| r.max_cost_per_day_usd));
+    let m_old = show(old.map(|r| r.max_cost_per_month_usd));
+    let m_new = show(new.map(|r| r.max_cost_per_month_usd));
+    // tokens-per-hour is `Option<u64>`: render `none` for "inherit
+    // global default" so the diff distinguishes unset from explicit 0.
+    let t_old = show(old.and_then(|r| r.max_llm_tokens_per_hour));
+    let t_new = show(new.and_then(|r| r.max_llm_tokens_per_hour));
+    format!(
+        "hourly: {h_old}→{h_new} daily: {d_old}→{d_new} monthly: {m_old}→{m_new} tokens/h: {t_old}→{t_new}"
+    )
+}
+
+fn fmt_global_budget_diff(
+    old: &librefang_types::config::BudgetConfig,
+    new: &librefang_types::config::BudgetConfig,
+) -> String {
+    format!(
+        "hourly: {}→{} daily: {}→{} monthly: {}→{} alert: {}→{} tokens/h_default: {}→{}",
+        old.max_hourly_usd,
+        new.max_hourly_usd,
+        old.max_daily_usd,
+        new.max_daily_usd,
+        old.max_monthly_usd,
+        new.max_monthly_usd,
+        old.alert_threshold,
+        new.alert_threshold,
+        old.default_max_llm_tokens_per_hour,
+        new.default_max_llm_tokens_per_hour,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Usage endpoint
 // ---------------------------------------------------------------------------
 
@@ -248,8 +330,16 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    // Capture OLD config BEFORE the mutation so the audit row can carry
+    // an old→new diff. Without this the chain only records the forward
+    // state, forcing forensics to scan multiple rows to reconstruct
+    // what the operator actually changed.
+    let old_budget = state.kernel.budget_config();
+
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
     state.kernel.update_budget_config(|budget| {
@@ -279,10 +369,20 @@ pub async fn update_budget(
         }
     });
 
-    let status = state
-        .kernel
-        .metering_ref()
-        .budget_status(&state.kernel.budget_config());
+    let new_budget = state.kernel.budget_config();
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!(
+            "global_budget updated: {}",
+            fmt_global_budget_diff(&old_budget, &new_budget)
+        ),
+        "ok",
+        api_user_ref.map(|u| u.user_id),
+        Some("api".to_string()),
+    );
+
+    let status = state.kernel.metering_ref().budget_status(&new_budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -402,8 +502,10 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -423,6 +525,16 @@ pub async fn update_agent_budget(
         .into_response();
     }
 
+    // Capture OLD per-agent caps BEFORE the in-memory mutation so the
+    // audit row can carry an old→new diff for forensics. `None` here
+    // means the agent vanished between the path-parse and the snapshot,
+    // which the `update_resources` call below will surface as 404.
+    let old_resources = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.resources.clone());
+
     match state
         .kernel
         .agent_registry()
@@ -430,11 +542,30 @@ pub async fn update_agent_budget(
     {
         Ok(()) => {
             // Persist updated entry
+            let new_resources = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.manifest.resources.clone());
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                 if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
+            // Audit with old→new diff and caller attribution. agent_id
+            // is the *target* of the change, not the actor — the actor
+            // is conveyed via `user_id` (None for anonymous loopback).
+            state.kernel.audit().record_with_context(
+                agent_id.to_string(),
+                librefang_runtime::audit::AuditAction::ConfigChange,
+                format!(
+                    "agent_budget updated for {agent_id}: {}",
+                    fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
+                ),
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
@@ -791,6 +922,19 @@ pub async fn update_user_budget(
         .parse()
         .unwrap_or_else(|_| UserId::from_name(&user_id_param));
 
+    // Capture OLD budget BEFORE persist so the audit detail can render
+    // an old→new diff. Forensics are a lot easier when one row tells you
+    // what was rotated rather than forcing a correlate-multiple-entries
+    // walk through the chain. `None` means "no cap configured" — we
+    // render that as `none` in the diff.
+    let old_budget: Option<librefang_types::config::UserBudgetConfig> = state
+        .kernel
+        .config_snapshot()
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == target_user_id)
+        .and_then(|u| u.budget.clone());
+
     let new_budget_for_closure = new_budget.clone();
     let user_id_param_for_closure = user_id_param.clone();
     let result = super::users::persist_users(&state, move |users| {
@@ -813,7 +957,8 @@ pub async fn update_user_budget(
                 "system",
                 librefang_runtime::audit::AuditAction::ConfigChange,
                 format!(
-                    "user_budget updated for {user_id_param}: hourly={max_hourly_usd} daily={max_daily_usd} monthly={max_monthly_usd} alert={alert_threshold}"
+                    "user_budget updated for {user_id_param}: {}",
+                    fmt_user_budget_diff(old_budget.as_ref(), Some(&new_budget))
                 ),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
@@ -874,6 +1019,18 @@ pub async fn delete_user_budget(
         .parse()
         .unwrap_or_else(|_| UserId::from_name(&user_id_param));
 
+    // Capture OLD budget BEFORE persist so the audit detail records what
+    // was actually cleared. A `None` here means the cap was already
+    // absent (idempotent delete) — we still emit the audit row but the
+    // diff renders `none → none`.
+    let old_budget: Option<librefang_types::config::UserBudgetConfig> = state
+        .kernel
+        .config_snapshot()
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == target_user_id)
+        .and_then(|u| u.budget.clone());
+
     let user_id_param_for_closure = user_id_param.clone();
     let result = super::users::persist_users(&state, move |users| {
         let idx = users
@@ -894,7 +1051,10 @@ pub async fn delete_user_budget(
             state.kernel.audit().record_with_context(
                 "system",
                 librefang_runtime::audit::AuditAction::ConfigChange,
-                format!("user_budget cleared for {user_id_param}"),
+                format!(
+                    "user_budget cleared for {user_id_param}: {}",
+                    fmt_user_budget_diff(old_budget.as_ref(), None)
+                ),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),

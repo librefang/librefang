@@ -2641,6 +2641,25 @@
     "show_less": "Show less",
     "today": "Today",
     "yesterday": "Yesterday",
-    "unknown_date": "Unknown"
+    "unknown_date": "Unknown",
+    "range_custom": "Custom…",
+    "export_json": "JSON",
+    "export_csv_short": "CSV",
+    "detail_title": "Audit entry",
+    "detail_seq": "Sequence",
+    "detail_timestamp": "Timestamp",
+    "detail_action": "Action",
+    "detail_outcome": "Outcome",
+    "detail_agent": "Agent",
+    "detail_user": "User",
+    "detail_channel": "Channel",
+    "detail_payload": "Detail",
+    "detail_hash": "Hash",
+    "detail_prev_hash": "Previous hash",
+    "detail_copy_json": "Copy as JSON",
+    "detail_copy_hash": "Copy hash",
+    "detail_copy_link": "Copy permalink",
+    "detail_copied": "Copied",
+    "open_detail": "Open details"
   }
 }

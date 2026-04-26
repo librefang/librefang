@@ -4,8 +4,9 @@
 // rows, default 200) — for deeper history use the export button which hits
 // /api/audit/export with the same filter set.
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ScrollText,
   Download,
@@ -36,6 +37,10 @@ import {
   Filter,
   ChevronDown,
   ChevronUp,
+  Copy,
+  Hash,
+  Link2,
+  FileJson,
 } from "lucide-react";
 
 import { PageHeader } from "../components/ui/PageHeader";
@@ -46,11 +51,13 @@ import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Modal } from "../components/ui/Modal";
 import { useAuditQuery } from "../lib/queries/audit";
 import { ApiError } from "../lib/http/errors";
 import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
 import type { AuditQueryEntry } from "../api";
+import { useUIStore } from "../lib/store";
 
 // `<input type="datetime-local">` produces "YYYY-MM-DDTHH:MM" with no
 // timezone. The server parses `from` / `to` as RFC-3339 (offset
@@ -363,11 +370,48 @@ function ActiveChip({ label, value, onClear }: ActiveChipProps) {
 
 export function AuditPage() {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState<AuditQueryFilters>({ limit: 200 });
-  const [active, setActive] = useState<AuditQueryFilters>({ limit: 200 });
+  const navigate = useNavigate();
+  // URL search params drive the initial filter state and the optional
+  // `?seq=N` deep-link to a specific entry's detail modal. The page
+  // writes back to the URL whenever `active` changes so a bookmark /
+  // shared link round-trips.
+  const search = useSearch({ from: "/audit" }) as {
+    user?: string;
+    action?: string;
+    agent?: string;
+    channel?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    seq?: number;
+  };
+  const initialFilters: AuditQueryFilters = useMemo(
+    () => ({
+      user: search.user,
+      action: search.action,
+      agent: search.agent,
+      channel: search.channel,
+      from: search.from,
+      to: search.to,
+      limit: search.limit ?? 200,
+    }),
+    // Initial only — subsequent URL changes flow OUT (active → URL),
+    // not in. Reading `search` reactively here would create a loop with
+    // the sync effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [draft, setDraft] = useState<AuditQueryFilters>(initialFilters);
+  const [active, setActive] = useState<AuditQueryFilters>(initialFilters);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  // The audit entry currently shown in the detail modal. Lifted above
+  // the row map so the `?seq=` URL deep-link can pre-open it without
+  // racing with the row click handler.
+  const [detailEntry, setDetailEntry] = useState<AuditQueryEntry | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
   // Per-row detail-expansion. Keyed by `${seq}-${hash}` (same as row key).
   // We default to "clamped" for any row with shouldClampDetail(detail);
   // Show more flips it for that one row only.
@@ -381,6 +425,13 @@ export function AuditPage() {
     });
   };
 
+  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
+  // the bare datetime-local format. Same for export URL.
+  // NOTE: must be declared before any hook that reads `query.data` —
+  // `useMemo` bodies run synchronously on first render and would hit
+  // a TDZ ReferenceError if `query` were declared below them.
+  const query = useAuditQuery(normaliseFilters(active));
+
   // Action options for the Select — the empty-value "(any)" gets the
   // localised label; the rest are pinned to their server-side enum
   // names. Memo'd because Select shallow-compares its `options` prop
@@ -393,21 +444,44 @@ export function AuditPage() {
     [t],
   );
 
-  // Datetime-preset click. Sets `from` to now-N, clears `to`, applies
-  // immediately so the operator sees the result without a second click.
-  const applyDatePreset = (preset: DatePreset) => {
-    const next: AuditQueryFilters = {
-      ...active,
-      from: preset.since(),
-      to: undefined,
-    };
-    setActive(next);
-    setDraft(next);
-  };
+  // Channel Select options: a fixed seed of well-known adapter names +
+  // any other channel value actually present in the current result set,
+  // so the operator can both pick from common ones up-front AND drill
+  // into a one-off channel that showed up in the log (e.g. a webhook
+  // adapter the seed doesn't list). "(any)" stays the empty-value
+  // first option; "Custom…" reveals a free-text input for channels
+  // that haven't been recorded yet.
+  const channelOptions = useMemo(() => {
+    const seed = ["api", "dashboard", "cli", "telegram", "discord", "slack", "matrix", "feishu"];
+    const seen = new Set<string>(seed);
+    for (const e of query.data?.entries ?? []) {
+      if (e.channel) seen.add(e.channel);
+    }
+    const list = Array.from(seen).sort();
+    return [
+      { value: "", label: t("audit.any") },
+      ...list.map((c) => ({ value: c, label: c })),
+      { value: "__custom__", label: t("audit.range_custom") },
+    ];
+  }, [query.data?.entries, t]);
 
-  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
-  // the bare datetime-local format. Same for export URL.
-  const query = useAuditQuery(normaliseFilters(active));
+  // True when the active channel filter doesn't match any known option
+  // (operator typed something custom, or filtered via row-click for a
+  // channel not in the seed). The Select snaps to "Custom…" and the
+  // free-text input below stays visible.
+  const channelIsCustom = useMemo(() => {
+    if (!draft.channel) return false;
+    return !channelOptions.some((o) => o.value === draft.channel);
+  }, [draft.channel, channelOptions]);
+
+  const onChannelChange = (value: string) => {
+    if (value === "__custom__") {
+      // Stay on whatever was typed; if blank, just open the input.
+      setDraft((d) => ({ ...d, channel: d.channel ?? "" }));
+      return;
+    }
+    setDraft((d) => ({ ...d, channel: value || undefined }));
+  };
 
   const onApply = (e: React.FormEvent) => {
     e.preventDefault();
@@ -418,6 +492,77 @@ export function AuditPage() {
     const reset: AuditQueryFilters = { limit: 200 };
     setDraft(reset);
     setActive(reset);
+  };
+
+  // Active-filter → URL sync. `replace: true` so each filter tweak
+  // doesn't pollute browser history (back button feels broken
+  // otherwise — every chip click would be its own entry). `seq` is
+  // preserved so an open detail modal stays in the URL while the
+  // filters change underneath.
+  useEffect(() => {
+    const next: Record<string, string | number | undefined> = {
+      user: active.user || undefined,
+      action: active.action || undefined,
+      agent: active.agent || undefined,
+      channel: active.channel || undefined,
+      from: active.from || undefined,
+      to: active.to || undefined,
+      // Don't bake the default 200 into the URL — keeps share links
+      // clean for the common case.
+      limit: active.limit && active.limit !== 200 ? active.limit : undefined,
+      seq: detailEntry?.seq,
+    };
+    navigate({
+      to: "/audit",
+      // TanStack Router strips undefined keys, so omitted filters
+      // round-trip as missing — not as `?user=undefined`.
+      search: next as Record<string, unknown>,
+      replace: true,
+    });
+  }, [active, detailEntry?.seq, navigate]);
+
+  // `?seq=N` deep-link: when the page boots with a seq in the URL,
+  // wait for the row data and auto-open the matching detail modal.
+  // We only consult `search.seq` once (initial value) — subsequent
+  // URL writes from the modal-open/close path manage themselves.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const initialSeq = useMemo(() => search.seq, []);
+  useEffect(() => {
+    if (initialSeq == null || detailEntry) return;
+    const match = query.data?.entries.find((e) => e.seq === initialSeq);
+    if (match) setDetailEntry(match);
+  }, [initialSeq, query.data, detailEntry]);
+
+  // Copy helpers + transient "Copied" affordance. The keyed state lets
+  // multiple buttons in the modal each show their own check briefly
+  // without tripping over each other.
+  const copyToClipboard = async (text: string, fieldKey: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(fieldKey);
+      setTimeout(() => setCopiedField((cur) => (cur === fieldKey ? null : cur)), 1500);
+    } catch (err) {
+      addToast(
+        err instanceof Error ? err.message : t("audit.error_title"),
+        "error",
+      );
+    }
+  };
+
+  const buildPermalink = (entry: AuditQueryEntry): string => {
+    const params = new URLSearchParams();
+    if (active.user) params.set("user", active.user);
+    if (active.action) params.set("action", active.action);
+    if (active.agent) params.set("agent", active.agent);
+    if (active.channel) params.set("channel", active.channel);
+    if (active.from) params.set("from", active.from);
+    if (active.to) params.set("to", active.to);
+    if (active.limit && active.limit !== 200) params.set("limit", String(active.limit));
+    params.set("seq", String(entry.seq));
+    const qs = params.toString();
+    // Use the dashboard's basepath; fall back to current location host so
+    // the copied link is absolute (better UX when pasting into chat).
+    return `${window.location.origin}/dashboard/audit${qs ? `?${qs}` : ""}`;
   };
 
   // Click-to-filter from inside a row. The chip handlers feed this so
@@ -432,11 +577,11 @@ export function AuditPage() {
     setDraft(next);
   };
 
-  const onExport = async () => {
+  const onExport = async (format: "csv" | "json") => {
     setExportError(null);
     setExporting(true);
     try {
-      await downloadExport(active, "csv");
+      await downloadExport(active, format);
     } catch (err) {
       setExportError(
         err instanceof ApiError
@@ -490,10 +635,7 @@ export function AuditPage() {
         )}
         isFetching={query.isFetching}
         onRefresh={() => void query.refetch()}
-        helpText={t(
-          "audit.help",
-          "Hash-chained tamper-evident log of every privileged action. Filters narrow the in-memory window (server hard cap 5000). Use Export for deeper history or to take the chain offline for verification.",
-        )}
+        helpText={t("audit.help")}
         actions={
           <div className="flex items-center gap-2">
             {query.data && (
@@ -501,17 +643,34 @@ export function AuditPage() {
                 {totalCount} / {totalLimit}
               </Badge>
             )}
-            <Button
-              variant="secondary"
-              size="sm"
-              leftIcon={<Download className="h-3.5 w-3.5" />}
-              onClick={onExport}
-              disabled={exporting || isForbidden}
-            >
-              {exporting
-                ? t("audit.exporting")
-                : t("audit.export_csv")}
-            </Button>
+            {/* Split export: CSV (Excel / pandas) and JSON (jq / log
+                pipelines). Same filter set, same auth flow — both call
+                /api/audit/export with the same params, only `?format=`
+                differs. */}
+            <div className="inline-flex items-stretch divide-x divide-border-subtle rounded-xl border border-border-subtle overflow-hidden">
+              <button
+                type="button"
+                onClick={() => onExport("csv")}
+                disabled={exporting || isForbidden}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-text-main bg-surface hover:bg-surface-hover hover:text-brand disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title={t("audit.export_csv")}
+              >
+                <Download className="h-3.5 w-3.5" />
+                {exporting
+                  ? t("audit.exporting")
+                  : t("audit.export_csv_short")}
+              </button>
+              <button
+                type="button"
+                onClick={() => onExport("json")}
+                disabled={exporting || isForbidden}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-text-main bg-surface hover:bg-surface-hover hover:text-brand disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title={t("audit.export_json")}
+              >
+                <FileJson className="h-3.5 w-3.5" />
+                {t("audit.export_json")}
+              </button>
+            </div>
           </div>
         }
       />
@@ -633,18 +792,27 @@ export function AuditPage() {
               placeholder={t("audit.f_agent_placeholder")}
               leftIcon={<Activity className="h-3.5 w-3.5" />}
             />
-            <Input
-              label={t("audit.f_channel")}
-              value={draft.channel ?? ""}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  channel: e.target.value || undefined,
-                }))
-              }
-              placeholder={t("audit.f_channel_placeholder")}
-              leftIcon={<Plug className="h-3.5 w-3.5" />}
-            />
+            <div className="flex flex-col gap-1.5">
+              <Select
+                label={t("audit.f_channel")}
+                value={channelIsCustom ? "__custom__" : (draft.channel ?? "")}
+                onChange={(e) => onChannelChange(e.target.value)}
+                options={channelOptions}
+              />
+              {channelIsCustom && (
+                <Input
+                  value={draft.channel ?? ""}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      channel: e.target.value || undefined,
+                    }))
+                  }
+                  placeholder={t("audit.f_channel_placeholder")}
+                  leftIcon={<Plug className="h-3.5 w-3.5" />}
+                />
+              )}
+            </div>
             <Input
               label={t("audit.f_from")}
               type="datetime-local"
@@ -798,12 +966,27 @@ export function AuditPage() {
                   return (
                     <div
                       key={`${e.seq}-${e.hash}`}
-                      className="flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setDetailEntry(e)}
+                      onKeyDown={(ev) => {
+                        if (ev.key === "Enter" || ev.key === " ") {
+                          ev.preventDefault();
+                          setDetailEntry(e);
+                        }
+                      }}
+                      aria-label={t("audit.open_detail")}
+                      className="flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:-translate-y-0.5 transition-all duration-200 shadow-sm cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand/30"
                     >
-                      {/* Action chip — click filters by this action */}
+                      {/* Action chip — click filters by this action.
+                          stopPropagation so the row's open-detail click
+                          doesn't fire on top of it. */}
                       <button
                         type="button"
-                        onClick={() => drillFilter("action", e.action)}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          drillFilter("action", e.action);
+                        }}
                         className={`shrink-0 inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider hover:opacity-80 transition-opacity ${actionChipClass(e.outcome)}`}
                         title={t("audit.filter_by_action", { action: e.action })}
                       >
@@ -821,7 +1004,10 @@ export function AuditPage() {
                           {e.user_id && (
                             <button
                               type="button"
-                              onClick={() => drillFilter("user", e.user_id!)}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                drillFilter("user", e.user_id!);
+                              }}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
                               title={t("audit.filter_by_user")}
                             >
@@ -832,7 +1018,10 @@ export function AuditPage() {
                           {e.channel && (
                             <button
                               type="button"
-                              onClick={() => drillFilter("channel", e.channel!)}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                drillFilter("channel", e.channel!);
+                              }}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
                               title={t("audit.filter_by_channel")}
                             >
@@ -843,7 +1032,10 @@ export function AuditPage() {
                           {e.agent_id && e.agent_id !== "system" && (
                             <button
                               type="button"
-                              onClick={() => drillFilter("agent", e.agent_id)}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                drillFilter("agent", e.agent_id);
+                              }}
                               className="inline-flex items-center gap-1 text-[10px] text-text-dim hover:text-brand transition-colors"
                               title={t("audit.filter_by_agent")}
                             >
@@ -878,7 +1070,10 @@ export function AuditPage() {
                               </p>
                               <button
                                 type="button"
-                                onClick={() => toggleExpanded(rowKey)}
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  toggleExpanded(rowKey);
+                                }}
                                 className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-brand hover:text-brand/80 transition-colors"
                               >
                                 {isExpanded ? (
@@ -915,6 +1110,149 @@ export function AuditPage() {
           })}
         </div>
       ) : null}
+
+      {/* Detail modal — opens on row click and on `?seq=N` deep-link.
+          Carries everything the in-line row hides: full RFC-3339
+          timestamp, full UUID values, prev/curr hash for chain
+          verification, and the unclamped detail payload. */}
+      <Modal
+        isOpen={detailEntry !== null}
+        onClose={() => setDetailEntry(null)}
+        title={t("audit.detail_title")}
+        size="2xl"
+      >
+        {detailEntry && (
+          <div className="p-5 flex flex-col gap-4">
+            {/* Header strip — action chip + outcome badge so the modal
+                opens with the same visual identity as the row. */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <div
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-black uppercase tracking-wider ${actionChipClass(detailEntry.outcome)}`}
+              >
+                {actionIcon(detailEntry.action)}
+                {detailEntry.action}
+              </div>
+              <Badge variant={outcomeVariant(detailEntry.outcome)} dot>
+                {detailEntry.outcome}
+              </Badge>
+              <span className="text-[10px] font-mono text-text-dim/70">
+                #{detailEntry.seq}
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyToClipboard(buildPermalink(detailEntry), "permalink")
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2 py-1 text-[10px] font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
+                  title={t("audit.detail_copy_link")}
+                >
+                  <Link2 className="h-3 w-3" />
+                  {copiedField === "permalink"
+                    ? t("audit.detail_copied")
+                    : t("audit.detail_copy_link")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyToClipboard(
+                      JSON.stringify(detailEntry, null, 2),
+                      "json",
+                    )
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2 py-1 text-[10px] font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-colors"
+                  title={t("audit.detail_copy_json")}
+                >
+                  <Copy className="h-3 w-3" />
+                  {copiedField === "json"
+                    ? t("audit.detail_copied")
+                    : t("audit.detail_copy_json")}
+                </button>
+              </div>
+            </div>
+
+            {/* Field grid */}
+            <dl className="grid grid-cols-1 sm:grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-xs">
+              <DetailRow label={t("audit.detail_timestamp")}>
+                <code className="font-mono text-text-main">
+                  {detailEntry.timestamp}
+                </code>
+                <span className="ml-2 text-text-dim/70">
+                  ({formatRelativeTime(detailEntry.timestamp)})
+                </span>
+              </DetailRow>
+              <DetailRow label={t("audit.detail_agent")}>
+                <code className="font-mono text-text-main break-all">
+                  {detailEntry.agent_id}
+                </code>
+              </DetailRow>
+              {detailEntry.user_id && (
+                <DetailRow label={t("audit.detail_user")}>
+                  <code className="font-mono text-text-main break-all">
+                    {detailEntry.user_id}
+                  </code>
+                </DetailRow>
+              )}
+              {detailEntry.channel && (
+                <DetailRow label={t("audit.detail_channel")}>
+                  <code className="font-mono text-text-main">
+                    {detailEntry.channel}
+                  </code>
+                </DetailRow>
+              )}
+              <DetailRow label={t("audit.detail_hash")}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <code className="font-mono text-text-main text-[10px] break-all">
+                    {detailEntry.hash}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(detailEntry.hash, "hash")}
+                    className="shrink-0 text-text-dim hover:text-brand transition-colors"
+                    title={t("audit.detail_copy_hash")}
+                  >
+                    {copiedField === "hash" ? (
+                      <span className="text-[10px] font-bold text-success">
+                        {t("audit.detail_copied")}
+                      </span>
+                    ) : (
+                      <Hash className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+              </DetailRow>
+            </dl>
+
+            {/* Detail payload — preformatted, no clamp. JSON-looking
+                strings get a darker code-block treatment so the
+                operator sees structure even without syntax highlighting. */}
+            {detailEntry.detail && (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                  {t("audit.detail_payload")}
+                </span>
+                <pre className="rounded-lg border border-border-subtle bg-main/40 p-3 text-xs text-text-main font-mono whitespace-pre-wrap break-words max-h-72 overflow-y-auto scrollbar-thin">
+                  {detailEntry.detail}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
+  );
+}
+
+// Tiny presentational helper for the field grid inside the detail
+// modal. Keeps each row to a definition-list pair without repeating
+// the dt/dd boilerplate eight times.
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="text-[10px] font-black uppercase tracking-widest text-text-dim pt-0.5">
+        {label}
+      </dt>
+      <dd className="min-w-0">{children}</dd>
+    </>
   );
 }

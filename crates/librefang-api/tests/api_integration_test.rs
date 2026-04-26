@@ -3783,6 +3783,116 @@ async fn test_user_budget_put_get_delete_round_trip() {
     );
 }
 
+/// Pin the new audit-detail diff format introduced by review item #21
+/// follow-up: every PUT to `/api/budget/users/{user}` must emit a
+/// ConfigChange row whose `detail` carries `old → new` for every field,
+/// and whose `user_id` is the calling admin (not the target user, not
+/// the literal `system`). Without this an audit reader has to correlate
+/// multiple rows to reconstruct what was rotated; a single row should
+/// be self-describing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_audit_records_old_new_diff_and_caller() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // First PUT — old budget is `none` (no prior cap).
+    let _ = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Second PUT — bumps hourly 1.0 → 5.0 so the diff is unambiguous.
+    let _ = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 5.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Pull recent audit rows, filter to ConfigChange.
+    let q: serde_json::Value = client
+        .get(format!(
+            "{}/api/audit/query?action=ConfigChange",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = q["entries"].as_array().expect("entries[] present");
+    assert!(
+        !entries.is_empty(),
+        "ConfigChange audit row must be emitted by /api/budget/users/{{user}} PUT"
+    );
+
+    // Newest first: the second PUT's row carries the 1.0→5.0 transition.
+    let bump = entries
+        .iter()
+        .find(|e| {
+            e["detail"]
+                .as_str()
+                .map(|s| s.contains("hourly: 1→5"))
+                .unwrap_or(false)
+        })
+        .expect("audit detail must record old→new diff (e.g. hourly: 1→5)");
+    let detail = bump["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("user_budget updated for "),
+        "detail prefix pins forensic search: {detail}"
+    );
+    assert!(detail.contains("→"), "diff arrow must be present: {detail}");
+
+    // Caller attribution: user_id must be the admin (Alice), not the
+    // target user (also Alice in this test — but distinguishable from
+    // `null` which would mean anonymous).
+    let alice = librefang_types::agent::UserId::from_name("Alice").to_string();
+    assert_eq!(
+        bump["user_id"].as_str().unwrap_or(""),
+        alice,
+        "audit row must attribute the action to the calling admin"
+    );
+    assert_eq!(
+        bump["agent_id"].as_str().unwrap_or(""),
+        "system",
+        "config-mutation rows are not agent-scoped — agent_id stays 'system'"
+    );
+
+    // The first PUT's row had old=none → new=1: walk the array for it.
+    let first = entries
+        .iter()
+        .find(|e| {
+            e["detail"]
+                .as_str()
+                .map(|s| s.contains("hourly: none→1"))
+                .unwrap_or(false)
+        })
+        .expect("first PUT must render old=none → new=1");
+    assert!(first["detail"]
+        .as_str()
+        .unwrap()
+        .contains("alert: none→0.8"));
+}
+
 /// Validation: PUT with negative or out-of-range values is rejected
 /// before touching disk. Each case is a full-shape payload with exactly
 /// one offending field — proves the per-field validators fire, not just
