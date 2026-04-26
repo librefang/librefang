@@ -2329,7 +2329,10 @@ model = "llama-3.3-70b-versatile"
 mode = "rw"
 "#;
         let d: WorkspaceDecl = toml::from_str(s).unwrap();
-        assert_eq!(d.path.as_deref(), Some(std::path::Path::new("shared/library")));
+        assert_eq!(
+            d.path.as_deref(),
+            Some(std::path::Path::new("shared/library"))
+        );
         assert!(d.mount.is_none());
         assert_eq!(d.mode, WorkspaceMode::ReadWrite);
         assert!(!d.is_external_mount());
@@ -2341,7 +2344,10 @@ mode = "rw"
 mode = "r"
 "#;
         let d: WorkspaceDecl = toml::from_str(s).unwrap();
-        assert_eq!(d.mount.as_deref(), Some(std::path::Path::new("/Users/me/Obsidian")));
+        assert_eq!(
+            d.mount.as_deref(),
+            Some(std::path::Path::new("/Users/me/Obsidian"))
+        );
         assert!(d.path.is_none());
         assert_eq!(d.mode, WorkspaceMode::ReadOnly);
         assert!(d.is_external_mount());

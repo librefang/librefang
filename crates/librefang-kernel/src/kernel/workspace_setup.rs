@@ -727,9 +727,7 @@ pub(super) fn ensure_named_workspaces(
                 }
             }
         }
-        if let Some(entry) =
-            resolve_workspace_decl(name, decl, workspaces_root, &canonical_roots)
-        {
+        if let Some(entry) = resolve_workspace_decl(name, decl, workspaces_root, &canonical_roots) {
             resolved.insert(name.clone(), entry);
         }
     }
