@@ -205,6 +205,10 @@ mod tests {
                     m
                 },
                 api_key_hash: None,
+                tool_policy: None,
+                tool_categories: None,
+                memory_access: None,
+                channel_tool_rules: HashMap::new(),
             },
             UserConfig {
                 name: "Guest".to_string(),
@@ -215,12 +219,20 @@ mod tests {
                     m
                 },
                 api_key_hash: None,
+                tool_policy: None,
+                tool_categories: None,
+                memory_access: None,
+                channel_tool_rules: HashMap::new(),
             },
             UserConfig {
                 name: "ReadOnly".to_string(),
                 role: "viewer".to_string(),
                 channel_bindings: HashMap::new(),
                 api_key_hash: None,
+                tool_policy: None,
+                tool_categories: None,
+                memory_access: None,
+                channel_tool_rules: HashMap::new(),
             },
         ]
     }

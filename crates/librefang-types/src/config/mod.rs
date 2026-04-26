@@ -147,12 +147,116 @@ mod tests {
                 m
             },
             api_key_hash: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&uc).unwrap();
         let back: UserConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "Alice");
         assert_eq!(back.role, "owner");
         assert_eq!(back.channel_bindings.get("telegram").unwrap(), "123456");
+    }
+
+    #[test]
+    fn test_user_config_with_tool_policy_serde() {
+        use crate::user_policy::{
+            ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
+        };
+        let mut channel_rules = std::collections::HashMap::new();
+        channel_rules.insert(
+            "telegram".to_string(),
+            ChannelToolPolicy {
+                allowed_tools: vec![],
+                denied_tools: vec!["shell_*".to_string()],
+            },
+        );
+        let uc = UserConfig {
+            name: "Bob".to_string(),
+            role: "user".to_string(),
+            channel_bindings: std::collections::HashMap::new(),
+            api_key_hash: None,
+            tool_policy: Some(UserToolPolicy {
+                allowed_tools: vec!["web_*".to_string()],
+                denied_tools: vec!["shell_exec".to_string()],
+            }),
+            tool_categories: Some(UserToolCategories {
+                allowed_groups: vec!["read_only".to_string()],
+                denied_groups: vec!["dangerous".to_string()],
+            }),
+            memory_access: Some(UserMemoryAccess {
+                readable_namespaces: vec!["proactive".to_string(), "kv:*".to_string()],
+                writable_namespaces: vec!["kv:scratch".to_string()],
+                pii_access: false,
+                export_allowed: false,
+                delete_allowed: true,
+            }),
+            channel_tool_rules: channel_rules,
+        };
+
+        // JSON roundtrip
+        let json = serde_json::to_string(&uc).unwrap();
+        let back: UserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_policy, uc.tool_policy);
+        assert_eq!(back.tool_categories, uc.tool_categories);
+        assert_eq!(back.memory_access, uc.memory_access);
+        assert_eq!(back.channel_tool_rules, uc.channel_tool_rules);
+
+        // TOML roundtrip
+        let tomls = toml::to_string(&uc).unwrap();
+        let back2: UserConfig = toml::from_str(&tomls).unwrap();
+        assert_eq!(back2.memory_access.as_ref().unwrap().delete_allowed, true);
+        assert!(back2
+            .channel_tool_rules
+            .get("telegram")
+            .unwrap()
+            .denied_tools
+            .contains(&"shell_*".to_string()));
+    }
+
+    #[test]
+    fn test_user_config_omitted_optional_policy_defaults_to_none() {
+        let toml_str = r#"
+            name = "Carol"
+            role = "user"
+        "#;
+        let uc: UserConfig = toml::from_str(toml_str).unwrap();
+        assert!(uc.tool_policy.is_none());
+        assert!(uc.tool_categories.is_none());
+        assert!(uc.memory_access.is_none());
+        assert!(uc.channel_tool_rules.is_empty());
+    }
+
+    #[test]
+    fn test_kernel_config_users_with_tool_policy_toml() {
+        let toml_str = r#"
+            [[users]]
+            name = "Alice"
+            role = "admin"
+
+            [users.tool_policy]
+            denied_tools = ["shell_exec"]
+
+            [users.memory_access]
+            readable_namespaces = ["proactive", "kv:*"]
+            writable_namespaces = ["kv:user_alice"]
+            pii_access = true
+            export_allowed = false
+            delete_allowed = true
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.users.len(), 1);
+        let alice = &config.users[0];
+        assert_eq!(
+            alice.tool_policy.as_ref().unwrap().denied_tools,
+            vec!["shell_exec".to_string()]
+        );
+        let mem = alice.memory_access.as_ref().unwrap();
+        assert!(mem.pii_access);
+        assert!(mem.delete_allowed);
+        assert!(!mem.export_allowed);
+        assert_eq!(mem.readable_namespaces.len(), 2);
     }
 
     #[test]
