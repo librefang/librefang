@@ -247,6 +247,67 @@ pub fn redact_pii_in_text(text: &str, replacement: &str) -> String {
     out
 }
 
+/// Like [`check_outbound_text_violation_with_skip`] but returns *every*
+/// [`TaintRuleId`] that fires against the payload — both Secret-family and
+/// PII-family rules — instead of a pre-formatted string.
+///
+/// Callers applying rule-set severity actions (`block` / `warn` / `log`)
+/// MUST use this rather than [`detect_outbound_text_violation_with_skip`]:
+/// returning only the first match would let a rule-set downgrade authorized
+/// for one rule silently mask an unrelated violation in the same payload
+/// (e.g. a Secret rule downgraded to `warn` masking a PII rule that the
+/// rule set never authorized).
+///
+/// Returns an empty vector when no rule fires.
+pub fn detect_outbound_text_violation_rules_with_skip(
+    payload: &str,
+    sink: &TaintSink,
+    skip_rules: &HashSet<TaintRuleId>,
+) -> Vec<TaintRuleId> {
+    let mut hits = Vec::new();
+    if let Some(rule) = detect_secret_rule_with_skip(payload, skip_rules) {
+        let mut labels = HashSet::new();
+        labels.insert(TaintLabel::Secret);
+        let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+        if tainted.check_sink(sink).is_err() {
+            hits.push(rule);
+        }
+    }
+    if sink.blocked_labels.contains(&TaintLabel::Pii) {
+        if let Some(rule) = detect_pii_rule_with_skip(payload, skip_rules) {
+            let mut labels = HashSet::new();
+            labels.insert(TaintLabel::Pii);
+            let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+            if tainted.check_sink(sink).is_err() {
+                hits.push(rule);
+            }
+        }
+    }
+    hits
+}
+
+/// Like [`check_outbound_text_violation_with_skip`] but returns the
+/// specific [`TaintRuleId`] that caused the violation instead of a
+/// pre-formatted string.
+///
+/// **For rule-set severity decisions, prefer
+/// [`detect_outbound_text_violation_rules_with_skip`]** — this function
+/// returns only the first matching rule and is unsafe to use as the input
+/// for downgrade decisions, because a rule-set authorized to downgrade the
+/// returned rule could mask other rules that fired but weren't authorized.
+///
+/// Returns `None` when no rule fires, `Some(rule)` otherwise (Secret rules
+/// take precedence over PII rules — same order as the underlying detector).
+pub fn detect_outbound_text_violation_with_skip(
+    payload: &str,
+    sink: &TaintSink,
+    skip_rules: &HashSet<TaintRuleId>,
+) -> Option<TaintRuleId> {
+    detect_outbound_text_violation_rules_with_skip(payload, sink, skip_rules)
+        .into_iter()
+        .next()
+}
+
 /// Like [`check_outbound_text_violation`] but lets callers skip specific
 /// [`TaintRuleId`]s.  Rules listed in `skip_rules` are not evaluated.
 ///
@@ -258,6 +319,31 @@ pub fn check_outbound_text_violation_with_skip(
     sink: &TaintSink,
     skip_rules: &HashSet<TaintRuleId>,
 ) -> Option<String> {
+    let mut labels = HashSet::new();
+    if detect_secret_rule_with_skip(payload, skip_rules).is_some() {
+        labels.insert(TaintLabel::Secret);
+    }
+    if sink.blocked_labels.contains(&TaintLabel::Pii)
+        && detect_pii_rule_with_skip(payload, skip_rules).is_some()
+    {
+        labels.insert(TaintLabel::Pii);
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
+    if let Err(violation) = tainted.check_sink(sink) {
+        return Some(violation.to_string());
+    }
+    None
+}
+
+/// Returns the secret-shaped rule that fires for the given payload, if any.
+/// Order: AuthorizationLiteral → KeyValueSecret → OpaqueToken → WellKnownPrefix.
+fn detect_secret_rule_with_skip(
+    payload: &str,
+    skip_rules: &HashSet<TaintRuleId>,
+) -> Option<TaintRuleId> {
     const SECRET_KEYS: &[&str] = &[
         "api_key",
         "apikey",
@@ -277,8 +363,10 @@ pub fn check_outbound_text_violation_with_skip(
     let lower = payload.to_lowercase();
 
     // 1. `Authorization:` header literal — unambiguous.
-    let mut hit = !skip_rules.contains(&TaintRuleId::AuthorizationLiteral)
-        && lower.contains("authorization:");
+    if !skip_rules.contains(&TaintRuleId::AuthorizationLiteral) && lower.contains("authorization:")
+    {
+        return Some(TaintRuleId::AuthorizationLiteral);
+    }
 
     // 2. `key=value` / `key: value` / `"key":` / `'key':` shapes,
     //    including variants with whitespace around the separator
@@ -287,7 +375,7 @@ pub fn check_outbound_text_violation_with_skip(
     //    separator list can stay compact. The separator gate still
     //    keeps natural-language ("a token of appreciation") from
     //    tripping the filter.
-    if !hit && !skip_rules.contains(&TaintRuleId::KeyValueSecret) {
+    if !skip_rules.contains(&TaintRuleId::KeyValueSecret) {
         let normalized = lower
             .replace(" = ", "=")
             .replace(" =", "=")
@@ -295,11 +383,10 @@ pub fn check_outbound_text_violation_with_skip(
             .replace(" : ", ":")
             .replace(" :", ":")
             .replace(": ", ":");
-        'outer: for k in SECRET_KEYS {
+        for k in SECRET_KEYS {
             for sep in ["=", ":", "\":", "':"] {
                 if normalized.contains(&format!("{k}{sep}")) {
-                    hit = true;
-                    break 'outer;
+                    return Some(TaintRuleId::KeyValueSecret);
                 }
             }
         }
@@ -314,93 +401,80 @@ pub fn check_outbound_text_violation_with_skip(
     // carry essentially no entropy as credentials relative to how
     // often they show up as plain arguments, so they are NOT
     // flagged. Real opaque tokens mix letters and digits.
-    if !hit {
-        let trimmed = payload.trim();
-        let skip_opaque = skip_rules.contains(&TaintRuleId::OpaqueToken);
-        let skip_well_known = skip_rules.contains(&TaintRuleId::WellKnownPrefix);
-        if !skip_opaque || !skip_well_known {
-            let charset_ok = !trimmed.chars().any(char::is_whitespace)
-                && trimmed.chars().all(|c| {
-                    c.is_ascii_alphanumeric()
-                        || c == '-'
-                        || c == '_'
-                        || c == '.'
-                        || c == '/'
-                        || c == '+'
-                        || c == '='
-                });
-            let has_letter = trimmed.chars().any(|c| c.is_ascii_alphabetic());
-            let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
-            let is_hex_only = trimmed.chars().all(|c| c.is_ascii_hexdigit());
-            // Require letters + digits AND reject pure-hex runs. This
-            // excludes git SHAs (40-hex), sha256 (64-hex), UUIDs without
-            // dashes (32-hex), and bare decimal runs — all common in
-            // legitimate tool arguments.
-            let mixed_enough = has_letter && has_digit && !is_hex_only;
-            // Strings containing a calendar date component (YYYY-MM-DD) are
-            // structured resource identifiers, not opaque credentials. Real
-            // API tokens never embed dates. This prevents false positives on
-            // MCP session handles of the form `tab-2026-04-16-<uuid-parts>`.
-            let has_date_component = date_component_regex().is_match(trimmed);
-            // File paths (absolute or relative with directory separators)
-            // are structured identifiers, not credentials. Exclude strings
-            // that look like paths: start with `/` or `C:\`, or contain
-            // multiple `/` segments with a file extension at the end.
-            let looks_like_path = trimmed.starts_with('/')
-                || (trimmed.len() >= 3
-                    && trimmed.as_bytes()[1] == b':'
-                    && trimmed.as_bytes()[2] == b'\\')
-                || trimmed.starts_with("\\\\")
-                || (trimmed.contains('/')
-                    && trimmed
-                        .rfind('.')
-                        .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)));
+    let trimmed = payload.trim();
+    let skip_opaque = skip_rules.contains(&TaintRuleId::OpaqueToken);
+    let skip_well_known = skip_rules.contains(&TaintRuleId::WellKnownPrefix);
+    if !skip_opaque || !skip_well_known {
+        let charset_ok = !trimmed.chars().any(char::is_whitespace)
+            && trimmed.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '-'
+                    || c == '_'
+                    || c == '.'
+                    || c == '/'
+                    || c == '+'
+                    || c == '='
+            });
+        let has_letter = trimmed.chars().any(|c| c.is_ascii_alphabetic());
+        let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+        let is_hex_only = trimmed.chars().all(|c| c.is_ascii_hexdigit());
+        // Require letters + digits AND reject pure-hex runs. This
+        // excludes git SHAs (40-hex), sha256 (64-hex), UUIDs without
+        // dashes (32-hex), and bare decimal runs — all common in
+        // legitimate tool arguments.
+        let mixed_enough = has_letter && has_digit && !is_hex_only;
+        // Strings containing a calendar date component (YYYY-MM-DD) are
+        // structured resource identifiers, not opaque credentials. Real
+        // API tokens never embed dates. This prevents false positives on
+        // MCP session handles of the form `tab-2026-04-16-<uuid-parts>`.
+        let has_date_component = date_component_regex().is_match(trimmed);
+        // File paths (absolute or relative with directory separators)
+        // are structured identifiers, not credentials. Exclude strings
+        // that look like paths: start with `/` or `C:\`, or contain
+        // multiple `/` segments with a file extension at the end.
+        let looks_like_path = trimmed.starts_with('/')
+            || (trimmed.len() >= 3
+                && trimmed.as_bytes()[1] == b':'
+                && trimmed.as_bytes()[2] == b'\\')
+            || trimmed.starts_with("\\\\")
+            || (trimmed.contains('/')
+                && trimmed
+                    .rfind('.')
+                    .is_some_and(|dot| dot > trimmed.rfind('/').unwrap_or(0)));
 
-            if !skip_opaque {
-                let looks_opaque = trimmed.len() >= 32
-                    && charset_ok
-                    && mixed_enough
-                    && !has_date_component
-                    && !looks_like_path;
-                if looks_opaque {
-                    hit = true;
-                }
+        if !skip_opaque {
+            let looks_opaque = trimmed.len() >= 32
+                && charset_ok
+                && mixed_enough
+                && !has_date_component
+                && !looks_like_path;
+            if looks_opaque {
+                return Some(TaintRuleId::OpaqueToken);
             }
-            if !hit && !skip_well_known {
-                let well_known = trimmed.starts_with("sk-")
-                    || trimmed.starts_with("ghp_")
-                    || trimmed.starts_with("github_pat_")
-                    || trimmed.starts_with("xoxp-")
-                    || trimmed.starts_with("xoxb-")
-                    || trimmed.starts_with("AKIA")
-                    || trimmed.starts_with("AIza");
-                if well_known {
-                    hit = true;
-                }
+        }
+        if !skip_well_known {
+            let well_known = trimmed.starts_with("sk-")
+                || trimmed.starts_with("ghp_")
+                || trimmed.starts_with("github_pat_")
+                || trimmed.starts_with("xoxp-")
+                || trimmed.starts_with("xoxb-")
+                || trimmed.starts_with("AKIA")
+                || trimmed.starts_with("AIza");
+            if well_known {
+                return Some(TaintRuleId::WellKnownPrefix);
             }
         }
     }
 
-    let mut labels = HashSet::new();
-    if hit {
-        labels.insert(TaintLabel::Secret);
-    }
-    if sink.blocked_labels.contains(&TaintLabel::Pii)
-        && payload_contains_pii_with_skip(payload, skip_rules)
-    {
-        labels.insert(TaintLabel::Pii);
-    }
-    if labels.is_empty() {
-        return None;
-    }
-    let tainted = TaintedValue::new(payload, labels, "llm_tool_call");
-    if let Err(violation) = tainted.check_sink(sink) {
-        return Some(violation.to_string());
-    }
     None
 }
 
-fn payload_contains_pii_with_skip(payload: &str, skip_rules: &HashSet<TaintRuleId>) -> bool {
+/// Returns the PII rule that fires for the given payload, if any.
+/// Order: PiiEmail → PiiPhone → PiiCreditCard → PiiSsn.
+fn detect_pii_rule_with_skip(
+    payload: &str,
+    skip_rules: &HashSet<TaintRuleId>,
+) -> Option<TaintRuleId> {
     let trimmed = payload.trim();
     let tokenish_mixed = !trimmed.is_empty()
         && !trimmed.contains('@')
@@ -416,7 +490,7 @@ fn payload_contains_pii_with_skip(payload: &str, skip_rules: &HashSet<TaintRuleI
         })
         && trimmed.chars().any(|c| c.is_ascii_alphabetic());
     if tokenish_mixed {
-        return false;
+        return None;
     }
     // Unix / Slack-style timestamps (e.g. "1747123456.789000") are pure
     // digits with a single dot. Real phone numbers carry separators,
@@ -429,13 +503,21 @@ fn payload_contains_pii_with_skip(payload: &str, skip_rules: &HashSet<TaintRuleI
             .split_once('.')
             .is_some_and(|(l, r)| l.len() >= 9 && !r.is_empty());
     if is_numeric_timestamp {
-        return false;
+        return None;
     }
-    (!skip_rules.contains(&TaintRuleId::PiiEmail) && email_regex().is_match(payload))
-        || (!skip_rules.contains(&TaintRuleId::PiiPhone) && phone_regex().is_match(payload))
-        || (!skip_rules.contains(&TaintRuleId::PiiCreditCard)
-            && credit_card_regex().is_match(payload))
-        || (!skip_rules.contains(&TaintRuleId::PiiSsn) && ssn_regex().is_match(payload))
+    if !skip_rules.contains(&TaintRuleId::PiiEmail) && email_regex().is_match(payload) {
+        return Some(TaintRuleId::PiiEmail);
+    }
+    if !skip_rules.contains(&TaintRuleId::PiiPhone) && phone_regex().is_match(payload) {
+        return Some(TaintRuleId::PiiPhone);
+    }
+    if !skip_rules.contains(&TaintRuleId::PiiCreditCard) && credit_card_regex().is_match(payload) {
+        return Some(TaintRuleId::PiiCreditCard);
+    }
+    if !skip_rules.contains(&TaintRuleId::PiiSsn) && ssn_regex().is_match(payload) {
+        return Some(TaintRuleId::PiiSsn);
+    }
+    None
 }
 
 /// Matches a calendar date in ISO 8601 / RFC 3339 form (`YYYY-MM-DD`).

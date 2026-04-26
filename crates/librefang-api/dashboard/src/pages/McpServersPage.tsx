@@ -29,7 +29,9 @@ import {
   Plug, Plus, X, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
   Search, Clock, Filter, Store, Key, Download, RefreshCw, Activity,
+  ShieldHalf,
 } from "lucide-react";
+import { TaintPolicyEditor } from "../components/TaintPolicyEditor";
 import { DynamicIcon } from "lucide-react/dynamic";
 import type { IconName } from "lucide-react/dynamic";
 
@@ -442,6 +444,7 @@ function ServerCard({
   isExpanded,
   onToggleTools,
   onEdit,
+  onEditTaintPolicy,
   onDelete,
   onAuthSuccess,
   t,
@@ -451,6 +454,7 @@ function ServerCard({
   isExpanded: boolean;
   onToggleTools: () => void;
   onEdit: () => void;
+  onEditTaintPolicy: () => void;
   onDelete: () => void;
   onAuthSuccess?: () => void;
   t: (key: string, opts?: any) => string;
@@ -595,6 +599,16 @@ function ServerCard({
         </button>
         <div className="w-px bg-border-subtle" />
         <button
+          onClick={onEditTaintPolicy}
+          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+          aria-label={t("mcp.edit_taint_policy", "Taint policy")}
+          title={t("mcp.edit_taint_policy", "Taint policy")}
+        >
+          <ShieldHalf className="h-3.5 w-3.5" />
+          {t("mcp.taint_policy_short", "Taint")}
+        </button>
+        <div className="w-px bg-border-subtle" />
+        <button
           onClick={onDelete}
           className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-error hover:bg-error/5 transition-colors rounded-br-xl sm:rounded-br-2xl"
           aria-label={t("mcp.delete_server")}
@@ -616,6 +630,7 @@ export function McpServersPage() {
   const [tab, setTab] = useState<"servers" | "catalog">("servers");
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerConfigured | null>(null);
+  const [taintEditingServer, setTaintEditingServer] = useState<McpServerConfigured | null>(null);
   const [deletingServer, setDeletingServer] = useState<McpServerConfigured | null>(null);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<ServerFormState>(defaultForm);
@@ -975,6 +990,7 @@ export function McpServersPage() {
                     isExpanded={expandedTools.has(id)}
                     onToggleTools={() => toggleTools(server)}
                     onEdit={() => openEdit(server)}
+                    onEditTaintPolicy={() => setTaintEditingServer(server)}
                     onDelete={() => deleteServer(server)}
                     t={t}
                   />
@@ -1317,6 +1333,15 @@ export function McpServersPage() {
         }}
         onClose={() => setDeletingServer(null)}
       />
+
+      {/* Issue #3050: granular taint-policy editor */}
+      {taintEditingServer && (
+        <TaintPolicyEditor
+          server={taintEditingServer}
+          isOpen={!!taintEditingServer}
+          onClose={() => setTaintEditingServer(null)}
+        />
+      )}
     </div>
   );
 }

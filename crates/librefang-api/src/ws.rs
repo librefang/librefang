@@ -1343,7 +1343,7 @@ async fn handle_command(
             })
         }
         "queue" => {
-            let is_running = state.kernel.running_tasks_ref().contains_key(&agent_id);
+            let is_running = state.kernel.agent_has_active_session(agent_id);
             let msg = if is_running {
                 "Agent is processing a request..."
             } else {

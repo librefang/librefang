@@ -299,6 +299,9 @@ export const mcpKeys = {
   catalog: () => [...mcpKeys.all, "catalog"] as const,
   catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
   health: () => [...mcpKeys.all, "health"] as const,
+  // Read-only `[[taint_rules]]` registry — drives dashboard validation
+  // that flags rule_set names not registered in config.toml.
+  taintRules: () => [...mcpKeys.all, "taint-rules"] as const,
 };
 
 export const pluginKeys = {

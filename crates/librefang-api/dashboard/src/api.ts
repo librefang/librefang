@@ -2992,6 +2992,44 @@ export interface McpTransport {
   url?: string;
 }
 
+/** TaintRuleId — must match the snake-cased serde tag of the Rust enum. */
+export type TaintRuleId =
+  | "authorization_literal"
+  | "key_value_secret"
+  | "well_known_prefix"
+  | "opaque_token"
+  | "pii_email"
+  | "pii_phone"
+  | "pii_credit_card"
+  | "pii_ssn"
+  | "sensitive_key_name";
+
+/** Tool-level baseline action when no path entry matches. */
+export type McpTaintToolAction = "scan" | "skip";
+
+/** Severity action for a named rule set. */
+export type McpTaintRuleSetAction = "block" | "warn" | "log";
+
+export interface McpTaintPathPolicy {
+  skip_rules: TaintRuleId[];
+}
+
+export interface McpTaintToolPolicy {
+  default?: McpTaintToolAction;
+  paths?: Record<string, McpTaintPathPolicy>;
+  rule_sets?: string[];
+}
+
+export interface McpTaintPolicy {
+  tools?: Record<string, McpTaintToolPolicy>;
+}
+
+export interface NamedTaintRuleSet {
+  name: string;
+  action?: McpTaintRuleSetAction;
+  rules?: TaintRuleId[];
+}
+
 export interface McpServerConfigured {
   /** Stable identifier; falls back to `name` when the backend omits it. */
   id?: string;
@@ -3003,6 +3041,10 @@ export interface McpServerConfigured {
   /** Catalog template this server was installed from, when applicable. */
   template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
+  /** Issue #3050: per-server taint scanning toggle. */
+  taint_scanning?: boolean;
+  /** Issue #3050: granular per-tool / per-path / per-rule taint policy. */
+  taint_policy?: McpTaintPolicy;
 }
 
 export interface McpServerConnected {
@@ -3093,6 +3135,21 @@ export async function updateMcpServer(
   return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
+export interface PatchMcpTaintRequest {
+  taint_scanning?: boolean;
+  taint_policy?: McpTaintPolicy;
+}
+
+export async function patchMcpServerTaint(
+  id: string,
+  body: PatchMcpTaintRequest,
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/taint`,
+    body,
+  );
+}
+
 export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
 }
@@ -3126,6 +3183,29 @@ export async function getMcpHealth(): Promise<McpHealthResponse> {
 
 export async function reloadMcp(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP `[[taint_rules]]` Registry ──────────────────────────────────────
+
+/** Summary of one named taint rule set defined by `[[taint_rules]]`. */
+export interface McpTaintRuleSummary {
+  /** Identifier referenced by `McpTaintToolPolicy.rule_sets`. */
+  name: string;
+  /** Severity action this set applies when one of its rules fires. */
+  action: "block" | "warn" | "log";
+  /** Number of `TaintRuleId` variants this set covers (display-only). */
+  rule_count: number;
+}
+
+/**
+ * Read-only list of `[[taint_rules]]` for dashboard validation.
+ *
+ * Used by `TaintPolicyEditor` to flag rule_set names that don't match any
+ * registered set — without this, typos sit silent in production until a
+ * scanner WARN line happens to be noticed in logs.
+ */
+export async function listMcpTaintRules(): Promise<McpTaintRuleSummary[]> {
+  return get<McpTaintRuleSummary[]>("/api/mcp/taint-rules");
 }
 
 // ── MCP OAuth Auth ──────────────────────────────────────────────────────
