@@ -3,6 +3,7 @@
 //! Uses long-polling via `getUpdates` with exponential backoff on failures.
 //! No external Telegram crate — just `reqwest` for full control over error handling.
 
+use crate::bridge::SENDER_USER_ID_KEY;
 use crate::formatter;
 use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
@@ -2335,6 +2336,11 @@ fn parse_telegram_callback_query(
         serde_json::json!(callback_query_id),
     );
     metadata.insert("user_id".to_string(), serde_json::json!(user_id_str));
+    // See parse_telegram_message: RBAC needs the actual user id, not chat_id.
+    metadata.insert(
+        SENDER_USER_ID_KEY.to_string(),
+        serde_json::json!(user_id_str),
+    );
     metadata.insert(
         "message_id".to_string(),
         serde_json::json!(message_id.to_string()),
@@ -2726,6 +2732,16 @@ async fn parse_telegram_update(
 
     // Build metadata
     let mut metadata = HashMap::new();
+
+    // RBAC and per-user rate limiting key off `metadata[SENDER_USER_ID_KEY]`.
+    // For group/supergroup chats `sender.platform_id` is the chat_id, not the
+    // sender's user id, so without this entry `bridge::sender_user_id()` would
+    // fall back to the chat_id and `auth_manager.identify("telegram", chat_id)`
+    // would reject every group message as "Unrecognized user".
+    metadata.insert(
+        SENDER_USER_ID_KEY.to_string(),
+        serde_json::json!(user_id.to_string()),
+    );
 
     // Store reply-to-message metadata for downstream consumers.
     if let Some(reply) = message.get("reply_to_message") {
@@ -3534,6 +3550,66 @@ mod tests {
             .unwrap();
         assert!(msg.is_group);
         assert!(!msg.metadata.contains_key("was_mentioned"));
+    }
+
+    #[tokio::test]
+    async fn test_group_message_carries_sender_user_id_metadata() {
+        // Regression: in groups, sender.platform_id is the chat_id. The
+        // actual sender user id must be exposed via metadata[SENDER_USER_ID_KEY]
+        // so RBAC and per-user rate limiting resolve to the user, not the
+        // group, otherwise auth_manager.identify("telegram", chat_id) rejects
+        // every group message as "Unrecognized user".
+        let update = serde_json::json!({
+            "update_id": 700,
+            "message": {
+                "message_id": 100,
+                "from": { "id": 111222333_i64, "first_name": "Alice" },
+                "chat": { "id": -1001234567890_i64, "type": "supergroup" },
+                "date": 1700000000,
+                "text": "ping"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        assert!(msg.is_group);
+        assert_eq!(msg.sender.platform_id, "-1001234567890");
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("111222333"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_message_also_carries_sender_user_id_metadata() {
+        // In DMs platform_id == user_id, but downstream code shouldn't have to
+        // special-case channel mode — always populate the metadata key.
+        let update = serde_json::json!({
+            "update_id": 701,
+            "message": {
+                "message_id": 101,
+                "from": { "id": 111222333_i64, "first_name": "Alice" },
+                "chat": { "id": 111222333_i64, "type": "private" },
+                "date": 1700000000,
+                "text": "ping"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], &test_ctx(&client), None)
+            .await
+            .unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(
+            msg.metadata
+                .get(crate::bridge::SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("111222333"),
+        );
     }
 
     #[tokio::test]
