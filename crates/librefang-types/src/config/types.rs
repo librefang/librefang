@@ -410,22 +410,33 @@ pub struct TelegramRoleMapping {
     pub member_role: Option<String>,
 }
 
-/// Discord-side mapping. The user can have any number of guild roles; the
-/// resolver walks `role_map` in declaration order and returns the first match
-/// (deployers should list higher-privilege roles first in `config.toml`).
+/// Discord-side mapping. A user may hold any number of guild roles
+/// simultaneously; the resolver walks **every** role the user has,
+/// looks each one up in `role_map`, and picks the **highest-privilege**
+/// match (`Owner` > `Admin` > `User` > `Viewer`). Declaration order
+/// in `config.toml` is irrelevant — the privilege ordering on the
+/// LibreFang side decides the winner. This protects against Discord-
+/// side role ordering (which is outside our control) deciding the
+/// effective LibreFang permissions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiscordRoleMapping {
-    /// Discord role name → LibreFang role.
-    /// Use an `IndexMap`-friendly TOML inline table to preserve declaration
-    /// order on disk; iteration order at runtime is whatever `HashMap`
-    /// provides, but the resolver is order-stable per call.
+    /// Discord role name → LibreFang role string (`owner` / `admin` /
+    /// `user` / `viewer` / `guest`). Iteration order is irrelevant —
+    /// the translator scans every match the user holds and returns the
+    /// most privileged. Typo'd LibreFang role strings (e.g. `"admn"`)
+    /// are silently skipped, falling back to default-deny `Viewer`.
     pub role_map: HashMap<String, String>,
 }
 
 /// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
-/// `is_admin` / regular member / guest; we honour the precedence
-/// owner > admin > member > guest with each step being optional.
+/// `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence
+/// (owner > admin > guest > member) is collapsed inside the channel
+/// adapter (`SlackAdapter::parse_users_info_response`) into a single
+/// platform token before this mapping ever sees it; the translator
+/// here is a flat lookup, not a precedence ladder. Each step is
+/// optional — leave a field unset to fall through to default-deny
+/// `Viewer` for that platform tier.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackRoleMapping {
     /// LibreFang role for `is_owner = true` users.

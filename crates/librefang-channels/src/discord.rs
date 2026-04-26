@@ -9,6 +9,7 @@ use crate::types::{
     PlatformRole,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -57,6 +58,12 @@ pub struct DiscordAdapter {
     session_id: Arc<RwLock<Option<String>>>,
     /// Resume gateway URL.
     resume_gateway_url: Arc<RwLock<Option<String>>>,
+    /// Channel-id → guild-id resolution cache. Populated on first
+    /// `lookup_role` call for a given channel; channels almost never
+    /// move guilds, so this stays valid for the adapter's lifetime.
+    /// Keeps `lookup_role` to one Discord API call after the first hit
+    /// (the `/guilds/.../members/...` request) instead of three.
+    channel_to_guild: Arc<DashMap<String, String>>,
 }
 
 impl DiscordAdapter {
@@ -85,6 +92,7 @@ impl DiscordAdapter {
             bot_user_id: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
+            channel_to_guild: Arc::new(DashMap::new()),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -160,6 +168,50 @@ impl DiscordAdapter {
             .send()
             .await?;
         Ok(())
+    }
+
+    /// Resolve a Discord channel ID to its guild ID.
+    ///
+    /// `lookup_role` receives a channel ID (because that is what every
+    /// `ChannelMessage` carries as `sender.platform_id`, see
+    /// `parse_message_create` ~line 715), but Discord's
+    /// `/guilds/{id}/members/{uid}` endpoint expects the guild ID. We
+    /// resolve via `GET /channels/{channel_id}` once per channel and
+    /// cache the result for the adapter's lifetime — channels do not
+    /// move guilds in normal operation, so cache invalidation is a
+    /// non-issue.
+    ///
+    /// Returns `Ok(None)` for DM channels (no `guild_id` in the
+    /// response) so the caller falls through to default-deny rather
+    /// than 404-ing on a phantom guild lookup.
+    pub async fn api_resolve_channel_guild(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(cached) = self.channel_to_guild.get(channel_id) {
+            return Ok(Some(cached.clone()));
+        }
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get channel failed ({status}): {body_text}").into());
+        }
+        let channel: serde_json::Value = resp.json().await?;
+        let Some(guild_id) = channel["guild_id"].as_str() else {
+            // DM / group-DM channels — no guild role to resolve.
+            return Ok(None);
+        };
+        let guild_id = guild_id.to_string();
+        self.channel_to_guild
+            .insert(channel_id.to_string(), guild_id.clone());
+        Ok(Some(guild_id))
     }
 
     /// Fetch a guild member and the set of guild-role names they hold.
@@ -254,26 +306,29 @@ pub(crate) fn resolve_role_ids_to_names(
 
 #[async_trait]
 impl ChannelRoleQuery for DiscordAdapter {
-    /// `chat_id` is interpreted as the Discord guild ID.
+    /// `chat_id` here is the Discord **channel** ID (matches what every
+    /// `ChannelMessage` carries as `sender.platform_id`); we resolve it
+    /// to the owning guild internally before hitting the members API.
+    /// DM channels (no guild) yield `Ok(None)` → default-deny `Viewer`.
     async fn lookup_role(
         &self,
         chat_id: &str,
         user_id: &str,
     ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
-        let Some(roles) = self.api_get_guild_member_roles(chat_id, user_id).await? else {
+        let Some(guild_id) = self.api_resolve_channel_guild(chat_id).await? else {
+            return Ok(None);
+        };
+        let Some(roles) = self.api_get_guild_member_roles(&guild_id, user_id).await? else {
             return Ok(None);
         };
         if roles.is_empty() {
             return Ok(None);
         }
-        // Discord users have no inherent ordering on their role list, so we
-        // pass everything through and let the kernel walk `role_map` to find
-        // the first configured match.
-        let primary = roles[0].clone();
-        Ok(Some(PlatformRole {
-            primary,
-            roles: roles[1..].to_vec(),
-        }))
+        // Discord users hold an unordered set of guild roles; pass them
+        // all through and let the kernel translator pick the highest-
+        // privilege match from `role_map` (Discord-side ordering must
+        // not decide LibreFang permissions).
+        Ok(Some(PlatformRole::many(roles)))
     }
 }
 

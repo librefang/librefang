@@ -47,6 +47,13 @@ impl UserRole {
     /// operator (audit + dashboard show `User`). Channel-mapping translators
     /// MUST use [`UserRole::try_from_str_role`] instead so a typo in
     /// `[channel_role_mapping]` fails closed to `Viewer`.
+    ///
+    /// **Behavior change in M4 (#3054):** the literal string `"guest"`
+    /// used to fall through the `_` arm and resolve to `User`; it now
+    /// resolves to `Viewer`. Operators with `[users.x] role = "guest"`
+    /// in a deployed `config.toml` will see that user demoted to read-
+    /// only on upgrade. This is intentional — `"guest"` was always a
+    /// misnomer that produced the wrong privilege level.
     pub fn from_str_role(s: &str) -> Self {
         Self::try_from_str_role(s).unwrap_or(UserRole::User)
     }
@@ -263,6 +270,16 @@ impl AuthManager {
     ///
     /// Returns `UserRole::Viewer` on any platform error so a flaky external
     /// API can never accidentally elevate privileges (fail-closed).
+    /// **Transient platform errors are NOT cached** — the next call
+    /// re-queries the platform so a momentary 5xx / timeout doesn't
+    /// lock the user out for the rest of the session. Only definitive
+    /// outcomes (`Ok(Some)` translated, `Ok(None)`, no-translator-
+    /// configured) populate the cache.
+    ///
+    /// **Status:** public surface added in M4 (RBAC #3054); production
+    /// wiring (per-message agent loop + dashboard auth) lands in M5.
+    /// Not invoked from production paths yet — do not assume it's
+    /// safe to delete as unused.
     pub async fn resolve_role_for_sender(
         &self,
         sender: &SenderContext,
@@ -290,30 +307,49 @@ impl AuthManager {
         }
 
         // 3. Translate via the per-channel mapping.
-        let resolved = match (role_query, mapping_for_channel(mapping, &sender.channel)) {
-            (Some(query), Some(translator)) => {
+        //
+        // `transient` distinguishes "platform call failed" (don't
+        // cache — retry next time) from "platform definitively says
+        // no role" (cache the Viewer fallback so we don't hammer the
+        // API). Without this split, a single 5xx during session warm-
+        // up would lock the user at Viewer until session restart.
+        let has_mapping_for_channel = match sender.channel.as_str() {
+            "telegram" => mapping.telegram.is_some(),
+            "discord" => mapping.discord.is_some(),
+            "slack" => mapping.slack.is_some(),
+            _ => false,
+        };
+        let (resolved, transient) = match (role_query, has_mapping_for_channel) {
+            (Some(query), true) => {
                 let chat_id = sender.chat_id.as_deref().unwrap_or("");
                 match query.lookup_role(chat_id, &sender.user_id).await {
-                    Ok(Some(platform_role)) => translator.translate(&platform_role),
-                    Ok(None) => None,
+                    Ok(Some(platform_role)) => (
+                        translate_platform_role(mapping, &sender.channel, &platform_role),
+                        false,
+                    ),
+                    Ok(None) => (None, false),
                     Err(e) => {
                         warn!(
                             channel = %sender.channel,
                             user = %sender.user_id,
                             error = %e,
-                            "channel role lookup failed; falling back to default-deny"
+                            "channel role lookup failed; returning default-deny \
+                             without caching so the next call re-queries"
                         );
-                        None
+                        (None, true)
                     }
                 }
             }
             // No platform query available, or no mapping configured for
-            // this channel — fall through to default-deny.
-            _ => None,
+            // this channel — fall through to default-deny. Cache it:
+            // missing config is a stable state, not a transient one.
+            _ => (None, false),
         };
 
         let role = resolved.unwrap_or(UserRole::Viewer);
-        self.role_cache.insert(cache_key, role);
+        if !transient {
+            self.role_cache.insert(cache_key, role);
+        }
         role
     }
 
@@ -331,100 +367,108 @@ impl AuthManager {
     }
 }
 
-/// Per-channel translator: given a [`PlatformRole`] returned by the adapter,
-/// emit the corresponding [`UserRole`] (or `None` if the platform role has
-/// no configured mapping).
-trait RoleTranslator: Send + Sync {
-    fn translate(&self, role: &librefang_channels::types::PlatformRole) -> Option<UserRole>;
-}
-
-struct TelegramTranslator<'a>(&'a librefang_types::config::TelegramRoleMapping);
-struct DiscordTranslator<'a>(&'a librefang_types::config::DiscordRoleMapping);
-struct SlackTranslator<'a>(&'a librefang_types::config::SlackRoleMapping);
-
-impl RoleTranslator for TelegramTranslator<'_> {
-    fn translate(&self, role: &librefang_channels::types::PlatformRole) -> Option<UserRole> {
-        // Telegram's primary status string is one of `creator` /
-        // `administrator` / `member` / `restricted`. We deliberately do
-        // not map `restricted` — operators wanting to grant restricted
-        // members a role can use `member_role` and accept that distinction
-        // is invisible at this layer (Telegram allows ~22 fine-grained
-        // restriction flags; surfacing them is out of scope for M4).
-        let mapped = match role.primary.as_str() {
-            "creator" => self.0.creator_role.as_deref(),
-            "administrator" => self.0.admin_role.as_deref(),
-            "member" => self.0.member_role.as_deref(),
-            _ => None,
-        };
-        // Strict mapping: an operator typo in `[channel_role_mapping.telegram]`
-        // (e.g. `admin_role = "admn"`) falls through to None → Viewer rather
-        // than silently granting `User`.
-        mapped.and_then(UserRole::try_from_str_role)
-    }
-}
-
-impl RoleTranslator for DiscordTranslator<'_> {
-    fn translate(&self, role: &librefang_channels::types::PlatformRole) -> Option<UserRole> {
-        // Walk every role token (primary + extras) and pick the
-        // highest-privilege match from `role_map`. Discord users routinely
-        // hold multiple roles simultaneously, and operators expect the
-        // most privileged mapping to win — taking the literal first match
-        // would mean role-list ordering on Discord's side decides
-        // permissions, which is not under our control.
-        let mut best: Option<UserRole> = None;
-        let candidates = std::iter::once(&role.primary).chain(role.roles.iter());
-        for name in candidates {
-            if let Some(mapped_str) = self.0.role_map.get(name) {
-                // Strict mapping: typo in `role_map` (e.g. `Moderator = "admn"`)
-                // is skipped rather than defaulting to `User`, so unrecognized
-                // role-name → privilege drift is impossible.
-                if let Some(candidate) = UserRole::try_from_str_role(mapped_str) {
-                    best = Some(match best {
-                        Some(prev) => prev.max(candidate),
-                        None => candidate,
-                    });
-                }
-            }
-        }
-        best
-    }
-}
-
-impl RoleTranslator for SlackTranslator<'_> {
-    fn translate(&self, role: &librefang_channels::types::PlatformRole) -> Option<UserRole> {
-        // The Slack adapter pre-collapses to one of owner/admin/member/guest.
-        let mapped = match role.primary.as_str() {
-            "owner" => self.0.owner_role.as_deref(),
-            "admin" => self.0.admin_role.as_deref(),
-            "member" => self.0.member_role.as_deref(),
-            "guest" => self.0.guest_role.as_deref(),
-            _ => None,
-        };
-        // Strict mapping: typo in `[channel_role_mapping.slack]` falls through
-        // to None → Viewer.
-        mapped.and_then(UserRole::try_from_str_role)
-    }
-}
-
-fn mapping_for_channel<'a>(
-    mapping: &'a ChannelRoleMapping,
+/// Translate a platform-native role into a LibreFang [`UserRole`] using
+/// the channel's configured mapping. Returns `None` when:
+/// - no mapping exists for this channel,
+/// - the platform-role tokens did not match any configured mapping
+///   entry, or
+/// - the matched LibreFang role string is unrecognized (typo'd
+///   `[channel_role_mapping]` entries fail closed to default-deny
+///   rather than being demoted to `User`).
+///
+/// Per-platform precedence rules (Discord = highest privilege wins,
+/// Telegram/Slack = single-token flat lookup) are inlined per channel
+/// — there are exactly three platforms and each has bespoke semantics,
+/// so a trait + dyn dispatch was over-abstraction.
+fn translate_platform_role(
+    mapping: &ChannelRoleMapping,
     channel: &str,
-) -> Option<Box<dyn RoleTranslator + 'a>> {
+    role: &librefang_channels::types::PlatformRole,
+) -> Option<UserRole> {
     match channel {
         "telegram" => mapping
             .telegram
             .as_ref()
-            .map(|m| Box::new(TelegramTranslator(m)) as Box<dyn RoleTranslator + 'a>),
+            .and_then(|m| translate_telegram_role(m, role)),
         "discord" => mapping
             .discord
             .as_ref()
-            .map(|m| Box::new(DiscordTranslator(m)) as Box<dyn RoleTranslator + 'a>),
+            .and_then(|m| translate_discord_role(m, role)),
         "slack" => mapping
             .slack
             .as_ref()
-            .map(|m| Box::new(SlackTranslator(m)) as Box<dyn RoleTranslator + 'a>),
+            .and_then(|m| translate_slack_role(m, role)),
         _ => None,
     }
+}
+
+fn translate_telegram_role(
+    cfg: &librefang_types::config::TelegramRoleMapping,
+    role: &librefang_channels::types::PlatformRole,
+) -> Option<UserRole> {
+    // Telegram's status token is one of `creator` / `administrator` /
+    // `member` / `restricted`. `restricted` is deliberately unmapped —
+    // operators wanting to grant restricted members a role use
+    // `member_role` and accept that the ~22 fine-grained restriction
+    // flags are invisible at this layer (out of scope for M4).
+    let primary = role.roles.first()?;
+    let mapped = match primary.as_str() {
+        "creator" => cfg.creator_role.as_deref(),
+        "administrator" => cfg.admin_role.as_deref(),
+        "member" => cfg.member_role.as_deref(),
+        _ => None,
+    };
+    // Strict mapping: a typo in `[channel_role_mapping.telegram]` (e.g.
+    // `admin_role = "admn"`) falls through to None → Viewer rather
+    // than silently granting `User`.
+    mapped.and_then(UserRole::try_from_str_role)
+}
+
+fn translate_discord_role(
+    cfg: &librefang_types::config::DiscordRoleMapping,
+    role: &librefang_channels::types::PlatformRole,
+) -> Option<UserRole> {
+    // Walk every role token the user holds and pick the
+    // highest-privilege match from `role_map`. Discord users routinely
+    // hold multiple roles simultaneously and operators expect the most
+    // privileged mapping to win — taking the literal first match would
+    // mean role-list ordering on Discord's side decides LibreFang
+    // permissions, which is not under our control.
+    let mut best: Option<UserRole> = None;
+    for name in &role.roles {
+        if let Some(mapped_str) = cfg.role_map.get(name) {
+            // Strict mapping: typo in `role_map` (e.g. `Moderator = "admn"`)
+            // is skipped rather than defaulting to `User`, so unrecognized
+            // role-name → privilege drift is impossible.
+            if let Some(candidate) = UserRole::try_from_str_role(mapped_str) {
+                best = Some(match best {
+                    Some(prev) => prev.max(candidate),
+                    None => candidate,
+                });
+            }
+        }
+    }
+    best
+}
+
+fn translate_slack_role(
+    cfg: &librefang_types::config::SlackRoleMapping,
+    role: &librefang_channels::types::PlatformRole,
+) -> Option<UserRole> {
+    // The Slack adapter pre-collapses to one of owner/admin/member/guest
+    // in `parse_users_info_response`; the precedence ladder lives there,
+    // not here.
+    let primary = role.roles.first()?;
+    let mapped = match primary.as_str() {
+        "owner" => cfg.owner_role.as_deref(),
+        "admin" => cfg.admin_role.as_deref(),
+        "member" => cfg.member_role.as_deref(),
+        "guest" => cfg.guest_role.as_deref(),
+        _ => None,
+    };
+    // Strict mapping: typo in `[channel_role_mapping.slack]` falls
+    // through to None → Viewer.
+    mapped.and_then(UserRole::try_from_str_role)
 }
 
 #[cfg(test)]
@@ -751,10 +795,10 @@ mod channel_role_tests {
         let mgr = AuthManager::new(&[]);
         let calls = Arc::new(AtomicUsize::new(0));
         let query = StaticRoleQuery {
-            result: Ok(Some(PlatformRole {
-                primary: "Member".to_string(),
-                roles: vec!["Moderator".to_string()],
-            })),
+            result: Ok(Some(PlatformRole::many(vec![
+                "Member".to_string(),
+                "Moderator".to_string(),
+            ]))),
             calls: calls.clone(),
         };
         let sender = SenderContext {
@@ -893,6 +937,80 @@ mod channel_role_tests {
             .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
             .await;
         assert_eq!(role, UserRole::Viewer);
+    }
+
+    /// Test double whose first `lookup_role` call fails and every
+    /// subsequent call succeeds with `success`. Exercises the
+    /// "transient platform error must not poison the cache" path.
+    struct FailThenSucceedQuery {
+        success: PlatformRole,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ChannelRoleQuery for FailThenSucceedQuery {
+        async fn lookup_role(
+            &self,
+            _chat_id: &str,
+            _user_id: &str,
+        ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err("transient 503".into())
+            } else {
+                Ok(Some(self.success.clone()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_role_transient_failure_does_not_poison_cache() {
+        // Regression: an `Err` from the platform used to be cached as
+        // Viewer for the rest of the session, locking the user out
+        // until restart. Now we return Viewer for the failing call but
+        // skip the cache write, so the next call re-queries and picks
+        // up the recovered platform.
+        let mgr = AuthManager::new(&[]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let query = FailThenSucceedQuery {
+            success: PlatformRole::single("administrator"),
+            calls: calls.clone(),
+        };
+        let sender = telegram_sender("tg-bob", "chat-1");
+
+        // First call: platform fails → fail-closed Viewer, no cache.
+        let r1 = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(r1, UserRole::Viewer, "first call must fail closed");
+
+        // Second call: platform recovers → must re-query (proves no
+        // cached Viewer is shadowing the recovery) AND must reflect
+        // the now-administrator role.
+        let r2 = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(
+            r2,
+            UserRole::Admin,
+            "second call must pick up the recovered role, not a cached Viewer"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "platform must be re-queried after a transient failure"
+        );
+
+        // Third call: platform still up → cache hit, no extra query.
+        let r3 = mgr
+            .resolve_role_for_sender(&sender, &telegram_only_mapping(), Some(&query))
+            .await;
+        assert_eq!(r3, UserRole::Admin);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "successful resolution must populate the cache so subsequent calls hit it"
+        );
     }
 
     #[tokio::test]

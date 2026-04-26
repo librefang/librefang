@@ -472,32 +472,37 @@ pub use librefang_types::config::{DmPolicy, GroupPolicy, OutputFormat};
 /// Platform-native role tokens returned by [`ChannelRoleQuery`].
 ///
 /// Channel adapters return platform-shaped strings (`"creator"`,
-/// `"administrator"`, `"member"`, …) that are translated into LibreFang
-/// `UserRole` values by `AuthManager` using the operator-defined mapping in
-/// `config.toml: [channel_role_mapping]`. We deliberately keep adapters
-/// unaware of `UserRole` so a kernel-side change to role granularity does
-/// not need to ripple through every channel implementation.
+/// `"administrator"`, `"member"`, …) that the kernel translates into
+/// LibreFang `UserRole` values using the operator-defined mapping in
+/// `config.toml: [channel_role_mapping]`. Adapters stay unaware of
+/// `UserRole` so a kernel-side change to role granularity does not
+/// ripple through every channel implementation.
+///
+/// Telegram and Slack always populate exactly one token (membership
+/// status is single-valued); Discord populates every guild role the
+/// user holds. The translator scans the whole vector and never treats
+/// any position as privileged — see the kernel resolver for the
+/// per-platform precedence rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformRole {
-    /// Primary role token. For Telegram this is the chat-status string
-    /// (`creator` / `administrator` / `member` / …). For Slack this is
-    /// `owner` / `admin` / `member` / `guest`. For Discord this is the
-    /// guild role name (the kernel walks the configured `role_map` to find
-    /// the first match across `roles`).
-    pub primary: String,
-    /// Additional role tokens — populated for platforms where a user can
-    /// hold multiple roles simultaneously (Discord guild roles). Empty for
-    /// Telegram/Slack where membership status is single-valued.
+    /// Every role token the user holds on the platform. Always
+    /// non-empty when constructed by [`PlatformRole::single`] or
+    /// [`PlatformRole::many`]; the resolver also early-returns on
+    /// empty before reaching the translator.
     pub roles: Vec<String>,
 }
 
 impl PlatformRole {
-    /// Convenience constructor for the single-token case.
+    /// Convenience constructor for the single-token case (Telegram / Slack).
     pub fn single(role: impl Into<String>) -> Self {
         Self {
-            primary: role.into(),
-            roles: Vec::new(),
+            roles: vec![role.into()],
         }
+    }
+
+    /// Convenience constructor for the multi-token case (Discord guild roles).
+    pub fn many(roles: Vec<String>) -> Self {
+        Self { roles }
     }
 }
 
