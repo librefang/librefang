@@ -11560,6 +11560,67 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Periodic audit retention trim (M7) — per-action retention with
+        // chain-anchor preservation. Distinct from the legacy day-based
+        // `prune` above: this one honors `audit.retention.retention_days_by_action`,
+        // enforces `max_in_memory_entries`, and writes a self-audit
+        // `RetentionTrim` row so trims are themselves auditable. The
+        // legacy `prune` keeps running in parallel for operators who
+        // only set the coarse `retention_days` field.
+        {
+            let trim_interval = cfg.audit.retention.trim_interval_secs.unwrap_or(0);
+            // 0 / unset disables the trim job entirely — matches the
+            // "default = preserve forever" rule for the per-action map.
+            if trim_interval > 0 {
+                let kernel = Arc::clone(self);
+                let retention = cfg.audit.retention.clone();
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(trim_interval));
+                    interval.tick().await; // Skip first immediate tick.
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let report = kernel
+                            .audit_log
+                            .trim(&retention, chrono::Utc::now());
+                        if !report.is_empty() {
+                            // Detail is JSON of the per-action drop counts.
+                            // Keeping it small + structured so a downstream
+                            // dashboard can parse a `RetentionTrim` row
+                            // without a separate metrics surface.
+                            let detail = serde_json::json!({
+                                "dropped_by_action": report.dropped_by_action,
+                                "total_dropped": report.total_dropped,
+                                "new_chain_anchor": report.new_chain_anchor,
+                            })
+                            .to_string();
+                            kernel.audit_log.record(
+                                "system",
+                                librefang_runtime::audit::AuditAction::RetentionTrim,
+                                detail,
+                                "ok",
+                            );
+                            info!(
+                                total_dropped = report.total_dropped,
+                                "Audit retention trim: dropped {} entries (per-action: {:?})",
+                                report.total_dropped,
+                                report.dropped_by_action,
+                            );
+                        }
+                    }
+                });
+                info!(
+                    "Audit retention trim scheduled every {trim_interval}s \
+                     (per-action policy: {} rules, max_in_memory={:?})",
+                    cfg.audit.retention.retention_days_by_action.len(),
+                    cfg.audit.retention.max_in_memory_entries,
+                );
+            }
+        }
+
         // Periodic session retention cleanup (prune expired / excess sessions)
         {
             let session_cfg = cfg.session.clone();
