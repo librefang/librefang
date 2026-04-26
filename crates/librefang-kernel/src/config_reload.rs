@@ -127,7 +127,30 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
     old_json != new_json
 }
 
+/// Runtime capabilities the planner needs to know about so it can correctly
+/// classify changes whose hot-reload feasibility depends on which optional
+/// hooks the embedding binary wired up at boot.
+///
+/// Today the only such hook is the log-level reloader (only the CLI daemon
+/// path installs it; embedded callers like the desktop server start the same
+/// kernel without it). Without consulting this struct, `build_reload_plan`
+/// would always mark `log_level` changes as hot-reloadable — and in
+/// embedded contexts the kernel would just warn-and-no-op while the
+/// dashboard reported success. See Codex P2-2 #3200.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReloadCapabilities {
+    /// `true` if a [`crate::log_reload::LogLevelReloader`] has been installed
+    /// on the kernel via `set_log_reloader`. When `false`, `log_level`
+    /// changes are routed to `restart_required` instead of `hot_actions`.
+    pub log_reloader_installed: bool,
+}
+
 /// Diff two configurations and produce a reload plan.
+///
+/// Backward-compatibility wrapper that assumes every optional reloader is
+/// installed — i.e. matches the original CLI daemon path. New call sites
+/// (especially anything embedded that lacks the log reloader) should prefer
+/// [`build_reload_plan_with_caps`].
 ///
 /// The plan categorizes every detected change into one of three buckets:
 ///
@@ -136,6 +159,26 @@ fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
 /// 2. **hot_actions** — the change can be applied without restarting.
 /// 3. **noop_changes** — the change is informational; no action needed.
 pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
+    build_reload_plan_with_caps(
+        old,
+        new,
+        ReloadCapabilities {
+            log_reloader_installed: true,
+        },
+    )
+}
+
+/// Diff two configurations against a known set of [`ReloadCapabilities`].
+///
+/// Use this from the kernel hot-reload path so changes whose feasibility
+/// depends on optional hooks (currently `log_level`) get demoted to
+/// `restart_required` when the hook isn't wired — preventing the
+/// dashboard from being told "applied" while the live filter never moved.
+pub fn build_reload_plan_with_caps(
+    old: &KernelConfig,
+    new: &KernelConfig,
+    caps: ReloadCapabilities,
+) -> ReloadPlan {
     let mut plan = ReloadPlan {
         restart_required: false,
         restart_reasons: Vec::new(),
@@ -303,8 +346,20 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
     // ----- No-op fields -----
 
     if old.log_level != new.log_level {
-        plan.hot_actions
-            .push(HotAction::ReloadLogLevel(new.log_level.clone()));
+        if caps.log_reloader_installed {
+            plan.hot_actions
+                .push(HotAction::ReloadLogLevel(new.log_level.clone()));
+        } else {
+            // No reloader wired (embedded callers without the CLI's
+            // log_filter slot). Demote to restart_required so the
+            // dashboard reports an honest "needs restart" instead of
+            // a false "applied" — see Codex P2-2 #3200.
+            plan.restart_required = true;
+            plan.restart_reasons.push(format!(
+                "log_level: {} -> {} (no log reloader installed; restart required)",
+                old.log_level, new.log_level
+            ));
+        }
     }
 
     if old.language != new.language {
@@ -683,6 +738,43 @@ mod tests {
         assert!(plan
             .hot_actions
             .contains(&HotAction::ReloadLogLevel("debug".to_string())));
+    }
+
+    #[test]
+    fn test_log_level_demoted_to_restart_when_no_reloader_installed() {
+        // Codex P2-2 #3200: embedded callers (e.g. desktop server) boot
+        // the same kernel without wiring a LogLevelReloader. Without
+        // capability-aware planning, the dashboard would receive a
+        // false "applied, no restart needed" response while the live
+        // filter never moved. Assert that demoting to restart_required
+        // is the active behaviour when the reloader is absent.
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.log_level = "debug".to_string();
+
+        let plan = build_reload_plan_with_caps(
+            &a,
+            &b,
+            ReloadCapabilities {
+                log_reloader_installed: false,
+            },
+        );
+        assert!(
+            plan.restart_required,
+            "log_level change must require restart when no reloader is installed"
+        );
+        assert!(
+            !plan
+                .hot_actions
+                .iter()
+                .any(|a| matches!(a, HotAction::ReloadLogLevel(_))),
+            "ReloadLogLevel must NOT be queued as a hot action without a reloader"
+        );
+        assert!(
+            plan.restart_reasons.iter().any(|r| r.contains("log_level")),
+            "restart_reasons should explain the log_level demotion: {:?}",
+            plan.restart_reasons
+        );
     }
 
     // -----------------------------------------------------------------------

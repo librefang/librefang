@@ -1701,34 +1701,33 @@ fn init_tracing_stderr(log_level: &str) {
     // see everything, and daemon/foreground boots route through a different
     // initialiser where the full log is expected.
     let user_set_rust_log = std::env::var("RUST_LOG").is_ok();
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-    let env_filter = if user_set_rust_log {
-        env_filter
+    // Per-target overrides applied unconditionally on top of the user-visible
+    // level (and reapplied on every hot-reload via `install_with_baseline` —
+    // see Codex P2-1 #3200). Stored as strings so the filter installer can
+    // reparse them after a `log_level` swap; without that, a dashboard
+    // "give me debug" toggle would silently drop these and flood operators
+    // with kernel/runtime DEBUG noise that boot specifically masked.
+    let baseline_directives: Vec<String> = if user_set_rust_log {
+        // RUST_LOG is the explicit "I want full control" knob — don't layer
+        // any opinionated overrides on top of it, and don't carry any across
+        // reloads either.
+        Vec::new()
     } else {
-        // For one-shot CLI commands, downgrade library-level chatter so the
-        // user sees only their command's own output. WARN and above still
-        // surface everywhere — the filter is per-target verbosity, not a
-        // global mute. Setting RUST_LOG restores full detail.
-        env_filter
-            .add_directive("librefang_kernel=warn".parse().expect("static directive"))
-            .add_directive("librefang_runtime=warn".parse().expect("static directive"))
-            .add_directive(
-                "librefang_extensions=warn"
-                    .parse()
-                    .expect("static directive"),
-            )
-            .add_directive(
-                "librefang_kernel::config=error"
-                    .parse()
-                    .expect("static directive"),
-            )
-            .add_directive(
-                "librefang_runtime::registry_sync=error"
-                    .parse()
-                    .expect("static directive"),
-            )
+        vec![
+            "librefang_kernel=warn".to_string(),
+            "librefang_runtime=warn".to_string(),
+            "librefang_extensions=warn".to_string(),
+            "librefang_kernel::config=error".to_string(),
+            "librefang_runtime::registry_sync=error".to_string(),
+        ]
     };
+    let mut env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+    for d in &baseline_directives {
+        // Per-string parse keeps the boot-time directive list and the
+        // reload-time directive list literally identical.
+        env_filter = env_filter.add_directive(d.parse().expect("baseline directive must parse"));
+    }
 
     // Compact stderr format: in a one-shot CLI context the user cares about
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
@@ -1745,10 +1744,18 @@ fn init_tracing_stderr(log_level: &str) {
     //
     // The filter is wrapped in `ReloadableEnvFilter` so the daemon can swap
     // it at runtime when `KernelConfig::log_level` changes via hot-reload.
+    // `install_with_baseline` hands the per-target directives above to the
+    // filter installer so a dashboard `log_level` edit reapplies them after
+    // the swap — i.e. the kernel/runtime overrides survive reloads instead
+    // of being silently dropped. `RUST_LOG` itself is *not* re-read on
+    // reload (it's a boot-time knob); operators wanting env-driven
+    // filtering after a config edit need to restart.
+    //
     // Force stderr explicitly: machine-readable subcommands like
     // `doctor --json` expect a clean stdout stream. The fmt layer's
     // default writer is stdout, which would interleave tracing output
     // with the JSON payload and corrupt downstream parsers.
+    //
     // Build the inner format separately so we can wrap it in `WithTraceId`,
     // which appends the OTel `trace_id` as a logfmt suffix on every line when
     // an OTel context is active. The wrapper is unconditional but no-ops
@@ -1757,7 +1764,8 @@ fn init_tracing_stderr(log_level: &str) {
         .without_time()
         .with_target(false)
         .compact();
-    let reloadable_filter = log_filter::ReloadableEnvFilter::install(env_filter);
+    let reloadable_filter =
+        log_filter::ReloadableEnvFilter::install_with_baseline(env_filter, baseline_directives);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .event_format(WithTraceId(inner_format))

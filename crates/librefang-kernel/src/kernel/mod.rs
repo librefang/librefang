@@ -9549,9 +9549,7 @@ system_prompt = "You are a helpful assistant."
     /// apply hot-reloadable actions. Returns the reload plan for API response.
     pub async fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         let old_cfg = self.config.load();
-        use crate::config_reload::{
-            build_reload_plan, should_apply_hot, validate_config_for_reload,
-        };
+        use crate::config_reload::{should_apply_hot, validate_config_for_reload};
 
         // Read and parse config file (using load_config to process $include directives)
         let config_path = self.home_dir_boot.join("config.toml");
@@ -9573,8 +9571,14 @@ system_prompt = "You are a helpful assistant."
             return Err(format!("Validation failed: {}", errors.join("; ")));
         }
 
-        // Build the reload plan
-        let plan = build_reload_plan(&old_cfg, &new_config);
+        // Build the reload plan against the live capability set so changes
+        // whose feasibility depends on optional reloaders get correctly
+        // routed to `restart_required` when the reloader isn't installed
+        // (e.g. embedded desktop boot doesn't wire the log reloader).
+        let caps = crate::config_reload::ReloadCapabilities {
+            log_reloader_installed: self.log_reloader.get().is_some(),
+        };
+        let plan = crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
         plan.log_summary();
 
         // Apply hot actions + store new config atomically under the same
