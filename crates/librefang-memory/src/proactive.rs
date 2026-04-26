@@ -1565,6 +1565,63 @@ impl ProactiveMemoryStore {
 
         Ok(groups)
     }
+
+    // ----- RBAC M3 — namespace ACL helpers (#3054) -----
+
+    /// Search wrapper that gates access to the `proactive` namespace and
+    /// applies PII redaction before returning fragments to the caller.
+    ///
+    /// `user_id` here is still the agent identifier the existing
+    /// `ProactiveMemory::search` expects — the guard's *user* ACL is a
+    /// separate concept resolved by the kernel from the inbound message's
+    /// channel binding. Returns
+    /// [`LibreFangError::AuthDenied`](librefang_types::error::LibreFangError::AuthDenied)
+    /// when the guard refuses the read.
+    pub async fn search_with_guard(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut items =
+            <Self as librefang_types::memory::ProactiveMemory>::search(self, query, user_id, limit)
+                .await?;
+        guard.redact_all(&mut items);
+        Ok(items)
+    }
+
+    /// Delete wrapper that gates access to the `proactive` namespace and
+    /// honours `delete_allowed`. Mirrors the
+    /// [`ProactiveMemory::delete`](librefang_types::memory::ProactiveMemory::delete)
+    /// signature on success.
+    pub async fn delete_with_guard(
+        &self,
+        memory_id: &str,
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<bool> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        <Self as librefang_types::memory::ProactiveMemory>::delete(self, memory_id, user_id).await
+    }
+
+    /// Add wrapper that gates writes to the `proactive` namespace.
+    pub async fn add_with_guard(
+        &self,
+        messages: &[serde_json::Value],
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_write("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        <Self as librefang_types::memory::ProactiveMemory>::add(self, messages, user_id).await
+    }
 }
 
 /// A flat, JSON-serializable representation of a memory for import/export.

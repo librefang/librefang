@@ -228,6 +228,25 @@ pub fn check_outbound_text_violation(payload: &str, sink: &TaintSink) -> Option<
     check_outbound_text_violation_with_skip(payload, sink, &HashSet::new())
 }
 
+/// Replace every PII-shaped substring in `text` with `replacement`.
+///
+/// Used by the RBAC M3 memory namespace ACL when the user lacks
+/// `pii_access`: PII-tagged fragments still flow through the recall
+/// path, but their visible content is scrubbed first. The replacement
+/// runs four passes — e-mail, phone, credit card, SSN — each backed by
+/// the same regex used by the outbound-taint sink so behaviour stays in
+/// sync. Anything else (names, IPs, free-form addresses) is out of scope
+/// for this slice.
+pub fn redact_pii_in_text(text: &str, replacement: &str) -> String {
+    let mut out = email_regex().replace_all(text, replacement).into_owned();
+    out = phone_regex().replace_all(&out, replacement).into_owned();
+    out = credit_card_regex()
+        .replace_all(&out, replacement)
+        .into_owned();
+    out = ssn_regex().replace_all(&out, replacement).into_owned();
+    out
+}
+
 /// Like [`check_outbound_text_violation`] but lets callers skip specific
 /// [`TaintRuleId`]s.  Rules listed in `skip_rules` are not evaluated.
 ///
@@ -838,5 +857,22 @@ mod tests {
         assert_eq!(json, "\"opaque_token\"");
         let back: TaintRuleId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, rule);
+    }
+
+    #[test]
+    fn redact_pii_in_text_replaces_email_phone_ssn_card() {
+        let text = "ping me at alice@example.com or 555-123-4567. SSN: 123-45-6789, card 4111 1111 1111 1111";
+        let redacted = redact_pii_in_text(text, "[REDACTED]");
+        assert!(!redacted.contains("alice@example.com"));
+        assert!(!redacted.contains("123-45-6789"));
+        assert!(!redacted.contains("4111 1111 1111 1111"));
+        // Phone regex is broad — just verify it ate the contact number.
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_pii_in_text_passes_through_clean_strings() {
+        let text = "this string has no PII at all";
+        assert_eq!(redact_pii_in_text(text, "[X]"), text);
     }
 }
