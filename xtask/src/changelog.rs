@@ -177,6 +177,61 @@ fn generate_classified_output(prs: &[PrInfo]) -> String {
     output
 }
 
+/// Summarize the classified changelog into a `### Highlights` block via local
+/// `claude` CLI. Returns `None` if claude isn't installed, the call fails, or
+/// the response is empty — never propagates errors to gate the release.
+fn generate_highlights(classified: &str) -> Option<String> {
+    if classified.trim().is_empty() {
+        return None;
+    }
+
+    if Command::new("claude").arg("--version").output().is_err() {
+        println!("  claude CLI not available, skipping Highlights generation");
+        return None;
+    }
+
+    let prompt = format!(
+        "Summarize this LibreFang release changelog into 3-5 user-facing highlights as a markdown bullet list under a `### Highlights` heading. \
+        Lead each bullet with the headline feature name in **bold**, followed by an em dash and a short clause. \
+        Pick the most impactful user-visible changes; group related items into one bullet. \
+        Skip internal milestone names (M2, M3, etc.), test/CI/typecheck fixes, refactors, and pure maintenance. \
+        Output ONLY the `### Highlights` section and its bullets — no preamble, no trailing prose.\n\n\
+        Changelog:\n{}",
+        classified
+    );
+
+    let output = Command::new("claude")
+        .args([
+            "-p",
+            "--model",
+            "claude-sonnet-4-6",
+            "--output-format",
+            "text",
+            &prompt,
+        ])
+        .env_remove("CLAUDECODE")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        println!("  claude call failed, skipping Highlights generation");
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    let block = if text.starts_with("### Highlights") {
+        format!("{}\n\n", text)
+    } else {
+        format!("### Highlights\n\n{}\n\n", text)
+    };
+    println!("  Generated Highlights via claude");
+    Some(block)
+}
+
 fn write_changelog(
     changelog_path: &Path,
     version: &str,
@@ -286,7 +341,12 @@ pub fn run(args: ChangelogArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let classified = generate_classified_output(&prs);
 
-    write_changelog(&changelog_path, &args.version, &classified)?;
+    let final_output = match generate_highlights(&classified) {
+        Some(highlights) => format!("{}{}", highlights, classified),
+        None => classified,
+    };
+
+    write_changelog(&changelog_path, &args.version, &final_output)?;
 
     println!("Updated {}", changelog_path.display());
 
