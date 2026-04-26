@@ -381,6 +381,13 @@ export function AuditPage() {
     });
   };
 
+  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
+  // the bare datetime-local format. Same for export URL.
+  // NOTE: must be declared before any hook that reads `query.data` —
+  // `useMemo` bodies run synchronously on first render and would hit
+  // a TDZ ReferenceError if `query` were declared below them.
+  const query = useAuditQuery(normaliseFilters(active));
+
   // Action options for the Select — the empty-value "(any)" gets the
   // localised label; the rest are pinned to their server-side enum
   // names. Memo'd because Select shallow-compares its `options` prop
@@ -431,10 +438,6 @@ export function AuditPage() {
     }
     setDraft((d) => ({ ...d, channel: value || undefined }));
   };
-
-  // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
-  // the bare datetime-local format. Same for export URL.
-  const query = useAuditQuery(normaliseFilters(active));
 
   const onApply = (e: React.FormEvent) => {
     e.preventDefault();
