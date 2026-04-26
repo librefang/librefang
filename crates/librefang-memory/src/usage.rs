@@ -863,8 +863,20 @@ impl UsageStore {
     // otherwise be assigned to whichever user the operator looks at first.
     // The `idx_usage_user_time` index added in v23 keeps these aggregates
     // O(log n + k) regardless of total table size.
+    //
+    // **Time zone:** SQLite's `datetime('now', 'start of day')` returns
+    // the UTC day boundary, NOT the server-local boundary. Operators in
+    // non-UTC zones see "today's spend" sliced on the UTC midnight
+    // (e.g. an Asia/Shanghai admin watching at 06:00 local sees the
+    // window that started at 14:00 the previous evening). This matches
+    // the existing global / per-agent rollups (`query_global_*`,
+    // `query_agent_*`) and the server-side `usage_events.timestamp` —
+    // making spend totals comparable across all the rollups in this
+    // module. If a future operator wants local-day buckets, swap the
+    // SQL to `datetime('now', 'localtime', 'start of day', 'utc')` in
+    // every roll-up and update the `BudgetConfig` doc to match.
 
-    /// Total cost in the last hour for a single user.
+    /// Total cost in the last hour (UTC sliding window) for a single user.
     pub fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64> {
         let conn = self
             .conn
@@ -881,7 +893,7 @@ impl UsageStore {
         Ok(cost)
     }
 
-    /// Total cost today (calendar day, server-local) for a single user.
+    /// Total cost today (UTC calendar day, see module-level note) for a single user.
     pub fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64> {
         let conn = self
             .conn
@@ -898,7 +910,7 @@ impl UsageStore {
         Ok(cost)
     }
 
-    /// Total cost in the current calendar month for a single user.
+    /// Total cost in the current UTC calendar month (see module-level note) for a single user.
     pub fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64> {
         let conn = self
             .conn

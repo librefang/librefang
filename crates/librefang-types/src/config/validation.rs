@@ -739,6 +739,41 @@ impl KernelConfig {
             }
         }
 
+        // RBAC M3 review follow-up: per-user `memory_access` flags
+        // (`pii_access` / `export_allowed` / `delete_allowed`) only
+        // matter alongside read access — the runtime guard checks the
+        // flag AND `readable_namespaces` for export/delete, and PII
+        // redaction only applies to fragments the user can read in the
+        // first place. An admin who toggles a flag without declaring
+        // namespaces gets a no-op that looks like it works, which is a
+        // silent privilege misconfiguration. Flag it loudly so the typo
+        // is caught at boot, not at first failed call.
+        for user in &self.users {
+            let Some(ref acl) = user.memory_access else {
+                continue;
+            };
+            if !acl.readable_namespaces.is_empty() {
+                continue;
+            }
+            let problematic: Vec<&'static str> = [
+                ("pii_access", acl.pii_access),
+                ("export_allowed", acl.export_allowed),
+                ("delete_allowed", acl.delete_allowed),
+            ]
+            .into_iter()
+            .filter_map(|(name, on)| on.then_some(name))
+            .collect();
+            if !problematic.is_empty() {
+                warnings.push(format!(
+                    "[users.{}.memory_access] sets {:?} = true but \
+                     `readable_namespaces` is empty — these flags are no-ops without \
+                     read access. Likely a typo: did you mean to add \
+                     `readable_namespaces = [\"...\"]`?",
+                    user.name, problematic,
+                ));
+            }
+        }
+
         warnings
     }
 
@@ -823,6 +858,24 @@ impl KernelConfig {
             self.max_cron_jobs = 500;
         } else if self.max_cron_jobs > 10_000 {
             self.max_cron_jobs = 10_000;
+        }
+
+        // RBAC M5: per-user `alert_threshold` is documented as "clamped to
+        // 0..=1" but the field type is bare `f64` and TOML will accept any
+        // value. Without this clamp, `alert_threshold = 5.0` makes
+        // `alert_breach` permanently false (no alert ever fires) and
+        // `-1.0` makes it permanently true (alerts on zero spend). Clamp
+        // both ends so the documented contract holds.
+        for user in &mut self.users {
+            if let Some(ref mut budget) = user.budget {
+                if !budget.alert_threshold.is_finite() {
+                    budget.alert_threshold = 0.8;
+                } else if budget.alert_threshold < 0.0 {
+                    budget.alert_threshold = 0.0;
+                } else if budget.alert_threshold > 1.0 {
+                    budget.alert_threshold = 1.0;
+                }
+            }
         }
     }
 }

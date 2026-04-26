@@ -568,6 +568,98 @@ mod tests {
         assert_eq!(config.web.fetch.timeout_secs, 30);
     }
 
+    /// PR #3203 review item — `UserBudgetConfig::alert_threshold` is
+    /// documented "clamped to 0..=1" but the field is bare `f64`. Without
+    /// the clamp in `clamp_bounds`, an out-of-range value silently makes
+    /// `alert_breach` either permanently false (>1) or permanently true
+    /// (<0), which is exactly what the documentation promises NOT to happen.
+    #[test]
+    fn test_clamp_bounds_user_alert_threshold() {
+        use crate::config::types::{UserBudgetConfig, UserConfig};
+        let mut config = KernelConfig {
+            users: vec![
+                UserConfig {
+                    name: "TooHigh".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: 5.0,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "Negative".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: -0.5,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "NaN".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: f64::NAN,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+                UserConfig {
+                    name: "InRange".into(),
+                    role: "user".into(),
+                    channel_bindings: std::collections::HashMap::new(),
+                    api_key_hash: None,
+                    budget: Some(UserBudgetConfig {
+                        alert_threshold: 0.65,
+                        ..UserBudgetConfig::default()
+                    }),
+                    tool_policy: None,
+                    tool_categories: None,
+                    memory_access: None,
+                    channel_tool_rules: std::collections::HashMap::new(),
+                },
+            ],
+            ..KernelConfig::default()
+        };
+        config.clamp_bounds();
+        assert_eq!(
+            config.users[0].budget.as_ref().unwrap().alert_threshold,
+            1.0,
+            "above-1 must clamp DOWN to 1.0"
+        );
+        assert_eq!(
+            config.users[1].budget.as_ref().unwrap().alert_threshold,
+            0.0,
+            "below-0 must clamp UP to 0.0"
+        );
+        assert_eq!(
+            config.users[2].budget.as_ref().unwrap().alert_threshold,
+            0.8,
+            "NaN must reset to default 0.8 (otherwise pct >= NaN is always false)"
+        );
+        assert_eq!(
+            config.users[3].budget.as_ref().unwrap().alert_threshold,
+            0.65,
+            "in-range value must round-trip unchanged"
+        );
+    }
+
     #[test]
     fn test_clamp_bounds_defaults_unchanged() {
         let mut config = KernelConfig::default();
