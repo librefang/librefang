@@ -784,6 +784,127 @@ async fn users_policy_put_validates_no_empty_tool_strings() {
     );
 }
 
+/// `channel_tool_rules` keys land verbatim in `config.toml` and are
+/// matched against channel-adapter identifiers (`telegram`, `slack`,
+/// `feishu`, …). The original `trim().is_empty()` check let through:
+///   - embedded newlines / control chars (`"foo\nbar"` survives `trim`)
+///   - 10 KB blobs that bloat the TOML round-trip
+///   - non-ASCII or whitespace-bearing names that never match an adapter
+/// Each invalid shape must be rejected at the PUT boundary; valid slugs
+/// like `feishu` must still round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_validates_channel_rules_keys() {
+    use std::collections::HashMap;
+    let seed = UserConfig {
+        name: "Channel".into(),
+        role: "user".into(),
+        channel_bindings: HashMap::new(),
+        ..Default::default()
+    };
+    let h = boot_with_seed_users(vec![seed]).await;
+
+    // (1) empty after trim — confirms the existing branch still fires.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "   ": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("empty"),
+        "error must mention empty channel name: {body:?}"
+    );
+
+    // (2) embedded newline — survives `trim()` but must be rejected.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "foo\nbar": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "newline: {body:?}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("control characters"),
+        "error must mention control characters: {body:?}"
+    );
+
+    // (3) overlong key — adapter names are short slugs; cap at 64 chars.
+    let long_name = "a".repeat(65);
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                long_name.clone(): { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "long: {body:?}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("longer than"),
+        "error must mention length cap: {body:?}"
+    );
+
+    // (4) non-ASCII / spaces — must match the printable slug charset.
+    for bad in ["telegram channel", "电报", "slack!"] {
+        let (status, body) = json_request(
+            &h,
+            Method::PUT,
+            "/api/users/Channel/policy",
+            Some(serde_json::json!({
+                "channel_tool_rules": {
+                    bad: { "allowed_tools": ["web_search"], "denied_tools": [] }
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "charset {bad:?}: {body:?}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("[a-zA-Z0-9_-]+"),
+            "error must mention the slug charset for {bad:?}: {body:?}"
+        );
+    }
+
+    // (5) valid `feishu` — sanity check that the new validators don't
+    // over-reject real adapter names.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/users/Channel/policy",
+        Some(serde_json::json!({
+            "channel_tool_rules": {
+                "feishu": { "allowed_tools": ["web_search"], "denied_tools": [] }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "valid feishu: {body:?}");
+    assert_eq!(
+        body["channel_tool_rules"]["feishu"]["allowed_tools"],
+        serde_json::json!(["web_search"]),
+        "valid rule must round-trip: {body:?}"
+    );
+}
+
 /// Follow-up to PR #3229 — the user-list view must surface presence
 /// flags so the dashboard can render "Policy / Memory / Budget" badges
 /// without an extra round-trip per row. A bare user must report all

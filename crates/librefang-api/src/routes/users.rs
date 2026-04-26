@@ -885,11 +885,41 @@ fn validate_memory_access(a: &UserMemoryAccess) -> Result<(), String> {
     Ok(())
 }
 
+/// Channel-name keys are written verbatim into `config.toml` and matched
+/// against channel-adapter identifiers (`telegram`, `slack`, `discord`,
+/// `whatsapp`, `feishu`, `dingtalk`, …). The trim-then-empty check alone
+/// lets through embedded newlines, control chars, multi-KB blobs, and
+/// non-ASCII keys that would either corrupt the TOML round-trip or never
+/// match a real adapter. Cap length and lock the charset here at the same
+/// boundary that already validates the inner allow/deny lists.
+const MAX_CHANNEL_NAME_LEN: usize = 64;
+
 fn validate_channel_rules(rules: &HashMap<String, ChannelToolPolicy>) -> Result<(), String> {
     for (channel, rule) in rules {
         let trimmed = channel.trim();
         if trimmed.is_empty() {
             return Err("channel_tool_rules contains an empty channel name".to_string());
+        }
+        if trimmed.len() > MAX_CHANNEL_NAME_LEN {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 longer than {MAX_CHANNEL_NAME_LEN} chars"
+            ));
+        }
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 embedded control characters are not allowed"
+            ));
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "channel_tool_rules contains invalid channel name {trimmed:?}: \
+                 must match [a-zA-Z0-9_-]+"
+            ));
         }
         validate_string_list(
             &format!("channel_tool_rules['{trimmed}'].allowed_tools"),
