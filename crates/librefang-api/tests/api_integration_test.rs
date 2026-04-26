@@ -3455,6 +3455,166 @@ async fn test_effective_permissions_distinguishes_none_from_empty() {
     assert!(empty_body["memory_access"].is_object());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_allow_for_permitted_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec![],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "allow");
+    assert_eq!(body["allowed"], true);
+    assert!(body["reason"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_deny_for_blocked_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec![],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "deny");
+    assert_eq!(body["allowed"], false);
+    assert!(body["reason"].as_str().unwrap_or("").contains("shell_exec"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_unknown_user_returns_404() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Nobody&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "unknown user must surface as 404 — silent guest fallback would mask config gaps"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_viewer_caller_rejected_403() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let viewer = UserConfig {
+        name: "Vince".to_string(),
+        role: "viewer".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (viewer, "vince-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer vince-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not query authz/check");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_rejects_anonymous() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/authz/check must be 401'd at the middleware (same as other admin endpoints)"
+    );
+}
 /// Round-trip: PUT a budget, GET reflects the new limits, DELETE clears
 /// it back to "no cap" (limit = 0 in the response).
 #[tokio::test(flavor = "multi_thread")]
