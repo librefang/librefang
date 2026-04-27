@@ -1492,10 +1492,7 @@
     "output_short": "out",
     "calls": "calls",
     "tools": "tools",
-    "last_updated": "Updated",
-    "expand_raw": "Expand raw",
-    "collapse_raw": "Collapse",
-    "no_data_short": "No data"
+    "last_updated": "Updated"
   },
   "logs": {
     "title": "Logs",

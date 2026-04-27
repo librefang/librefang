@@ -2400,10 +2400,7 @@
     "output_short": "出",
     "calls": "次调用",
     "tools": "次工具",
-    "last_updated": "更新于",
-    "expand_raw": "展开原始数据",
-    "collapse_raw": "折叠",
-    "no_data_short": "暂无数据"
+    "last_updated": "更新于"
   },
   "schema_form": {
     "select_option": "请选择...",

@@ -550,33 +550,36 @@ export function TelemetryPage() {
           </StaggerList>
 
           {/* ── Raw Prometheus (collapsible) ── */}
+          {/* Toggle and external link kept as siblings so we don't nest
+              an <a> inside a <button> — invalid HTML5 (interactive
+              content can't contain interactive content) and screen
+              readers / a11y linters flag it. */}
           <Card padding="lg">
-            <button
-              onClick={() => setRawExpanded(v => !v)}
-              className="w-full flex items-center justify-between"
-              aria-expanded={rawExpanded}
-            >
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><ExternalLink className="h-4 w-4 text-brand" /></div>
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={() => setRawExpanded(v => !v)}
+                className="flex flex-1 items-center gap-2 text-left"
+                aria-expanded={rawExpanded}
+              >
+                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
+                  <ExternalLink className="h-4 w-4 text-brand" />
+                </div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.prometheus_endpoint")}</h2>
-              </div>
-              <div className="flex items-center gap-3">
-                <a
-                  href="/api/metrics"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-xs text-brand hover:underline"
-                >
-                  {t("telemetry.view_raw")}
-                </a>
                 {rawExpanded ? (
-                  <ChevronUp className="h-4 w-4 text-text-dim" />
+                  <ChevronUp className="h-4 w-4 text-text-dim ml-2" />
                 ) : (
-                  <ChevronDown className="h-4 w-4 text-text-dim" />
+                  <ChevronDown className="h-4 w-4 text-text-dim ml-2" />
                 )}
-              </div>
-            </button>
+              </button>
+              <a
+                href="/api/metrics"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-brand hover:underline shrink-0"
+              >
+                {t("telemetry.view_raw")}
+              </a>
+            </div>
             {rawExpanded && (
               <>
                 <pre className="mt-4 text-xs font-mono bg-main rounded-lg p-4 overflow-auto max-h-96 text-text-dim">
