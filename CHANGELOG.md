@@ -5,6 +5,106 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.4.28] - 2026-04-28
+
+_67 PRs from 4 contributors since v2026.4.27-beta6._
+
+### Highlights
+
+- **Auxiliary LLM client** — a dedicated cheap-tier model now handles background side tasks, reducing cost on main-agent calls
+- **BytePlus, Microsoft (GitHub Models), and Z.ai providers** — three new LLM provider families added, each with their own dedicated API key env vars
+- **Thread ownership** — prevents multiple agents from sending duplicate replies to the same thread; paired with a pause/resume foundation for resumable multi-step workflows
+- **Redesigned Users surface and dashboard UI** — compact card grid layout, push-style adaptive drawer, unified animations, and richer markdown help drawers across all pages; empty states now land on the marketplace tab automatically
+- **Auto-fill channel replies and approval notifications** — channel replies now auto-populate the recipient from the sender, and approval notifications include the agent name for clarity
+
+### Added
+
+- Add env_passthrough allowlist to skill manifest (#3219) (@neo-wanderer)
+- Include agent name in approval notifications (#3247) (@neo-wanderer)
+- Auto-Highlights + collapse boilerplate + contributor roll-up (#3257) (@houko)
+- Add per_call_cost billing for video/music modalities (#3270) (@houko)
+- Add byteplus + byteplus_coding providers (#3271) (@houko)
+- Split _coding provider env vars onto dedicated names (#3279) (@houko)
+- Add microsoft provider entry with own env var (#3281) (@houko)
+- Split zai api_key_env from zhipu (#3285) (@houko)
+- Stream plugin / python stderr per-line to tracing (#3256) (#3287) (@houko)
+- Backfill providers missing from TUI first-run setup (#3291) (@houko)
+- Aux LLM client for cheap-tier side tasks (#3314) (#3321) (@houko)
+- Add file-backed cross-process rate-limit guard (#3322) (@houko)
+- Auto-fill channel_send recipient from sender_id for replies (#3323) (@leszek3737)
+- Internationalize Users surface (en + zh) (#3324) (@houko)
+- Redesign as compact card grid (#3336) (@houko)
+- Polish UI/UX across users surface (#3341) (@houko)
+- Push-style drawer that adapts main content width (#3356) (@houko)
+- BeforePromptBuild hook can contribute prompt sections (#3358) (@houko)
+- Unify all custom animations on motion (#3365) (@houko)
+- Land on marketplace tab when no servers configured (#3411) (@houko)
+- Land on marketplace tab when no workflows (#3412) (@houko)
+- Land on marketplace tab when nothing installed (#3413) (@houko)
+- Thread ownership prevents multi-agent duplicate replies (#3414) (@houko)
+- Pause/resume foundation for resumable workflows (#3418) (@houko)
+- Honest card cursor + detail drawers for plugins / MCP / FangHub skills (#3422) (@houko)
+- I18n keys + surface plugin / MCP catalog [i18n.<lang>] blocks via Accept-Language (#3424) (@houko)
+- Regroup metrics, surface unused per-agent data, collapse endpoints (#3427) (@houko)
+- Click anywhere on a channel card to open the drawer (#3434) (@houko)
+- Rich markdown help drawer + page coverage + UserBudget redesign (#3435) (@houko)
+
+### Fixed
+
+- Unbreak main — namespace traversal substring + openapi.json bump (#3258) (@houko)
+- Add dbus to buildInputs to fix failing build (#3263) (@FrantaNautilus)
+- Install libdbus-1 so image builds and starts (closes #3259) (#3265) (@houko)
+- Keyring is target-conditional so musl/android cross builds compile (#3267) (@houko)
+- Copy deploy/ into builder so include_str! observability assets resolve (closes #3259) (#3268) (@houko)
+- Show declared tools in editor and persist to **disk** (#3269) (@leszek3737)
+- Recognize BYTEPLUS_API_KEY in provider key checks (#3274) (@houko)
+- Silence three sources of routine WARN log spam (#3275) (@houko)
+- Skip OTLP exporter when no collector is reachable (#3276) (@houko)
+- Point at recovery commands when boot integrity check fails (#3277) (@houko)
+- Align model_catalog/routing tests with current registry (#3280) (@houko)
+- Refresh provider list after Test button so latency shows (#3288) (@houko)
+- Wire missing applyDatePreset for quick-pick buttons (#3289) (@houko)
+- Align useDeleteWorkflow test with removeQueries semantics (#3290) (@houko)
+- Use correct path + auth for Anthropic-protocol providers (#3292) (@houko)
+- Add missing librefang-llm-drivers dep to unbreak main (#3294) (@houko)
+- Stop bypassing needs-changes via comment inference / push (#3312) (@houko)
+- Treat Anthropic 401/403 as reachable, not auth-failed (#3316) (@houko)
+- Decouple model-id assertions from registry catalog state (#3317) (@houko)
+- Enforce deterministic ordering for LLM-bound registries (#3325) (@houko)
+- Install libdbus-1-dev for glibc Linux CLI builds (#3357) (@houko)
+- Drop layout/AnimatePresence from StaggerList to unblock clicks (#3415) (@houko)
+- Regenerate kernel config schema golden after thread-ownership field (#3417) (@houko)
+- Drawer not opening on hands page (DrawerPanel mount race) (#3421) (@houko)
+- Add /api/auto-dream/status to dashboard read allowlist (#3426) (@houko)
+- Scale Top Endpoints status bar with call volume (#3428) (@houko)
+- Exempt loopback + cheaper cost for dashboard polls (#3430) (@houko)
+
+### Changed
+
+- Tidy env_passthrough nits from #3219 review (#3273) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Align display name with registry rename (#3284) (@houko)
+- Align Z.ai env + add Microsoft (GitHub Models) section (#3286) (@houko)
+- Expand every page-header help drawer to a real explanation (#3433) (@houko)
+
+### Maintenance
+
+- Add Nix build workflow to catch flake breakage on PR (#3264) (@houko)
+- Add Docker build + boot smoke test on PR (#3266) (@houko)
+- Regenerate Cargo.lock for librefang-llm-drivers dep (#3318) (@houko)
+- Shorten MCP nav label to 'MCP' (#3410) (@houko)
+- Remove Settings from left sidebar nav (#3423) (@houko)
+- Expand .dockerignore for security + smaller build context (#3431) (@houko)
+- Minimal rustup profile + sync mise rust to MSRV (#3432) (@houko)
+
+</details>
+
+
 ## [2026.4.27] - 2026-04-27
 
 ### Added
