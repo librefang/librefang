@@ -43,15 +43,15 @@ fn base_config() -> KernelConfig {
 ///
 /// This test is only meaningful when compiled WITHOUT `surreal-backend`.
 #[cfg(not(feature = "surreal-backend"))]
-#[tokio::test]
-async fn vector_backend_surreal_requires_feature() {
+#[test]
+fn vector_backend_surreal_requires_feature() {
     let mut cfg = base_config();
     cfg.memory = MemoryConfig {
         vector_backend: Some("surreal".to_string()),
         ..Default::default()
     };
 
-    let result = LibreFangKernel::boot_with_config(cfg).await;
+    let result = LibreFangKernel::boot_with_config(cfg);
     assert!(
         result.is_err(),
         "Expected boot to fail when surreal-backend feature is absent"
@@ -68,9 +68,9 @@ async fn vector_backend_surreal_requires_feature() {
 ///
 /// Requires a running SurrealDB instance on `ws://127.0.0.1:8000`.
 #[cfg(feature = "surreal-backend")]
-#[tokio::test]
+#[test]
 #[ignore = "requires a running SurrealDB instance on ws://127.0.0.1:8000"]
-async fn vector_backend_surreal_boot_selects_surreal_backend() {
+fn vector_backend_surreal_boot_selects_surreal_backend() {
     let mut cfg = base_config();
     cfg.memory = MemoryConfig {
         vector_backend: Some("surreal".to_string()),
@@ -78,11 +78,10 @@ async fn vector_backend_surreal_boot_selects_surreal_backend() {
     };
 
     let kernel = LibreFangKernel::boot_with_config(cfg)
-        .await
         .expect("Kernel should boot successfully with vector_backend = \"surreal\"");
 
     assert_eq!(
-        kernel.semantic_backend.backend_name(),
+        kernel.semantic_backend_name(),
         "surreal",
         "SemanticBackend should report 'surreal' when surreal-backend feature is enabled"
     );
@@ -93,17 +92,16 @@ async fn vector_backend_surreal_boot_selects_surreal_backend() {
 ///
 /// Requires a running SurrealDB instance on `ws://127.0.0.1:8000`.
 #[cfg(feature = "surreal-backend")]
-#[tokio::test]
+#[test]
 #[ignore = "requires a running SurrealDB instance on ws://127.0.0.1:8000"]
-async fn vector_backend_auto_selects_surreal_when_feature_enabled() {
+fn vector_backend_auto_selects_surreal_when_feature_enabled() {
     let cfg = base_config(); // vector_backend = None → "auto"
 
     let kernel = LibreFangKernel::boot_with_config(cfg)
-        .await
         .expect("Kernel should boot with auto/unset vector_backend");
 
     assert_eq!(
-        kernel.semantic_backend.backend_name(),
+        kernel.semantic_backend_name(),
         "surreal",
         "auto mode with surreal-backend feature should select the SurrealDB backend"
     );
@@ -112,9 +110,9 @@ async fn vector_backend_auto_selects_surreal_when_feature_enabled() {
 /// Verify that booting with `vector_backend = "sqlite"` keeps the SQLite
 /// semantic backend even when `surreal-backend` is compiled in.
 #[cfg(feature = "surreal-backend")]
-#[tokio::test]
+#[test]
 #[ignore = "requires a running SurrealDB instance on ws://127.0.0.1:8000"]
-async fn vector_backend_explicit_sqlite_bypasses_surreal() {
+fn vector_backend_explicit_sqlite_bypasses_surreal() {
     let mut cfg = base_config();
     cfg.memory = MemoryConfig {
         vector_backend: Some("sqlite".to_string()),
@@ -122,11 +120,10 @@ async fn vector_backend_explicit_sqlite_bypasses_surreal() {
     };
 
     let kernel = LibreFangKernel::boot_with_config(cfg)
-        .await
         .expect("Kernel should boot with vector_backend = \"sqlite\"");
 
     assert_eq!(
-        kernel.semantic_backend.backend_name(),
+        kernel.semantic_backend_name(),
         "sqlite",
         "Explicit sqlite selection should bypass the surreal-backend even when feature is on"
     );

@@ -4647,6 +4647,7 @@ mod tests {
                 librefang_types::memory::MemorySource::Conversation,
                 "episodic",
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4659,6 +4660,7 @@ mod tests {
                 librefang_types::memory::MemorySource::Conversation,
                 "episodic",
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4907,8 +4909,16 @@ ingest = "hooks/ingest.py"
     fn test_build_context_engine_default() {
         let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
         let runtime_config = ContextEngineConfig::default();
-        let engine =
-            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
+        let mem = make_memory();
+        let engine = build_context_engine(
+            &toml_config,
+            runtime_config,
+            mem.clone(),
+            mem,
+            None,
+            &|_| None,
+            None,
+        );
         // Should not panic — returns DefaultContextEngine
         let _ = engine;
     }
@@ -4921,8 +4931,16 @@ ingest = "hooks/ingest.py"
         };
         let runtime_config = ContextEngineConfig::default();
         // Should fall back to default engine, not panic
-        let engine =
-            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
+        let mem = make_memory();
+        let engine = build_context_engine(
+            &toml_config,
+            runtime_config,
+            mem.clone(),
+            mem,
+            None,
+            &|_| None,
+            None,
+        );
         let _ = engine;
     }
 

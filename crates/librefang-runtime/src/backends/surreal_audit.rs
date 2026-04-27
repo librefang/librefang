@@ -51,6 +51,10 @@ pub struct SurrealAuditStore {
     /// Optional external anchor file (see [`AuditLog`](crate::audit::AuditLog)
     /// for the rationale).
     anchor_path: Option<PathBuf>,
+    /// Hash of the last entry that was dropped by a trim operation.
+    /// When non-None, `verify_integrity` seeds the chain walk from this
+    /// hash instead of ZERO_HASH so a trimmed log verifies correctly.
+    chain_anchor: Mutex<Option<String>>,
 }
 
 /// Disk row layout for the `audit_entries` SurrealDB table.
@@ -66,9 +70,9 @@ struct AuditRow {
     action: String,
     detail: String,
     outcome: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     user_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     channel: Option<String>,
     prev_hash: String,
     hash: String,
@@ -129,6 +133,11 @@ fn parse_action(s: &str) -> AuditAction {
         "WireConnect" => AuditAction::WireConnect,
         "ConfigChange" => AuditAction::ConfigChange,
         "DreamConsolidation" => AuditAction::DreamConsolidation,
+        "UserLogin" => AuditAction::UserLogin,
+        "RoleChange" => AuditAction::RoleChange,
+        "PermissionDenied" => AuditAction::PermissionDenied,
+        "BudgetExceeded" => AuditAction::BudgetExceeded,
+        "RetentionTrim" => AuditAction::RetentionTrim,
         other => {
             warn!(
                 action = other,
@@ -171,6 +180,7 @@ impl SurrealAuditStore {
             entries: Mutex::new(entries),
             tip: Mutex::new(tip),
             anchor_path: None,
+            chain_anchor: Mutex::new(None),
         })
     }
 
@@ -283,7 +293,14 @@ impl AuditStore for SurrealAuditStore {
 
     fn verify_integrity(&self) -> Result<(), String> {
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let mut prev = ZERO_HASH.to_string();
+        // When a trim has dropped a prefix, the chain_anchor records the hash
+        // of the last dropped entry. Seed the walk from it so trimmed logs verify.
+        let anchor = self
+            .chain_anchor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut prev = anchor.unwrap_or_else(|| ZERO_HASH.to_string());
         for entry in entries.iter() {
             let expected = compute_hash(
                 entry.seq,
@@ -395,7 +412,42 @@ impl AuditStore for SurrealAuditStore {
         let mut dropped_by_action: BTreeMap<String, usize> = BTreeMap::new();
         let mut new_chain_anchor: Option<String> = None;
 
-        // Per-action retention: delete entries whose action exceeds its window.
+        // Pass 1: enforce max_in_memory_entries cap (same semantics as AuditLog::trim).
+        // Drop the oldest entries from both the in-memory mirror and SurrealDB.
+        {
+            let cap = config.max_in_memory_entries.unwrap_or(0);
+            let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let total = entries.len();
+            if cap > 0 && total > cap {
+                let drop_count = total - cap;
+                for entry in &entries[..drop_count] {
+                    *dropped_by_action
+                        .entry(entry.action.to_string())
+                        .or_insert(0) += 1;
+                }
+                let first_survivor_seq = entries[drop_count].seq;
+                let last_dropped_hash = entries[drop_count - 1].hash.clone();
+                new_chain_anchor = Some(last_dropped_hash.clone());
+                entries.drain(..drop_count);
+                drop(entries); // release lock before blocking DB call
+                               // Update chain_anchor so verify_integrity seeds from the right hash.
+                *self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(last_dropped_hash);
+                if let Err(e) = block_on(async {
+                    self.db
+                        .query("DELETE FROM audit_entries WHERE seq < $seq RETURN NONE")
+                        .bind(("seq", first_survivor_seq))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .take::<Vec<serde_json::Value>>(0)
+                        .map_err(|e| e.to_string())
+                }) {
+                    warn!(error = %e, "failed to trim capped audit entries from SurrealDB");
+                }
+            }
+        }
+
+        // Pass 2: per-action retention — delete entries whose action exceeds its window.
         for (action_str, &days) in &config.retention_days_by_action {
             let cutoff = (now - chrono::Duration::days(i64::from(days))).to_rfc3339();
             let action_str = action_str.clone();

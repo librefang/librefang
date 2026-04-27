@@ -13117,6 +13117,7 @@ mod tests {
                 tail,
                 foreground,
                 spawned,
+                ..
             }) => {
                 assert!(tail);
                 assert!(!foreground);
@@ -13170,6 +13171,7 @@ mod tests {
                 tail,
                 foreground,
                 spawned,
+                ..
             }) => {
                 assert!(!tail);
                 assert!(foreground);

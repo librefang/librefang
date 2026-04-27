@@ -63,7 +63,7 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
         audit.record(
             "agent-x",
             AuditAction::RoleChange,
-            format!("noise-{i}"),
+            &format!("noise-{i}"),
             "ok",
         );
     }

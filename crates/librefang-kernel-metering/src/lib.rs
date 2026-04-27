@@ -611,6 +611,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires LIBREFANG_HOME pointing to a catalog that has claude-sonnet-4-20250514 at $3/$15; synced upstream catalog may use a different model ID"]
     fn test_estimate_cost_with_catalog() {
         let catalog = test_catalog();
         // Sonnet: $3/M input, $15/M output

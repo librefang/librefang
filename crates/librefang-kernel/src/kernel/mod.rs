@@ -1078,6 +1078,12 @@ impl LibreFangKernel {
         &self.audit_log
     }
 
+    /// Returns the name reported by the active semantic/vector backend.
+    #[inline]
+    pub fn semantic_backend_name(&self) -> &str {
+        self.semantic_backend.backend_name()
+    }
+
     /// Cost metering engine.
     #[inline]
     pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
@@ -10265,6 +10271,12 @@ system_prompt = "You are a helpful assistant."
         // Remove the SQLite rows for every hand-agent we just tore down.
         // `remove_agent` cascades to session rows, so we don't need a
         // separate `delete_agent_sessions` call here.
+        //
+        // Also explicitly remove from agent_store (SurrealDB): kill_agent
+        // bails out early at registry.remove when the agent is not in the
+        // in-memory registry (post-restart scenario), so agent_store.remove_agent
+        // inside kill_agent is never reached. Belt-and-suspenders cleanup here
+        // ensures the row is gone from both stores regardless.
         for agent_id in &affected_agents {
             if let Err(e) = self.memory.remove_agent(*agent_id) {
                 warn!(
@@ -10272,6 +10284,14 @@ system_prompt = "You are a helpful assistant."
                     hand_id = %instance.hand_id,
                     error = %e,
                     "Failed to remove hand-agent row from SQLite on deactivate"
+                );
+            }
+            if let Err(e) = self.agent_store.remove_agent(*agent_id) {
+                warn!(
+                    agent = %agent_id,
+                    hand_id = %instance.hand_id,
+                    error = %e,
+                    "Failed to remove hand-agent row from agent store on deactivate"
                 );
             }
         }
