@@ -1,23 +1,89 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
-    { "title": "Overview", "url": "/d/librefang-overview", "type": "link", "icon": "apps", "tooltip": "System Overview" },
-    { "title": "LLM & Tokens", "url": "/d/librefang-llm", "type": "link", "icon": "bolt", "tooltip": "LLM & Token Usage" },
-    { "title": "Cost & Budget", "url": "/d/librefang-cost", "type": "link", "icon": "calculator-alt", "tooltip": "Cost & Budget" }
+    {
+      "title": "Overview",
+      "url": "/d/librefang-overview",
+      "type": "link",
+      "icon": "apps",
+      "tooltip": "System Overview"
+    },
+    {
+      "title": "LLM & Tokens",
+      "url": "/d/librefang-llm",
+      "type": "link",
+      "icon": "bolt",
+      "tooltip": "LLM & Token Usage"
+    },
+    {
+      "title": "Cost & Budget",
+      "url": "/d/librefang-cost",
+      "type": "link",
+      "icon": "calculator-alt",
+      "tooltip": "Cost & Budget"
+    },
+    {
+      "title": "Search Traces (Tempo)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Tempo datasource, prefilled with service.name=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-tempo\",{\"queryType\":\"traceql\",\"query\":\"{ resource.service.name=\\\"librefang\\\" }\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Search Logs (Loki)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Loki datasource, prefilled with service=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-loki\",{\"expr\":\"{service=\\\"librefang\\\"}\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Jaeger UI",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open standalone Jaeger UI for waterfall / span-diff / service-deps views",
+      "url": "http://localhost:16686/search?service=librefang",
+      "targetBlank": true,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false
+    }
   ],
   "panels": [
     {
       "title": "HTTP Request Rate",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "req/s",
@@ -27,29 +93,60 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" }
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
           },
           "unit": "reqps"
         },
         "overrides": []
       },
       "options": {
-        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "sum(rate(librefang_http_requests_total[5m]))", "legendFormat": "Total", "refId": "A" },
-        { "expr": "sum by (method) (rate(librefang_http_requests_total[5m]))", "legendFormat": "{{method}}", "refId": "B" }
+        {
+          "expr": "sum(rate(librefang_http_requests_total[5m]))",
+          "legendFormat": "Total",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (method) (rate(librefang_http_requests_total[5m]))",
+          "legendFormat": "{{method}}",
+          "refId": "B"
+        }
       ]
     },
     {
       "title": "Request Latency (p50 / p90 / p99)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "latency",
@@ -59,34 +156,111 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" }
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
           },
           "unit": "s"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "p90" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p90"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
-        { "expr": "histogram_quantile(0.90, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p90", "refId": "B" },
-        { "expr": "histogram_quantile(0.99, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C" }
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(librefang_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
       ]
     },
     {
       "title": "Request Rate by Status Code",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "req/s",
@@ -96,29 +270,56 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "normal" }
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
           },
           "unit": "reqps"
         },
         "overrides": []
       },
       "options": {
-        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "sum by (status) (rate(librefang_http_requests_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }
+        {
+          "expr": "sum by (status) (rate(librefang_http_requests_total[5m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "HTTP Error Rate (4xx / 5xx)",
       "description": "Client and server error rates over time",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "errors/s",
@@ -128,37 +329,108 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" }
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
           },
           "unit": "reqps"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "4xx" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "sum(rate(librefang_http_requests_total{status=~\"4..\"}[5m]))", "legendFormat": "4xx", "refId": "A" },
-        { "expr": "sum(rate(librefang_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "5xx", "refId": "B" }
+        {
+          "expr": "sum(rate(librefang_http_requests_total{status=~\"4..\"}[5m]))",
+          "legendFormat": "4xx",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(librefang_http_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx",
+          "refId": "B"
+        }
       ]
     },
     {
       "title": "Top Endpoints by Request Count",
       "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 100 },
-            { "color": "red", "value": 1000 }
-          ]},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
           "unit": "short"
         },
         "overrides": []
@@ -169,29 +441,62 @@
         "minVizWidth": 0,
         "namePlacement": "auto",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "showUnfilled": true,
         "sizing": "auto",
         "valueMode": "color"
       },
       "targets": [
-        { "expr": "topk(10, sum by (path) (increase(librefang_http_requests_total[1h])))", "legendFormat": "{{path}}", "refId": "A", "instant": true }
+        {
+          "expr": "topk(10, sum by (path) (increase(librefang_http_requests_total[1h])))",
+          "legendFormat": "{{path}}",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Slowest Endpoints (p99 Latency)",
       "description": "p99 latency per endpoint path",
       "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 0.5 },
-            { "color": "red", "value": 2 }
-          ]},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
           "unit": "s"
         },
         "overrides": []
@@ -202,20 +507,40 @@
         "minVizWidth": 0,
         "namePlacement": "auto",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "showUnfilled": true,
         "sizing": "auto",
         "valueMode": "color"
       },
       "targets": [
-        { "expr": "topk(10, histogram_quantile(0.99, sum by (path, le) (rate(librefang_http_request_duration_seconds_bucket[5m]))))", "legendFormat": "{{path}}", "refId": "A", "instant": true }
+        {
+          "expr": "topk(10, histogram_quantile(0.99, sum by (path, le) (rate(librefang_http_request_duration_seconds_bucket[5m]))))",
+          "legendFormat": "{{path}}",
+          "refId": "A",
+          "instant": true
+        }
       ]
     }
   ],
   "schemaVersion": 39,
-  "tags": ["librefang", "http", "api"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "librefang",
+    "http",
+    "api"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "LibreFang HTTP & API",

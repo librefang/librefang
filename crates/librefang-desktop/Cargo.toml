@@ -14,7 +14,6 @@ librefang-api = { path = "../librefang-api", default-features = false }
 librefang-types = { path = "../librefang-types" }
 librefang-extensions = { path = "../librefang-extensions" }
 clap = { workspace = true }
-dirs = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }

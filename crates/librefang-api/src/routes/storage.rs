@@ -165,7 +165,7 @@ pub async fn get_storage_config(State(state): State<Arc<AppState>>) -> impl Into
     let uar_linked = cfg
         .uar
         .as_ref()
-        .map_or(false, |u| u.share_librefang_storage || u.remote.is_some());
+        .is_some_and(|u| u.share_librefang_storage || u.remote.is_some());
 
     (
         StatusCode::OK,
@@ -309,7 +309,7 @@ pub async fn get_storage_status(State(state): State<Arc<AppState>>) -> impl Into
     let uar_linked = cfg
         .uar
         .as_ref()
-        .map_or(false, |u| u.share_librefang_storage || u.remote.is_some());
+        .is_some_and(|u| u.share_librefang_storage || u.remote.is_some());
     let uar_namespace = if uar_linked {
         cfg.uar
             .as_ref()

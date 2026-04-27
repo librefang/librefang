@@ -1703,6 +1703,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let result = mgr.submit_request(req, deferred);
@@ -1732,6 +1733,7 @@ mod tests {
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
+            force_human: false,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -1773,6 +1775,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -1812,6 +1815,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         mgr.submit_request(req, deferred).unwrap();
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
@@ -1845,6 +1849,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         mgr.submit_request(req, deferred).unwrap();
 
@@ -1882,6 +1887,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
@@ -1899,6 +1905,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let result = mgr.submit_request(req2, deferred2);
@@ -1924,6 +1931,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
 
@@ -1939,6 +1947,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let id2 = mgr.submit_request(req2, deferred2).unwrap();
@@ -1966,6 +1975,7 @@ mod tests {
                 sender_id: None,
                 channel: None,
                 workspace_root: None,
+                force_human: false,
             };
             let id = mgr.submit_request(req, deferred).unwrap();
             ids.push(id);
@@ -1984,6 +1994,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_err());
@@ -2002,6 +2013,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_ok());
@@ -2034,6 +2046,7 @@ mod tests {
                     sender_id: None,
                     channel: None,
                     workspace_root: None,
+                    force_human: false,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -2075,6 +2088,7 @@ mod tests {
                     sender_id: None,
                     channel: None,
                     workspace_root: None,
+                    force_human: false,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -2606,6 +2620,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
 
         let req1 = make_session_request("agent-1", "sess-dedup");
@@ -2629,6 +2644,7 @@ mod tests {
             sender_id: None,
             channel: None,
             workspace_root: None,
+            force_human: false,
         };
         let req3 = make_session_request("agent-1", "sess-dedup");
         let id3 = mgr.submit_request(req3, deferred2).unwrap();

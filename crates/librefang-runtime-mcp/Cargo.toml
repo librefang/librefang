@@ -20,3 +20,4 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
+arc-swap = { workspace = true }

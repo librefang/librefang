@@ -178,7 +178,27 @@ pub struct SkillManifest {
     /// time and injected into the system prompt.
     #[serde(default)]
     pub config_vars: Vec<SkillConfigVar>,
+    /// Environment variables that should be passed through from the
+    /// host process to the skill subprocess.  Default is empty (full
+    /// `env_clear` isolation).  The value is an allowlist of variable
+    /// names; only variables actually set in the host environment are
+    /// injected.  Mirrors the existing `[exec_policy].allowed_env_vars`
+    /// mechanism for `shell_exec`.
+    ///
+    /// Declared at the top level of `skill.toml`, sibling to `[skill]`,
+    /// `[runtime]`, etc.:
+    ///
+    /// ```toml
+    /// env_passthrough = ["GOG_KEYRING_PASSWORD", "GOG_KEYRING_BACKEND"]
+    /// ```
+    ///
+    /// The variable *names* are public (visible in the manifest); only
+    /// their host-side *values* cross the subprocess boundary.
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
+
+pub use librefang_types::config::EnvPassthroughPolicy;
 
 /// Skill metadata section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,6 +417,45 @@ description = "No extra config"
         let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.skill.name, "plain-skill");
         assert!(manifest.config.is_empty());
+    }
+
+    #[test]
+    fn test_skill_manifest_env_passthrough_roundtrip() {
+        let toml_str = r#"
+env_passthrough = ["GOG_KEYRING_PASSWORD", "GOG_KEYRING_BACKEND"]
+
+[skill]
+name = "env-passthrough-skill"
+version = "0.1.0"
+description = "A skill that imports specific host env vars"
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.env_passthrough,
+            vec![
+                "GOG_KEYRING_PASSWORD".to_string(),
+                "GOG_KEYRING_BACKEND".to_string()
+            ]
+        );
+
+        // Round-trip: serialize and re-parse, confirm field is preserved.
+        let serialized = toml::to_string(&manifest).unwrap();
+        let reparsed: SkillManifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.env_passthrough, manifest.env_passthrough);
+    }
+
+    #[test]
+    fn test_skill_manifest_env_passthrough_default_empty() {
+        let toml_str = r#"
+[skill]
+name = "no-passthrough-skill"
+version = "0.1.0"
+description = "Default — no env passthrough"
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.env_passthrough.is_empty());
     }
 
     #[test]

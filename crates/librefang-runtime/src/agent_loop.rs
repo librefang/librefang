@@ -39,7 +39,70 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 /// Maximum iterations in the agent loop before giving up.
-const MAX_ITERATIONS: u32 = 50;
+///
+/// Single source of truth is `AutonomousConfig::DEFAULT_MAX_ITERATIONS` in
+/// `librefang-types` — kept as a local alias here so the hot-path branches
+/// in this file read as a plain constant instead of a fully-qualified
+/// path. Changing the policy value in one place propagates to both the
+/// runtime fallback and the manifest default.
+const MAX_ITERATIONS: u32 = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
+
+/// Hard cap on the in-memory `accumulated_text` buffer used as a fallback for
+/// the empty-response guard.
+///
+/// Each agent loop turn may push intermediate text emitted alongside
+/// `tool_use` blocks into this buffer. Across many iterations (autonomous
+/// agents, retry loops, long-running tasks) the buffer can grow unbounded,
+/// pinning megabytes of heap per active session. 64 KiB is far above any
+/// reasonable user-facing message (~10× a Slack message limit) while still
+/// being orders of magnitude below problematic memory pressure.
+///
+/// Once the cap is reached the buffer is sealed: subsequent appends short-
+/// circuit and a single `warn!` is emitted on the transition so the log
+/// isn't spammed. The existing buffered prefix is preserved so the empty-
+/// response fallback still has something useful to surface.
+const ACCUMULATED_TEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Append `intermediate_text` to `accumulated_text`, bounded by
+/// `ACCUMULATED_TEXT_MAX_BYTES`. See the constant's doc-comment for rationale.
+fn push_accumulated_text(accumulated_text: &mut String, intermediate_text: &str) {
+    // Buffer already sealed on a prior call.
+    if accumulated_text.len() >= ACCUMULATED_TEXT_MAX_BYTES {
+        return;
+    }
+    let separator = if accumulated_text.is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let projected = accumulated_text.len() + separator.len() + intermediate_text.len();
+    if projected > ACCUMULATED_TEXT_MAX_BYTES {
+        warn!(
+            current_bytes = accumulated_text.len(),
+            incoming_bytes = intermediate_text.len(),
+            cap_bytes = ACCUMULATED_TEXT_MAX_BYTES,
+            "accumulated_text fallback buffer cap reached; further intermediate \
+             text for this loop will be dropped (existing buffer is preserved \
+             for the empty-response fallback)"
+        );
+        // Seal the buffer with ASCII padding so future calls trip the early
+        // return above. ASCII is always UTF-8 boundary-safe.
+        let sentinel = " [accumulated_text capped]";
+        if accumulated_text.len() + sentinel.len() <= ACCUMULATED_TEXT_MAX_BYTES {
+            accumulated_text.push_str(sentinel);
+        }
+        let pad = ACCUMULATED_TEXT_MAX_BYTES.saturating_sub(accumulated_text.len());
+        if pad > 0 {
+            accumulated_text.reserve(pad);
+            for _ in 0..pad {
+                accumulated_text.push(' ');
+            }
+        }
+        return;
+    }
+    accumulated_text.push_str(separator);
+    accumulated_text.push_str(intermediate_text);
+}
 
 /// Maximum retries for rate-limited or overloaded API calls.
 const MAX_RETRIES: u32 = 3;
@@ -67,10 +130,56 @@ const MAX_CONCURRENT_LLM_CALLS: usize = 5;
 static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
 
-/// Maximum message history size before auto-trimming to prevent context overflow.
-/// With tool calls each user turn can consume 4-6 messages, so 40 gives roughly
-/// 7-10 real conversation turns instead of the previous 3-5.
-const MAX_HISTORY_MESSAGES: usize = 40;
+/// Default ceiling for message history before auto-trimming. With tool
+/// calls each user turn can consume 4–6 messages, so 40 gives roughly
+/// 7–10 real conversation turns instead of the previous 3–5. Override
+/// per-agent via `AgentManifest.max_history_messages` or globally via
+/// `KernelConfig.max_history_messages`; resolved at loop entry by
+/// `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES` are
+/// clamped up at runtime.
+pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 40;
+
+/// Floor for the message-history cap. Values below this are clamped up
+/// with a warning log: `safe_trim_messages` re-validates the trimmed
+/// window via `validate_and_repair` and synthesizes a minimal user
+/// message when fewer than 2 messages survive, so caps under one full
+/// tool round-trip (user → tool_use → tool_result → assistant text)
+/// defeat the safe-trim heuristic entirely.
+const MIN_HISTORY_MESSAGES: usize = 4;
+
+/// Resolve the effective message-history trim cap for an agent loop entry.
+///
+/// Resolution order:
+/// 1. `manifest.max_history_messages` (per-agent override)
+/// 2. `opts.max_history_messages` (operator / kernel config override)
+/// 3. `DEFAULT_MAX_HISTORY_MESSAGES` (compiled-in fallback)
+///
+/// The resolved value is then clamped up to `MIN_HISTORY_MESSAGES` if it
+/// would otherwise defeat the safe-trim heuristic.
+fn resolve_max_history(manifest: &AgentManifest, opts: &LoopOptions) -> usize {
+    let raw = manifest
+        .max_history_messages
+        .or(opts.max_history_messages)
+        .unwrap_or(DEFAULT_MAX_HISTORY_MESSAGES);
+    clamp_max_history(raw, &manifest.name)
+}
+
+/// Clamp a requested cap up to `MIN_HISTORY_MESSAGES`, logging a warning
+/// when the requested value is too low. Returning silently for values at
+/// or above the floor keeps logs quiet for the common path.
+fn clamp_max_history(requested: usize, agent: &str) -> usize {
+    if requested < MIN_HISTORY_MESSAGES {
+        warn!(
+            agent = %agent,
+            requested,
+            applied = MIN_HISTORY_MESSAGES,
+            "max_history_messages below floor; clamping"
+        );
+        MIN_HISTORY_MESSAGES
+    } else {
+        requested
+    }
+}
 
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
@@ -80,6 +189,47 @@ const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
 /// Marker included in timeout error messages when partial output was delivered.
 /// Used by channel_bridge to detect this case without fragile string matching.
 pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
+
+/// Lazy tool loading kicks in only when the agent's granted-tool set is
+/// larger than this threshold. Below this, it's cheaper and simpler to just
+/// ship everything — the agent has already been restricted (by profile or
+/// explicit `capabilities.tools`) and the payload is already small.
+///
+/// ~30 is roughly `ALWAYS_NATIVE_TOOLS.len() + 10`, so any agent with a
+/// trimmed-down profile (Coding = 5, Research = 4, Messaging = 6) stays
+/// well below and bypasses lazy mode entirely. Agents with access to the
+/// full ~75 builtin catalog (issue #3044's problem case) trigger lazy mode.
+const LAZY_TOOLS_THRESHOLD: usize = 30;
+
+/// Build the `tools` field for a `CompletionRequest`. When `lazy_mode` is on
+/// AND the granted-tool set is large enough to benefit AND `tool_load` is
+/// actually reachable from the granted set, ship only the always-native
+/// subset plus any tools the LLM has loaded this turn via `tool_load(name)`.
+/// The LLM can discover + load more on-demand.
+///
+/// When lazy_mode is off, the set is already small, or `tool_load` is not in
+/// the allowlist (the LLM would have no way to pull a stripped tool back in),
+/// pass everything through so behavior matches the eager baseline. Missing
+/// `tool_load` in an allowlisted-but-over-threshold agent was a silent
+/// tool-disappearance bug — see issue #3044 follow-up review.
+fn resolve_request_tools(
+    available_tools: &[ToolDefinition],
+    session_loaded: &[ToolDefinition],
+    lazy_mode: bool,
+) -> Vec<ToolDefinition> {
+    let has_tool_load = available_tools.iter().any(|t| t.name == "tool_load");
+    if !lazy_mode || available_tools.len() <= LAZY_TOOLS_THRESHOLD || !has_tool_load {
+        return available_tools.to_vec();
+    }
+    let mut out = crate::tool_runner::select_native_tools(available_tools);
+    let seen: std::collections::HashSet<String> = out.iter().map(|t| t.name.clone()).collect();
+    for t in session_loaded {
+        if !seen.contains(&t.name) {
+            out.push(t.clone());
+        }
+    }
+    out
+}
 
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
@@ -158,7 +308,7 @@ fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("argument is required")
 }
 
-/// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
+/// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
 /// Both the LLM working copy (`messages`) and the canonical session store
@@ -174,11 +324,12 @@ fn safe_trim_messages(
     session_messages: &mut Vec<Message>,
     agent_name: &str,
     user_message: &str,
+    max_history: usize,
 ) {
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
-    if session_messages.len() > MAX_HISTORY_MESSAGES {
-        let desired = session_messages.len() - MAX_HISTORY_MESSAGES;
+    if session_messages.len() > max_history {
+        let desired = session_messages.len() - max_history;
         let trim_point = crate::session_repair::find_safe_trim_point(session_messages, desired)
             .filter(|&p| p > 0)
             .unwrap_or(desired);
@@ -193,11 +344,11 @@ fn safe_trim_messages(
         session_messages.drain(..trim_point);
     }
 
-    if messages.len() <= MAX_HISTORY_MESSAGES {
+    if messages.len() <= max_history {
         return;
     }
 
-    let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
+    let desired_trim = messages.len() - max_history;
 
     // Find a trim point that does not split ToolUse/ToolResult pairs.
     // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
@@ -217,6 +368,10 @@ fn safe_trim_messages(
 
     // Re-validate after trim.
     *messages = crate::session_repair::validate_and_repair(messages);
+    // Ensure history starts with a user turn: trimming may have left an
+    // assistant turn at position 0, which strict providers (e.g. Gemini)
+    // reject with INVALID_ARGUMENT on function-call turns.
+    *messages = crate::session_repair::ensure_starts_with_user(std::mem::take(messages));
 
     // Post-trim safety: ensure at least a user message survives so the LLM
     // request body is never empty.
@@ -582,6 +737,11 @@ struct ToolExecutionContext<'a> {
     session: &'a mut Session,
     kernel: Option<&'a Arc<dyn KernelHandle>>,
     available_tool_names: &'a [String],
+    /// Full `ToolDefinition` list for the agent's granted tools — needed so
+    /// the lazy-load meta-tools (`tool_load`, `tool_search`) can resolve
+    /// non-builtin entries (MCP, skills) against the agent's actual pool
+    /// rather than only the builtin catalog (issue #3044 follow-up).
+    available_tools: &'a [ToolDefinition],
     caller_id_str: &'a str,
     skill_registry: Option<&'a SkillRegistry>,
     allowed_skills: &'a [String],
@@ -619,6 +779,13 @@ struct ToolExecutionContext<'a> {
         Option<&'a Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>>,
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        tool.name = %tool_call.name,
+        tool.id = %tool_call.id,
+    ),
+)]
 async fn execute_single_tool_call(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
@@ -783,6 +950,7 @@ async fn execute_single_tool_call(
             ctx.interrupt.clone(),
             Some(ctx.session.id.to_string()).as_deref(),
             ctx.dangerous_command_checker,
+            Some(ctx.available_tools),
         ),
     )
     .await
@@ -1289,6 +1457,27 @@ pub struct LoopOptions {
     /// `ToolExecutionContext` so that cancelling the parent session
     /// interrupts all its in-flight tools without affecting other sessions.
     pub interrupt: Option<crate::interrupt::SessionInterrupt>,
+    /// Operator-level override for the agent-loop iteration cap. Resolution
+    /// order when the loop starts:
+    /// 1. `manifest.autonomous.max_iterations` (per-agent)
+    /// 2. `opts.max_iterations` (operator / kernel config)
+    /// 3. `AutonomousConfig::DEFAULT_MAX_ITERATIONS` (library fallback)
+    ///
+    /// Kernel populates this from `KernelConfig.agent_max_iterations` so
+    /// operators can lower the default without recompiling or editing every
+    /// manifest. None → use the library fallback.
+    pub max_iterations: Option<u32>,
+    /// Operator-level override for the message-history trim cap.
+    /// Resolution order when the loop starts:
+    /// 1. `manifest.max_history_messages` (per-agent)
+    /// 2. `opts.max_history_messages` (operator / kernel config)
+    /// 3. `DEFAULT_MAX_HISTORY_MESSAGES` (library fallback)
+    ///
+    /// Kernel populates this from `KernelConfig.max_history_messages` so
+    /// operators can lower the default without recompiling or editing every
+    /// manifest. `None` → use the library fallback. Values below
+    /// `MIN_HISTORY_MESSAGES` are clamped up at resolution time.
+    pub max_history_messages: Option<usize>,
 }
 
 /// Result of an agent loop execution.
@@ -1666,6 +1855,11 @@ struct RecallSetupContext<'a> {
     proactive_memory: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&'a dyn ContextEngine>,
     sender_user_id: Option<&'a str>,
+    sender_channel: Option<&'a str>,
+    /// Optional kernel handle used to resolve the per-user memory ACL
+    /// (RBAC M3, #3054). When `None` the auto-retrieve path runs without
+    /// a guard — preserving pre-M3 single-user behaviour.
+    kernel: Option<&'a Arc<dyn KernelHandle>>,
     stable_prefix_mode: bool,
     streaming: bool,
     opts: &'a LoopOptions,
@@ -1895,10 +2089,39 @@ async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
     if !ctx.stable_prefix_mode && !ctx.opts.is_fork {
         if let Some(pm_store_arc) = ctx.proactive_memory {
             let user_id = ctx.session.agent_id.0.to_string();
-            match pm_store_arc
-                .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
-                .await
-            {
+            // RBAC M3 (#3054): build a memory namespace guard from the
+            // attributed end user (resolved by the kernel via channel
+            // bindings). When the guard denies "proactive" reads we skip
+            // the retrieval rather than letting the fragments leak into
+            // the LLM prompt. PII redaction is applied to the returned
+            // items as well.
+            let guard = ctx.kernel.and_then(|kh| {
+                kh.memory_acl_for_sender(ctx.sender_user_id, ctx.sender_channel)
+                    .map(librefang_memory::namespace_acl::MemoryNamespaceGuard::new)
+            });
+            let auto_retrieve_result = match guard.as_ref() {
+                Some(g) => match g.check_read("proactive") {
+                    librefang_memory::namespace_acl::NamespaceGate::Allow => {
+                        let mut items = pm_store_arc
+                            .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                            .await;
+                        if let Ok(ref mut its) = items {
+                            g.redact_all(its);
+                        }
+                        items
+                    }
+                    librefang_memory::namespace_acl::NamespaceGate::Deny(reason) => {
+                        debug!("Skipping proactive memory auto_retrieve: {reason}",);
+                        Ok(Vec::new())
+                    }
+                },
+                None => {
+                    pm_store_arc
+                        .auto_retrieve(&user_id, ctx.user_message, ctx.sender_user_id)
+                        .await
+                }
+            };
+            match auto_retrieve_result {
                 Ok(pm_memories) if !pm_memories.is_empty() => {
                     if ctx.streaming {
                         debug!(
@@ -2013,6 +2236,7 @@ fn prepare_llm_messages(
     session: &mut Session,
     user_message: &str,
     memory_context_msg: Option<String>,
+    max_history: usize,
 ) -> PreparedMessages {
     let llm_messages: Vec<Message> = session
         .messages
@@ -2020,6 +2244,14 @@ fn prepare_llm_messages(
         .filter(|m| m.role != Role::System)
         .cloned()
         .collect();
+
+    debug!(
+        agent = %manifest.name,
+        session_id = %session.id,
+        msg_count = llm_messages.len(),
+        last_two_roles = ?llm_messages.iter().rev().take(2).map(|m| m.role).collect::<Vec<_>>(),
+        "Pre-repair message snapshot (prepare_llm_messages)"
+    );
 
     let (mut messages, repair_stats) =
         crate::session_repair::validate_and_repair_with_stats(&llm_messages);
@@ -2048,6 +2280,7 @@ fn prepare_llm_messages(
         &mut session.messages,
         &manifest.name,
         user_message,
+        max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
     strip_prior_image_data(&mut messages);
@@ -2160,6 +2393,7 @@ async fn generate_search_queries(
         system: Some(system),
         thinking: None,
         prompt_caching: false,
+        cache_ttl: None,
         response_format: None,
         timeout_secs: Some(15),
         extra_body: None,
@@ -2343,6 +2577,7 @@ fn classify_end_turn_retry(ctx: EndTurnRetryContext<'_>) -> Option<EndTurnRetry>
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finalize_end_turn_text(
     text: String,
     any_tools_executed: bool,
@@ -2351,8 +2586,23 @@ fn finalize_end_turn_text(
     total_usage: &TokenUsage,
     messages_count: usize,
     empty_response_log_message: &str,
+    accumulated_text: &str,
 ) -> String {
     if text.trim().is_empty() {
+        // Fallback to text accumulated from intermediate tool_use iterations.
+        // Agents commonly emit a chat reply alongside tool_use blocks (e.g. a
+        // user-facing message followed by memory_store calls); without this
+        // fallback the final EndTurn iteration's empty text would mask that
+        // earlier output and the empty-response guard would replace it with
+        // a generic completion notice.
+        if !accumulated_text.trim().is_empty() {
+            debug!(
+                agent = %manifest_name,
+                accumulated_len = accumulated_text.len(),
+                "Using accumulated text from intermediate tool_use iterations"
+            );
+            return accumulated_text.to_string();
+        }
         warn!(
             agent = %manifest_name,
             iteration,
@@ -2446,6 +2696,20 @@ async fn finalize_successful_end_turn(
         } else {
             "Agent loop completed"
         }
+    );
+
+    // Prompt-cache observability (M2): emit a single-line metric so log
+    // pipelines can compute hit-rate trends per agent without parsing the
+    // surrounding loop summary. `None` (no caching activity) is folded to
+    // 0.0 for the log field; readers wanting to distinguish "no caching"
+    // from "0% hit" should look at the `creation` + `read` totals.
+    tracing::info!(
+        target: "librefang::cache",
+        agent = ctx.agent_id_str,
+        hit_ratio = end_turn.total_usage.cache_hit_ratio().unwrap_or(0.0),
+        creation = end_turn.total_usage.cache_creation_input_tokens,
+        read = end_turn.total_usage.cache_read_input_tokens,
+        "prompt cache metrics for turn"
     );
 
     if !ctx.opts.is_fork {
@@ -2561,7 +2825,7 @@ pub async fn run_agent_loop(
     // pushed) expose an empty slice to callers. Updated after
     // safe_trim_messages to point at the post-trim position of the just-
     // pushed user message (len-1) so slicing stays in-bounds even when the
-    // trim drains deeper than (len - MAX_HISTORY_MESSAGES). Fixes #2067.
+    // trim drains deeper than (len - DEFAULT_MAX_HISTORY_MESSAGES). Fixes #2067.
     let mut new_messages_start = session.messages.len();
 
     // Early return if driver is not configured
@@ -2585,6 +2849,17 @@ pub async fn run_agent_loop(
         .get("hand_allowed_env")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
 
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
@@ -2612,6 +2887,8 @@ pub async fn run_agent_loop(
         proactive_memory: proactive_memory.as_ref(),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
+        sender_channel: sender_channel.as_deref(),
+        kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
         opts,
@@ -2715,6 +2992,7 @@ pub async fn run_agent_loop(
         sender_prefix.as_deref(),
     );
 
+    let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
@@ -2724,6 +3002,7 @@ pub async fn run_agent_loop(
         session,
         &effective_user_message,
         memory_context_msg,
+        max_history,
     );
     log_repair_stats(manifest, session, &repair_stats);
 
@@ -2748,14 +3027,21 @@ pub async fn run_agent_loop(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Accumulate text content from intermediate tool_use iterations. A turn
+    // that yields a tool_use response may also carry user-facing text (e.g.
+    // "Looking that up for you..." before a memory_store call). Without this
+    // buffer that text is lost when the final EndTurn iteration returns an
+    // empty body and the empty-response guard takes over. See #fix-3074.
+    let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -2927,6 +3213,8 @@ pub async fn run_agent_loop(
             if !compression_events.is_empty() {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Ensure history starts with a user turn after soft compression.
+                messages = crate::session_repair::ensure_starts_with_user(messages);
                 // Keep session.messages in sync with the compressed LLM working copy
                 // so subsequent turns don't re-read the uncompressed history.
                 session.messages = messages.clone();
@@ -2950,6 +3238,8 @@ pub async fn run_agent_loop(
                     }
                     if recovery != RecoveryStage::None {
                         messages = crate::session_repair::validate_and_repair(&messages);
+                        // Ensure history starts with a user turn after overflow recovery.
+                        messages = crate::session_repair::ensure_starts_with_user(messages);
                     }
                 }
             } else {
@@ -2964,6 +3254,8 @@ pub async fn run_agent_loop(
                 }
                 if recovery != RecoveryStage::None {
                     messages = crate::session_repair::validate_and_repair(&messages);
+                    // Ensure history starts with a user turn after overflow recovery.
+                    messages = crate::session_repair::ensure_starts_with_user(messages);
                 }
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
@@ -2996,12 +3288,13 @@ pub async fn run_agent_loop(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
+            cache_ttl: None,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {
@@ -3217,6 +3510,7 @@ pub async fn run_agent_loop(
                     &total_usage,
                     messages.len(),
                     "Empty response from LLM — guard activated",
+                    &accumulated_text,
                 );
                 final_response = text.clone();
 
@@ -3257,6 +3551,20 @@ pub async fn run_agent_loop(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Capture any text content from this tool_use turn — the LLM
+                // may emit text alongside tool calls (e.g. a chat reply
+                // before a memory_store invocation). Without this the text
+                // is lost if the next iteration returns EndTurn with empty
+                // text.
+                //
+                // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
+                // push_accumulated_text.
+                let intermediate_text = response.text();
+                if !intermediate_text.trim().is_empty() {
+                    push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
+                }
+
                 // Stage the turn locally — session.messages is NOT
                 // mutated until `staged.commit(...)` runs below (or the
                 // mid-turn signal handler commits on our behalf). If
@@ -3278,6 +3586,7 @@ pub async fn run_agent_loop(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -3318,6 +3627,15 @@ pub async fn run_agent_loop(
                             Some(prev) => format!("{prev}\n\n{notice}"),
                             None => notice.clone(),
                         });
+                    }
+
+                    // Capture lazy-load side-channel from the tool_load meta-tool
+                    // (issue #3044). Tools registered this way become callable on
+                    // subsequent iterations of this loop.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
+                        }
                     }
 
                     // Layer 2: per-result budget — persist oversized outputs to disk.
@@ -3632,6 +3950,15 @@ fn build_user_facing_llm_error(
     (classified.is_billing, LibreFangError::LlmDriver(user_msg))
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        llm.provider = provider.unwrap_or("unknown"),
+        llm.model = %request.model,
+        llm.messages = request.messages.len(),
+        llm.tools = request.tools.len(),
+    ),
+)]
 async fn call_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
@@ -3876,6 +4203,17 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // Lazy tool loading (issue #3044). Default ON — the LLM gets a trimmed
+    // "always native" toolset plus `tool_load` / `tool_search`, and pays a
+    // per-turn round-trip to pull in any other schema it wants. Set
+    // `lazy_tools = false` in manifest.metadata to restore eager mode.
+    let lazy_tools = manifest
+        .metadata
+        .get("lazy_tools")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut session_loaded_tools: Vec<ToolDefinition> = Vec::new();
+
     // Extract sender context from manifest metadata (set by kernel for per-sender
     // trust and channel-specific tool authorization).
     let sender_user_id: Option<String> = manifest
@@ -3902,6 +4240,8 @@ pub async fn run_agent_loop_streaming(
         proactive_memory: proactive_memory.as_ref(),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
+        sender_channel: sender_channel.as_deref(),
+        kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: true,
         opts,
@@ -4005,6 +4345,7 @@ pub async fn run_agent_loop_streaming(
         sender_prefix.as_deref(),
     );
 
+    let max_history = resolve_max_history(manifest, opts);
     let PreparedMessages {
         mut messages,
         new_messages_start: prepared_new_messages_start,
@@ -4014,6 +4355,7 @@ pub async fn run_agent_loop_streaming(
         session,
         &effective_user_message,
         memory_context_msg,
+        max_history,
     );
     log_repair_stats(manifest, session, &repair_stats);
 
@@ -4038,14 +4380,18 @@ pub async fn run_agent_loop_streaming(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Accumulated text from intermediate tool_use iterations — see the
+    // matching declaration in run_agent_loop for full rationale.
+    let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
 
-    // Use autonomous config max_iterations if set, else default
+    // Resolution order: per-agent manifest > operator LoopOptions > library default.
     let max_iterations = manifest
         .autonomous
         .as_ref()
         .map(|a| a.max_iterations)
+        .or(opts.max_iterations)
         .unwrap_or(MAX_ITERATIONS);
 
     // Initialize loop guard — scale circuit breaker for autonomous agents
@@ -4200,6 +4546,8 @@ pub async fn run_agent_loop_streaming(
             if !compression_events.is_empty() {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
+                // Ensure history starts with a user turn after soft compression.
+                messages = crate::session_repair::ensure_starts_with_user(messages);
                 // Keep session.messages in sync with the compressed LLM working copy
                 // so subsequent turns don't re-read the uncompressed history.
                 session.messages = messages.clone();
@@ -4220,6 +4568,8 @@ pub async fn run_agent_loop_streaming(
                     );
                     if r != RecoveryStage::None {
                         messages = crate::session_repair::validate_and_repair(&messages);
+                        // Ensure history starts with a user turn after overflow recovery.
+                        messages = crate::session_repair::ensure_starts_with_user(messages);
                     }
                     r
                 } else {
@@ -4236,6 +4586,8 @@ pub async fn run_agent_loop_streaming(
                 );
                 if recovery != RecoveryStage::None {
                     messages = crate::session_repair::validate_and_repair(&messages);
+                    // Ensure history starts with a user turn after overflow recovery.
+                    messages = crate::session_repair::ensure_starts_with_user(messages);
                 }
                 apply_context_guard(&mut messages, &context_budget, available_tools);
                 recovery
@@ -4291,12 +4643,13 @@ pub async fn run_agent_loop_streaming(
         let request = CompletionRequest {
             model: api_model,
             messages: messages.clone(),
-            tools: available_tools.to_vec(),
+            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             system: Some(system_prompt.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
+            cache_ttl: None,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {
@@ -4548,6 +4901,7 @@ pub async fn run_agent_loop_streaming(
                     &total_usage,
                     messages.len(),
                     "Empty response from LLM (streaming) — guard activated",
+                    &accumulated_text,
                 );
                 final_response = text.clone();
 
@@ -4590,6 +4944,45 @@ pub async fn run_agent_loop_streaming(
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Capture text from this tool_use turn (streaming path) — the
+                // streaming sink already forwards the deltas to the channel,
+                // but the in-memory accumulator is what feeds the empty-text
+                // fallback in finalize_end_turn_text. Mirrors the sync path.
+                //
+                // IMPORTANT (streaming-already-emitted semantics): every byte
+                // pushed into `accumulated_text` here has *already been
+                // delivered to the client* via the streaming sink. The
+                // accumulator is a **post-stream** fallback, not a re-emit:
+                //   * On final EndTurn with non-empty text the live deltas
+                //     drove the UI, and `final_response` is only used for
+                //     session persistence + memory extraction.
+                //   * On final EndTurn with empty text, finalize_end_turn_text
+                //     returns `accumulated_text` as `final_response`, but the
+                //     stream has already drained — no re-push to `stream_tx`
+                //     happens (see signal_response_complete is fire-only).
+                //   * The bridge.rs streaming success path
+                //     (channel_bridge.rs ~3032 `Ok(())` arm) calls only
+                //     `record_delivery` + lifecycle reaction; it never invokes
+                //     `send_response` with the buffered text. Fallback to
+                //     `send_response(buffered_text)` only fires on the
+                //     `Err(stream_error)` adapter-failure arm — that is the
+                //     intended recovery path, not a duplicate display.
+                //
+                // So the surface-level concern of "double display" does not
+                // manifest with the current bridge wiring. Any future
+                // refactor that has the streaming success arm also
+                // re-emit `final_response` MUST either drop the
+                // accumulated_text fallback in finalize_end_turn_text or
+                // gate it on a `streaming_already_emitted: bool` flag.
+                //
+                // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
+                // push_accumulated_text.
+                let intermediate_text = response.text();
+                if !intermediate_text.trim().is_empty() {
+                    push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
+                }
+
                 // See non-streaming branch above for the full rationale
                 // — this is the streaming twin of the #2381 staged-commit
                 // fix.
@@ -4607,6 +5000,7 @@ pub async fn run_agent_loop_streaming(
                         session,
                         kernel: kernel.as_ref(),
                         available_tool_names: &staged.allowed_tool_names,
+                        available_tools,
                         caller_id_str: &staged.caller_id_str,
                         skill_registry,
                         allowed_skills: &manifest.skills,
@@ -4657,6 +5051,15 @@ pub async fn run_agent_loop_streaming(
                             .is_err()
                         {
                             warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
+                    }
+
+                    // Capture lazy-load side-channel (issue #3044) — the
+                    // streaming path, same rationale as the non-streaming
+                    // version above.
+                    if let Some(def) = executed.result.loaded_tool.clone() {
+                        if !session_loaded_tools.iter().any(|t| t.name == def.name) {
+                            session_loaded_tools.push(def);
                         }
                     }
 
@@ -5606,7 +6009,190 @@ mod tests {
 
     #[test]
     fn test_max_iterations_constant() {
-        assert_eq!(MAX_ITERATIONS, 50);
+        assert_eq!(
+            MAX_ITERATIONS,
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    // ── push_accumulated_text bounded growth ──────────────────────────────
+
+    #[test]
+    fn test_push_accumulated_text_appends_with_separator() {
+        let mut buf = String::new();
+        push_accumulated_text(&mut buf, "first");
+        assert_eq!(buf, "first");
+
+        push_accumulated_text(&mut buf, "second");
+        assert_eq!(buf, "first\n\nsecond");
+    }
+
+    #[test]
+    fn test_push_accumulated_text_caps_at_max_bytes() {
+        let mut buf = String::new();
+        // First push: well within cap
+        let small = "a".repeat(1024);
+        push_accumulated_text(&mut buf, &small);
+        assert_eq!(buf.len(), 1024);
+
+        // Second push: would exceed the cap → buffer is sealed at exactly the cap
+        let huge = "b".repeat(ACCUMULATED_TEXT_MAX_BYTES);
+        push_accumulated_text(&mut buf, &huge);
+        assert_eq!(
+            buf.len(),
+            ACCUMULATED_TEXT_MAX_BYTES,
+            "buffer must be sealed exactly at the cap (no overflow)"
+        );
+        // The original 'a' prefix must be preserved — that's the whole point
+        // of the "preserve buffered prefix" guarantee.
+        assert!(buf.starts_with(&small));
+
+        // Third push: short-circuits, no growth, no panic
+        push_accumulated_text(&mut buf, "ignored");
+        assert_eq!(buf.len(), ACCUMULATED_TEXT_MAX_BYTES);
+        assert!(!buf.contains("ignored"));
+    }
+
+    #[test]
+    fn test_push_accumulated_text_under_cap_unchanged() {
+        // Sanity: many small pushes under the cap accumulate normally.
+        let mut buf = String::new();
+        for i in 0..100 {
+            push_accumulated_text(&mut buf, &format!("turn {i}"));
+        }
+        assert!(buf.len() < ACCUMULATED_TEXT_MAX_BYTES);
+        assert!(buf.starts_with("turn 0"));
+        assert!(buf.contains("turn 99"));
+    }
+
+    #[test]
+    fn test_push_accumulated_text_empty_initial_no_separator() {
+        // First-push must not start with the "\n\n" separator.
+        let mut buf = String::new();
+        push_accumulated_text(&mut buf, "hello");
+        assert_eq!(buf, "hello");
+        assert!(!buf.starts_with("\n\n"));
+    }
+
+    /// Resolve the iteration cap the same way `run_agent_loop` does: per-agent
+    /// manifest > operator LoopOptions > library default.
+    fn resolve_max_iterations(manifest_cap: Option<u32>, opts_cap: Option<u32>) -> u32 {
+        manifest_cap.or(opts_cap).unwrap_or(MAX_ITERATIONS)
+    }
+
+    #[test]
+    fn max_iterations_resolution_prefers_manifest_over_opts() {
+        assert_eq!(resolve_max_iterations(Some(7), Some(100)), 7);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_opts() {
+        assert_eq!(resolve_max_iterations(None, Some(100)), 100);
+    }
+
+    #[test]
+    fn max_iterations_resolution_falls_back_to_default_when_nothing_set() {
+        assert_eq!(
+            resolve_max_iterations(None, None),
+            librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
+        );
+    }
+
+    // --- finalize_end_turn_text fallback tests ------------------------------
+    //
+    // The helper is the single funnel for empty-response handling on both
+    // sync and streaming paths. These tests pin the three-way contract:
+    //   1. Final text non-empty → use it (accumulated buffer ignored).
+    //   2. Final text empty + accumulated non-empty → use accumulated buffer.
+    //   3. Final text empty + accumulated empty → emit canned guard message.
+
+    #[test]
+    fn finalize_end_turn_text_uses_final_text_when_present() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(
+            "final answer".to_string(),
+            true,
+            "agent",
+            3,
+            &usage,
+            5,
+            "log msg",
+            "leftover from earlier turn",
+        );
+        // Final text wins — accumulated buffer must NOT leak into output.
+        assert_eq!(out, "final answer");
+    }
+
+    #[test]
+    fn finalize_end_turn_text_falls_back_to_accumulated_when_final_empty() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(
+            "   ".to_string(), // whitespace-only counts as empty
+            true,
+            "agent",
+            3,
+            &usage,
+            5,
+            "log msg",
+            "I looked that up for you.",
+        );
+        assert_eq!(out, "I looked that up for you.");
+    }
+
+    #[test]
+    fn finalize_end_turn_text_emits_guard_when_both_empty_with_tools() {
+        let usage = TokenUsage::default();
+        let out = finalize_end_turn_text(String::new(), true, "agent", 3, &usage, 5, "log msg", "");
+        assert!(
+            out.contains("Task completed"),
+            "expected tools-executed guard message, got: {out}"
+        );
+    }
+
+    #[test]
+    fn finalize_end_turn_text_emits_guard_when_both_empty_no_tools() {
+        let usage = TokenUsage::default();
+        let out =
+            finalize_end_turn_text(String::new(), false, "agent", 0, &usage, 1, "log msg", "");
+        assert!(
+            out.contains("empty response"),
+            "expected no-tools guard message, got: {out}"
+        );
+    }
+
+    fn fake_tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("fake {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn test_resolve_request_tools_falls_back_to_eager_when_tool_load_missing() {
+        // Regression for PR #3047 codex review P1: if an agent's allowlist
+        // is over the threshold but does NOT include `tool_load`, we must
+        // return the full eager list. Otherwise non-native tools get
+        // stripped with no recovery path and silently disappear.
+        let mut pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .collect();
+        // Sanity: tool_load is definitely not in the list.
+        assert!(!pool.iter().any(|t| t.name == "tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert_eq!(
+            resolved.len(),
+            pool.len(),
+            "lazy mode must bypass when tool_load is absent — got trimmed list"
+        );
+
+        // And with tool_load in the pool, lazy mode kicks in (as designed).
+        pool.push(fake_tool("tool_load"));
+        let resolved = resolve_request_tools(&pool, &[], true);
+        assert!(
+            resolved.len() < pool.len(),
+            "lazy mode should trim when tool_load is present"
+        );
     }
 
     #[test]
@@ -5955,7 +6541,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
     }
 
     #[test]
@@ -6354,7 +6940,7 @@ mod tests {
     /// Regression for issue #2067: auto_memorize sliced `session.messages`
     /// with an index captured **before** `safe_trim_messages` ran, so when
     /// `find_safe_trim_point` scanned forward and trimmed deeper than
-    /// `len - MAX_HISTORY_MESSAGES`, the slice went out of range and the
+    /// `len - DEFAULT_MAX_HISTORY_MESSAGES`, the slice went out of range and the
     /// agent_loop task panicked ("range start index 42 out of range for
     /// slice of length 36").
     ///
@@ -6414,10 +7000,10 @@ mod tests {
         let old_messages_before = session_messages.len();
 
         // Push the current turn's user message. At this point
-        // len = 26 + 14 + 1 = 41, which is > MAX_HISTORY_MESSAGES=40 and
+        // len = 26 + 14 + 1 = 41, which is > DEFAULT_MAX_HISTORY_MESSAGES=40 and
         // will trigger safe_trim_messages.
         session_messages.push(Message::user("current turn"));
-        assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
+        assert!(session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES);
 
         let mut llm_messages = session_messages.clone();
         safe_trim_messages(
@@ -6425,6 +7011,7 @@ mod tests {
             &mut session_messages,
             "test-agent",
             "current turn",
+            DEFAULT_MAX_HISTORY_MESSAGES,
         );
 
         // The forward scan in find_safe_trim_point skipped past the tool-pair
@@ -6499,7 +7086,13 @@ mod tests {
         session.messages.push(Message::user("current turn"));
         let PreparedMessages {
             new_messages_start, ..
-        } = prepare_llm_messages(&manifest, &mut session, "current turn", None);
+        } = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "current turn",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
 
         assert!(prior_len > new_messages_start);
         let tail = &session.messages[new_messages_start..];
@@ -6569,9 +7162,10 @@ mod tests {
             &mut session,
             "current turn",
             Some("memory context".to_string()),
+            DEFAULT_MAX_HISTORY_MESSAGES,
         );
 
-        assert!(messages.len() <= MAX_HISTORY_MESSAGES);
+        assert!(messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES);
         assert!(messages.iter().all(|msg| {
             let text = msg.content.text_content();
             text != "canonical context"
@@ -7666,7 +8260,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
     }
 
     #[tokio::test]
@@ -9667,6 +10261,130 @@ mod tests {
         assert_eq!(
             r.owner_notice.as_deref(),
             Some("Sir, the appointment is at 3pm.")
+        );
+    }
+
+    #[test]
+    fn resolve_max_history_uses_manifest_when_set() {
+        let manifest = AgentManifest {
+            name: "agent-a".into(),
+            max_history_messages: Some(7),
+            ..AgentManifest::default()
+        };
+        let opts = LoopOptions {
+            max_history_messages: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(resolve_max_history(&manifest, &opts), 7);
+    }
+
+    #[test]
+    fn resolve_max_history_falls_back_to_opts_when_manifest_unset() {
+        let manifest = AgentManifest {
+            name: "agent-b".into(),
+            ..AgentManifest::default()
+        };
+        let opts = LoopOptions {
+            max_history_messages: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(resolve_max_history(&manifest, &opts), 20);
+    }
+
+    #[test]
+    fn resolve_max_history_falls_back_to_default_when_both_unset() {
+        let manifest = AgentManifest {
+            name: "agent-c".into(),
+            ..AgentManifest::default()
+        };
+        let opts = LoopOptions::default();
+        assert_eq!(
+            resolve_max_history(&manifest, &opts),
+            DEFAULT_MAX_HISTORY_MESSAGES
+        );
+    }
+
+    #[test]
+    fn resolve_max_history_clamps_below_floor() {
+        let manifest = AgentManifest {
+            name: "agent-d".into(),
+            max_history_messages: Some(2),
+            ..AgentManifest::default()
+        };
+        let opts = LoopOptions::default();
+        assert_eq!(resolve_max_history(&manifest, &opts), MIN_HISTORY_MESSAGES);
+    }
+
+    #[test]
+    fn resolve_max_history_clamps_zero() {
+        let manifest = AgentManifest {
+            name: "agent-e".into(),
+            max_history_messages: Some(0),
+            ..AgentManifest::default()
+        };
+        let opts = LoopOptions::default();
+        assert_eq!(resolve_max_history(&manifest, &opts), MIN_HISTORY_MESSAGES);
+    }
+
+    #[test]
+    fn resolve_max_history_passes_through_at_floor_and_above() {
+        let opts = LoopOptions::default();
+
+        let manifest_at_floor = AgentManifest {
+            name: "agent-f".into(),
+            max_history_messages: Some(MIN_HISTORY_MESSAGES),
+            ..AgentManifest::default()
+        };
+        assert_eq!(
+            resolve_max_history(&manifest_at_floor, &opts),
+            MIN_HISTORY_MESSAGES
+        );
+
+        let manifest_above_floor = AgentManifest {
+            name: "agent-f".into(),
+            max_history_messages: Some(200),
+            ..AgentManifest::default()
+        };
+        assert_eq!(resolve_max_history(&manifest_above_floor, &opts), 200);
+    }
+
+    #[test]
+    fn safe_trim_messages_respects_custom_cap() {
+        // Build 20 alternating user/assistant messages so the history is
+        // well above any reasonable small cap. Each pair is one "turn".
+        let mut messages: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Message::user(format!("u{i}"))
+                } else {
+                    Message::assistant(format!("a{i}"))
+                }
+            })
+            .collect();
+        let mut session_messages = messages.clone();
+
+        safe_trim_messages(
+            &mut messages,
+            &mut session_messages,
+            "test-agent",
+            "current",
+            10,
+        );
+
+        assert!(
+            messages.len() <= 10,
+            "messages should be trimmed to <= 10, got {}",
+            messages.len()
+        );
+        assert!(
+            session_messages.len() <= 10,
+            "session_messages should be trimmed to <= 10, got {}",
+            session_messages.len()
+        );
+        assert_eq!(
+            messages.first().map(|m| m.role),
+            Some(Role::User),
+            "history must start with a user turn after trim+repair"
         );
     }
 }

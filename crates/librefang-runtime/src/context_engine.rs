@@ -3458,7 +3458,7 @@ fn validate_plugin_name(name: &str) -> LibreFangResult<()> {
     Ok(())
 }
 
-pub fn load_plugin(
+fn load_plugin(
     plugin_name: &str,
 ) -> LibreFangResult<(
     librefang_types::config::PluginManifest,
@@ -3601,25 +3601,6 @@ pub fn load_plugin(
     );
 
     Ok((manifest, resolved_hooks))
-}
-
-/// List all installed plugins in `~/.librefang/plugins/`.
-pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> {
-    let dir = plugins_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.file_type().ok()?.is_dir() {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            load_plugin(&name).ok().map(|(manifest, _)| manifest)
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -4666,6 +4647,7 @@ mod tests {
                 librefang_types::memory::MemorySource::Conversation,
                 "episodic",
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4678,6 +4660,7 @@ mod tests {
                 librefang_types::memory::MemorySource::Conversation,
                 "episodic",
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4881,14 +4864,6 @@ printf '{"type":"ingest_result","memories":[{"content":"full-path-runtime"}]}\n'
     }
 
     #[test]
-    fn test_list_installed_plugins_empty() {
-        // Should not panic even if the plugins dir doesn't exist
-        let plugins = list_installed_plugins();
-        // May or may not be empty depending on the environment
-        let _ = plugins;
-    }
-
-    #[test]
     fn test_load_plugin_with_tempdir() {
         use std::io::Write;
         let tmp = tempfile::tempdir().unwrap();
@@ -4934,8 +4909,16 @@ ingest = "hooks/ingest.py"
     fn test_build_context_engine_default() {
         let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
         let runtime_config = ContextEngineConfig::default();
-        let engine =
-            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
+        let mem = make_memory();
+        let engine = build_context_engine(
+            &toml_config,
+            runtime_config,
+            mem.clone(),
+            mem,
+            None,
+            &|_| None,
+            None,
+        );
         // Should not panic — returns DefaultContextEngine
         let _ = engine;
     }
@@ -4948,8 +4931,16 @@ ingest = "hooks/ingest.py"
         };
         let runtime_config = ContextEngineConfig::default();
         // Should fall back to default engine, not panic
-        let engine =
-            build_context_engine(&toml_config, runtime_config, make_memory(), None, &|_| None);
+        let mem = make_memory();
+        let engine = build_context_engine(
+            &toml_config,
+            runtime_config,
+            mem.clone(),
+            mem,
+            None,
+            &|_| None,
+            None,
+        );
         let _ = engine;
     }
 

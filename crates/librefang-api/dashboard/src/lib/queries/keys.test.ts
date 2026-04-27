@@ -34,6 +34,9 @@ import {
   skillhubKeys,
   fanghubKeys,
   totpKeys,
+  userKeys,
+  userBudgetKeys,
+  permissionPolicyKeys,
 } from "./keys";
 
 describe("query key factories", () => {
@@ -199,6 +202,17 @@ describe("query key factories", () => {
       const prefix = memoryKeys.statsAll();
       expect(memoryKeys.stats().slice(0, prefix.length)).toEqual(prefix);
       expect(memoryKeys.stats("a1").slice(0, prefix.length)).toEqual(prefix);
+    });
+
+    it("agentKv keys are nested under memoryKeys.all and agentKvs", () => {
+      expect(memoryKeys.agentKvs()).toEqual(["memory", "agentKv"]);
+      expect(memoryKeys.agentKv("a1")).toEqual(["memory", "agentKv", "a1"]);
+      const prefix = memoryKeys.agentKvs();
+      expect(memoryKeys.agentKv("a1").slice(0, prefix.length)).toEqual(prefix);
+      // Ensure agentKv subtree is disjoint from list/stats subtrees so
+      // invalidating proactive memory doesn't blow KV away.
+      expect(memoryKeys.agentKvs()).not.toEqual(memoryKeys.lists());
+      expect(memoryKeys.agentKvs()).not.toEqual(memoryKeys.statsAll());
     });
   });
 
@@ -375,6 +389,9 @@ describe("query key factories", () => {
       registryKeys,
       telemetryKeys,
       terminalKeys,
+      userKeys,
+      userBudgetKeys,
+      permissionPolicyKeys,
     ];
 
     it("all factories have an 'all' key", () => {
@@ -391,6 +408,44 @@ describe("query key factories", () => {
       const prefix = terminalKeys.all;
       expect(terminalKeys.health().slice(0, prefix.length)).toEqual(prefix);
       expect(terminalKeys.windows().slice(0, prefix.length)).toEqual(prefix);
+    });
+  });
+
+  describe("userKeys (RBAC M6)", () => {
+    it("is hierarchical and anchored on userKeys.all", () => {
+      const prefix = userKeys.all;
+      expect(userKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(userKeys.list({ role: "admin" }).slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+      expect(userKeys.detail("alice").slice(0, prefix.length)).toEqual(prefix);
+      // List with filters is structurally distinct per filter set.
+      expect(userKeys.list({ role: "admin" })).not.toEqual(
+        userKeys.list({ role: "viewer" }),
+      );
+    });
+  });
+
+  describe("auditKeys.query (M5 stub)", () => {
+    it("query factory is anchored under auditKeys.all and queries()", () => {
+      expect(auditKeys.queries()).toEqual(["audit", "query"]);
+      expect(auditKeys.query({ user: "alice" }).slice(0, 2)).toEqual([
+        "audit",
+        "query",
+      ]);
+      // Empty filters still produces a stable key.
+      expect(auditKeys.query()).toEqual(["audit", "query", {}]);
+    });
+  });
+
+  describe("userBudgetKeys / permissionPolicyKeys", () => {
+    it("expose hierarchical detail factories", () => {
+      expect(userBudgetKeys.detail("alice").slice(0, userBudgetKeys.all.length)).toEqual(
+        userBudgetKeys.all,
+      );
+      expect(
+        permissionPolicyKeys.detail("alice").slice(0, permissionPolicyKeys.all.length),
+      ).toEqual(permissionPolicyKeys.all);
     });
   });
 });

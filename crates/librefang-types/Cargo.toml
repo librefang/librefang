@@ -17,11 +17,13 @@ async-trait = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-rand = { workspace = true }
+zeroize = { workspace = true }
 fluent = { workspace = true }
 unic-langid = { workspace = true }
 regex-lite = { workspace = true }
 librefang-storage = { path = "../librefang-storage", default-features = false }
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+tracing = { workspace = true }
 
 [features]
 default = []
@@ -32,3 +34,4 @@ storage-sqlite = ["librefang-storage/sqlite-backend"]
 
 [dev-dependencies]
 rmp-serde = { workspace = true }
+tempfile = { workspace = true }

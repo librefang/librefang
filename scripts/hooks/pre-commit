@@ -1,5 +1,6 @@
 #!/bin/sh
-# Pre-commit hook: ensure Rust code is formatted.
+# Pre-commit hook: ensure Rust code is formatted, openapi.json is current, and
+# SDKs are regenerated whenever the spec changes.
 # Install: git config core.hooksPath scripts/hooks
 
 cargo fmt --check 2>/dev/null
@@ -8,4 +9,56 @@ if [ $? -ne 0 ]; then
     cargo fmt
     echo "Formatted. Please re-stage and commit again."
     exit 1
+fi
+
+# Regenerate openapi.json only when staged route changes can actually move
+# the spec. OpenAPI output is driven by utoipa attributes, derives, and
+# handler signatures — pure function-body edits never change openapi.json,
+# but used to trigger a 1-2 minute codegen anyway.
+#
+# Heuristic: scan added/removed lines under crates/librefang-api/src/routes/.
+# If any look spec-relevant (attributes, item declarations, use statements,
+# trait/type references), run codegen. Otherwise skip — utoipa derives the
+# spec from signatures + attributes only, so body-only diffs are safe.
+#
+# Conservative bias: the regex is intentionally broad. False positives
+# (unnecessary codegen) only cost build time; false negatives are caught
+# by the `openapi-drift` CI job which regenerates and diffs authoritatively.
+# If you suspect the heuristic missed your change and want immediate local
+# feedback, run `cargo xtask codegen --openapi` manually.
+ROUTES_CHANGED=$(git diff --cached --name-only | grep "crates/librefang-api/src/routes/" || true)
+if [ -n "$ROUTES_CHANGED" ]; then
+    SPEC_RELEVANT=$(git diff --cached -U0 -- crates/librefang-api/src/routes/ \
+        | grep -E '^[+-][^+-]' \
+        | grep -E '^[+-][[:space:]]*(#\[|pub |use |fn |struct |enum |impl |type |trait )' \
+        || true)
+
+    if [ -n "$SPEC_RELEVANT" ]; then
+        echo "Regenerating openapi.json (spec-relevant route changes detected)..."
+        if ! cargo xtask codegen --openapi; then
+            echo "Error: openapi.json regeneration failed — fix build/codegen before committing."
+            exit 1
+        fi
+        # Only stage if codegen actually changed the spec; cosmetic touches
+        # produce a byte-identical file.
+        if ! git diff --quiet -- openapi.json; then
+            git add openapi.json
+            echo "openapi.json updated and staged."
+        else
+            echo "openapi.json unchanged."
+        fi
+    else
+        echo "Routes touched but no spec-relevant lines (attributes/signatures/derives) — skipping codegen."
+    fi
+fi
+
+# Regenerate SDKs whenever openapi.json is part of the commit.
+if git diff --cached --name-only | grep -qx "openapi.json"; then
+    echo "Regenerating SDKs from openapi.json..."
+    if ! python3 scripts/codegen-sdks.py; then
+        echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before committing."
+        exit 1
+    fi
+    git add sdk/python sdk/javascript sdk/go sdk/rust
+    echo "SDKs updated and staged."
 fi

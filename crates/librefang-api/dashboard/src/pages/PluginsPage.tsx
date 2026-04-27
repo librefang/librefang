@@ -331,7 +331,7 @@ export function PluginsPage() {
       )}
 
       {/* Install Modal */}
-      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md">
+      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md" variant="panel-right">
         <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
@@ -398,7 +398,7 @@ export function PluginsPage() {
       </Modal>
 
       {/* Scaffold Modal */}
-      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
+      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm" variant="panel-right">
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>

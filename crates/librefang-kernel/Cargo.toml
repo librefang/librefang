@@ -27,9 +27,7 @@ serde_yaml = { workspace = true }
 dashmap = { workspace = true }
 rusqlite = { workspace = true }
 arc-swap = { workspace = true }
-crossbeam = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }

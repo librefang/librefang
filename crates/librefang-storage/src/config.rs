@@ -28,7 +28,7 @@ pub const DEFAULT_MEMORY_DATABASE_NAME: &str = "memory";
 /// `Embedded` uses the bundled RocksDB engine and is the default chosen by
 /// the wizard. `Remote` connects to an external SurrealDB 3.0 instance and
 /// can be shared with the Universal Agent Runtime via separate namespaces.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StorageBackendKind {
     /// Single-process embedded SurrealDB. Cannot be shared between
@@ -66,7 +66,7 @@ impl StorageBackendKind {
 /// The same struct is reused by [`crate::config::StorageConfig`] (for
 /// librefang's own session) and by `librefang_types::config::UarConfig`
 /// (when UAR is configured to reuse the same instance).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoteSurrealConfig {
     /// Endpoint URL — `ws://`, `wss://`, `http://`, or `https://`.
     pub url: String,
@@ -106,7 +106,7 @@ impl RemoteSurrealConfig {
 /// Top-level storage configuration on `KernelConfig`.
 ///
 /// Defaults to embedded SurrealDB at `<data_dir>/librefang.surreal`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct StorageConfig {
     /// Which backend to use at startup.
     pub backend: StorageBackendKind,

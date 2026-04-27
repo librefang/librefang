@@ -41,7 +41,7 @@ fn parse_prompt_version(row: &serde_json::Value) -> Option<PromptVersion> {
     let id = row.get("id").and_then(|v| {
         // SurrealDB returns id as "prompt_versions:uuid"
         let s = v.as_str()?;
-        let id_part = s.split(':').last().unwrap_or(s);
+        let id_part = s.split(':').next_back().unwrap_or(s);
         id_part.parse::<Uuid>().ok()
     })?;
     let agent_id: AgentId = row
@@ -91,7 +91,7 @@ fn parse_prompt_version(row: &serde_json::Value) -> Option<PromptVersion> {
 fn parse_experiment(row: &serde_json::Value) -> Option<PromptExperiment> {
     let id = row.get("id").and_then(|v| {
         let s = v.as_str()?;
-        let id_part = s.split(':').last().unwrap_or(s);
+        let id_part = s.split(':').next_back().unwrap_or(s);
         id_part.parse::<Uuid>().ok()
     })?;
     let agent_id: AgentId = row
@@ -199,10 +199,7 @@ impl PromptBackend for SurrealPromptStore {
             let rows: Vec<serde_json::Value> = res
                 .take(0)
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB list_versions: {e}")))?;
-            Ok(rows
-                .iter()
-                .filter_map(|r| parse_prompt_version(r))
-                .collect())
+            Ok(rows.iter().filter_map(parse_prompt_version).collect())
         })
     }
 
@@ -213,7 +210,7 @@ impl PromptBackend for SurrealPromptStore {
                 .select(("prompt_versions", id.to_string()))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB get_version: {e}")))?;
-            Ok(row.as_ref().and_then(|r| parse_prompt_version(r)))
+            Ok(row.as_ref().and_then(parse_prompt_version))
         })
     }
 
@@ -234,7 +231,7 @@ impl PromptBackend for SurrealPromptStore {
             let rows: Vec<serde_json::Value> = res.take(0).map_err(|e| {
                 LibreFangError::Memory(format!("SurrealDB get_active_version: {e}"))
             })?;
-            Ok(rows.iter().next().and_then(|r| parse_prompt_version(r)))
+            Ok(rows.first().and_then(parse_prompt_version))
         })
     }
 
@@ -416,7 +413,7 @@ impl PromptBackend for SurrealPromptStore {
             let rows: Vec<serde_json::Value> = res
                 .take(0)
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB list_experiments: {e}")))?;
-            Ok(rows.iter().filter_map(|r| parse_experiment(r)).collect())
+            Ok(rows.iter().filter_map(parse_experiment).collect())
         })
     }
 
@@ -427,7 +424,7 @@ impl PromptBackend for SurrealPromptStore {
                 .select(("prompt_experiments", id.to_string()))
                 .await
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB get_experiment: {e}")))?;
-            Ok(row.as_ref().and_then(|r| parse_experiment(r)))
+            Ok(row.as_ref().and_then(parse_experiment))
         })
     }
 
@@ -470,7 +467,7 @@ impl PromptBackend for SurrealPromptStore {
             let rows: Vec<serde_json::Value> = res.take(0).map_err(|e| {
                 LibreFangError::Memory(format!("SurrealDB get_running_experiment: {e}"))
             })?;
-            Ok(rows.iter().next().and_then(|r| parse_experiment(r)))
+            Ok(rows.first().and_then(parse_experiment))
         })
     }
 

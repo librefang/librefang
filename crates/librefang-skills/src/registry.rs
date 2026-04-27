@@ -286,6 +286,27 @@ impl SkillRegistry {
             }
         }
 
+        // env_passthrough only flows to subprocess-spawning runtimes
+        // (Python / Node / Shell). For other runtimes the field is silently
+        // inert; warn so authors don't think they've granted access.
+        if !manifest.env_passthrough.is_empty()
+            && !matches!(
+                manifest.runtime.runtime_type,
+                crate::SkillRuntime::Python
+                    | crate::SkillRuntime::Node
+                    | crate::SkillRuntime::Shell
+            )
+        {
+            warn!(
+                skill = %manifest.skill.name,
+                runtime = ?manifest.runtime.runtime_type,
+                vars = ?manifest.env_passthrough,
+                "skill declares env_passthrough but runtime does not spawn a \
+                 subprocess; field will be ignored. Move credentials to \
+                 [skill.config] or remove env_passthrough"
+            );
+        }
+
         let name = manifest.skill.name.clone();
 
         // Canonicalize the skill directory path so entry-point resolution
@@ -674,6 +695,7 @@ mod tests {
             source: None,
             config: Default::default(),
             config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
         }
     }
 

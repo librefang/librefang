@@ -23,13 +23,105 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/budget/agents/{id}",
             axum::routing::get(agent_budget_status).put(update_agent_budget),
         )
+        // RBAC M5: per-user budget endpoints (admin-only, gated in-handler).
+        .route("/budget/users", axum::routing::get(user_budget_ranking))
+        .route(
+            "/budget/users/{user_id}",
+            axum::routing::get(user_budget_detail)
+                .put(update_user_budget)
+                .delete(delete_user_budget),
+        )
 }
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_types::agent::AgentId;
+use librefang_kernel::auth::UserRole;
+use librefang_types::agent::{AgentId, UserId};
+use std::collections::HashMap;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Audit-detail diff formatters
+// ---------------------------------------------------------------------------
+//
+// These render `old → new` strings used in the audit `detail` field for budget
+// mutations. Goal: a single audit row tells an operator what was rotated, so
+// forensics don't need to correlate across multiple entries to reconstruct the
+// change. Each helper renders only the fields that actually changed plus the
+// alert/threshold context — unchanged fields are still emitted so the row is
+// self-describing (the diff is the key, not the new value alone).
+//
+// A `None` budget renders as the literal `none` token. Numeric formatting
+// uses Rust's default `Display` so callers see exactly what was written
+// (no rounding).
+
+fn fmt_user_budget_diff(
+    old: Option<&librefang_types::config::UserBudgetConfig>,
+    new: Option<&librefang_types::config::UserBudgetConfig>,
+) -> String {
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "none".to_string(),
+        }
+    }
+    let h_old = show(old.map(|b| b.max_hourly_usd));
+    let h_new = show(new.map(|b| b.max_hourly_usd));
+    let d_old = show(old.map(|b| b.max_daily_usd));
+    let d_new = show(new.map(|b| b.max_daily_usd));
+    let m_old = show(old.map(|b| b.max_monthly_usd));
+    let m_new = show(new.map(|b| b.max_monthly_usd));
+    let a_old = show(old.map(|b| b.alert_threshold));
+    let a_new = show(new.map(|b| b.alert_threshold));
+    format!(
+        "hourly: {h_old}→{h_new} daily: {d_old}→{d_new} monthly: {m_old}→{m_new} alert: {a_old}→{a_new}"
+    )
+}
+
+fn fmt_agent_resources_diff(
+    old: Option<&librefang_types::agent::ResourceQuota>,
+    new: Option<&librefang_types::agent::ResourceQuota>,
+) -> String {
+    fn show<T: std::fmt::Display>(v: Option<T>) -> String {
+        match v {
+            Some(v) => v.to_string(),
+            None => "none".to_string(),
+        }
+    }
+    let h_old = show(old.map(|r| r.max_cost_per_hour_usd));
+    let h_new = show(new.map(|r| r.max_cost_per_hour_usd));
+    let d_old = show(old.map(|r| r.max_cost_per_day_usd));
+    let d_new = show(new.map(|r| r.max_cost_per_day_usd));
+    let m_old = show(old.map(|r| r.max_cost_per_month_usd));
+    let m_new = show(new.map(|r| r.max_cost_per_month_usd));
+    // tokens-per-hour is `Option<u64>`: render `none` for "inherit
+    // global default" so the diff distinguishes unset from explicit 0.
+    let t_old = show(old.and_then(|r| r.max_llm_tokens_per_hour));
+    let t_new = show(new.and_then(|r| r.max_llm_tokens_per_hour));
+    format!(
+        "hourly: {h_old}→{h_new} daily: {d_old}→{d_new} monthly: {m_old}→{m_new} tokens/h: {t_old}→{t_new}"
+    )
+}
+
+fn fmt_global_budget_diff(
+    old: &librefang_types::config::BudgetConfig,
+    new: &librefang_types::config::BudgetConfig,
+) -> String {
+    format!(
+        "hourly: {}→{} daily: {}→{} monthly: {}→{} alert: {}→{} tokens/h_default: {}→{}",
+        old.max_hourly_usd,
+        new.max_hourly_usd,
+        old.max_daily_usd,
+        new.max_daily_usd,
+        old.max_monthly_usd,
+        new.max_monthly_usd,
+        old.alert_threshold,
+        new.alert_threshold,
+        old.default_max_llm_tokens_per_hour,
+        new.default_max_llm_tokens_per_hour,
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Usage endpoint
@@ -238,8 +330,16 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    // Capture OLD config BEFORE the mutation so the audit row can carry
+    // an old→new diff. Without this the chain only records the forward
+    // state, forcing forensics to scan multiple rows to reconstruct
+    // what the operator actually changed.
+    let old_budget = state.kernel.budget_config();
+
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
     state.kernel.update_budget_config(|budget| {
@@ -269,10 +369,20 @@ pub async fn update_budget(
         }
     });
 
-    let status = state
-        .kernel
-        .metering_ref()
-        .budget_status(&state.kernel.budget_config());
+    let new_budget = state.kernel.budget_config();
+    state.kernel.audit().record_with_context(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        &format!(
+            "global_budget updated: {}",
+            fmt_global_budget_diff(&old_budget, &new_budget)
+        ),
+        "ok",
+        api_user_ref.map(|u| u.user_id),
+        Some("api".to_string()),
+    );
+
+    let status = state.kernel.metering_ref().budget_status(&new_budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -392,8 +502,10 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -413,6 +525,16 @@ pub async fn update_agent_budget(
         .into_response();
     }
 
+    // Capture OLD per-agent caps BEFORE the in-memory mutation so the
+    // audit row can carry an old→new diff for forensics. `None` here
+    // means the agent vanished between the path-parse and the snapshot,
+    // which the `update_resources` call below will surface as 404.
+    let old_resources = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.resources.clone());
+
     match state
         .kernel
         .agent_registry()
@@ -420,11 +542,30 @@ pub async fn update_agent_budget(
     {
         Ok(()) => {
             // Persist updated entry
+            let new_resources = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.manifest.resources.clone());
             if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                 if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
+            // Audit with old→new diff and caller attribution. agent_id
+            // is the *target* of the change, not the actor — the actor
+            // is conveyed via `user_id` (None for anonymous loopback).
+            state.kernel.audit().record_with_context(
+                &agent_id.to_string(),
+                librefang_runtime::audit::AuditAction::ConfigChange,
+                &format!(
+                    "agent_budget updated for {agent_id}: {}",
+                    fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
+                ),
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
@@ -432,5 +573,510 @@ pub async fn update_agent_budget(
                 .into_response()
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RBAC M5 — per-user budget endpoints
+// ---------------------------------------------------------------------------
+
+/// Reject the request unless the caller is an authenticated `Admin`+.
+///
+/// Anonymous callers (loopback / `LIBREFANG_ALLOW_NO_AUTH=1`) are denied:
+/// per-user spend exposes who-spent-what attribution, which is sensitive
+/// enough that we don't blanket-trust an unauthenticated origin even on
+/// loopback. To use these endpoints in a no-auth deployment, configure at
+/// least one user with an admin api_key.
+fn require_admin_for_user_budget(
+    state: &AppState,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+) -> Option<Response> {
+    match api_user {
+        Some(u) if u.role >= UserRole::Admin => None,
+        Some(u) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                &format!("user budget endpoint denied for role {}", u.role),
+                "denied",
+                Some(u.user_id),
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden("Admin role required for user budget access")
+                    .into_response(),
+            )
+        }
+        None => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::PermissionDenied,
+                "user budget endpoint denied for anonymous caller",
+                "denied",
+                None,
+                Some("api".to_string()),
+            );
+            Some(
+                ApiErrorResponse::forbidden(
+                    "Authenticated Admin role required for user budget access (configure an admin api_key)",
+                )
+                .into_response(),
+            )
+        }
+    }
+}
+
+/// GET /api/budget/users — admin-only per-user spend ranking.
+///
+/// Query params:
+///   - `limit` (default 25, hard cap 1000) — max rows returned.
+///
+/// Response: `{ "users": [...], "total": N }`. Each row carries the
+/// rolled-up hourly / daily / monthly cost plus the per-user budget
+/// limits (when configured) so the dashboard can render % bars without
+/// a follow-up call.
+#[utoipa::path(
+    get,
+    path = "/api/budget/users",
+    tag = "budget",
+    params(("limit" = Option<u32>, Query, description = "Top N users (default 25, cap 1000)")),
+    responses((status = 200, description = "Per-user cost ranking", body = serde_json::Value))
+)]
+pub async fn user_budget_ranking(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(25)
+        .clamp(1, 1000);
+
+    let usage_store = state.kernel.memory_substrate().usage();
+    let ranking = match usage_store.query_user_ranking(Some(limit)) {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("Failed to query user spend: {e}"))
+                .into_response();
+        }
+    };
+
+    // Resolve display names + per-user budgets (when configured) so the
+    // dashboard does not need a second round-trip.
+    let cfg = state.kernel.config_snapshot();
+    let user_budgets: HashMap<String, librefang_types::config::UserBudgetConfig> = cfg
+        .users
+        .iter()
+        .filter_map(|u| {
+            u.budget
+                .as_ref()
+                .map(|b| (UserId::from_name(&u.name).to_string(), b.clone()))
+        })
+        .collect();
+    let user_names: HashMap<String, String> = cfg
+        .users
+        .iter()
+        .map(|u| (UserId::from_name(&u.name).to_string(), u.name.clone()))
+        .collect();
+
+    let users: Vec<serde_json::Value> = ranking
+        .iter()
+        .map(|row| {
+            let budget = user_budgets.get(&row.user_id);
+            serde_json::json!({
+                "user_id": row.user_id,
+                "name": user_names.get(&row.user_id),
+                "hourly_cost_usd": row.hourly_cost_usd,
+                "daily_cost_usd": row.daily_cost_usd,
+                "monthly_cost_usd": row.monthly_cost_usd,
+                "call_count": row.call_count,
+                "limits": budget.map(|b| serde_json::json!({
+                    "max_hourly_usd": b.max_hourly_usd,
+                    "max_daily_usd": b.max_daily_usd,
+                    "max_monthly_usd": b.max_monthly_usd,
+                    "alert_threshold": b.alert_threshold,
+                })),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "users": users,
+        "total": users.len(),
+        "limit": limit,
+    }))
+    .into_response()
+}
+
+/// GET /api/budget/users/{user_id} — admin-only single-user budget detail.
+///
+/// `user_id` accepts either a UUID (the canonical `UserId` form) or the
+/// raw configured name (re-derived via `UserId::from_name`) so operators
+/// can paste a name from `config.toml` directly into the URL.
+#[utoipa::path(
+    get,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses((status = 200, description = "Single user budget detail", body = serde_json::Value))
+)]
+pub async fn user_budget_detail(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    // Resolve to a canonical UserId. Try parse-as-uuid first; if that
+    // fails fall back to from_name, which always succeeds.
+    let user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    let cfg = state.kernel.config_snapshot();
+    let user_cfg = cfg
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == user_id);
+    let display_name = user_cfg.map(|u| u.name.clone());
+    let role = user_cfg.map(|u| u.role.clone());
+    let budget = user_cfg.and_then(|u| u.budget.clone());
+
+    let usage_store = state.kernel.memory_substrate().usage();
+    let hourly = usage_store.query_user_hourly(user_id).unwrap_or(0.0);
+    let daily = usage_store.query_user_daily(user_id).unwrap_or(0.0);
+    let monthly = usage_store.query_user_monthly(user_id).unwrap_or(0.0);
+
+    // Compute alert breach against the user's configured budget. When no
+    // limit is set the percentage is 0 and `alert_breach` is false — the
+    // dashboard can still render the spend numbers without budget bars.
+    let pct = |spend: f64, limit: f64| -> f64 {
+        if limit > 0.0 {
+            spend / limit
+        } else {
+            0.0
+        }
+    };
+    let alert_threshold = budget.as_ref().map(|b| b.alert_threshold).unwrap_or(0.8);
+    let limits = budget.as_ref();
+    let hourly_pct = limits.map(|b| pct(hourly, b.max_hourly_usd)).unwrap_or(0.0);
+    let daily_pct = limits.map(|b| pct(daily, b.max_daily_usd)).unwrap_or(0.0);
+    let monthly_pct = limits
+        .map(|b| pct(monthly, b.max_monthly_usd))
+        .unwrap_or(0.0);
+    let alert_breach = hourly_pct >= alert_threshold
+        || daily_pct >= alert_threshold
+        || monthly_pct >= alert_threshold;
+
+    Json(serde_json::json!({
+        "user_id": user_id.to_string(),
+        "name": display_name,
+        "role": role,
+        "hourly": {
+            "spend": hourly,
+            "limit": limits.map(|b| b.max_hourly_usd).unwrap_or(0.0),
+            "pct": hourly_pct,
+        },
+        "daily": {
+            "spend": daily,
+            "limit": limits.map(|b| b.max_daily_usd).unwrap_or(0.0),
+            "pct": daily_pct,
+        },
+        "monthly": {
+            "spend": monthly,
+            "limit": limits.map(|b| b.max_monthly_usd).unwrap_or(0.0),
+            "pct": monthly_pct,
+        },
+        "alert_threshold": alert_threshold,
+        "alert_breach": alert_breach,
+        // RBAC M5: per-user budget enforcement is wired through
+        // `metering::check_user_budget` (post-call, same semantics as
+        // global / per-agent / per-provider caps). When `alert_breach`
+        // flips true, the next LLM call from this user is denied at the
+        // BudgetExceeded gate.
+        "enforced": true,
+    }))
+    .into_response()
+}
+
+/// PUT /api/budget/users/{user_id} — admin-only per-user budget upsert.
+///
+/// `user_id` accepts the same forms as the GET sibling (UUID or configured
+/// name). The request body mirrors `UserBudgetConfig` and is a **full
+/// replacement** of the user's budget — all four keys are required, any
+/// missing key returns 400. Set a window to `0.0` to mean "unlimited on
+/// that window" (same semantics as the kernel-side metering check); this
+/// is **not** the same as omitting the key.
+///
+/// ```json
+/// { "max_hourly_usd": 1.0, "max_daily_usd": 10.0, "max_monthly_usd": 100.0,
+///   "alert_threshold": 0.8 }
+/// ```
+///
+/// Full-replace was chosen over PATCH semantics so `curl -X PUT` with a
+/// partial body cannot silently zero out other windows (`UserBudgetConfig`
+/// derives `#[serde(default)]`, which would otherwise default any omitted
+/// field to `0.0` / `0.8` and clear an existing cap).
+///
+/// On success the cap takes effect on the **next** LLM call — already-
+/// billed responses are returned unchanged. Persists to `config.toml` via
+/// `users::persist_users` and triggers a kernel reload (auth manager picks
+/// up the new `UserConfig.budget`).
+#[utoipa::path(
+    put,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses(
+        (status = 200, description = "Budget written and reloaded", body = serde_json::Value),
+        (status = 400, description = "Invalid or partial budget payload"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "No user matches the given id/name"),
+    )
+)]
+pub async fn update_user_budget(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    // Full replacement: every field is required. Reject missing or wrong-
+    // typed keys before disk so a partial body cannot silently zero out
+    // existing caps via `UserBudgetConfig`'s `#[serde(default)]`. A typo
+    // (`"max_hourly_usd": "1.0"` as a string) returns 400 instead of being
+    // coerced to 0.0.
+    #[allow(clippy::result_large_err)]
+    let extract_f64 = |key: &str| -> Result<f64, ApiErrorResponse> {
+        match body.get(key) {
+            Some(v) => v.as_f64().ok_or_else(|| {
+                ApiErrorResponse::bad_request(format!("{key} must be a JSON number (got {v})"))
+            }),
+            None => Err(ApiErrorResponse::bad_request(format!(
+                "{key} is required (PUT is a full replacement, not a patch)"
+            ))),
+        }
+    };
+    let max_hourly_usd = match extract_f64("max_hourly_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let max_daily_usd = match extract_f64("max_daily_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let max_monthly_usd = match extract_f64("max_monthly_usd") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let alert_threshold = match extract_f64("alert_threshold") {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
+    for (label, v) in [
+        ("max_hourly_usd", max_hourly_usd),
+        ("max_daily_usd", max_daily_usd),
+        ("max_monthly_usd", max_monthly_usd),
+    ] {
+        if v.is_nan() || v.is_infinite() || v < 0.0 {
+            return ApiErrorResponse::bad_request(format!(
+                "{label} must be a finite, non-negative number (got {v})"
+            ))
+            .into_response();
+        }
+    }
+    if !(0.0..=1.0).contains(&alert_threshold)
+        || alert_threshold.is_nan()
+        || alert_threshold.is_infinite()
+    {
+        return ApiErrorResponse::bad_request(format!(
+            "alert_threshold must be in 0.0..=1.0 (got {alert_threshold})"
+        ))
+        .into_response();
+    }
+
+    let new_budget = librefang_types::config::UserBudgetConfig {
+        max_hourly_usd,
+        max_daily_usd,
+        max_monthly_usd,
+        alert_threshold,
+    };
+
+    // Resolve the path param to a name we can match in the on-disk
+    // `[[users]]` array. Same parse-as-uuid-then-from_name shape as
+    // `user_budget_detail`.
+    let target_user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    // Capture OLD budget BEFORE persist so the audit detail can render
+    // an old→new diff. Forensics are a lot easier when one row tells you
+    // what was rotated rather than forcing a correlate-multiple-entries
+    // walk through the chain. `None` means "no cap configured" — we
+    // render that as `none` in the diff.
+    let old_budget: Option<librefang_types::config::UserBudgetConfig> = state
+        .kernel
+        .config_snapshot()
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == target_user_id)
+        .and_then(|u| u.budget.clone());
+
+    let new_budget_for_closure = new_budget.clone();
+    let user_id_param_for_closure = user_id_param.clone();
+    let result = super::users::persist_users(&state, move |users| {
+        let idx = users
+            .iter()
+            .position(|u| UserId::from_name(&u.name) == target_user_id)
+            .ok_or_else(|| {
+                super::users::PersistError::NotFound(format!(
+                    "no user matches '{user_id_param_for_closure}'"
+                ))
+            })?;
+        users[idx].budget = Some(new_budget_for_closure);
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::ConfigChange,
+                &format!(
+                    "user_budget updated for {user_id_param}: {}",
+                    fmt_user_budget_diff(old_budget.as_ref(), Some(&new_budget))
+                ),
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "budget": new_budget,
+                })),
+            )
+                .into_response()
+        }
+        Err(super::users::PersistError::NotFound(m)) => {
+            ApiErrorResponse::not_found(m).into_response()
+        }
+        Err(super::users::PersistError::BadRequest(m)) => {
+            ApiErrorResponse::bad_request(m).into_response()
+        }
+        Err(super::users::PersistError::Conflict(m)) => {
+            ApiErrorResponse::conflict(m).into_response()
+        }
+        Err(super::users::PersistError::Internal(m)) => {
+            ApiErrorResponse::internal(m).into_response()
+        }
+    }
+}
+
+/// DELETE /api/budget/users/{user_id} — clear the per-user budget.
+///
+/// Sets `UserConfig.budget` back to `None` and persists. Subsequent LLM
+/// calls from this user are bounded only by global / per-agent /
+/// per-provider caps. Returns 200 even when the user had no budget set
+/// (idempotent — same shape as `delete_agent_budget`'s sibling pattern).
+#[utoipa::path(
+    delete,
+    path = "/api/budget/users/{user_id}",
+    tag = "budget",
+    params(("user_id" = String, Path, description = "User UUID or configured name")),
+    responses(
+        (status = 200, description = "Budget cleared (or already absent)"),
+        (status = 403, description = "Caller is not an admin"),
+        (status = 404, description = "No user matches the given id/name"),
+    )
+)]
+pub async fn delete_user_budget(
+    State(state): State<Arc<AppState>>,
+    Path(user_id_param): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> Response {
+    let api_user_ref = api_user.as_ref().map(|e| &e.0);
+    if let Some(deny) = require_admin_for_user_budget(&state, api_user_ref) {
+        return deny;
+    }
+
+    let target_user_id: UserId = user_id_param
+        .parse()
+        .unwrap_or_else(|_| UserId::from_name(&user_id_param));
+
+    // Capture OLD budget BEFORE persist so the audit detail records what
+    // was actually cleared. A `None` here means the cap was already
+    // absent (idempotent delete) — we still emit the audit row but the
+    // diff renders `none → none`.
+    let old_budget: Option<librefang_types::config::UserBudgetConfig> = state
+        .kernel
+        .config_snapshot()
+        .users
+        .iter()
+        .find(|u| UserId::from_name(&u.name) == target_user_id)
+        .and_then(|u| u.budget.clone());
+
+    let user_id_param_for_closure = user_id_param.clone();
+    let result = super::users::persist_users(&state, move |users| {
+        let idx = users
+            .iter()
+            .position(|u| UserId::from_name(&u.name) == target_user_id)
+            .ok_or_else(|| {
+                super::users::PersistError::NotFound(format!(
+                    "no user matches '{user_id_param_for_closure}'"
+                ))
+            })?;
+        users[idx].budget = None;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::ConfigChange,
+                &format!(
+                    "user_budget cleared for {user_id_param}: {}",
+                    fmt_user_budget_diff(old_budget.as_ref(), None)
+                ),
+                "ok",
+                api_user_ref.map(|u| u.user_id),
+                Some("api".to_string()),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "message": "budget cleared"})),
+            )
+                .into_response()
+        }
+        Err(super::users::PersistError::NotFound(m)) => {
+            ApiErrorResponse::not_found(m).into_response()
+        }
+        Err(super::users::PersistError::BadRequest(m)) => {
+            ApiErrorResponse::bad_request(m).into_response()
+        }
+        Err(super::users::PersistError::Conflict(m)) => {
+            ApiErrorResponse::conflict(m).into_response()
+        }
+        Err(super::users::PersistError::Internal(m)) => {
+            ApiErrorResponse::internal(m).into_response()
+        }
     }
 }

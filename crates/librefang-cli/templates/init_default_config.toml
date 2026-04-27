@@ -81,6 +81,10 @@ readability = true              # Clean HTML → readable text
 main_lane = 3                   # Concurrent user messages
 cron_lane = 2                   # Concurrent scheduled jobs
 subagent_lane = 3               # Concurrent child agents
+trigger_lane = 8                # Global cap on in-flight trigger dispatches
+default_per_agent = 1           # Per-agent fallback when manifest omits cap
+                                # (1 = legacy serial behavior; raise per-agent
+                                # via [agents.*] max_concurrent_invocations)
 
 # ── Shell Execution Policy ───────────────────────────────────
 [exec_policy]
@@ -100,8 +104,8 @@ debounce_ms = 500
 
 # ── Provider URL Overrides (uncomment to use) ────────────────
 # [provider_urls]
-# ollama = "http://localhost:11434/v1"
-# vllm = "http://localhost:8000/v1"
+# ollama = "http://127.0.0.1:11434/v1"
+# vllm = "http://127.0.0.1:8000/v1"
 
 # ── Fallback Providers (LLM failover chain) ──────────────────
 # [[fallback_providers]]

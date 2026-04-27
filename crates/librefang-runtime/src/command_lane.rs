@@ -5,6 +5,7 @@
 //! - Main: user messages (3 concurrent by default)
 //! - Cron: scheduled jobs (2 concurrent)
 //! - Subagent: spawned child agents (3 concurrent)
+//! - Trigger: event-trigger dispatches (8 concurrent)
 
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -18,6 +19,11 @@ pub enum Lane {
     Cron,
     /// Subagent spawn/call execution (3 concurrent).
     Subagent,
+    /// Event-trigger dispatch — `TaskPosted`, `MessageReceived`, etc.
+    /// fired against the kernel by `task_post`/event-bus callers.
+    /// Bounded globally so a runaway producer can't spawn unbounded
+    /// tokio tasks racing for the per-agent semaphore.
+    Trigger,
 }
 
 impl std::fmt::Display for Lane {
@@ -26,6 +32,7 @@ impl std::fmt::Display for Lane {
             Lane::Main => write!(f, "main"),
             Lane::Cron => write!(f, "cron"),
             Lane::Subagent => write!(f, "subagent"),
+            Lane::Trigger => write!(f, "trigger"),
         }
     }
 }
@@ -47,9 +54,11 @@ pub struct CommandQueue {
     main_sem: Arc<Semaphore>,
     cron_sem: Arc<Semaphore>,
     subagent_sem: Arc<Semaphore>,
+    trigger_sem: Arc<Semaphore>,
     main_capacity: u32,
     cron_capacity: u32,
     subagent_capacity: u32,
+    trigger_capacity: u32,
 }
 
 impl CommandQueue {
@@ -59,22 +68,34 @@ impl CommandQueue {
             main_sem: Arc::new(Semaphore::new(3)),
             cron_sem: Arc::new(Semaphore::new(2)),
             subagent_sem: Arc::new(Semaphore::new(3)),
+            trigger_sem: Arc::new(Semaphore::new(8)),
             main_capacity: 3,
             cron_capacity: 2,
             subagent_capacity: 3,
+            trigger_capacity: 8,
         }
     }
 
     /// Create with custom capacities.
-    pub fn with_capacities(main: u32, cron: u32, subagent: u32) -> Self {
+    pub fn with_capacities(main: u32, cron: u32, subagent: u32, trigger: u32) -> Self {
         Self {
             main_sem: Arc::new(Semaphore::new(main as usize)),
             cron_sem: Arc::new(Semaphore::new(cron as usize)),
             subagent_sem: Arc::new(Semaphore::new(subagent as usize)),
+            trigger_sem: Arc::new(Semaphore::new(trigger as usize)),
             main_capacity: main,
             cron_capacity: cron,
             subagent_capacity: subagent,
+            trigger_capacity: trigger,
         }
+    }
+
+    /// Borrow the semaphore for a lane. Useful when callers need an
+    /// **owned** permit (`acquire_owned()`) so it can be moved into a
+    /// detached `tokio::spawn` task — the returned `Arc<Semaphore>` is
+    /// cheap to clone.
+    pub fn semaphore_for_lane(&self, lane: Lane) -> Arc<Semaphore> {
+        self.semaphore_for(lane).clone()
     }
 
     /// Submit work to a lane. Acquires a permit, executes the future, releases.
@@ -123,6 +144,11 @@ impl CommandQueue {
                 active: self.subagent_capacity - self.subagent_sem.available_permits() as u32,
                 capacity: self.subagent_capacity,
             },
+            LaneOccupancy {
+                lane: Lane::Trigger,
+                active: self.trigger_capacity - self.trigger_sem.available_permits() as u32,
+                capacity: self.trigger_capacity,
+            },
         ]
     }
 
@@ -131,6 +157,7 @@ impl CommandQueue {
             Lane::Main => &self.main_sem,
             Lane::Cron => &self.cron_sem,
             Lane::Subagent => &self.subagent_sem,
+            Lane::Trigger => &self.trigger_sem,
         }
     }
 }
@@ -192,16 +219,61 @@ mod tests {
     async fn test_occupancy() {
         let queue = CommandQueue::new();
         let occ = queue.occupancy();
-        assert_eq!(occ.len(), 3);
+        assert_eq!(occ.len(), 4);
+        assert_eq!(occ[0].lane, Lane::Main);
         assert_eq!(occ[0].active, 0);
         assert_eq!(occ[0].capacity, 3);
+        assert_eq!(occ[1].lane, Lane::Cron);
         assert_eq!(occ[1].capacity, 2);
+        assert_eq!(occ[2].lane, Lane::Subagent);
         assert_eq!(occ[2].capacity, 3);
+        assert_eq!(occ[3].lane, Lane::Trigger);
+        assert_eq!(occ[3].capacity, 8);
+    }
+
+    #[tokio::test]
+    async fn test_trigger_lane_caps_concurrency() {
+        // Lane::Trigger with capacity 2 — third concurrent caller waits.
+        let queue = Arc::new(CommandQueue::with_capacities(3, 2, 3, 2));
+        let trigger_sem = queue.semaphore_for_lane(Lane::Trigger);
+
+        // Burn both permits, then prove a third try_acquire fails.
+        let p1 = trigger_sem.clone().try_acquire_owned().unwrap();
+        let p2 = trigger_sem.clone().try_acquire_owned().unwrap();
+        assert!(trigger_sem.clone().try_acquire_owned().is_err());
+
+        // Occupancy reports both slots active.
+        let occ = queue.occupancy();
+        let trigger = occ.iter().find(|o| o.lane == Lane::Trigger).unwrap();
+        assert_eq!(trigger.active, 2);
+        assert_eq!(trigger.capacity, 2);
+
+        drop(p1);
+        drop(p2);
+        assert!(trigger_sem.try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_for_lane_routes_each_variant() {
+        // Distinct capacities per lane → semaphore_for_lane must return
+        // the matching one. Catches a copy-paste bug in the match arm
+        // (e.g. Lane::Trigger accidentally aliasing main_sem).
+        let queue = CommandQueue::with_capacities(2, 4, 6, 5);
+        assert_eq!(queue.semaphore_for_lane(Lane::Main).available_permits(), 2);
+        assert_eq!(queue.semaphore_for_lane(Lane::Cron).available_permits(), 4);
+        assert_eq!(
+            queue.semaphore_for_lane(Lane::Subagent).available_permits(),
+            6
+        );
+        assert_eq!(
+            queue.semaphore_for_lane(Lane::Trigger).available_permits(),
+            5
+        );
     }
 
     #[tokio::test]
     async fn test_try_submit_when_full() {
-        let queue = CommandQueue::with_capacities(1, 1, 1);
+        let queue = CommandQueue::with_capacities(1, 1, 1, 1);
 
         // Acquire the main permit
         let sem = queue.main_sem.clone();
@@ -214,10 +286,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_capacities() {
-        let queue = CommandQueue::with_capacities(2, 4, 6);
+        let queue = CommandQueue::with_capacities(2, 4, 6, 5);
         let occ = queue.occupancy();
         assert_eq!(occ[0].capacity, 2);
         assert_eq!(occ[1].capacity, 4);
         assert_eq!(occ[2].capacity, 6);
+        assert_eq!(occ[3].capacity, 5);
     }
 }

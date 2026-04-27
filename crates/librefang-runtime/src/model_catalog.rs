@@ -58,6 +58,31 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     (supports_vision, true, supports_thinking)
 }
 
+#[cfg(test)]
+impl ModelCatalog {
+    /// Test-only constructor: build a catalog directly from owned entries
+    /// without going through TOML loading. Used by sibling modules' unit
+    /// tests (`model_metadata`, etc.) so they can inject deterministic
+    /// fixtures without touching the filesystem.
+    pub fn from_entries(models: Vec<ModelCatalogEntry>, providers: Vec<ProviderInfo>) -> Self {
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for m in &models {
+            for alias in &m.aliases {
+                aliases
+                    .entry(alias.to_lowercase())
+                    .or_insert_with(|| m.id.clone());
+            }
+        }
+        Self {
+            models,
+            aliases,
+            providers,
+            suppressed_providers: HashSet::new(),
+            overrides: HashMap::new(),
+        }
+    }
+}
+
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
@@ -160,6 +185,13 @@ impl ModelCatalog {
                         if let Some(ref pid) = provider_id {
                             model.provider = pid.clone();
                         }
+                    }
+                    // Reject malformed text entries (zero context_window /
+                    // max_output_tokens) so we fail at parse instead of
+                    // silently feeding 0 into compaction / budget math.
+                    if let Err(e) = model.validate() {
+                        tracing::warn!("Skipping invalid catalog entry: {e}");
+                        continue;
                     }
                     models.push(model);
                 }
@@ -299,50 +331,39 @@ impl ModelCatalog {
             };
 
             // If the user explicitly removed this provider's key, skip
-            // fallback/CLI detection — only honour the primary env var.
+            // alias detection — only honour the primary env var.
             let suppressed = self.suppressed_providers.contains(&provider.id);
 
-            // Secondary: provider-specific fallback keys (still API-key-based auth)
-            let has_key_fallback = if suppressed {
+            // Secondary: recognised alias env var. Only officially documented
+            // aliases count (e.g. Google AI Studio docs both `GEMINI_API_KEY`
+            // and `GOOGLE_API_KEY` as equivalent). This is NOT a CLI-to-API
+            // mapping — both are explicit API keys the user set.
+            //
+            // LibreFang intentionally does NOT promote a CLI login (Claude
+            // Code, Codex, Gemini CLI, Qwen Code) to "configured" for the
+            // corresponding API provider. CLI auth and API-key auth are
+            // surfaced as separate providers so the user sees exactly what
+            // they configured — CLI logins show up under `claude-code` /
+            // `codex-cli` / `gemini-cli` / `qwen-code`, API keys under
+            // `anthropic` / `openai` / `gemini` / `qwen`.
+            let has_key_alias = if suppressed {
                 false
             } else {
-                match provider.id.as_str() {
-                    "gemini" => std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty()),
-                    "openai" | "codex" => {
-                        std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.trim().is_empty())
-                            || read_codex_credential().is_some()
-                    }
-                    _ => false,
-                }
-            };
-
-            // Tertiary: CLI tools that can serve as fallback for API providers
-            let has_cli_fallback = if suppressed {
-                false
-            } else {
-                match provider.id.as_str() {
-                    "anthropic" => crate::drivers::cli_provider_available("claude-code"),
-                    "gemini" => crate::drivers::cli_provider_available("gemini-cli"),
-                    "openai" | "codex" => crate::drivers::cli_provider_available("codex-cli"),
-                    "qwen" => crate::drivers::cli_provider_available("qwen-code"),
-                    _ => false,
-                }
+                provider.id == "gemini"
+                    && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
             };
 
             provider.auth_status = if has_key {
                 AuthStatus::Configured
-            } else if has_key_fallback {
+            } else if has_key_alias {
                 AuthStatus::AutoDetected
-            } else if has_cli_fallback {
-                AuthStatus::ConfiguredCli
             } else {
                 AuthStatus::Missing
             };
             tracing::debug!(
                 provider = %provider.id,
                 has_key,
-                has_key_fallback,
-                has_cli_fallback,
+                has_key_alias,
                 auth_status = %provider.auth_status,
                 "detect_auth result"
             );
@@ -391,6 +412,63 @@ impl ModelCatalog {
     /// List all models in the catalog.
     pub fn list_models(&self) -> &[ModelCatalogEntry] {
         &self.models
+    }
+
+    /// Find a model by canonical ID restricted to a specific provider.
+    ///
+    /// Same model ID can exist under multiple providers with different
+    /// `context_window` values (e.g. `claude-opus-4-7` is 1M on
+    /// `anthropic` but 128K on `copilot`). [`Self::find_model`] is
+    /// provider-blind and may return the first match — this method
+    /// resolves the ambiguity when the caller knows which provider the
+    /// agent is targeting.
+    ///
+    /// Resolution order:
+    /// 1. Exact `(provider, id)` match (case-insensitive on both).
+    /// 2. Exact `(provider, alias)` match resolved via the alias map.
+    /// 3. `None`. Callers fall back to [`Self::find_model`] for
+    ///    cross-provider lookup.
+    ///
+    /// `provider` matches case-insensitively. An empty `provider`
+    /// disables the provider filter and behaves like
+    /// [`Self::find_model`].
+    pub fn find_model_for_provider(
+        &self,
+        provider: &str,
+        id_or_alias: &str,
+    ) -> Option<&ModelCatalogEntry> {
+        if provider.is_empty() {
+            return self.find_model(id_or_alias);
+        }
+        let want_provider = provider.to_lowercase();
+        let want_id = id_or_alias.to_lowercase();
+
+        // Pass 1: exact (provider, id) match. Custom-tier wins, otherwise
+        // first occurrence (mirrors the precedence in `find_model`).
+        let mut found: Option<&ModelCatalogEntry> = None;
+        for m in &self.models {
+            if m.provider.to_lowercase() == want_provider && m.id.to_lowercase() == want_id {
+                if m.tier == ModelTier::Custom {
+                    return Some(m);
+                }
+                if found.is_none() {
+                    found = Some(m);
+                }
+            }
+        }
+        if let Some(entry) = found {
+            return Some(entry);
+        }
+
+        // Pass 2: alias resolution restricted to the provider.
+        if let Some(canonical) = self.aliases.get(&want_id) {
+            return self
+                .models
+                .iter()
+                .find(|m| m.provider.to_lowercase() == want_provider && m.id == *canonical);
+        }
+
+        None
     }
 
     /// Find a model by its canonical ID, display name, or alias.
@@ -789,6 +867,7 @@ impl ModelCatalog {
                 supports_streaming: supports_tools,
                 supports_thinking,
                 aliases: Vec::new(),
+                ..Default::default()
             });
             added += 1;
         }
@@ -938,6 +1017,11 @@ impl ModelCatalog {
                     continue;
                 }
             }
+            // Modality-aware schema gate (see ModelCatalogEntry::validate).
+            if let Err(e) = model.validate() {
+                tracing::warn!("Skipping invalid catalog entry: {e}");
+                continue;
+            }
             let lower_id = model.id.to_lowercase();
             let lower_provider = model.provider.to_lowercase();
             if self.models.iter().any(|m| {
@@ -1086,55 +1170,6 @@ fn resolve_home_dir() -> std::path::PathBuf {
                 .unwrap_or_else(std::env::temp_dir)
                 .join(".librefang")
         })
-}
-
-/// Read an OpenAI API key from the Codex CLI credential file.
-///
-/// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-/// Returns `Some(api_key)` if the file exists and contains a valid, non-expired token.
-/// Only checks presence — the actual key value is used transiently, never stored.
-pub fn read_codex_credential() -> Option<String> {
-    let codex_home = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var("USERPROFILE")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-        })?;
-
-    let auth_path = codex_home.join("auth.json");
-    let content = std::fs::read_to_string(&auth_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    // Check expiry if present
-    if let Some(expires_at) = parsed.get("expires_at").and_then(|v| v.as_i64()) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if now >= expires_at {
-            return None; // Expired
-        }
-    }
-
-    parsed
-        .get("api_key")
-        .or_else(|| parsed.get("token"))
-        // Codex CLI OAuth stores the token nested at tokens.id_token
-        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -1290,6 +1325,71 @@ id = "acme"
         assert!(catalog.find_model("nonexistent-model").is_none());
     }
 
+    /// `find_model_for_provider` must filter by provider so the same model
+    /// id under different providers (which can differ in `context_window`)
+    /// resolves to the right entry. The test catalog has
+    /// `claude-sonnet-4-20250514` only under `anthropic`, so a copilot
+    /// lookup of the same id must miss.
+    #[test]
+    fn test_find_model_for_provider_filters_by_provider() {
+        let catalog = test_catalog();
+        assert!(
+            catalog
+                .find_model_for_provider("anthropic", "claude-sonnet-4-20250514")
+                .is_some(),
+            "anthropic catalog hit expected"
+        );
+        assert!(
+            catalog
+                .find_model_for_provider("copilot", "claude-sonnet-4-20250514")
+                .is_none(),
+            "no copilot entry for the anthropic id should exist",
+        );
+    }
+
+    /// Empty `provider` arg disables filtering and behaves like
+    /// `find_model`. Useful when the agent's manifest has no provider
+    /// configured (e.g. fresh install before any provider key is set).
+    #[test]
+    fn test_find_model_for_provider_empty_provider_falls_back() {
+        let catalog = test_catalog();
+        let via_filtered = catalog
+            .find_model_for_provider("", "claude-sonnet-4-20250514")
+            .expect("empty provider should match anyway");
+        let via_unfiltered = catalog
+            .find_model("claude-sonnet-4-20250514")
+            .expect("unfiltered match");
+        assert_eq!(via_filtered.id, via_unfiltered.id);
+    }
+
+    /// Provider matching is case-insensitive — registries sometimes
+    /// store providers as `Anthropic` while manifests use `anthropic`.
+    #[test]
+    fn test_find_model_for_provider_case_insensitive_provider() {
+        let catalog = test_catalog();
+        assert!(catalog
+            .find_model_for_provider("ANTHROPIC", "claude-sonnet-4-20250514")
+            .is_some(),);
+    }
+
+    /// Alias resolution is also provider-scoped: `"sonnet"` must resolve
+    /// to the anthropic entry under `provider="anthropic"`, but a query
+    /// against an unrelated provider with the same alias must miss.
+    #[test]
+    fn test_find_model_for_provider_alias_is_scoped() {
+        let catalog = test_catalog();
+        let r = catalog
+            .find_model_for_provider("anthropic", "sonnet")
+            .expect("alias under anthropic");
+        assert_eq!(r.id, "claude-sonnet-4-6");
+        assert!(
+            catalog
+                .find_model_for_provider("openai", "sonnet")
+                .is_none(),
+            "alias must not leak across providers",
+        );
+    }
+
     #[test]
     fn test_resolve_alias() {
         let catalog = test_catalog();
@@ -1348,6 +1448,103 @@ id = "acme"
         assert_eq!(ollama.auth_status, AuthStatus::NotRequired);
         let vllm = catalog.get_provider("vllm").unwrap();
         assert_eq!(vllm.auth_status, AuthStatus::NotRequired);
+    }
+
+    /// Module-scope mutex for tests that mutate process env vars.
+    ///
+    /// `cargo test` runs tests in parallel by default, so any two tests
+    /// touching the same env var must share this lock — otherwise they race
+    /// on process-global state. Each test declaring its own `static` was the
+    /// earlier bug: two disjoint mutexes = no mutual exclusion.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression: a CLI login must NOT auto-configure the corresponding API
+    /// provider. `anthropic` / `openai` / `gemini` / `qwen` only light up
+    /// when the user sets their own API key. CLI logins surface via their
+    /// dedicated provider entries (`claude-code`, `codex-cli`, etc.).
+    ///
+    /// This test runs with no provider API-key env vars set, so every
+    /// API provider should report `Missing`. We only assert on the four
+    /// providers that previously borrowed CLI credentials — the others
+    /// are naturally Missing.
+    #[test]
+    fn detect_auth_does_not_promote_api_providers_from_cli_login() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let preserved: Vec<(&str, Option<String>)> = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "QWEN_API_KEY",
+            "DASHSCOPE_API_KEY",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+        for (k, _) in &preserved {
+            // SAFETY: single-threaded section guarded by ENV_LOCK.
+            unsafe { std::env::remove_var(k) };
+        }
+
+        let mut catalog = test_catalog();
+        catalog.detect_auth();
+
+        for id in ["anthropic", "openai", "gemini", "qwen"] {
+            let p = catalog.get_provider(id).unwrap();
+            assert_eq!(
+                p.auth_status,
+                AuthStatus::Missing,
+                "{id} must be Missing when no API key is set, regardless of CLI login"
+            );
+        }
+
+        for (k, v) in preserved {
+            // SAFETY: single-threaded section guarded by ENV_LOCK.
+            unsafe {
+                if let Some(val) = v {
+                    std::env::set_var(k, val);
+                } else {
+                    std::env::remove_var(k);
+                }
+            }
+        }
+    }
+
+    /// `GOOGLE_API_KEY` remains a recognised alias for `GEMINI_API_KEY`
+    /// (officially documented by Google AI Studio as equivalent). Setting
+    /// it should promote Gemini to AutoDetected — this is a real API key
+    /// the user typed, not a CLI-credential borrow.
+    #[test]
+    fn google_api_key_alias_still_recognised_for_gemini() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev_gemini = std::env::var("GEMINI_API_KEY").ok();
+        let prev_google = std::env::var("GOOGLE_API_KEY").ok();
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::set_var("GOOGLE_API_KEY", "test-alias-key");
+        }
+
+        let mut catalog = test_catalog();
+        catalog.detect_auth();
+        let gemini = catalog.get_provider("gemini").unwrap();
+        assert_eq!(gemini.auth_status, AuthStatus::AutoDetected);
+
+        // SAFETY: single-threaded section guarded by ENV_LOCK.
+        unsafe {
+            if let Some(v) = prev_gemini {
+                std::env::set_var("GEMINI_API_KEY", v);
+            } else {
+                std::env::remove_var("GEMINI_API_KEY");
+            }
+            if let Some(v) = prev_google {
+                std::env::set_var("GOOGLE_API_KEY", v);
+            } else {
+                std::env::remove_var("GOOGLE_API_KEY");
+            }
+        }
     }
 
     #[test]
@@ -1592,6 +1789,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: vec!["custom-qwen".to_string()],
+            ..Default::default()
         });
 
         assert!(added);
@@ -1620,6 +1818,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         assert!(catalog.add_custom_model(ModelCatalogEntry {
@@ -1636,6 +1835,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         let qwen_count = catalog
@@ -1679,6 +1879,7 @@ id = "acme"
             supports_streaming: true,
             supports_thinking: false,
             aliases: Vec::new(),
+            ..Default::default()
         }));
 
         // find_model should now return the custom entry, not the builtin
@@ -1792,7 +1993,7 @@ id = "acme"
     fn test_set_provider_url() {
         let mut catalog = test_catalog();
         let old_url = catalog.get_provider("ollama").unwrap().base_url.clone();
-        assert_eq!(old_url, "http://localhost:11434/v1");
+        assert_eq!(old_url, "http://127.0.0.1:11434/v1");
 
         let updated = catalog.set_provider_url("ollama", "http://192.168.1.100:11434/v1");
         assert!(updated);
@@ -1837,7 +2038,7 @@ id = "acme"
         // lmstudio should be unchanged
         assert_eq!(
             catalog.get_provider("lmstudio").unwrap().base_url,
-            "http://localhost:1234/v1"
+            "http://127.0.0.1:1234/v1"
         );
     }
 

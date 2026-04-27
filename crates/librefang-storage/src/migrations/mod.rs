@@ -83,4 +83,14 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "knowledge_graph_v1",
         sql: include_str!("sql/011_knowledge_graph.surql"),
     },
+    Migration {
+        version: 12,
+        name: "audit_user_channel_v1",
+        sql: include_str!("sql/012_audit_user_channel.surql"),
+    },
+    Migration {
+        version: 13,
+        name: "usage_user_id_v1",
+        sql: include_str!("sql/013_usage_user_id.surql"),
+    },
 ];

@@ -887,6 +887,10 @@ impl LlmDriver for VertexAiDriver {
 
         Err(last_error.unwrap_or_else(|| LlmError::Http("Max retries exceeded".into())))
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::Google
+    }
 }
 
 #[cfg(test)]

@@ -1271,6 +1271,96 @@
       "proof": "docs/integration-test-matrix.md",
       "scenario": "openai_compat_contract_http",
       "status": "covered"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/hand-runtime-config",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/runtime",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/stop",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/stream",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/trajectory",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/audit/export",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/audit/query",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/budget/users",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/budget/users/{user_id}",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/taint-rules",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/tools/{name}/invoke",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/import",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/{name}",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/{name}/rotate-key",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
     }
   ],
   "policy": "Every OpenAPI path must be marked covered or explicitly exempted. Covered paths must reference a scenario in docs/integration-test-matrix.md. Exemptions are temporary and reviewed with the matrix.",

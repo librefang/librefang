@@ -18,7 +18,6 @@ librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -27,6 +26,3 @@ dashmap = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
-
-[dev-dependencies]
-tokio-test = { workspace = true }

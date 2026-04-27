@@ -1,14 +1,14 @@
 //! Usage tracking store — records LLM usage events for cost monitoring.
 
 use chrono::Utc;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// A single usage event recording an LLM call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRecord {
     /// Which agent made the call.
     pub agent_id: AgentId,
@@ -29,6 +29,52 @@ pub struct UsageRecord {
     pub tool_calls: u32,
     /// Latency in milliseconds.
     pub latency_ms: u64,
+    /// RBAC M5: LibreFang user that triggered the call (resolved from the
+    /// API caller, channel binding, or sender context). `None` for
+    /// kernel-internal events (cron / boot tasks) and pre-M5 records that
+    /// pre-date this column.
+    #[serde(default)]
+    pub user_id: Option<UserId>,
+    /// RBAC M5: Channel the call originated from (e.g. "telegram",
+    /// "discord", "api", "cron", "cli"). `None` for unattributed calls.
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+impl UsageRecord {
+    /// Convenience constructor for tests and call sites that do not yet
+    /// attribute usage to a user / channel. Keeps the new optional fields
+    /// out of every existing struct literal in the kernel.
+    ///
+    /// Eight positional args is over the clippy default of seven, but the
+    /// shape mirrors the metering record schema 1:1 and grouping into a
+    /// builder would push call-site noise into ~20 internal kernel paths
+    /// that touch this constructor without gaining type safety. Suppression
+    /// is local to this fn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn anonymous(
+        agent_id: AgentId,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        tool_calls: u32,
+        latency_ms: u64,
+    ) -> Self {
+        Self {
+            agent_id,
+            provider: provider.into(),
+            model: model.into(),
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            tool_calls,
+            latency_ms,
+            user_id: None,
+            channel: None,
+        }
+    }
 }
 
 /// Summary of usage over a period.
@@ -86,6 +132,21 @@ pub struct ModelPerformance {
     pub avg_latency_per_call: f64,
 }
 
+/// Per-user spend ranking row (RBAC M5).
+///
+/// `user_id` is the stringified [`librefang_types::agent::UserId`] —
+/// callers re-parse it via `FromStr` if they need the typed form. Three
+/// time windows are precomputed by the SQL so the dashboard doesn't have
+/// to issue four queries per row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSpendRanking {
+    pub user_id: String,
+    pub hourly_cost_usd: f64,
+    pub daily_cost_usd: f64,
+    pub monthly_cost_usd: f64,
+    pub call_count: u64,
+}
+
 /// Daily usage breakdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyBreakdown {
@@ -125,9 +186,12 @@ impl UsageStore {
     fn insert_record(conn: &Connection, record: &UsageRecord) -> LibreFangResult<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        // RBAC M5: persist user_id/channel alongside the existing columns.
+        // Schema v23 added these as NULL-able, so missing attribution still
+        // round-trips as NULL.
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -139,6 +203,8 @@ impl UsageStore {
                 record.cost_usd,
                 record.tool_calls as i64,
                 record.latency_ms as i64,
+                record.user_id.map(|u| u.to_string()),
+                record.channel.as_deref(),
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -790,6 +856,131 @@ impl UsageStore {
         Ok(tokens.max(0) as u64)
     }
 
+    // ── Per-user spend rollup (RBAC M5) ─────────────────────────────────
+    //
+    // Pre-M5 rows have `user_id IS NULL` and never match these queries —
+    // that is the right default since they pre-date attribution and would
+    // otherwise be assigned to whichever user the operator looks at first.
+    // The `idx_usage_user_time` index added in v23 keeps these aggregates
+    // O(log n + k) regardless of total table size.
+    //
+    // **Time zone:** SQLite's `datetime('now', 'start of day')` returns
+    // the UTC day boundary, NOT the server-local boundary. Operators in
+    // non-UTC zones see "today's spend" sliced on the UTC midnight
+    // (e.g. an Asia/Shanghai admin watching at 06:00 local sees the
+    // window that started at 14:00 the previous evening). This matches
+    // the existing global / per-agent rollups (`query_global_*`,
+    // `query_agent_*`) and the server-side `usage_events.timestamp` —
+    // making spend totals comparable across all the rollups in this
+    // module. If a future operator wants local-day buckets, swap the
+    // SQL to `datetime('now', 'localtime', 'start of day', 'utc')` in
+    // every roll-up and update the `BudgetConfig` doc to match.
+
+    /// Total cost in the last hour (UTC sliding window) for a single user.
+    pub fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cost: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE user_id = ?1 AND timestamp > datetime('now', '-1 hour')",
+                rusqlite::params![user_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(cost)
+    }
+
+    /// Total cost today (UTC calendar day, see module-level note) for a single user.
+    pub fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cost: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE user_id = ?1 AND timestamp > datetime('now', 'start of day')",
+                rusqlite::params![user_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(cost)
+    }
+
+    /// Total cost in the current UTC calendar month (see module-level note) for a single user.
+    pub fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cost: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE user_id = ?1 AND timestamp > datetime('now', 'start of month')",
+                rusqlite::params![user_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(cost)
+    }
+
+    /// Per-user spend ranking, sorted by daily cost descending.
+    ///
+    /// Anonymous spend (rows with `user_id IS NULL`) is excluded — the
+    /// ranking is meant for human attribution, not totals. `limit` caps
+    /// the result set; pass `None` for "no limit".
+    pub fn query_user_ranking(&self, limit: Option<u32>) -> LibreFangResult<Vec<UserSpendRanking>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        // Aggregate three time windows in a single round-trip via
+        // CASE-when sums, then sort by daily desc — the interesting
+        // signal for "who spent the most today". `LIMIT` is bound as a
+        // parameter (rather than format!()'d into the SQL) to match the
+        // rest of this module — the value is a clamped u32 so injection
+        // isn't a real risk, but keeping the convention uniform avoids
+        // future copy-paste from this site landing on user-controlled
+        // input.
+        const RANKING_SQL: &str = "SELECT user_id, \
+                COALESCE(SUM(CASE WHEN timestamp > datetime('now', '-1 hour') THEN cost_usd ELSE 0 END), 0.0) AS hourly, \
+                COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of day') THEN cost_usd ELSE 0 END), 0.0) AS daily, \
+                COALESCE(SUM(CASE WHEN timestamp > datetime('now', 'start of month') THEN cost_usd ELSE 0 END), 0.0) AS monthly, \
+                COUNT(*) AS calls \
+             FROM usage_events \
+             WHERE user_id IS NOT NULL \
+             GROUP BY user_id \
+             ORDER BY daily DESC, monthly DESC \
+             LIMIT ?1";
+        // SQLite treats a negative LIMIT as "no limit" — so `None` maps to
+        // -1 and `Some(n)` clamps to 1000 (same hard cap the call sites use).
+        let bound_limit: i64 = match limit {
+            Some(n) => n.min(1000) as i64,
+            None => -1,
+        };
+
+        let mut stmt = conn
+            .prepare(RANKING_SQL)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![bound_limit], |row| {
+                Ok(UserSpendRanking {
+                    user_id: row.get::<_, String>(0)?,
+                    hourly_cost_usd: row.get(1)?,
+                    daily_cost_usd: row.get(2)?,
+                    monthly_cost_usd: row.get(3)?,
+                    call_count: row.get::<_, i64>(4)?.max(0) as u64,
+                })
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let out: Vec<UserSpendRanking> = rows.filter_map(|r| r.ok()).collect();
+        Ok(out)
+    }
+
     /// Query total cost across all agents for the current hour.
     pub fn query_global_hourly(&self) -> LibreFangResult<f64> {
         let conn = self
@@ -1066,6 +1257,7 @@ mod tests {
                 cost_usd: 0.001,
                 tool_calls: 2,
                 latency_ms: 150,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1079,6 +1271,7 @@ mod tests {
                 cost_usd: 0.01,
                 tool_calls: 1,
                 latency_ms: 300,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1106,6 +1299,7 @@ mod tests {
                 cost_usd: 0.001,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1119,6 +1313,7 @@ mod tests {
                 cost_usd: 0.005,
                 tool_calls: 1,
                 latency_ms: 200,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1143,6 +1338,7 @@ mod tests {
                     cost_usd: 0.001,
                     tool_calls: 0,
                     latency_ms: 100,
+                    ..Default::default()
                 })
                 .unwrap();
         }
@@ -1157,6 +1353,7 @@ mod tests {
                 cost_usd: 0.01,
                 tool_calls: 1,
                 latency_ms: 250,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1183,6 +1380,7 @@ mod tests {
                 cost_usd: 0.05,
                 tool_calls: 0,
                 latency_ms: 150,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1205,6 +1403,7 @@ mod tests {
                 cost_usd: 0.123,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1227,6 +1426,7 @@ mod tests {
                 cost_usd: 0.001,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1263,6 +1463,7 @@ mod tests {
                     cost_usd: cost,
                     tool_calls: 0,
                     latency_ms: latency,
+                    ..Default::default()
                 })
                 .unwrap();
         }
@@ -1277,6 +1478,7 @@ mod tests {
                 cost_usd: 0.01,
                 tool_calls: 1,
                 latency_ms: 500,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1313,6 +1515,7 @@ mod tests {
                 cost_usd: 0.001,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             },
             1.0,   // hourly
             10.0,  // daily
@@ -1341,6 +1544,7 @@ mod tests {
                 cost_usd: 0.009,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1355,6 +1559,7 @@ mod tests {
                 cost_usd: 0.002,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             },
             0.01, // hourly limit
             10.0,
@@ -1386,6 +1591,7 @@ mod tests {
                 cost_usd: 0.008,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1400,6 +1606,7 @@ mod tests {
                 cost_usd: 0.005,
                 tool_calls: 0,
                 latency_ms: 100,
+                ..Default::default()
             },
             1.0,   // agent hourly (fine)
             10.0,  // agent daily (fine)
@@ -1415,5 +1622,102 @@ mod tests {
         // Agent B's record was NOT inserted
         let summary = store.query_summary(Some(agent_b)).unwrap();
         assert_eq!(summary.call_count, 0);
+    }
+
+    // ── RBAC M5: per-user spend rollup ──────────────────────────────────
+
+    #[test]
+    fn test_user_spend_rollup_per_window() {
+        // Records carrying user_id must roll up cleanly into hourly /
+        // daily / monthly totals; records WITHOUT user_id must not leak
+        // into any user's spend bucket (anonymous spend stays anonymous).
+        let store = setup();
+        let alice = librefang_types::agent::UserId::from_name("Alice");
+        let bob = librefang_types::agent::UserId::from_name("Bob");
+
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 0.10,
+                user_id: Some(alice),
+                channel: Some("api".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 0.05,
+                user_id: Some(alice),
+                channel: Some("telegram".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 1.0,
+                user_id: Some(bob),
+                channel: Some("api".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        // Anonymous spend — must NOT be attributed to anyone.
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 999.0,
+                user_id: None,
+                channel: Some("cron".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!((store.query_user_hourly(alice).unwrap() - 0.15).abs() < 1e-9);
+        assert!((store.query_user_daily(alice).unwrap() - 0.15).abs() < 1e-9);
+        assert!((store.query_user_monthly(alice).unwrap() - 0.15).abs() < 1e-9);
+        assert!((store.query_user_hourly(bob).unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_user_ranking_excludes_anonymous_and_orders_by_daily() {
+        let store = setup();
+        let alice = librefang_types::agent::UserId::from_name("Alice");
+        let bob = librefang_types::agent::UserId::from_name("Bob");
+
+        // Bob spends more than Alice; an anonymous spike is loudest of all
+        // but must NOT appear in the ranking.
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 5.0,
+                user_id: Some(alice),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 12.5,
+                user_id: Some(bob),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd: 9999.0,
+                user_id: None,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let ranking = store.query_user_ranking(Some(10)).unwrap();
+        assert_eq!(ranking.len(), 2);
+        // Bob first (higher daily), Alice second.
+        assert_eq!(ranking[0].user_id, bob.to_string());
+        assert_eq!(ranking[1].user_id, alice.to_string());
+        assert!((ranking[0].daily_cost_usd - 12.5).abs() < 1e-9);
+        assert!((ranking[1].daily_cost_usd - 5.0).abs() < 1e-9);
     }
 }

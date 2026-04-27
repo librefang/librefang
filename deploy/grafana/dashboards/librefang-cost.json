@@ -1,52 +1,161 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
-    { "title": "Overview", "url": "/d/librefang-overview", "type": "link", "icon": "apps", "tooltip": "System Overview" },
-    { "title": "LLM & Tokens", "url": "/d/librefang-llm", "type": "link", "icon": "bolt", "tooltip": "LLM & Token Usage" },
-    { "title": "HTTP & API", "url": "/d/librefang-http", "type": "link", "icon": "cloud", "tooltip": "HTTP & API Metrics" }
+    {
+      "title": "Overview",
+      "url": "/d/librefang-overview",
+      "type": "link",
+      "icon": "apps",
+      "tooltip": "System Overview"
+    },
+    {
+      "title": "LLM & Tokens",
+      "url": "/d/librefang-llm",
+      "type": "link",
+      "icon": "bolt",
+      "tooltip": "LLM & Token Usage"
+    },
+    {
+      "title": "HTTP & API",
+      "url": "/d/librefang-http",
+      "type": "link",
+      "icon": "cloud",
+      "tooltip": "HTTP & API Metrics"
+    },
+    {
+      "title": "Search Traces (Tempo)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Tempo datasource, prefilled with service.name=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-tempo\",{\"queryType\":\"traceql\",\"query\":\"{ resource.service.name=\\\"librefang\\\" }\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Search Logs (Loki)",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open Grafana Explore on the Loki datasource, prefilled with service=librefang",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-loki\",{\"expr\":\"{service=\\\"librefang\\\"}\"}]",
+      "targetBlank": false,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true
+    },
+    {
+      "title": "Jaeger UI",
+      "type": "link",
+      "icon": "external link",
+      "tooltip": "Open standalone Jaeger UI for waterfall / span-diff / service-deps views",
+      "url": "http://localhost:16686/search?service=librefang",
+      "targetBlank": true,
+      "tags": [],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false
+    }
   ],
   "panels": [
     {
       "title": "Cost Today (USD)",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
           "decimals": 4,
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 1 },
-            { "color": "orange", "value": 5 },
-            { "color": "red", "value": 10 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "librefang_cost_usd_today", "legendFormat": "Cost Today", "refId": "A" }
+        {
+          "expr": "librefang_cost_usd_today",
+          "legendFormat": "Cost Today",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Total Tokens (1h window)",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
           "unit": "short"
         },
         "overrides": []
@@ -54,21 +163,49 @@
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Tokens", "refId": "A" }
+        {
+          "expr": "sum(librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "Tokens",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "LLM Calls (1h window)",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
           "unit": "short"
         },
         "overrides": []
@@ -76,21 +213,41 @@
       "options": {
         "colorMode": "value",
         "graphMode": "area",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
-        { "expr": "sum(librefang_llm_calls{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Calls", "refId": "A" }
+        {
+          "expr": "sum(librefang_llm_calls{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "Calls",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Cost Trend",
       "description": "Today's estimated cost over time",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "USD",
@@ -100,36 +257,75 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" },
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
             "gradientMode": "scheme"
           },
           "unit": "currencyUSD",
           "decimals": 4,
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 1 },
-            { "color": "red", "value": 10 }
-          ]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "librefang_cost_usd_today", "legendFormat": "Cost Today", "refId": "A" }
+        {
+          "expr": "librefang_cost_usd_today",
+          "legendFormat": "Cost Today",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Tokens by Agent (cost proxy)",
-      "description": "Token consumption per agent — more tokens = higher cost",
+      "description": "Token consumption per agent \u2014 more tokens = higher cost",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "axisBorderShow": false,
             "axisLabel": "tokens",
@@ -139,56 +335,127 @@
             "pointSize": 5,
             "showPoints": "auto",
             "spanNulls": false,
-            "stacking": { "group": "A", "mode": "normal" }
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
           },
           "unit": "short"
         },
         "overrides": []
       },
       "options": {
-        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "sortBy": "Last *", "sortDesc": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "sortBy": "Last *",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
-        { "expr": "librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}", "legendFormat": "{{agent}} ({{provider}}/{{model}})", "refId": "A" }
+        {
+          "expr": "librefang_tokens{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"}",
+          "legendFormat": "{{agent}} ({{provider}}/{{model}})",
+          "refId": "A"
+        }
       ]
     },
     {
       "title": "Cost by Model (token share)",
-      "description": "Token distribution by provider/model — output tokens cost more",
+      "description": "Token distribution by provider/model \u2014 output tokens cost more",
       "type": "piechart",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "color": {
+            "mode": "palette-classic"
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
         "pieType": "donut",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "tooltip": { "mode": "single" }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "sum by (provider, model) (librefang_tokens{provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "{{provider}}/{{model}}", "refId": "A", "instant": true }
+        {
+          "expr": "sum by (provider, model) (librefang_tokens{provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "{{provider}}/{{model}}",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Output Tokens by Agent (highest cost)",
       "description": "Output tokens are typically 3-5x more expensive than input tokens",
       "type": "bargauge",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 10000 },
-            { "color": "red", "value": 100000 }
-          ]},
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10000
+              },
+              {
+                "color": "red",
+                "value": 100000
+              }
+            ]
+          },
           "unit": "short"
         },
         "overrides": []
@@ -199,56 +466,141 @@
         "minVizWidth": 0,
         "namePlacement": "auto",
         "orientation": "horizontal",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "showUnfilled": true,
         "sizing": "auto",
         "valueMode": "color"
       },
       "targets": [
-        { "expr": "topk(10, librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "{{agent}} ({{model}})", "refId": "A", "instant": true }
+        {
+          "expr": "topk(10, librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "{{agent}} ({{model}})",
+          "refId": "A",
+          "instant": true
+        }
       ]
     },
     {
       "title": "Input / Output Token Ratio",
       "description": "Higher output ratio = more expensive. Ideal ratio depends on use case.",
       "type": "piechart",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "librefang-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "color": {
+            "mode": "palette-classic"
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Input (cheaper)" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "Output (expensive)" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Input (cheaper)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Output (expensive)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
         "pieType": "donut",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "tooltip": { "mode": "single" }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       },
       "targets": [
-        { "expr": "sum(librefang_tokens_input{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Input (cheaper)", "refId": "A", "instant": true },
-        { "expr": "sum(librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})", "legendFormat": "Output (expensive)", "refId": "B", "instant": true }
+        {
+          "expr": "sum(librefang_tokens_input{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "Input (cheaper)",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "expr": "sum(librefang_tokens_output{agent=~\"$agent\",provider=~\"$provider\",model=~\"$model\"})",
+          "legendFormat": "Output (expensive)",
+          "refId": "B",
+          "instant": true
+        }
       ]
     }
   ],
   "schemaVersion": 39,
-  "tags": ["librefang", "cost", "budget"],
+  "tags": [
+    "librefang",
+    "cost",
+    "budget"
+  ],
   "templating": {
     "list": [
       {
         "name": "agent",
         "label": "Agent",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "librefang-prometheus"
+        },
         "query": "label_values(librefang_tokens, agent)",
         "refresh": 2,
         "includeAll": true,
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "multi": true,
         "sort": 1
       },
@@ -256,12 +608,19 @@
         "name": "provider",
         "label": "Provider",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "librefang-prometheus"
+        },
         "query": "label_values(librefang_tokens, provider)",
         "refresh": 2,
         "includeAll": true,
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "multi": true,
         "sort": 1
       },
@@ -269,18 +628,28 @@
         "name": "model",
         "label": "Model",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "librefang-prometheus" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "librefang-prometheus"
+        },
         "query": "label_values(librefang_tokens{provider=~\"$provider\"}, model)",
         "refresh": 2,
         "includeAll": true,
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "multi": true,
         "sort": 1
       }
     ]
   },
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "LibreFang Cost & Budget",

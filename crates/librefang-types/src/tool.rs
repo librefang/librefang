@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Definition of a tool that an agent can use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +80,13 @@ pub struct ToolResult {
     /// LLM cannot see (or echo) the private text it just sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_notice: Option<String>,
+    /// Side-channel carrying a tool schema that should be registered in the
+    /// session's lazy-loaded tool cache so it becomes callable on the next
+    /// turn. Populated by the `tool_load` meta-tool (issue #3044); consumed
+    /// by the agent loop. Independent of `content`, which also carries the
+    /// schema JSON for the LLM to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_tool: Option<ToolDefinition>,
 }
 
 impl ToolResult {
@@ -114,6 +122,7 @@ impl ToolResult {
             approval_request_id: Some(request_id),
             tool_name: Some(tool_name),
             owner_notice: None,
+            loaded_tool: None,
         }
     }
 
@@ -144,6 +153,20 @@ pub struct DeferredToolExecution {
     pub sender_id: Option<String>,
     pub channel: Option<String>,
     pub workspace_root: Option<std::path::PathBuf>,
+    /// `true` when the approval was demanded by the per-user RBAC gate
+    /// (`UserToolGate::NeedsApproval`) rather than the standard
+    /// `require_approval` list. The kernel's `submit_tool_approval` MUST
+    /// honour this flag — even hand-tagged "trusted" agents that normally
+    /// auto-approve must surface the approval to a human, otherwise a
+    /// Viewer/User chatting with a hand-agent gains the agent's full
+    /// tool surface (RBAC M3, issue #3054 Phase 2).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub force_human: bool,
+}
+
+#[inline]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Outcome of submitting a deferred tool for approval.
@@ -204,11 +227,18 @@ pub struct DecisionTrace {
 
 /// Normalize a JSON Schema for cross-provider compatibility.
 ///
-/// Some providers (Gemini, Groq) reject `anyOf` in tool schemas.
-/// This function:
+/// Several providers (Gemini, Groq, OpenAI strict mode, …) ship strict JSON
+/// Schema validators that reject keywords Anthropic accepts natively (e.g.
+/// `anyOf`, `$ref`, `additionalProperties`, type unions). This function:
 /// - Converts `anyOf` arrays of simple types to flat `enum` arrays
-/// - Strips `$schema` keys (not accepted by most providers)
+/// - Strips `$schema`, `$defs`, `$ref`, `additionalProperties`, `format`, …
+/// - Resolves `$ref` against `$defs` before stripping
 /// - Recursively walks `properties` and `items`
+/// - Injects a fallback `items: {type: "string"}` for `array` schemas missing
+///   `items` (otherwise Gemini returns `INVALID_ARGUMENT`)
+///
+/// Anthropic is short-circuited at the top — its API accepts the schema as-is.
+/// Every other provider goes through `normalize_schema_for_strict_validators`.
 pub fn normalize_schema_for_provider(
     schema: &serde_json::Value,
     provider: &str,
@@ -217,10 +247,17 @@ pub fn normalize_schema_for_provider(
     if provider == "anthropic" {
         return schema.clone();
     }
-    normalize_schema_recursive(schema)
+    normalize_schema_for_strict_validators(schema)
 }
 
-fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
+/// Recursive worker for `normalize_schema_for_provider`.
+///
+/// Despite historical naming this routine is **not Gemini-specific** — it runs
+/// for every non-Anthropic provider (gemini, openai, groq, deepseek, bedrock,
+/// vertex, …) because they all share strict-validator semantics. Any change
+/// here affects all of them; verify against each driver before tightening
+/// behaviour.
+fn normalize_schema_for_strict_validators(schema: &serde_json::Value) -> serde_json::Value {
     let obj = match schema.as_object() {
         Some(o) => o,
         None => {
@@ -229,7 +266,7 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
             if let Some(s) = schema.as_str() {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
                     if parsed.is_object() {
-                        return normalize_schema_recursive(&parsed);
+                        return normalize_schema_for_strict_validators(&parsed);
                     }
                 }
             }
@@ -320,7 +357,10 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
             if let Some(props) = value.as_object() {
                 let mut new_props = serde_json::Map::new();
                 for (prop_name, prop_schema) in props {
-                    new_props.insert(prop_name.clone(), normalize_schema_recursive(prop_schema));
+                    new_props.insert(
+                        prop_name.clone(),
+                        normalize_schema_for_strict_validators(prop_schema),
+                    );
                 }
                 result.insert(key.clone(), serde_json::Value::Object(new_props));
                 continue;
@@ -329,11 +369,31 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
 
         // Recurse into items
         if key == "items" {
-            result.insert(key.clone(), normalize_schema_recursive(value));
+            result.insert(key.clone(), normalize_schema_for_strict_validators(value));
             continue;
         }
 
         result.insert(key.clone(), value.clone());
+    }
+
+    // Strict-validator providers (Gemini in particular) require `items` for
+    // every array-typed parameter. JSON Schema allows arrays without `items`,
+    // but the Gemini API rejects such schemas with INVALID_ARGUMENT.
+    //
+    // Fallback: inject `{"type": "string"}` so the request is at least accepted.
+    // This is **better than dropping the tool**, but not ideal: when the array
+    // truly contains numbers/objects the model will be told it is a `string[]`
+    // and may produce wrong arguments. Tool authors / MCP servers SHOULD always
+    // declare an explicit `items` schema; we emit a `warn!` so the gap is
+    // surfaced in logs rather than silently papered over.
+    if result.get("type").and_then(|t| t.as_str()) == Some("array") && !result.contains_key("items")
+    {
+        warn!(
+            "JSON Schema array without `items` — injecting fallback `{{\"type\":\"string\"}}` \
+             for strict-validator providers (Gemini etc.). The schema author should declare \
+             items explicitly; the string fallback may produce wrong tool arguments for non-string arrays."
+        );
+        result.insert("items".to_string(), serde_json::json!({"type": "string"}));
     }
 
     serde_json::Value::Object(result)
@@ -828,6 +888,96 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_injects_items_for_array_without_items() {
+        // MCP tools often send array params without `items` — Gemini rejects these.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "fields": { "type": "array", "description": "List of fields" },
+                "filters": { "type": "array" }
+            }
+        });
+        let result = normalize_schema_for_provider(&schema, "gemini");
+        // Both array properties must have `items` injected
+        assert_eq!(result["properties"]["fields"]["items"]["type"], "string");
+        assert_eq!(result["properties"]["filters"]["items"]["type"], "string");
+    }
+
+    #[test]
+    fn test_normalize_array_without_items_fallback_is_string_for_all_strict_providers() {
+        // The string fallback is NOT Gemini-specific — every strict-validator
+        // provider goes through the same worker. Lock that contract in: the
+        // same input must yield the same fallback for gemini, openai, groq.
+        // (anthropic short-circuits and keeps the schema as-is — also covered.)
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array" }
+            }
+        });
+
+        for provider in ["gemini", "openai", "groq"] {
+            let result = normalize_schema_for_provider(&schema, provider);
+            assert_eq!(
+                result["properties"]["tags"]["items"]["type"], "string",
+                "provider={provider} must inject string items fallback"
+            );
+        }
+
+        // Anthropic short-circuits — schema is preserved verbatim, no items
+        // injected (Anthropic does not require items for array params).
+        let anthropic_result = normalize_schema_for_provider(&schema, "anthropic");
+        assert!(
+            anthropic_result["properties"]["tags"]
+                .get("items")
+                .is_none(),
+            "anthropic must NOT inject items — schema is passed through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_normalize_array_fallback_warns_caller_via_log() {
+        // The fallback is intentionally lossy when the array's true element
+        // type is not `string` — e.g. an array of integers normalized for
+        // Gemini will be told to emit string elements. We document this here
+        // so future readers cannot mistake the fallback for type inference.
+        //
+        // The accompanying production code emits a `tracing::warn!` on every
+        // fallback so the gap surfaces in logs. We don't capture the log here
+        // (would require an extra dev-dep) — this test exists to:
+        //   1. Pin the fallback type as `string` (regression).
+        //   2. Carry the rationale in code so it's discoverable from a search
+        //      for `array_without_items` or `string_default`.
+        let int_array_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": { "type": "array", "description": "list of numeric ids" }
+            }
+        });
+        let result = normalize_schema_for_provider(&int_array_schema, "gemini");
+        // The fallback is `string`, even though the description hints at numbers.
+        // This is the "better than missing items" trade-off — callers should
+        // declare `items` explicitly to get correct typing.
+        assert_eq!(result["properties"]["ids"]["items"]["type"], "string");
+    }
+
+    #[test]
+    fn test_normalize_preserves_existing_items() {
+        // If `items` already exists, it must not be overwritten
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "integer" }
+                }
+            }
+        });
+        let result = normalize_schema_for_provider(&schema, "gemini");
+        assert_eq!(result["properties"]["ids"]["items"]["type"], "integer");
+    }
+
+    #[test]
     fn test_normalize_combined_issue_488() {
         // Real-world schema combining multiple #488 issues
         let schema = serde_json::json!({
@@ -972,6 +1122,7 @@ mod tests {
             sender_id: Some("user-123".to_string()),
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
+            force_human: false,
         };
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();

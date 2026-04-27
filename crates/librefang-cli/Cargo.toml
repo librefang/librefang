@@ -9,7 +9,7 @@ description = "CLI tool for the LibreFang Agent OS"
 default = ["librefang-api/all-channels", "telemetry", "surreal-backend"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
-telemetry = ["librefang-api/telemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 # Phase 7 of `surrealdb-storage-swap`: db-explorer and storage-migrate
 # subcommands are gated on the storage backend they target.
@@ -36,22 +36,26 @@ path = "src/main.rs"
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-api = { path = "../librefang-api", default-features = false }
+librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-extensions = { path = "../librefang-extensions" }
+librefang-memory = { path = "../librefang-memory" }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tracing = { workspace = true }
+tracing-core = "0.1"
 tracing-subscriber = { workspace = true }
-serde = { workspace = true }
+arc-swap = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 chrono = { workspace = true }
 walkdir = { workspace = true }
+base64 = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
 rusqlite = { workspace = true, optional = true }
@@ -61,11 +65,15 @@ colored = { workspace = true }
 libc = "0.2"
 fluent = "0.17"
 unic-langid = "0.9"
-open = "5.3.3"
+open = "5.3.4"
 toml_edit = "0.25.8"
 rustls = "0.23"
+opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

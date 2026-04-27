@@ -97,12 +97,20 @@ librefang/
 │   └── cli-npm/               #   @librefang/cli (npm 包装器)
 ├── deploy/                    # 部署配置
 │   ├── Dockerfile             #   Docker 镜像
+│   ├── docker-entrypoint.sh   #   容器启动脚本
 │   ├── docker-compose.yml     #   Docker Compose
+│   ├── docker-compose.observability.yml  # 可观测性栈
+│   ├── OBSERVABILITY.md       #   可观测性栈使用指南
 │   ├── fly/                   #   Fly.io (fly.toml + deploy.sh)
 │   ├── railway/               #   Railway (railway.json)
 │   ├── render.yaml            #   Render
 │   ├── gcp/                   #   GCP Terraform
 │   ├── librefang.service      #   systemd 服务单元
+│   ├── worker/                #   Worker 部署配置
+│   ├── otel-collector/        #   OpenTelemetry Collector 配置
+│   ├── tempo/                 #   Grafana Tempo（trace 存储）
+│   ├── loki/                  #   Grafana Loki（log 存储）
+│   ├── alloy/                 #   Grafana Alloy（log 收集器）
 │   ├── grafana/               #   Grafana 仪表板
 │   └── prometheus/            #   Prometheus 配置
 ├── docs/                      # 文档站（Next.js）
@@ -850,6 +858,8 @@ Wire 协议认证在握手双方使用 `hmac_sign(secret, nonce + node_id)`。No
 | 提供商 | 图像 | TTS | 视频 | 音乐 |
 |--------|------|-----|------|------|
 | OpenAI | gpt-image-1, dall-e-3 | tts-1, tts-1-hd | -- | -- |
+| ElevenLabs | -- | multilingual_v2 | -- | -- |
+| Google Cloud | -- | Standard/WaveNet/Neural2 | -- | -- |
 | MiniMax | image-01 | speech-2.8-hd | T2V-01 | music-2.5 |
 
 ### 视频生成流程

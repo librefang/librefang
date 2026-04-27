@@ -45,12 +45,30 @@ pub fn verify_password(password: &str, hash_str: &str) -> bool {
 }
 
 /// A session token with creation metadata for expiration support.
+///
+/// `user_name` / `user_role` are populated when the session was issued by
+/// a credential flow that carries identity (e.g. `dashboard_login`), so
+/// the auth middleware can build an `AuthenticatedApiUser` extension for
+/// RBAC-gated handlers (`audit/query`, per-user budget writes). Both are
+/// `#[serde(default)]` for backward-compat with sessions persisted to
+/// disk before attribution was added — those load with `None` and keep
+/// the legacy "session matches → trusted-anonymous" behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToken {
     /// The hex-encoded random token string.
     pub token: String,
     /// Unix timestamp (seconds) when this token was created.
     pub created_at: u64,
+    /// Display name of the principal this session was issued to (e.g.
+    /// the `dashboard_user` value, or a `[[users]] name` for future
+    /// API-key-driven session flows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    /// Role string (`"owner" | "admin" | "user" | "viewer"`) parsed by
+    /// `UserRole::from_str_role` at consume time. Stored as a string to
+    /// keep this crate independent of `librefang-kernel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_role: Option<String>,
 }
 
 /// Default session TTL: 30 days.
@@ -68,7 +86,12 @@ pub fn generate_session_token() -> SessionToken {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    SessionToken { token, created_at }
+    SessionToken {
+        token,
+        created_at,
+        user_name: None,
+        user_role: None,
+    }
 }
 
 /// Check if a session token has expired based on its creation time and TTL.
@@ -268,6 +291,8 @@ mod tests {
         let token = SessionToken {
             token: "deadbeef".to_string(),
             created_at: 0, // epoch = long ago
+            user_name: None,
+            user_role: None,
         };
         assert!(is_token_expired(&token, DEFAULT_SESSION_TTL_SECS));
     }

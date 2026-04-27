@@ -664,8 +664,10 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
 /// 4. `TOGETHER_API_KEY`   → `"together"`
 /// 5. `FIREWORKS_API_KEY`  → `"fireworks"`
 /// 6. `COHERE_API_KEY`     → `"cohere"`
-/// 7. `OLLAMA_HOST` set, or Ollama running on localhost → `"ollama"`
-/// 8. `None` if nothing is available
+/// 7. `OLLAMA_HOST`     set → `"ollama"`
+/// 8. `VLLM_BASE_URL`   set → `"vllm"`
+/// 9. `LMSTUDIO_BASE_URL` set → `"lmstudio"`
+/// 10. `None` if nothing is available
 ///
 /// `GROQ_API_KEY` is deliberately **not** in this list. Groq has no
 /// `/v1/embeddings` endpoint (verify with `GET api.groq.com/openai/v1/models`
@@ -689,11 +691,19 @@ pub fn detect_embedding_provider() -> Option<&'static str> {
         }
     }
 
-    // Local Ollama — available if OLLAMA_HOST is set and non-empty. We don't
-    // attempt a live TCP probe here (that would be async and would require a
-    // runtime); a non-empty env var is sufficient signal.
+    // Local providers — available if their respective base URL env var is
+    // set and non-empty. No live TCP probe (that would be async); a non-empty
+    // env var is sufficient signal that the user has intentionally configured
+    // a local server. Order: Ollama → vLLM → LM Studio (matching the
+    // create_embedding_driver builder's local provider order).
     if std::env::var("OLLAMA_HOST").is_ok_and(|v| !v.trim().is_empty()) {
         return Some("ollama");
+    }
+    if std::env::var("VLLM_BASE_URL").is_ok_and(|v| !v.trim().is_empty()) {
+        return Some("vllm");
+    }
+    if std::env::var("LMSTUDIO_BASE_URL").is_ok_and(|v| !v.trim().is_empty()) {
+        return Some("lmstudio");
     }
 
     None
@@ -860,11 +870,14 @@ pub fn create_embedding_driver(
         })
         .map(Ok)
         .unwrap_or_else(|| match provider {
-            // Local providers keep hardcoded defaults: their localhost URLs
-            // aren't registry-tracked and the ports are stable by convention.
-            "ollama" => Ok("http://localhost:11434/v1".to_string()),
-            "vllm" => Ok("http://localhost:8000/v1".to_string()),
-            "lmstudio" => Ok("http://localhost:1234/v1".to_string()),
+            // Local providers keep hardcoded defaults: the ports are stable by
+            // convention. Use 127.0.0.1 instead of `localhost` because on
+            // dual-stack hosts (macOS) `localhost` resolves to ::1 first, but
+            // these servers usually bind IPv4 only — and connection-refused
+            // doesn't always trigger Happy Eyeballs fallback to IPv4.
+            "ollama" => Ok("http://127.0.0.1:11434/v1".to_string()),
+            "vllm" => Ok("http://127.0.0.1:8000/v1".to_string()),
+            "lmstudio" => Ok("http://127.0.0.1:1234/v1".to_string()),
             // Cloud providers MUST come from the model catalog or an explicit
             // override. A hardcoded fallback is exactly the bug class this
             // plumbing is trying to eliminate (stale baked-in URL silently
@@ -1479,6 +1492,8 @@ mod tests {
             "FIREWORKS_API_KEY",
             "COHERE_API_KEY",
             "OLLAMA_HOST",
+            "VLLM_BASE_URL",
+            "LMSTUDIO_BASE_URL",
         ];
         let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         for k in keys {
@@ -1540,6 +1555,55 @@ mod tests {
     fn test_detect_embedding_provider_none_when_nothing_set() {
         let saved = clear_detect_env();
         assert_eq!(detect_embedding_provider(), None);
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_picks_vllm_when_only_vllm_url_set() {
+        let saved = clear_detect_env();
+        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+
+        assert_eq!(detect_embedding_provider(), Some("vllm"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_picks_lmstudio_when_only_lmstudio_url_set() {
+        let saved = clear_detect_env();
+        std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1");
+
+        assert_eq!(detect_embedding_provider(), Some("lmstudio"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_local_priority_ollama_beats_vllm_beats_lmstudio() {
+        // Local order matches create_embedding_driver's local builder order.
+        let saved = clear_detect_env();
+        std::env::set_var("OLLAMA_HOST", "http://localhost:11434");
+        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+        std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1");
+
+        assert_eq!(detect_embedding_provider(), Some("ollama"));
+        std::env::remove_var("OLLAMA_HOST");
+        assert_eq!(detect_embedding_provider(), Some("vllm"));
+        std::env::remove_var("VLLM_BASE_URL");
+        assert_eq!(detect_embedding_provider(), Some("lmstudio"));
+
+        restore_detect_env(saved);
+    }
+
+    #[test]
+    fn test_detect_embedding_provider_cloud_beats_local() {
+        // A configured API key still wins over a local server URL.
+        let saved = clear_detect_env();
+        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+
+        assert_eq!(detect_embedding_provider(), Some("openai"));
+
         restore_detect_env(saved);
     }
 

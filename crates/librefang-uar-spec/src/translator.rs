@@ -80,6 +80,8 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         api_key_env: None,
         base_url: None,
         extra_params: HashMap::new(),
+        context_window: None,
+        max_output_tokens: None,
     };
 
     let mut tool_allowlist: Vec<String> = artifact.tools.allow.clone();
@@ -171,6 +173,9 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         auto_evolve: true,
         workspaces: HashMap::new(),
         channel_overrides: None,
+        max_history_messages: None,
+        max_concurrent_invocations: None,
+        cache_context: false,
     })
 }
 

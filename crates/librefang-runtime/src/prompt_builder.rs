@@ -4,6 +4,8 @@
 //! Replaces the scattered `push_str` prompt injection throughout the codebase
 //! with a single, testable, ordered prompt builder.
 
+use crate::str_utils::safe_truncate_str;
+
 // ---------------------------------------------------------------------------
 // Skill prompt context budget
 // ---------------------------------------------------------------------------
@@ -175,6 +177,12 @@ pub struct PromptContext {
     /// Active goals (pending/in_progress) for the agent. Each entry is a
     /// (title, status, progress%) tuple.
     pub active_goals: Vec<(String, String, u8)>,
+    /// Current on-disk `context.md` content for the agent (see `agent_context`).
+    ///
+    /// Read per-turn by the kernel so external writers (cron jobs, integrations)
+    /// are reflected in the next LLM call. `None` when the file is absent or
+    /// the agent has no workspace.
+    pub context_md: Option<String>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -340,6 +348,22 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         }
     }
 
+    // Section 15 — Live agent context (`context.md`). Re-read per turn so
+    // external writers (e.g. cron jobs refreshing live data) show up on the
+    // very next message. Subagents skip it: they get a fresh prompt anyway
+    // and the live data belongs to the parent agent's workspace.
+    if !ctx.is_subagent {
+        if let Some(ref live) = ctx.context_md {
+            let trimmed = live.trim();
+            if !trimmed.is_empty() {
+                sections.push(format!(
+                    "## Live Context\nThe following context is refreshed from `context.md` each turn and may change between messages.\n\n{}",
+                    cap_str(trimmed, 8000)
+                ));
+            }
+        }
+    }
+
     sections.join("\n\n")
 }
 
@@ -375,10 +399,19 @@ execute it via the appropriate tool call (shell_exec, file_write, etc.). Never o
 code blocks — always call the tool instead.";
 
 /// Build the grouped tools section (Section 3).
+///
+/// When `tool_load` appears in `granted_tools`, the section is framed as a
+/// lazy-load catalog: only a handful of tools carry full JSON schemas in the
+/// request (see [`tool_runner::ALWAYS_NATIVE_TOOLS`]) and the rest are
+/// listed by name so the LLM can call `tool_load(name)` before using them.
+/// This keeps per-turn request payload ~1.5k tokens instead of ~6k when the
+/// agent has access to the full builtin catalog (issue #3044).
 pub fn build_tools_section(granted_tools: &[String]) -> String {
     if granted_tools.is_empty() {
         return String::new();
     }
+
+    let lazy_mode = granted_tools.iter().any(|t| t == "tool_load");
 
     // Group tools by category
     let mut groups: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
@@ -404,6 +437,21 @@ pub fn build_tools_section(granted_tools: &[String]) -> String {
             .collect();
         out.push_str(&descs.join(", "));
     }
+
+    if lazy_mode {
+        out.push_str(
+            "\n\n### Lazy Tool Loading\n\
+             Only a small set of tools is declared with full schemas up front \
+             (listed in the request). Any other tool from the catalog above is \
+             *available* but must be loaded before use:\n\
+             - `tool_search(query)` — find tools by keyword when you're unsure of the exact name.\n\
+             - `tool_load(name)` — fetch the full input schema. The tool becomes callable on the NEXT turn.\n\
+             \n\
+             Prefer the already-declared tools when they cover the task. Only reach for `tool_load` \
+             when you genuinely need a tool whose schema you haven't seen yet.",
+        );
+    }
+
     out
 }
 
@@ -1092,7 +1140,9 @@ fn cap_str(s: &str, max_chars: usize) -> String {
             .nth(max_chars)
             .map(|(i, _)| i)
             .unwrap_or(s.len());
-        format!("{}...", &s[..end])
+        // Defense in depth: walk back to a char boundary in case `end` is ever
+        // produced by something other than `char_indices` in the future.
+        format!("{}...", safe_truncate_str(s, end))
     }
 }
 
@@ -1638,6 +1688,28 @@ mod tests {
     }
 
     #[test]
+    fn test_context_md_section_included() {
+        let mut ctx = basic_ctx();
+        ctx.context_md = Some("BTCUSD: 67000\nETHUSD: 3400".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Live Context"));
+        assert!(prompt.contains("BTCUSD: 67000"));
+        assert!(prompt.contains("ETHUSD: 3400"));
+    }
+
+    #[test]
+    fn test_context_md_section_omitted_when_empty_or_none() {
+        let mut ctx = basic_ctx();
+        ctx.context_md = None;
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Live Context"));
+
+        ctx.context_md = Some("   \n\n   ".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Live Context"));
+    }
+
+    #[test]
     fn test_cap_str_short() {
         assert_eq!(cap_str("hello", 10), "hello");
     }
@@ -1899,5 +1971,37 @@ mod tests {
     fn prompt_builder_canali_uscita_absent_without_notify_owner() {
         let prompt = build_system_prompt(&basic_ctx());
         assert!(!prompt.contains("## Output Channels"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cap_str — UTF-8 boundary safety
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cap_str_handles_cjk_without_panic() {
+        // Each CJK char is 3 bytes in UTF-8.
+        let input = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}";
+        // Capping at 3 chars must not panic and must end at a char boundary.
+        let out = cap_str(input, 3);
+        assert!(out.ends_with("..."));
+        // Strip the suffix and verify the prefix is itself valid UTF-8 that
+        // contains exactly 3 CJK chars.
+        let prefix = out.trim_end_matches("...");
+        assert_eq!(prefix.chars().count(), 3);
+    }
+
+    #[test]
+    fn cap_str_handles_emoji_without_panic() {
+        // Each emoji is 4 bytes in UTF-8.
+        let input = "\u{1f600}\u{1f601}\u{1f602}\u{1f603}\u{1f604}";
+        let out = cap_str(input, 2);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.trim_end_matches("...").chars().count(), 2);
+    }
+
+    #[test]
+    fn cap_str_within_limit_returns_unchanged() {
+        let input = "\u{4f60}\u{597d}";
+        assert_eq!(cap_str(input, 10), input);
     }
 }

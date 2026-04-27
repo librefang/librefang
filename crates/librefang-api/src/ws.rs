@@ -135,7 +135,14 @@ pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(ToOwned::to_owned)
-        .or_else(|| ws_query_param(uri, "token"))
+        .or_else(|| {
+            // Use plain percent-decoding (NOT form-urlencoded) so literal `+`
+            // characters in base64-derived tokens are preserved instead of
+            // being turned into spaces. See issue #962 (ported from openfang).
+            uri.query()
+                .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+                .map(crate::percent_decode)
+        })
 }
 
 /// Validates the WebSocket `Origin` header against allowed origins.
@@ -301,11 +308,30 @@ pub async fn agent_ws(
     headers: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
-    // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
+    // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
     let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
     let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
+
+    // Mirror middleware: when no auth is configured, only allow loopback
+    // unless the operator opted in via LIBREFANG_ALLOW_NO_AUTH=1.
+    // SECURITY: Closes openfang #1034 B2 — empty api_key used to permit
+    // unauthenticated WS upgrades from any origin.
+    if !auth_required {
+        let is_loopback = addr.ip().is_loopback();
+        let allow_no_auth = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        if !is_loopback && !allow_no_auth {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: no api_key configured and origin is not loopback"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    }
+
     if auth_required {
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
@@ -364,9 +390,29 @@ pub async fn agent_ws(
         }
     };
 
-    // Verify agent exists
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Verify agent exists.
+    // Retry up to 5 times with 200ms backoff to handle a timing race where
+    // the client connects before the agent finishes registering (#804).
+    {
+        let mut found = state.kernel.agent_registry().get(agent_id).is_some();
+        if !found {
+            for attempt in 1..=4 {
+                debug!(
+                    agent_id = %id,
+                    attempt,
+                    "Agent not found yet, retrying in 200ms"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if state.kernel.agent_registry().get(agent_id).is_some() {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            warn!(agent_id = %id, "Agent not found after 5 lookup attempts");
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
     }
 
     // Optional per-connection explicit session_id override (issue #2959).
@@ -422,7 +468,22 @@ async fn handle_agent_ws(
     _guard: WsConnectionGuard,
     explicit_session: Option<SessionId>,
 ) {
-    info!(agent_id = %id_str, "WebSocket connected");
+    // Per-connection identity. Lets us distinguish concurrent reconnects
+    // (same agent_id, different conn_id) from a single client retrying.
+    let conn_id = uuid::Uuid::new_v4().simple().to_string();
+    let connected_at = std::time::Instant::now();
+    info!(
+        agent_id = %id_str,
+        conn_id = %conn_id,
+        client_ip = %client_ip,
+        explicit_session = ?explicit_session.map(|s| s.to_string()),
+        "WebSocket connected"
+    );
+
+    // Reason for the eventual disconnect — set at each exit point so the
+    // closing log line tells you whether it was a client close, an idle
+    // timeout, a protocol error, or stream EOF.
+    let mut disconnect_reason: &'static str = "stream_end";
 
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
@@ -508,12 +569,13 @@ async fn handle_agent_ws(
             msg = receiver.next() => {
                 match msg {
                     Some(m) => m,
-                    None => break, // Stream ended
+                    // Init value of `disconnect_reason` ("stream_end") is read here.
+                    None => break,
                 }
             }
             _ = tokio::time::sleep(ws_idle_timeout.saturating_sub(last_activity.elapsed())) => {
                 let timeout_secs = ws_idle_timeout.as_secs();
-                info!(agent_id = %id_str, timeout_secs, "WebSocket idle timeout");
+                info!(agent_id = %id_str, conn_id = %conn_id, timeout_secs, "WebSocket idle timeout");
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
@@ -521,6 +583,7 @@ async fn handle_agent_ws(
                         "content": format!("Connection closed due to inactivity ({timeout_secs}s timeout)"),
                     }),
                 ).await;
+                disconnect_reason = "idle_timeout";
                 break;
             }
         };
@@ -528,7 +591,8 @@ async fn handle_agent_ws(
         let msg = match msg {
             Ok(m) => m,
             Err(e) => {
-                debug!(error = %e, "WebSocket receive error");
+                debug!(agent_id = %id_str, conn_id = %conn_id, error = %e, "WebSocket receive error");
+                disconnect_reason = "receive_error";
                 break;
             }
         };
@@ -578,8 +642,23 @@ async fn handle_agent_ws(
                 )
                 .await;
             }
-            Message::Close(_) => {
-                info!(agent_id = %id_str, "WebSocket closed by client");
+            Message::Close(frame) => {
+                let close_code = frame
+                    .as_ref()
+                    .map(|f| f.code.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
+                let close_reason_text = frame
+                    .as_ref()
+                    .map(|f| f.reason.to_string())
+                    .unwrap_or_default();
+                info!(
+                    agent_id = %id_str,
+                    conn_id = %conn_id,
+                    close_code = %close_code,
+                    close_reason = %close_reason_text,
+                    "WebSocket closed by client"
+                );
+                disconnect_reason = "client_close";
                 break;
             }
             Message::Ping(data) => {
@@ -593,7 +672,13 @@ async fn handle_agent_ws(
 
     // Cleanup
     update_handle.abort();
-    info!(agent_id = %id_str, "WebSocket disconnected");
+    info!(
+        agent_id = %id_str,
+        conn_id = %conn_id,
+        reason = %disconnect_reason,
+        duration_secs = connected_at.elapsed().as_secs(),
+        "WebSocket disconnected"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,9 +1212,31 @@ async fn handle_command(
     verbose: &Arc<AtomicU8>,
 ) -> serde_json::Value {
     match cmd {
-        "new" | "reset" => match state.kernel.reset_session(agent_id) {
+        "new" => match state.kernel.create_agent_session(agent_id, None) {
+            Ok(info) => match info.get("session_id").and_then(|v| v.as_str()) {
+                Some(sid) if !sid.is_empty() => serde_json::json!({
+                    "type": "command_result",
+                    "command": "new",
+                    "message": "New session created.",
+                    "session_id": sid,
+                }),
+                // The kernel returned success but no session_id — treat as a
+                // hard failure rather than emitting an empty string the
+                // dashboard would silently swallow (frontend reads `sid`
+                // truthy and skips the navigate, leaving the URL stale on the
+                // old session). Surface explicitly so the user sees the bug.
+                _ => serde_json::json!({
+                    "type": "error",
+                    "content": "New session failed: kernel returned no session_id",
+                }),
+            },
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
+            }
+        },
+        "reset" => match state.kernel.reset_session(agent_id) {
             Ok(()) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
+                serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },
@@ -1236,7 +1343,7 @@ async fn handle_command(
             })
         }
         "queue" => {
-            let is_running = state.kernel.running_tasks_ref().contains_key(&agent_id);
+            let is_running = state.kernel.agent_has_active_session(agent_id);
             let msg = if is_running {
                 "Agent is processing a request..."
             } else {
@@ -1784,6 +1891,48 @@ mod tests {
             ws_auth_token(&headers, &uri).as_deref(),
             Some("header-token")
         );
+    }
+
+    /// Issue #962 (ported from openfang): WS auth tokens often contain
+    /// base64 chars (`+`, `/`, `=`). The query-param branch must percent-decode
+    /// (so `%2B` -> `+`) but must NOT apply form-urlencoded semantics
+    /// (which would turn a literal `+` into a space).
+    #[test]
+    fn test_ws_auth_token_percent_decodes_base64_chars() {
+        // Percent-encoded base64 token round-trips losslessly.
+        let uri: Uri = "/ws?token=abc%2Bdef%2Fghi%3D".parse().unwrap();
+        assert_eq!(
+            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
+            Some("abc+def/ghi=")
+        );
+    }
+
+    #[test]
+    fn test_ws_auth_token_preserves_literal_plus() {
+        // Literal `+` (not %20 / not space) MUST be preserved as `+`,
+        // not turned into a space the way x-www-form-urlencoded would.
+        let uri: Uri = "/ws?token=abc+def/ghi=".parse().unwrap();
+        assert_eq!(
+            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
+            Some("abc+def/ghi=")
+        );
+    }
+
+    #[test]
+    fn test_percent_decode_round_trip() {
+        use crate::percent_decode;
+        assert_eq!(percent_decode("abc%2Bdef"), "abc+def");
+        assert_eq!(percent_decode("a%2Fb%3D"), "a/b=");
+        // Literal `+` is preserved (not converted to space).
+        assert_eq!(percent_decode("abc+def"), "abc+def");
+        // Mixed: literal `+` and percent-encoded `/` together.
+        assert_eq!(percent_decode("a+b%2Fc"), "a+b/c");
+        // Lowercase hex.
+        assert_eq!(percent_decode("%2b%2f%3d"), "+/=");
+        // Malformed escape: leave as-is.
+        assert_eq!(percent_decode("%ZZ"), "%ZZ");
+        // Trailing `%` with no hex pair: leave as-is.
+        assert_eq!(percent_decode("abc%"), "abc%");
     }
 
     #[test]

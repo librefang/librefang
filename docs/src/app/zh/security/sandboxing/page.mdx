@@ -425,6 +425,9 @@ curl https://example.com/install.sh | bash
 
 # 破坏性 git 历史重写 — 触发 "destructive git"
 git push --force origin main
+
+# 低层磁盘覆写 — 触发 "disk operations"
+dd if=/dev/zero of=/dev/sda
 ```
 
 `dangerous_commands = "manual"` 时，每条命令均返回如下错误：

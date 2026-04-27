@@ -16,3 +16,11 @@ scrape_configs:
       - targets: ["host.docker.internal:9102"]
         labels:
           instance: "ollama-local"
+
+  # OTLP metrics routed through the collector (LibreFang → OTLP :4317 → collector → :8889).
+  - job_name: "otel-collector"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          instance: "otel-collector"

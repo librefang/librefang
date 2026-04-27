@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Memory levels for multi-level memory (User/Session/Agent)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLevel {
     /// User-level memory (persistent across sessions)
@@ -53,7 +55,7 @@ impl std::str::FromStr for MemoryLevel {
 
 /// A simple memory item for mem0-style API.
 /// This is a simplified version of MemoryFragment for external use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryItem {
     /// Unique ID.
     pub id: String,
@@ -166,7 +168,7 @@ impl MemoryItem {
 /// session_ttl_hours = 24
 /// extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProactiveMemoryConfig {
     /// Master toggle — when false, the entire proactive memory subsystem is disabled.
@@ -240,7 +242,7 @@ impl Default for ProactiveMemoryConfig {
 /// A relationship triple extracted from conversation (subject, relation, object).
 ///
 /// Example: ("Alice", "works_at", "Acme Corp")
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RelationTriple {
     /// Subject entity name.
     pub subject: String,
@@ -255,7 +257,7 @@ pub struct RelationTriple {
 }
 
 /// Result from LLM-powered memory extraction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtractionResult {
     /// Extracted memory items.
     pub memories: Vec<MemoryItem>,
@@ -275,7 +277,7 @@ pub struct ExtractionResult {
 /// This is surfaced when an Update action replaces old content with new content
 /// that appears contradictory (low similarity + negation patterns), rather than
 /// being a simple refinement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryConflict {
     /// The previous memory content that was replaced.
     pub old_content: String,
@@ -286,7 +288,7 @@ pub struct MemoryConflict {
 }
 
 /// Result from a single memory add operation, including the decision taken.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryAddResult {
     /// The memory item that was stored (or the updated version).
     pub item: MemoryItem,
@@ -303,7 +305,7 @@ pub struct MemoryAddResult {
 ///
 /// This is the core mem0 decision: when we extract a new memory, should we
 /// add it as new, update an existing one, or skip it?
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum MemoryAction {
     /// Store as a new memory (no conflict with existing).
@@ -769,7 +771,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
 }
 
 /// Unique identifier for a memory fragment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryId(pub Uuid);
 
 impl MemoryId {
@@ -792,7 +794,7 @@ impl std::fmt::Display for MemoryId {
 }
 
 /// Modality of a memory fragment (text, image, or multimodal).
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryModality {
     /// Pure text memory.
@@ -805,7 +807,7 @@ pub enum MemoryModality {
 }
 
 /// Where a memory came from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySource {
     /// From a conversation/interaction.
@@ -823,7 +825,7 @@ pub enum MemorySource {
 }
 
 /// A single unit of memory stored in the semantic store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryFragment {
     /// Unique ID.
     pub id: MemoryId,
@@ -859,7 +861,7 @@ pub struct MemoryFragment {
 }
 
 /// Filter criteria for memory recall.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryFilter {
     /// Filter by agent ID.
     pub agent_id: Option<AgentId>,
@@ -898,7 +900,7 @@ impl MemoryFilter {
 }
 
 /// An entity in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Entity {
     /// Unique entity ID.
     pub id: String,
@@ -915,7 +917,7 @@ pub struct Entity {
 }
 
 /// Types of entities in the knowledge graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
     /// A person.
@@ -939,7 +941,7 @@ pub enum EntityType {
 }
 
 /// A relation between two entities in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Relation {
     /// Source entity ID.
     pub source: String,
@@ -956,7 +958,7 @@ pub struct Relation {
 }
 
 /// Types of relations in the knowledge graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationType {
     /// Entity works at an organization.
@@ -984,7 +986,7 @@ pub enum RelationType {
 }
 
 /// A pattern for querying the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphPattern {
     /// Optional source entity filter.
     pub source: Option<String>,
@@ -997,7 +999,7 @@ pub struct GraphPattern {
 }
 
 /// A result from a graph query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphMatch {
     /// The source entity.
     pub source: Entity,
@@ -1008,7 +1010,7 @@ pub struct GraphMatch {
 }
 
 /// Report from memory consolidation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConsolidationReport {
     /// Number of memories merged.
     pub memories_merged: u64,
@@ -1019,7 +1021,7 @@ pub struct ConsolidationReport {
 }
 
 /// Format for memory export/import.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ExportFormat {
     /// JSON format.
     Json,
@@ -1028,7 +1030,7 @@ pub enum ExportFormat {
 }
 
 /// Report from memory import.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImportReport {
     /// Number of entities imported.
     pub entities_imported: u64,

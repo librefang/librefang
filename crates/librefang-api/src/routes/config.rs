@@ -130,6 +130,25 @@ fn current_process_rss_mb() -> Option<u64> {
     }
 }
 
+/// Returns `true` when at least one web search provider is configured —
+/// either an API-key-based provider with its env var set, or SearXNG with a
+/// non-empty URL. Drives the dashboard's "Configure API key" warning chip;
+/// must stay in sync with the providers actually wired into the search
+/// runtime, otherwise the UI nags users who already have a working setup.
+fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
+    let env_set = |env_var: &str| {
+        std::env::var(env_var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_some()
+    };
+    !web.searxng.url.trim().is_empty()
+        || env_set(&web.tavily.api_key_env)
+        || env_set(&web.brave.api_key_env)
+        || env_set(&web.jina.api_key_env)
+        || env_set(&web.perplexity.api_key_env)
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -279,14 +298,21 @@ api_key_env = "{api_key_env}"
         (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
     )
 )]
-pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn shutdown(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     tracing::info!("Shutdown requested via API");
-    // SECURITY: Record shutdown in audit trail
-    state.kernel.audit().record(
+    // SECURITY: Record shutdown in audit trail with the caller's user_id
+    // (None for loopback/unauthenticated calls — see middleware.rs).
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
         "ok",
+        user_id,
+        Some("api".to_string()),
     );
     state.kernel.shutdown();
     // Signal the HTTP server to initiate graceful shutdown so the process exits.
@@ -782,6 +808,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     set!("stable_prefix_mode", config.stable_prefix_mode);
     set!("prompt_caching", config.prompt_caching);
     set!("max_cron_jobs", config.max_cron_jobs);
+    set!("agent_max_iterations", config.agent_max_iterations);
     set!("include", config.include);
     set!(
         "workspaces_dir",
@@ -901,20 +928,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     );
 
     // ── Web ──
-    // Check if at least one search provider has a configured API key
-    let search_available = [
-        &config.web.tavily.api_key_env,
-        &config.web.brave.api_key_env,
-        &config.web.jina.api_key_env,
-        &config.web.perplexity.api_key_env,
-    ]
-    .iter()
-    .any(|env_var| {
-        std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-    });
+    let search_available = is_web_search_configured(&config.web);
     set!("web", {
         "search_provider": format!("{:?}", config.web.search_provider),
         "cache_ttl_minutes": config.web.cache_ttl_minutes,
@@ -1212,6 +1226,8 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "main_lane": config.queue.concurrency.main_lane,
                 "cron_lane": config.queue.concurrency.cron_lane,
                 "subagent_lane": config.queue.concurrency.subagent_lane,
+                "trigger_lane": config.queue.concurrency.trigger_lane,
+                "default_per_agent": config.queue.concurrency.default_per_agent,
             }),
         );
     }
@@ -1516,13 +1532,19 @@ pub async fn run_migrate(
         (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
     )
 )]
-pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // SECURITY: Record config reload in audit trail
-    state.kernel.audit().record(
+pub async fn config_reload(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    // SECURITY: Record config reload in audit trail with caller attribution.
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "config reload requested via API",
         "pending",
+        user_id,
+        Some("api".to_string()),
     );
     match state.kernel.reload_config().await {
         Ok(plan) => {
@@ -1655,7 +1677,21 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 )]
 pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Build provider/model options from model catalog for dropdowns
+    // Build the draft-07 JSON Schema directly from `KernelConfig` via
+    // `schemars`, then apply a small overlay for UI-only metadata that the
+    // struct cannot carry: curated select options with multi-locale labels,
+    // numeric `min`/`max`/`step` ranges, section grouping, dynamic provider
+    // and model options pulled from the live catalog.
+    //
+    // Return shape extends draft-07 with two custom extensions:
+    //   - `x-sections` — ordered list of UI section groupings. Each entry
+    //     has `{ key, title?, root_level?, struct_field?, hot_reloadable?,
+    //     fields: [...], virtual: bool }`. `virtual = true` collects
+    //     top-level KernelConfig fields into a synthetic "general" section.
+    //   - `x-ui-options` — per-field UI hints mapped by JSON-pointer path.
+    //     Carries `{ select?, number_select?, min?, max?, step?, placeholder? }`.
+    //
+    // Replaces a 245-line hand-authored schema (issue #3048 follow-up).
     let catalog = state
         .kernel
         .model_catalog_ref()
@@ -1673,233 +1709,164 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .collect();
     drop(catalog);
 
-    let mut sections = serde_json::Map::new();
-    macro_rules! sec {
-        ($k:expr, $($json:tt)+) => { sections.insert($k.into(), serde_json::json!($($json)+)); };
+    // Generate the base draft-07 schema.
+    let mut root =
+        serde_json::to_value(schemars::schema_for!(librefang_types::config::KernelConfig))
+            .unwrap_or_else(|_| serde_json::json!({}));
+
+    // Attach the UI overlay: sections + option/range hints.
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("x-sections".into(), ui_sections_overlay());
+        obj.insert(
+            "x-ui-options".into(),
+            ui_options_overlay(provider_options, model_options),
+        );
     }
 
-    sec!("general", {
-        "root_level": true,
-        "fields": {
-            "api_listen": "string",
-            "api_key": "string",
-            "log_level": { "type": "select", "options": ["trace", "debug", "info", "warn", "error"] },
-            "network_enabled": "boolean",
-            "mode": { "type": "select", "options": ["stable", "default", "dev"] },
-            "language": { "type": "select", "options": [
-                {"value": "en", "label": "English"},
-                {"value": "zh", "label": "中文"},
-                {"value": "ja", "label": "日本語"},
-                {"value": "ko", "label": "한국어"},
-                {"value": "es", "label": "Español"},
-                {"value": "fr", "label": "Français"},
-                {"value": "de", "label": "Deutsch"},
-                {"value": "it", "label": "Italiano"},
-                {"value": "pt", "label": "Português"},
-                {"value": "ru", "label": "Русский"},
-                {"value": "ar", "label": "العربية"},
-                {"value": "hi", "label": "हिन्दी"},
-                {"value": "tr", "label": "Türkçe"},
-                {"value": "pl", "label": "Polski"},
-                {"value": "nl", "label": "Nederlands"},
-                {"value": "vi", "label": "Tiếng Việt"},
-                {"value": "th", "label": "ภาษาไทย"},
-                {"value": "id", "label": "Bahasa Indonesia"}
-            ] },
-            "usage_footer": { "type": "select", "options": ["off", "tokens", "cost", "full"] },
-            "stable_prefix_mode": "boolean",
-            "prompt_caching": "boolean",
-            "max_cron_jobs": { "type": "number", "min": 0, "max": 100, "step": 1 },
-            "workspaces_dir": "string"
-        }
-    });
-    sec!("default_model", {
-        "hot_reloadable": true,
-        "fields": {
-            "provider": { "type": "select", "options": provider_options },
-            "model": { "type": "select", "options": model_options },
-            "api_key_env": "string",
-            "base_url": "string"
-        }
-    });
-    sec!("memory", { "fields": {
-        "sqlite_path": "string", "embedding_model": "string",
-        "consolidation_threshold": { "type": "number", "min": 1, "max": 1000000, "step": 1 },
-        "decay_rate": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
-        "embedding_provider": { "type": "select", "options": ["auto", "openai", "openrouter", "groq", "mistral", "together", "fireworks", "cohere", "ollama", "bedrock", "vllm", "lmstudio"] },
-        "embedding_api_key_env": "string",
-        "consolidation_interval_hours": { "type": "number_select", "options": ["0", "1", "6", "12", "24", "48", "168"] }
-    }});
-    sec!("proactive_memory", { "fields": {
-        "enabled": "boolean", "auto_memorize": "boolean", "auto_retrieve": "boolean",
-        "max_retrieve": { "type": "number", "min": 1, "max": 100, "step": 1 },
-        "extraction_threshold": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
-        "extraction_model": "string", "extract_categories": "array",
-        "session_ttl_hours": { "type": "number", "min": 1, "max": 8760, "step": 1 },
-        "confidence_decay_rate": { "type": "number", "min": 0, "max": 1, "step": 0.001 },
-        "duplicate_threshold": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
-        "max_memories_per_agent": { "type": "number", "min": 0, "max": 100000, "step": 100 }
-    }});
-    sec!("auto_dream", { "fields": {
-        "enabled": "boolean",
-        "min_hours": { "type": "number", "min": 0, "max": 168, "step": 0.5 },
-        "min_sessions": { "type": "number", "min": 0, "max": 1000, "step": 1 },
-        "check_interval_secs": { "type": "number", "min": 60, "max": 86400, "step": 60 },
-        "timeout_secs": { "type": "number", "min": 30, "max": 3600, "step": 30 },
-        "lock_dir": "string"
-    }});
-    sec!("web", { "fields": {
-        "search_provider": { "type": "select", "options": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"] },
-        "cache_ttl_minutes": { "type": "number", "min": 0, "max": 10080, "step": 1 }
-    }});
-    sec!("browser", { "fields": {
-        "headless": "boolean",
-        "viewport_width": { "type": "number", "min": 320, "max": 3840, "step": 1 },
-        "viewport_height": { "type": "number", "min": 240, "max": 2160, "step": 1 },
-        "timeout_secs": { "type": "number", "min": 5, "max": 300, "step": 1 },
-        "idle_timeout_secs": { "type": "number", "min": 0, "max": 3600, "step": 1 },
-        "max_sessions": { "type": "number", "min": 1, "max": 20, "step": 1 },
-        "chromium_path": "string"
-    }});
-    sec!("network", { "fields": {
-        "listen_addresses": "string[]", "bootstrap_peers": "string[]",
-        "mdns_enabled": "boolean",
-        "max_peers": { "type": "number", "min": 1, "max": 1000, "step": 1 },
-        "shared_secret": "string"
-    }});
-    sec!("extensions", { "fields": {
-        "auto_reconnect": "boolean",
-        "reconnect_max_attempts": { "type": "number", "min": 0, "max": 100, "step": 1 },
-        "reconnect_max_backoff_secs": { "type": "number", "min": 1, "max": 3600, "step": 1 },
-        "health_check_interval_secs": { "type": "number", "min": 5, "max": 3600, "step": 1 }
-    }});
-    sec!("vault", { "fields": { "enabled": "boolean", "path": "string" }});
-    sec!("a2a", { "fields": { "enabled": "boolean", "listen_path": "string" }});
-    sec!("channels", { "fields": {
-        "telegram": "object", "discord": "object", "slack": "object", "whatsapp": "object",
-        "signal": "object", "matrix": "object", "email": "object", "teams": "object",
-        "mattermost": "object", "irc": "object", "google_chat": "object"
-    }});
-    sec!("media", { "fields": {
-        "image_description": "boolean", "audio_transcription": "boolean",
-        "video_description": "boolean",
-        "max_concurrency": { "type": "number", "min": 1, "max": 20, "step": 1 },
-        "image_provider": { "type": "select", "options": ["", "anthropic", "openai", "gemini"] },
-        "audio_provider": { "type": "select", "options": ["", "groq", "openai", "gemini", "elevenlabs", "minimax", "fireworks", "together", "siliconflow"] },
-        "audio_model": "string"
-    }});
-    sec!("links", { "fields": {
-        "enabled": "boolean",
-        "max_links": { "type": "number", "min": 1, "max": 100, "step": 1 },
-        "max_content_bytes": { "type": "number", "min": 1024, "max": 10485760, "step": 1024 },
-        "timeout_secs": { "type": "number", "min": 5, "max": 120, "step": 1 }
-    }});
-    sec!("reload", { "hot_reloadable": true, "fields": {
-        "mode": { "type": "select", "options": ["off", "restart", "hot", "hybrid"] },
-        "debounce_ms": { "type": "number", "min": 100, "max": 10000, "step": 100 }
-    }});
-    sec!("webhook_triggers", { "fields": {
-        "enabled": "boolean", "token_env": "string",
-        "max_payload_bytes": { "type": "number", "min": 1024, "max": 10485760, "step": 1024 },
-        "rate_limit_per_minute": { "type": "number", "min": 1, "max": 10000, "step": 1 }
-    }});
-    sec!("approval", { "hot_reloadable": true, "fields": {
-        "require_approval": "string[]",
-        "timeout_secs": { "type": "number", "min": 30, "max": 86400, "step": 1 },
-        "auto_approve_autonomous": "boolean", "auto_approve": "boolean",
-        "second_factor": { "type": "select", "options": ["none", "totp", "login", "both"] },
-        "totp_issuer": "string"
-    }});
-    sec!("exec_policy", { "fields": {
-        "mode": { "type": "select", "options": ["deny", "allowlist", "full"] },
-        "safe_bins": "string[]", "allowed_commands": "string[]",
-        "timeout_secs": { "type": "number", "min": 1, "max": 3600, "step": 1 },
-        "max_output_bytes": { "type": "number", "min": 1024, "max": 104857600, "step": 1024 },
-        "no_output_timeout_secs": { "type": "number", "min": 1, "max": 3600, "step": 1 }
-    }});
-    sec!("broadcast", { "fields": {
-        "strategy": { "type": "select", "options": ["parallel", "sequential"] },
-        "routes": "object"
-    }});
-    sec!("auto_reply", { "fields": {
-        "enabled": "boolean",
-        "max_concurrent": { "type": "number", "min": 1, "max": 100, "step": 1 },
-        "timeout_secs": { "type": "number", "min": 1, "max": 3600, "step": 1 },
-        "suppress_patterns": "string[]"
-    }});
-    sec!("canvas", { "fields": {
-        "enabled": "boolean",
-        "max_html_bytes": { "type": "number", "min": 1024, "max": 10485760, "step": 1024 },
-        "allowed_tags": "string[]"
-    }});
-    sec!("tts", { "fields": {
-        "enabled": "boolean",
-        "provider": { "type": "select", "options": ["openai", "elevenlabs"] },
-        "max_text_length": { "type": "number", "min": 100, "max": 100000, "step": 100 },
-        "timeout_secs": { "type": "number", "min": 5, "max": 300, "step": 1 }
-    }});
-    sec!("docker", { "fields": {
-        "enabled": "boolean", "image": "string", "container_prefix": "string",
-        "workdir": "string", "network": "string", "memory_limit": "string",
-        "cpu_limit": { "type": "number", "min": 0.1, "max": 32, "step": 0.1 },
-        "timeout_secs": { "type": "number", "min": 1, "max": 3600, "step": 1 },
-        "read_only_root": "boolean",
-        "pids_limit": { "type": "number", "min": 1, "max": 10000, "step": 1 },
-        "reuse_cool_secs": { "type": "number", "min": 0, "max": 3600, "step": 1 },
-        "idle_timeout_secs": { "type": "number", "min": 0, "max": 86400, "step": 1 },
-        "max_age_secs": { "type": "number", "min": 0, "max": 86400, "step": 1 }
-    }});
-    sec!("pairing", { "fields": {
-        "enabled": "boolean",
-        "max_devices": { "type": "number", "min": 1, "max": 100, "step": 1 },
-        "token_expiry_secs": { "type": "number", "min": 60, "max": 2592000, "step": 60 },
-        "push_provider": { "type": "select", "options": ["none", "ntfy", "gotify"] },
-        "ntfy_url": "string", "ntfy_topic": "string"
-    }});
-    sec!("thinking", { "fields": { "budget_tokens": { "type": "number", "min": 1024, "max": 64000, "step": 512 }, "stream_thinking": "boolean" }});
-    sec!("budget", { "hot_reloadable": true, "fields": {
-        "max_hourly_usd": { "type": "number", "min": 0, "max": 1000, "step": 0.01 },
-        "max_daily_usd": { "type": "number", "min": 0, "max": 10000, "step": 0.01 },
-        "max_monthly_usd": { "type": "number", "min": 0, "max": 100000, "step": 0.01 },
-        "alert_threshold": { "type": "number", "min": 0, "max": 1, "step": 0.01 },
-        "default_max_llm_tokens_per_hour": { "type": "number", "min": 0, "max": 10000000, "step": 1000 }
-    }});
-    sec!("vertex_ai", { "fields": {
-        "project_id": "string", "region": "string", "credentials_path": "string"
-    }});
-    sec!("oauth", { "fields": {
-        "google_client_id": "string", "github_client_id": "string",
-        "microsoft_client_id": "string", "slack_client_id": "string"
-    }});
-    sec!("session", { "fields": {
-        "retention_days": { "type": "number", "min": 1, "max": 3650, "step": 1 },
-        "max_sessions_per_agent": { "type": "number", "min": 1, "max": 10000, "step": 1 },
-        "cleanup_interval_hours": { "type": "number_select", "options": ["0", "1", "6", "12", "24", "48", "168"] }
-    }});
-    sec!("queue", { "fields": {
-        "max_depth_per_agent": { "type": "number", "min": 1, "max": 10000, "step": 1 },
-        "max_depth_global": { "type": "number", "min": 1, "max": 100000, "step": 1 },
-        "task_ttl_secs": { "type": "number", "min": 60, "max": 86400, "step": 60 }
-    }});
-    sec!("external_auth", { "fields": {
-        "enabled": "boolean", "issuer_url": "string", "client_id": "string",
-        "client_secret_env": "string", "redirect_url": "string",
-        "scopes": "string[]", "allowed_domains": "string[]",
-        "audience": "string",
-        "session_ttl_secs": { "type": "number", "min": 60, "max": 2592000, "step": 60 }
-    }});
-    sec!("terminal", { "fields": {
-        "enabled": "boolean",
-        "allow_remote": "boolean",
-        "require_proxy_headers": "boolean",
-        "allow_unauthenticated_remote": "boolean",
-        "allowed_origins": "string[]",
-        "tmux_enabled": "boolean",
-        "max_windows": { "type": "number", "min": 1, "max": 64, "step": 1 },
-        "tmux_binary_path": "string"
-    }});
+    Json(root)
+}
 
-    Json(serde_json::json!({ "sections": serde_json::Value::Object(sections) }))
+/// Section grouping for the ConfigPage UI. Each entry carries the section key,
+/// the fields that belong to it, and any flags the UI cares about
+/// (root-level rendering, hot-reload safety).
+#[doc(hidden)]
+pub fn ui_sections_overlay() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "key": "general",
+            "root_level": true,
+            "fields": [
+                "api_listen", "api_key", "log_level", "network_enabled", "mode",
+                "language", "usage_footer", "stable_prefix_mode", "prompt_caching",
+                "max_cron_jobs", "agent_max_iterations", "workspaces_dir"
+            ]
+        },
+        {"key": "default_model", "struct_field": "default_model", "hot_reloadable": true},
+        {"key": "memory", "struct_field": "memory"},
+        {"key": "proactive_memory", "struct_field": "proactive_memory"},
+        {"key": "auto_dream", "struct_field": "auto_dream"},
+        {"key": "web", "struct_field": "web"},
+        {"key": "browser", "struct_field": "browser"},
+        {"key": "network", "struct_field": "network"},
+        {"key": "extensions", "struct_field": "extensions"},
+        {"key": "vault", "struct_field": "vault"},
+        {"key": "a2a", "struct_field": "a2a"},
+        {"key": "channels", "struct_field": "channels"},
+        {"key": "approval", "struct_field": "approval"},
+        {"key": "exec_policy", "struct_field": "exec_policy"},
+        {"key": "oauth", "struct_field": "oauth"},
+        {"key": "external_auth", "struct_field": "external_auth"},
+        {"key": "terminal", "struct_field": "terminal"},
+        {"key": "docker", "struct_field": "docker"},
+        {"key": "session", "struct_field": "session"},
+        {"key": "queue", "struct_field": "queue"},
+        {"key": "webhook_triggers", "struct_field": "webhook_triggers"},
+        {"key": "vertex_ai", "struct_field": "vertex_ai"},
+        {"key": "tts", "struct_field": "tts"},
+        {"key": "canvas", "struct_field": "canvas"},
+        {"key": "media", "struct_field": "media"},
+        {"key": "links", "struct_field": "links"},
+        {"key": "reload", "struct_field": "reload"},
+        {"key": "budget", "struct_field": "budget"},
+        {"key": "thinking", "struct_field": "thinking"},
+        {"key": "pairing", "struct_field": "pairing"},
+        {"key": "broadcast", "struct_field": "broadcast"},
+        {"key": "auto_reply", "struct_field": "auto_reply"}
+    ])
+}
+
+/// Per-field UI hints keyed by JSON-pointer path (so the frontend doesn't
+/// have to re-walk `$ref` chains). Carries numeric ranges, step granularity,
+/// curated select options (with human labels when applicable), and dynamic
+/// provider/model options sourced from the catalog.
+#[doc(hidden)]
+pub fn ui_options_overlay(
+    provider_options: Vec<String>,
+    model_options: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    // Language labels — preserved from the previous hand-authored schema so
+    // the UI keeps showing native-script names, not locale codes.
+    let languages = serde_json::json!([
+        {"value": "en", "label": "English"},
+        {"value": "zh", "label": "中文"},
+        {"value": "ja", "label": "日本語"},
+        {"value": "ko", "label": "한국어"},
+        {"value": "es", "label": "Español"},
+        {"value": "fr", "label": "Français"},
+        {"value": "de", "label": "Deutsch"},
+        {"value": "it", "label": "Italiano"},
+        {"value": "pt", "label": "Português"},
+        {"value": "ru", "label": "Русский"},
+        {"value": "ar", "label": "العربية"},
+        {"value": "hi", "label": "हिन्दी"},
+        {"value": "tr", "label": "Türkçe"},
+        {"value": "pl", "label": "Polski"},
+        {"value": "nl", "label": "Nederlands"},
+        {"value": "vi", "label": "Tiếng Việt"},
+        {"value": "th", "label": "ภาษาไทย"},
+        {"value": "id", "label": "Bahasa Indonesia"}
+    ]);
+
+    serde_json::json!({
+        // ── general (root-level KernelConfig fields) ──
+        "/log_level": {"select": ["trace", "debug", "info", "warn", "error"]},
+        "/mode": {"select": ["stable", "default", "dev"]},
+        "/language": {"select": languages},
+        "/usage_footer": {"select": ["off", "tokens", "cost", "full"]},
+        "/max_cron_jobs": {"min": 0, "max": 100, "step": 1},
+        "/agent_max_iterations": {"min": 1, "max": 500, "step": 1},
+
+        // ── default_model ──
+        "/default_model/provider": {"select": provider_options},
+        "/default_model/model": {"select_objects": model_options},
+
+        // ── memory ──
+        "/memory/consolidation_threshold": {"min": 1, "max": 1_000_000, "step": 1},
+        "/memory/decay_rate": {"min": 0, "max": 1, "step": 0.01},
+        "/memory/embedding_provider": {"select": [
+            "auto", "openai", "openrouter", "groq", "mistral", "together",
+            "fireworks", "cohere", "ollama", "bedrock", "vllm", "lmstudio"
+        ]},
+        "/memory/consolidation_interval_hours": {
+            "number_select": ["0", "1", "6", "12", "24", "48", "168"]
+        },
+
+        // ── proactive_memory ──
+        "/proactive_memory/max_retrieve": {"min": 1, "max": 100, "step": 1},
+        "/proactive_memory/extraction_threshold": {"min": 0, "max": 1, "step": 0.01},
+        "/proactive_memory/session_ttl_hours": {"min": 1, "max": 8760, "step": 1},
+        "/proactive_memory/confidence_decay_rate": {"min": 0, "max": 1, "step": 0.001},
+        "/proactive_memory/duplicate_threshold": {"min": 0, "max": 1, "step": 0.01},
+        "/proactive_memory/max_memories_per_agent": {"min": 0, "max": 100_000, "step": 100},
+
+        // ── auto_dream ──
+        "/auto_dream/min_hours": {"min": 0, "max": 168, "step": 0.5},
+        "/auto_dream/min_sessions": {"min": 0, "max": 1000, "step": 1},
+        "/auto_dream/check_interval_secs": {"min": 60, "max": 86_400, "step": 60},
+        "/auto_dream/timeout_secs": {"min": 30, "max": 3600, "step": 30},
+
+        // ── web ──
+        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"]},
+        "/web/cache_ttl_minutes": {"min": 0, "max": 10_080, "step": 1},
+
+        // ── browser ──
+        "/browser/viewport_width": {"min": 320, "max": 3840, "step": 1},
+        "/browser/viewport_height": {"min": 240, "max": 2160, "step": 1},
+        "/browser/timeout_secs": {"min": 5, "max": 300, "step": 1},
+        "/browser/idle_timeout_secs": {"min": 0, "max": 3600, "step": 1},
+        "/browser/max_sessions": {"min": 1, "max": 20, "step": 1},
+
+        // ── network ──
+        "/network/max_peers": {"min": 1, "max": 1000, "step": 1},
+
+        // ── extensions ──
+        "/extensions/reconnect_max_attempts": {"min": 0, "max": 100, "step": 1},
+        "/extensions/reconnect_max_backoff_secs": {"min": 1, "max": 3600, "step": 1},
+        "/extensions/health_check_interval_secs": {"min": 5, "max": 3600, "step": 1},
+
+        // ── terminal ──
+        "/terminal/max_windows": {"min": 1, "max": 64, "step": 1}
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1920,6 +1887,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
 )]
 pub async fn config_set(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let path = match body.get("path").and_then(|v| v.as_str()) {
@@ -2107,11 +2075,14 @@ pub async fn config_set(
             }
         };
 
-    state.kernel.audit().record(
+    let user_id = api_user.as_ref().map(|u| u.0.user_id);
+    state.kernel.audit().record_with_context(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         &format!("config set: {path}"),
         "completed",
+        user_id,
+        Some("api".to_string()),
     );
 
     let mut body = serde_json::json!({"status": reload_status, "path": path});
@@ -2155,7 +2126,8 @@ fn json_to_toml_edit_value(value: &serde_json::Value) -> toml_edit::Value {
 }
 
 /// Convert a serde_json::Value to a toml::Value.
-pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
+#[doc(hidden)]
+pub fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),
         serde_json::Value::Number(n) => {
@@ -2328,20 +2300,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     let providers = providers_result.unwrap_or_default();
     let channels = channels_result.unwrap_or_default();
 
-    // Check if at least one web search provider has a configured API key
-    let web_search_available = [
-        &cfg.web.tavily.api_key_env,
-        &cfg.web.brave.api_key_env,
-        &cfg.web.jina.api_key_env,
-        &cfg.web.perplexity.api_key_env,
-    ]
-    .iter()
-    .any(|env_var| {
-        std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-    });
+    let web_search_available = is_web_search_configured(&cfg.web);
 
     serde_json::json!({
         "health": health,
@@ -2353,4 +2312,53 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "workflowCount": workflow_count,
         "webSearchAvailable": web_search_available,
     })
+}
+
+#[cfg(test)]
+mod web_search_configured_tests {
+    use super::is_web_search_configured;
+    use librefang_types::config::WebConfig;
+
+    /// Point every API-key env-var lookup at a unique never-set name so the
+    /// helper's only path to "configured" in these tests is via SearXNG. This
+    /// keeps the assertions stable even on hosts that happen to export
+    /// `TAVILY_API_KEY` / `BRAVE_API_KEY` / etc. for unrelated reasons.
+    fn web_with_unset_keys(suffix: &str) -> WebConfig {
+        let mut web = WebConfig::default();
+        web.tavily.api_key_env = format!("LF_TEST_TAVILY_UNSET_{suffix}");
+        web.brave.api_key_env = format!("LF_TEST_BRAVE_UNSET_{suffix}");
+        web.jina.api_key_env = format!("LF_TEST_JINA_UNSET_{suffix}");
+        web.perplexity.api_key_env = format!("LF_TEST_PERPLEXITY_UNSET_{suffix}");
+        web.searxng.url = String::new();
+        web
+    }
+
+    #[test]
+    fn searxng_url_alone_counts_as_configured() {
+        let mut web = web_with_unset_keys("searxng_alone");
+        web.searxng.url = "https://search.example.com".to_string();
+        assert!(
+            is_web_search_configured(&web),
+            "non-empty SearXNG URL must satisfy the configured check — it does not need an API key"
+        );
+    }
+
+    #[test]
+    fn empty_searxng_and_unset_keys_is_unconfigured() {
+        let web = web_with_unset_keys("all_empty");
+        assert!(
+            !is_web_search_configured(&web),
+            "no SearXNG URL and no API keys must report unconfigured"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_searxng_url_does_not_count() {
+        let mut web = web_with_unset_keys("whitespace");
+        web.searxng.url = "   ".to_string();
+        assert!(
+            !is_web_search_configured(&web),
+            "whitespace-only SearXNG URL must not satisfy the configured check"
+        );
+    }
 }

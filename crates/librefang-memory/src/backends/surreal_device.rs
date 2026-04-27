@@ -117,7 +117,7 @@ impl DeviceBackend for SurrealDeviceStore {
             "push_token": push_token,
         });
         // Use device_id as record ID for idempotent upserts
-        let safe_id = device_id.replace(':', "_").replace('/', "_");
+        let safe_id = device_id.replace([':', '/'], "_");
         block_on(async {
             self.db
                 .upsert::<Option<serde_json::Value>>(("paired_devices", safe_id))
@@ -129,7 +129,7 @@ impl DeviceBackend for SurrealDeviceStore {
     }
 
     fn remove_paired_device(&self, device_id: &str) -> LibreFangResult<()> {
-        let safe_id = device_id.replace(':', "_").replace('/', "_");
+        let safe_id = device_id.replace([':', '/'], "_");
         block_on(async {
             self.db
                 .delete::<Option<serde_json::Value>>(("paired_devices", safe_id))

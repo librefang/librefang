@@ -7,6 +7,7 @@ crates/librefang-api/static/react/
 *.pdb
 dist
 sdk/**/target
+sdk/rust/Cargo.lock
 # Default `rustc foo.rs` output when run without `-o` — never a tracked artifact.
 /rust_out
 
@@ -46,6 +47,9 @@ predictions_database.json
 prediction_report_*.md
 BUILD_LOG.md
 message_journal.jsonl
+
+# Local working notes / design plans (ultrareview, brainstorm scratch)
+.plans/
 
 # Node.js (packages/)
 node_modules/

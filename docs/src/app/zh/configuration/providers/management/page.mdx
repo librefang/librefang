@@ -45,6 +45,28 @@ supports_vision = false
 
 `~/.librefang/providers/` 中的文件在启动时加载，并与内置提供商一起合并到目录中。
 
+### 自定义图像生成 provider
+
+不在内置列表（`openai`、`gemini`、`elevenlabs`、`minimax`、`google_tts`）的媒体驱动名以前会失败 `"Unknown media provider"`。现在配置了 URL 的自定义 provider 会落到通用 OpenAI 兼容图像驱动：
+
+```toml
+# config.toml
+[provider_urls]
+volcengine = "https://open.volcengineapi.com/v1"
+tongyi     = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+```
+
+```bash
+export VOLCENGINE_API_KEY="sk-..."
+export TONGYI_API_KEY="sk-..."
+```
+
+驱动期望标准的 OpenAI Images API 请求/响应形状（`/images/generations` 端点，返回 `b64_json` 或 `url`）。设 `[media] image_provider = "volcengine"`（或在 `[provider_urls]` 里用的任何 id）把图像生成调用路由过去。
+
+### 驱动侧文件上传
+
+Moonshot（Kimi）驱动在转发请求到 `/v1/chat/completions` 之前先把附件上传到 `/v1/files`，所以带 image / PDF / text 附件的消息端到端就能工作，不用你按附件做封送。文件写到 `std::env::temp_dir()`，上传前做了 content-type 校验、大小限制、文件名净化。这是透明的 — 不需要额外配置；像平时一样通过 `POST /api/agents/{id}/upload` 或 dashboard 聊天附文件即可。
+
 ### 提供商区域
 
 部分提供商提供区域特定的端点。区域在注册表 TOML 文件中定义，并支持可选的 `api_key_env` 覆盖：
@@ -668,6 +690,9 @@ key = "sk-ant-key-1"
 
 [[providers.anthropic.keys]]
 key = "sk-ant-key-2"
+
+[[providers.anthropic.keys]]
+key = "sk-ant-key-3"
 ```
 
 ### 耗尽与冷却
@@ -729,6 +754,7 @@ openai     [██████████████░░░░░░]  req: 
 ### 访问快照
 
 ```bash
+# Current rate-limit snapshot for all providers
 curl http://127.0.0.1:4545/api/providers/rate-limits
 ```
 

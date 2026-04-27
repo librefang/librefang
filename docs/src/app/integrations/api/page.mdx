@@ -432,7 +432,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/approvals/totp/setup` | Generate TOTP secret for enrollment |
 | POST | `/api/approvals/totp/confirm` | Confirm TOTP enrollment with code |
 | GET | `/api/approvals/totp/status` | Check TOTP enrollment status |
-| DELETE | `/api/approvals/totp` | Revoke TOTP enrollment |
+| POST | `/api/approvals/totp/revoke` | Revoke TOTP enrollment |
 | **Bindings & Commands** | | |
 | GET | `/api/bindings` | List UI bindings |
 | POST | `/api/bindings` | Add binding |
@@ -457,5 +457,71 @@ The `Retry-After` header indicates the window duration in seconds.
 | **OpenAI Compatible** | | |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat |
 | GET | `/v1/models` | OpenAI-compatible model list |
+| **Plugins (lifecycle & introspection)** | | |
+| GET | `/api/plugins/doctor` | Diagnose plugin issues across all installed plugins |
+| GET | `/api/plugins/{name}/status` | Plugin runtime status |
+| GET | `/api/plugins/{name}/health` | Plugin health probe |
+| GET | `/api/plugins/{name}/env` | Plugin environment variables (redacted) |
+| GET | `/api/plugins/{name}/export` | Export plugin definition |
+| GET | `/api/plugins/{name}/lint` | Lint plugin manifest |
+| POST | `/api/plugins/{name}/enable` | Enable / activate plugin |
+| POST | `/api/plugins/{name}/reload` | Hot-reload plugin |
+| POST | `/api/plugins/{name}/sign` | Sign plugin manifest (Ed25519) |
+| POST | `/api/plugins/prewarm` | Pre-warm plugin instances at boot |
+| **Skills (registry & runtime)** | | |
+| GET | `/api/skills/{name}` | Get individual skill detail |
+| GET | `/api/skills/{name}/file` | Retrieve a skill's supporting file (`references/`, `templates/`, `scripts/`, `assets/`) |
+| GET | `/api/skills/registry` | List skill marketplace registry |
+| POST | `/api/skills/reload` | Hot-reload installed skills |
+| **Tools (direct invocation)** | | |
+| POST | `/api/tools/{name}/invoke` | Direct tool call from a REST client (gated by `[tool_invoke]` allowlist) |
+| **Terminal** | | |
+| GET | `/api/terminal/health` | Terminal service health check |
+| GET | `/api/terminal/ws` | Terminal WebSocket session |
+| **A2A (extended task API)** | | |
+| GET | `/api/a2a/tasks/{id}` | Get external A2A task by ID |
+| POST | `/api/a2a/tasks/send` | Submit a new task to an external A2A agent |
+| **MCP (HTTP transport)** | | |
+| POST | `/api/mcp` | MCP HTTP transport (JSON-RPC 2.0) — alternative to the unauthenticated `/mcp` mount |
+| **Config & Registry** | | |
+| GET | `/api/config/export` | Export full effective config |
+| GET | `/api/registry/schema` | Config JSON schema for editor tooling |
+| GET | `/api/models/{*id}` | Wildcard model lookup (handles slash-bearing model IDs like `vendor/model-name`) |
+| GET | `/api/templates/{name}/toml` | Raw agent-template TOML (for editor use) |
+| **Goals & Inbox** | | |
+| GET | `/api/goals/templates` | List goal templates |
+| GET | `/api/inbox/status` | Inbox summary (pending counts by source) |
+| GET | `/api/sessions/search` | Search sessions with filters |
+| **Approvals (extended)** | | |
+| GET | `/api/approvals/audit` | Audit trail of approval decisions |
+| GET | `/api/approvals/count` | Count of pending approvals |
+| POST | `/api/approvals/batch` | Resolve multiple approvals atomically |
+| **Auto-Dream** | | |
+| GET | `/api/auto-dream/status` | Auto-dream automation status |
+| **Hands (extended)** | | |
+| DELETE | `/api/hands/{hand_id}` | Uninstall a hand |
+| POST | `/api/hands/reload` | Hot-reload hand definitions from disk |
+| **Media (extended)** | | |
+| POST | `/api/media/transcribe` | Transcribe audio to text |
+| **ClawHub CN mirror** | | |
+| GET | `/api/clawhub-cn/browse` | Browse ClawHub China mirror catalog |
+| GET | `/api/clawhub-cn/search` | Search ClawHub China mirror |
+| **Init** | | |
+| POST | `/api/init` | Quick-init wizard (called by `librefang setup --quick`) |
+| **Dashboard auth** | | |
+| POST | `/auth/logout` | Clear the dashboard session cookie |
+| **Prompt versioning & A/B testing** (when `[prompt_intelligence] enabled = true`) | | |
+| GET | `/agents/{agent_id}/prompts/versions` | List prompt versions for an agent |
+| POST | `/agents/{agent_id}/prompts/versions` | Save a new prompt version |
+| GET | `/prompts/versions/{id}` | Get a single prompt version |
+| DELETE | `/prompts/versions/{id}` | Delete a prompt version |
+| POST | `/prompts/versions/{id}/activate` | Activate this version for the agent |
+| GET | `/agents/{agent_id}/prompts/experiments` | List A/B experiments for an agent |
+| POST | `/agents/{agent_id}/prompts/experiments` | Create an A/B experiment |
+| GET | `/prompts/experiments/{id}` | Get experiment detail |
+| POST | `/prompts/experiments/{id}/start` | Start the experiment (begin sampling) |
+| POST | `/prompts/experiments/{id}/pause` | Pause the experiment |
+| POST | `/prompts/experiments/{id}/complete` | Complete the experiment + record winner |
+| GET | `/prompts/experiments/{id}/metrics` | Per-arm metrics (impressions / wins / cost / latency) |
 
 

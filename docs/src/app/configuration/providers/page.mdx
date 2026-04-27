@@ -8,11 +8,54 @@ This section is split into focused pages so you can jump straight to hosted APIs
 
 ## Table of Contents
 
-- [Hosted APIs](/configuration/providers/hosted) — Anthropic, OpenAI, Gemini, DeepSeek, Groq, OpenRouter, Mistral, Together, Fireworks, Perplexity, Cohere, AI21, Cerebras, SambaNova, Hugging Face, xAI
+- [Hosted APIs](/configuration/providers/hosted) — Anthropic, OpenAI, Gemini, DeepSeek, Groq, OpenRouter, Mistral, Together, Fireworks, Perplexity, Cohere, Cerebras, SambaNova, Hugging Face, xAI, Alibaba Coding Plan, Moonshot, Novita, AWS Bedrock
 - [Local & Self-Hosted](/configuration/providers/local) — Ollama, vLLM, LM Studio
-- [Platforms & Managed Endpoints](/configuration/providers/platforms) — Replicate, NVIDIA NIM, Voyage AI, Anyscale, DeepInfra, Azure OpenAI, Amazon Bedrock, Qwen (DashScope), MiniMax, Vertex AI
-- [Developer Tools](/configuration/providers/tools) — Claude Code, GitHub Copilot, Aider, Claude Code CLI, Codex CLI, Gemini CLI, Qwen Code
+- [Platforms & Managed Endpoints](/configuration/providers/platforms) — Replicate, NVIDIA NIM, DeepInfra, Azure OpenAI, Qwen (DashScope), MiniMax, Qianfan (Baidu), VolcEngine (Doubao), BytePlus ModelArk, Zhipu (GLM), Zhipu Coding, Z.ai, Vertex AI
+- [Developer Tools](/configuration/providers/tools) — Claude Code, GitHub Copilot, ChatGPT (Session), Kimi Coding, Aider, Claude Code CLI, Codex CLI, Gemini CLI, Qwen Code
 - [Provider Management](/configuration/providers/management) — dynamic loading, model catalog, aliases, routing, quotas, fallback, API endpoints, channel commands, env vars, security
+
+---
+
+## Capability Matrix
+
+A quick glance at which providers support which capabilities. ✓ = wired in the driver, ○ = partial / model-dependent, ✗ = not available via this provider in LibreFang. Embeddings shown here are inference-time embeddings, not the local Ollama auto-detect ladder.
+
+| Provider | Vision | Tools | Embeddings | File Upload | Prompt Cache | Image Gen | Audio |
+|---|---|---|---|---|---|---|---|
+| Anthropic | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| OpenAI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Google Gemini | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ✗ |
+| DeepSeek | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Groq | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| OpenRouter | ✓ | ✓ | ✗ | ○ | ○ | ✓ | ○ |
+| Mistral AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Together AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Fireworks AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Perplexity | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Cohere | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Cerebras | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| SambaNova | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Hugging Face | ○ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| xAI | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Alibaba Coding | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Moonshot (Kimi) | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Novita AI | ○ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| AWS Bedrock | ✗ | ✓ | ✓ | ✗ | ○ | ✗ | ○ |
+| Replicate | ✓ | ✗ | ✓ | ○ | ✗ | ✓ | ✓ |
+| Azure OpenAI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Qwen (DashScope) | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| MiniMax | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Qianfan (Baidu) | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ○ |
+| VolcEngine (Doubao) | ✓ | ✓ | ✗ | ○ | ✗ | ✗ | ✗ |
+| BytePlus ModelArk | ✓ | ✓ | ✗ | ○ | ✗ | ✗ | ✗ |
+| Zhipu (GLM) | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ✗ |
+| Vertex AI | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ○ |
+| GitHub Copilot | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| ChatGPT (Session) | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ○ |
+| Kimi Coding | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Ollama (Local) | ○ | ○ | ✓ | ✗ | ✗ | ✗ | ✗ |
+
+For the full provider catalog including every alias and model, run `librefang models list` against a running daemon — the in-process registry is always the source of truth.
 
 ---
 

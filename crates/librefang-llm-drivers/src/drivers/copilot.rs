@@ -240,6 +240,10 @@ impl crate::llm_driver::LlmDriver for CopilotDriver {
         let driver = self.make_inner_driver(&token);
         driver.stream(request, tx).await
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::OpenAi
+    }
 }
 
 #[cfg(test)]

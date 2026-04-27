@@ -242,6 +242,7 @@ mod tests {
             force_session_wipe: false,
             resume_pending: false,
             reset_reason: None,
+            has_processed_message: false,
         }
     }
 

@@ -55,7 +55,7 @@ pub struct MemoryState {
     pub status_msg: String,
 }
 
-pub enum MemoryAction {
+pub enum MemoryUIAction {
     Continue,
     LoadAgents,
     LoadKv(String),
@@ -93,9 +93,9 @@ impl MemoryState {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> MemoryAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> MemoryUIAction {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return MemoryAction::Continue;
+            return MemoryUIAction::Continue;
         }
         match self.sub {
             MemorySub::AgentSelect => self.handle_agent_select(key),
@@ -104,7 +104,7 @@ impl MemoryState {
         }
     }
 
-    fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryAction {
+    fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
         let total = self.agents.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if total > 0 => {
@@ -125,17 +125,17 @@ impl MemoryState {
                         self.selected_agent = Some(agent);
                         self.sub = MemorySub::KvBrowser;
                         self.loading = true;
-                        return MemoryAction::LoadKv(id);
+                        return MemoryUIAction::LoadKv(id);
                     }
                 }
             }
-            KeyCode::Char('r') => return MemoryAction::LoadAgents,
+            KeyCode::Char('r') => return MemoryUIAction::LoadAgents,
             _ => {}
         }
-        MemoryAction::Continue
+        MemoryUIAction::Continue
     }
 
-    fn handle_kv_browser(&mut self, key: KeyEvent) -> MemoryAction {
+    fn handle_kv_browser(&mut self, key: KeyEvent) -> MemoryUIAction {
         if self.confirm_delete {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -144,7 +144,7 @@ impl MemoryState {
                         (&self.selected_agent, self.kv_list_state.selected())
                     {
                         if sel < self.kv_pairs.len() {
-                            return MemoryAction::DeleteKv {
+                            return MemoryUIAction::DeleteKv {
                                 agent_id: agent.id.clone(),
                                 key: self.kv_pairs[sel].key.clone(),
                             };
@@ -153,7 +153,7 @@ impl MemoryState {
                 }
                 _ => self.confirm_delete = false,
             }
-            return MemoryAction::Continue;
+            return MemoryUIAction::Continue;
         }
 
         let total = self.kv_pairs.len();
@@ -195,15 +195,15 @@ impl MemoryState {
             KeyCode::Char('r') if self.selected_agent.is_some() => {
                 if let Some(agent) = &self.selected_agent {
                     self.loading = true;
-                    return MemoryAction::LoadKv(agent.id.clone());
+                    return MemoryUIAction::LoadKv(agent.id.clone());
                 }
             }
             _ => {}
         }
-        MemoryAction::Continue
+        MemoryUIAction::Continue
     }
 
-    fn handle_edit(&mut self, key: KeyEvent) -> MemoryAction {
+    fn handle_edit(&mut self, key: KeyEvent) -> MemoryUIAction {
         match key.code {
             KeyCode::Esc => {
                 self.sub = MemorySub::KvBrowser;
@@ -217,7 +217,7 @@ impl MemoryState {
             KeyCode::Enter => {
                 if !self.key_buf.is_empty() {
                     if let Some(agent) = &self.selected_agent {
-                        let action = MemoryAction::SaveKv {
+                        let action = MemoryUIAction::SaveKv {
                             agent_id: agent.id.clone(),
                             key: self.key_buf.clone(),
                             value: self.value_buf.clone(),
@@ -244,7 +244,7 @@ impl MemoryState {
             },
             _ => {}
         }
-        MemoryAction::Continue
+        MemoryUIAction::Continue
     }
 }
 

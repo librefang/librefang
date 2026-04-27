@@ -288,6 +288,9 @@ api-error-file-workspace-error = Workspace path error
 # Tool errors
 api-error-tool-provide-allowlist = Provide 'tool_allowlist' and/or 'tool_blocklist'
 api-error-tool-not-found = Tool not found: { $name }
+api-error-tool-invoke-disabled = Direct tool invocation is disabled. Enable '[tool_invoke] enabled = true' and add the tool to 'allowlist'.
+api-error-tool-invoke-denied = Tool '{ $name }' is not in '[tool_invoke] allowlist'
+api-error-tool-requires-agent = Tool '{ $name }' requires human approval and cannot be invoked without an agent context; call it through an agent instead
 
 # Validation errors
 api-error-validation-content-empty = Content cannot be empty

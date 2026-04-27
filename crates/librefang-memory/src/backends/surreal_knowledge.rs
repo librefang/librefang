@@ -155,7 +155,7 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
 
         let matches = rows
             .into_iter()
-            .filter_map(|row| {
+            .map(|row| {
                 // Build synthetic entity and relation objects from the flat row.
                 let src_entity = Entity {
                     id: row
@@ -163,7 +163,7 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .split(':')
-                        .last()
+                        .next_back()
                         .unwrap_or("")
                         .to_string(),
                     entity_type: {
@@ -200,7 +200,7 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .split(':')
-                        .last()
+                        .next_back()
                         .unwrap_or("")
                         .to_string(),
                     entity_type: {
@@ -263,11 +263,11 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or_else(Utc::now),
                 };
-                Some(GraphMatch {
+                GraphMatch {
                     source: src_entity,
                     relation: rel,
                     target: tgt_entity,
-                })
+                }
             })
             .collect();
         Ok(matches)

@@ -11,8 +11,17 @@ use crate::web_cache::WebCache;
 use crate::web_content::wrap_external_content;
 use librefang_types::config::{SearchProvider, WebConfig};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
+
+/// TTL for the per-engine SearXNG `/config` categories cache.
+///
+/// `/config` rarely changes between releases of the upstream instance, so a
+/// short-lived in-memory cache eliminates the second HTTP round-trip per
+/// search call without making admin reconfigurations sticky for long.
+const SEARXNG_CATEGORIES_TTL: Duration = Duration::from_secs(300);
 
 /// Multi-provider web search engine.
 pub struct WebSearchEngine {
@@ -22,6 +31,11 @@ pub struct WebSearchEngine {
     /// Extra API key env var names from auth_profiles (sorted by priority).
     /// Used for key rotation when the primary key returns 402/429.
     brave_key_envs: Vec<String>,
+    /// Cached `/config.categories` from the configured SearXNG instance.
+    ///
+    /// `None` until the first successful fetch. Refreshed when the cached
+    /// entry is older than [`SEARXNG_CATEGORIES_TTL`].
+    searxng_categories_cache: RwLock<Option<(Vec<String>, Instant)>>,
 }
 
 /// Context that bundles both search and fetch engines for passing through the tool runner.
@@ -61,6 +75,7 @@ impl WebSearchEngine {
             client,
             cache,
             brave_key_envs,
+            searxng_categories_cache: RwLock::new(None),
         }
     }
 
@@ -79,6 +94,7 @@ impl WebSearchEngine {
             SearchProvider::Jina => self.search_jina(query, max_results).await,
             SearchProvider::Perplexity => self.search_perplexity(query).await,
             SearchProvider::DuckDuckGo => self.search_duckduckgo(query, max_results).await,
+            SearchProvider::Searxng => self.search_searxng(query, max_results, None, 1).await,
             SearchProvider::Auto => self.search_auto(query, max_results).await,
         };
 
@@ -91,7 +107,7 @@ impl WebSearchEngine {
     }
 
     /// Auto-select provider based on available API keys.
-    /// Priority: Tavily → Brave → Jina → Perplexity → DuckDuckGo
+    /// Priority: Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo
     async fn search_auto(&self, query: &str, max_results: usize) -> Result<String, String> {
         // Tavily first (AI-agent-native)
         if resolve_api_key(&self.config.tavily.api_key_env).is_some() {
@@ -133,13 +149,22 @@ impl WebSearchEngine {
             }
         }
 
+        // Searxng fifth (self-hosted, requires only a URL — no API key)
+        if !self.config.searxng.url.is_empty() {
+            debug!("Auto: trying Searxng");
+            match self.search_searxng(query, max_results, None, 1).await {
+                Ok(result) => return Ok(result),
+                Err(e) => warn!("Searxng failed, falling back: {e}"),
+            }
+        }
+
         // DuckDuckGo as zero-config fallback — but it often gets captcha-blocked,
         // so treat it as best-effort and surface the last upstream error if it also
         // fails, giving the user a more actionable message.
         debug!("Auto: falling back to DuckDuckGo");
         match self.search_duckduckgo(query, max_results).await {
             Ok(result) if !result.trim().is_empty() => Ok(result),
-            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, or Perplexity API key for reliable search.".to_string()),
+            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, Jina, Perplexity, or SearXNG provider for reliable search.".to_string()),
             Err(e) => Err(format!("All search providers exhausted. Last error (DuckDuckGo): {e}")),
         }
     }
@@ -489,6 +514,200 @@ impl WebSearchEngine {
 
         Ok(output)
     }
+
+    /// Search via a self-hosted SearXNG instance.
+    ///
+    /// SearXNG public instances reject the upstream `limit` query param, so we
+    /// fetch a full page and truncate client-side. `category` defaults to
+    /// "general" and is validated against the instance's `/config` endpoint
+    /// (mismatches return an error so the LLM can pick a valid category on
+    /// retry). `page` is 1-based and forwarded as the `pageno` SearXNG param.
+    async fn search_searxng(
+        &self,
+        query: &str,
+        max_results: usize,
+        category: Option<&str>,
+        page: u32,
+    ) -> Result<String, String> {
+        if self.config.searxng.url.is_empty() {
+            return Err("SearXNG URL is not configured".to_string());
+        }
+
+        // SearXNG treats `pageno=0` as "no results" silently — guard up-front
+        // so callers (LLM tool args, internal misuse) get a clear error
+        // instead of an opaque empty response.
+        if page == 0 {
+            return Err("SearXNG pageno must be >= 1 (pages are 1-indexed)".to_string());
+        }
+
+        let category = category.unwrap_or("general");
+
+        // Validate category against the instance — fail fast with the available
+        // list so the agent can correct itself; treat connectivity errors as
+        // non-fatal (validation is best-effort, the search request itself will
+        // surface the real failure).
+        match self.list_searxng_categories().await {
+            Ok(cats) => {
+                if !cats.iter().any(|c| c == category) {
+                    return Err(format!(
+                        "Invalid SearXNG category '{}'. Available: {}",
+                        category,
+                        cats.join(", ")
+                    ));
+                }
+            }
+            Err(e) => warn!("Could not validate SearXNG category: {e}"),
+        }
+
+        debug!(query, category, page, "Searching via SearXNG");
+
+        let page_str = page.to_string();
+        let resp = self
+            .client
+            .get(format!(
+                "{}/search",
+                self.config.searxng.url.trim_end_matches('/')
+            ))
+            .query(&[
+                ("q", query),
+                ("format", "json"),
+                ("categories", category),
+                ("pageno", page_str.as_str()),
+            ])
+            .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
+            .send()
+            .await
+            .map_err(|e| format!("SearXNG request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("SearXNG API returned {}", resp.status()));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SearxngResponse {
+            results: Vec<SearxngResult>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SearxngResult {
+            url: String,
+            title: String,
+            content: Option<String>,
+            #[serde(alias = "pubdate")]
+            published_date: Option<String>,
+        }
+
+        let data: SearxngResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("SearXNG JSON parse failed: {e}"))?;
+
+        if data.results.is_empty() {
+            return Err(format!("No results found for '{query}' (SearXNG)."));
+        }
+
+        let total = data.results.len();
+        let shown = total.min(max_results);
+        let mut output = format!("Search results for '{query}' (SearXNG):\n\n");
+        for (i, r) in data.results.iter().take(max_results).enumerate() {
+            let content = r.content.as_deref().unwrap_or("");
+            output.push_str(&format!("{}. {}\n   URL: {}\n", i + 1, r.title, r.url));
+            if !content.is_empty() {
+                output.push_str(&format!("   {content}\n"));
+            }
+            if let Some(date) = &r.published_date {
+                output.push_str(&format!("   Published: {date}\n"));
+            }
+            output.push('\n');
+        }
+
+        // When client-side truncation hides results, tell the LLM so it can
+        // either widen `max_results` or paginate via `pageno`.
+        if shown < total {
+            output.push_str(&format!(
+                "Showing {shown} of {total} results on page {page} (truncated; pass a higher max_results or fetch the next page).\n",
+            ));
+        }
+
+        Ok(wrap_external_content("searxng-search", &output))
+    }
+
+    /// List available search categories from the configured SearXNG instance.
+    ///
+    /// Fetches the `/config` endpoint and returns the categories the instance
+    /// supports (e.g. "general", "images", "news", "videos"). Used both by
+    /// `search_searxng` for category validation and as a discovery hook for
+    /// agents that want to know what's available before issuing a query.
+    ///
+    /// Results are cached in-memory for [`SEARXNG_CATEGORIES_TTL`] so that a
+    /// single user-facing search call costs one HTTP round-trip (`/search`)
+    /// instead of two (`/config` + `/search`). On TTL miss the previous
+    /// cached value is returned if the refresh fetch fails, so transient
+    /// `/config` outages don't block searches.
+    pub async fn list_searxng_categories(&self) -> Result<Vec<String>, String> {
+        if self.config.searxng.url.is_empty() {
+            return Err("SearXNG URL is not configured".to_string());
+        }
+
+        // Fast path — fresh cached value.
+        {
+            let guard = self.searxng_categories_cache.read().await;
+            if let Some((cats, fetched_at)) = guard.as_ref() {
+                if fetched_at.elapsed() < SEARXNG_CATEGORIES_TTL {
+                    return Ok(cats.clone());
+                }
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct SearxngConfig {
+            categories: Vec<String>,
+        }
+
+        let fetch_result: Result<Vec<String>, String> = async {
+            let resp = self
+                .client
+                .get(format!(
+                    "{}/config",
+                    self.config.searxng.url.trim_end_matches('/')
+                ))
+                .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
+                .send()
+                .await
+                .map_err(|e| format!("SearXNG config request failed: {e}"))?;
+
+            if !resp.status().is_success() {
+                return Err(format!("SearXNG config API returned {}", resp.status()));
+            }
+
+            let data: SearxngConfig = resp
+                .json()
+                .await
+                .map_err(|e| format!("SearXNG config JSON parse failed: {e}"))?;
+            Ok(data.categories)
+        }
+        .await;
+
+        match fetch_result {
+            Ok(cats) => {
+                // Refresh cache.
+                let mut guard = self.searxng_categories_cache.write().await;
+                *guard = Some((cats.clone(), Instant::now()));
+                Ok(cats)
+            }
+            Err(e) => {
+                // Stale cache fallback — never blocks search if `/config` is
+                // briefly unreachable.
+                let guard = self.searxng_categories_cache.read().await;
+                if let Some((cats, _)) = guard.as_ref() {
+                    warn!("SearXNG /config refresh failed, using stale cache: {e}");
+                    Ok(cats.clone())
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -810,5 +1029,107 @@ mod tests {
         assert_eq!(config.web.jina.max_results, 3);
         // Perplexity should keep its default
         assert_eq!(config.web.perplexity.api_key_env, "PERPLEXITY_API_KEY");
+    }
+
+    // ── SearXNG provider tests ───────────────────────────────
+
+    #[test]
+    fn test_searxng_config_default_url_empty() {
+        let config = librefang_types::config::SearxngSearchConfig::default();
+        assert!(
+            config.url.is_empty(),
+            "SearXNG defaults to disabled (empty URL) so users opt in explicitly"
+        );
+    }
+
+    #[test]
+    fn test_searxng_search_provider_serde_json() {
+        let provider = librefang_types::config::SearchProvider::Searxng;
+        let json = serde_json::to_string(&provider).unwrap();
+        assert_eq!(json, "\"searxng\"");
+        let back: librefang_types::config::SearchProvider = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, librefang_types::config::SearchProvider::Searxng);
+    }
+
+    #[test]
+    fn test_searxng_config_toml_full_roundtrip() {
+        let toml_str = r#"
+            [web]
+            search_provider = "searxng"
+            [web.searxng]
+            url = "https://search.example.com"
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.web.search_provider,
+            librefang_types::config::SearchProvider::Searxng
+        );
+        assert_eq!(config.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn test_searxng_config_toml_partial_uses_defaults() {
+        let toml_str = r#"
+            [web]
+            search_provider = "searxng"
+        "#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.web.search_provider,
+            librefang_types::config::SearchProvider::Searxng
+        );
+        assert!(config.web.searxng.url.is_empty());
+    }
+
+    #[test]
+    fn test_web_config_default_includes_searxng() {
+        let config = librefang_types::config::WebConfig::default();
+        assert!(config.searxng.url.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_searxng_unconfigured_url_errors() {
+        let config = librefang_types::config::WebConfig::default();
+        let cache = std::sync::Arc::new(crate::web_cache::WebCache::new(std::time::Duration::ZERO));
+        let engine = WebSearchEngine::new(config, cache, Vec::new());
+        let err = engine
+            .search_searxng("test", 5, None, 1)
+            .await
+            .expect_err("empty SearXNG URL must fail");
+        assert!(
+            err.contains("SearXNG URL is not configured"),
+            "expected configuration error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_searxng_categories_unconfigured_url_errors() {
+        let config = librefang_types::config::WebConfig::default();
+        let cache = std::sync::Arc::new(crate::web_cache::WebCache::new(std::time::Duration::ZERO));
+        let engine = WebSearchEngine::new(config, cache, Vec::new());
+        let err = engine
+            .list_searxng_categories()
+            .await
+            .expect_err("empty SearXNG URL must fail");
+        assert!(err.contains("SearXNG URL is not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_search_searxng_pageno_zero_rejected() {
+        // Configure a non-empty URL so we get past the "URL not configured"
+        // gate and actually exercise the pageno guard. The URL is never
+        // contacted because the guard fires first.
+        let mut config = librefang_types::config::WebConfig::default();
+        config.searxng.url = "https://search.invalid".to_string();
+        let cache = std::sync::Arc::new(crate::web_cache::WebCache::new(std::time::Duration::ZERO));
+        let engine = WebSearchEngine::new(config, cache, Vec::new());
+        let err = engine
+            .search_searxng("test", 5, None, 0)
+            .await
+            .expect_err("pageno=0 must be rejected");
+        assert!(
+            err.contains("pageno must be >= 1"),
+            "expected pageno guard error, got: {err}"
+        );
     }
 }

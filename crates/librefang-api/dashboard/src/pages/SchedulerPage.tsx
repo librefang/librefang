@@ -8,12 +8,14 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
-import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight, Pencil } from "lucide-react";
-import type { TriggerItem, TriggerPatch } from "../api";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, Loader2, AlertCircle, ChevronRight, Pencil, Send } from "lucide-react";
+import type { TriggerItem, TriggerPatch, ScheduleItem } from "../api";
+import type { CronDeliveryTarget } from "../lib/http/client";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
+import { DeliveryTargetsEditor } from "../components/ui/DeliveryTargetsEditor";
 import { truncateId } from "../lib/string";
 import { formatTriggerPattern } from "../lib/triggerPattern";
 import { useSchedules, useTriggers } from "../lib/queries/schedules";
@@ -23,6 +25,7 @@ import {
   useDeleteSchedule,
   useRunSchedule,
   useUpdateSchedule,
+  useSetScheduleDeliveryTargets,
   useUpdateTrigger,
   useDeleteTrigger,
 } from "../lib/mutations/schedules";
@@ -65,7 +68,14 @@ export function SchedulerPage() {
   const [agentId, setAgentId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [message, setMessage] = useState("");
+  const [createDeliveryTargets, setCreateDeliveryTargets] = useState<CronDeliveryTarget[]>([]);
   const [confirmDelete, setConfirmDelete] = useState<{ type: "schedule" | "trigger"; id: string } | null>(null);
+
+  // Edit-targets modal state. Tracks the schedule being edited plus a
+  // working draft of the target list so the user can cancel without
+  // mutating the cached schedule.
+  const [editTargetsSchedule, setEditTargetsSchedule] = useState<ScheduleItem | null>(null);
+  const [editTargetsDraft, setEditTargetsDraft] = useState<CronDeliveryTarget[]>([]);
 
   // Trigger-creation state
   const [triggerAgentId, setTriggerAgentId] = useState("");
@@ -93,6 +103,7 @@ export function SchedulerPage() {
   const runMut = useRunSchedule();
   const deleteScheduleMut = useDeleteSchedule();
   const toggleScheduleMut = useUpdateSchedule();
+  const setDeliveryTargetsMut = useSetScheduleDeliveryTargets();
   const updateTriggerMut = useUpdateTrigger();
   const deleteTriggerMut = useDeleteTrigger();
 
@@ -113,8 +124,35 @@ export function SchedulerPage() {
       await createMut.mutateAsync({
         name, cron, tz: cronTz, message, enabled: true,
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
+        // Only send delivery_targets when the user actually configured
+        // some — otherwise leave the field absent so the backend default
+        // (empty) applies and we don't ship a noisy `[]` on every create.
+        ...(createDeliveryTargets.length > 0 ? { delivery_targets: createDeliveryTargets } : {}),
       });
       setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
+      setCreateDeliveryTargets([]);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast(msg || t("common.error"), "error");
+    }
+  };
+
+  const openEditTargets = (s: ScheduleItem) => {
+    setEditTargetsSchedule(s);
+    // Deep-clone so cancel leaves the cached list untouched.
+    setEditTargetsDraft((s.delivery_targets ?? []).map((t) => ({ ...t })));
+  };
+
+  const handleSaveTargets = async () => {
+    if (!editTargetsSchedule) return;
+    try {
+      await setDeliveryTargetsMut.mutateAsync({
+        id: editTargetsSchedule.id,
+        targets: editTargetsDraft,
+      });
+      setEditTargetsSchedule(null);
+      setEditTargetsDraft([]);
+      addToast(t("scheduler.delivery.saved", { defaultValue: "Delivery targets updated" }), "success");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
@@ -280,6 +318,47 @@ export function SchedulerPage() {
                     {agent && <span className="font-bold text-primary truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</span>}
                     {s.next_run && <span className="text-text-dim/40">{t("scheduler.next_run", { defaultValue: "Next" })}: {new Date(s.next_run).toLocaleString()}</span>}
                   </div>
+                  {/* Fan-out delivery targets summary + editor entry point */}
+                  <div className="flex items-center gap-2 pl-9 sm:pl-11 flex-wrap">
+                    {(s.delivery_targets ?? []).length > 0 ? (
+                      <>
+                        {(s.delivery_targets ?? []).map((target, ti) => {
+                          // 业务说明: 列出每条 fan-out target 的简短摘要,
+                          // 详细编辑走 modal,这里只做展示。
+                          const label =
+                            target.type === "channel"
+                              ? `${target.channel_type}: ${target.recipient}`
+                              : target.type === "webhook"
+                              ? "webhook"
+                              : target.type === "local_file"
+                              ? `file:${target.path}`
+                              : `email:${target.to}`;
+                          return (
+                            <span
+                              key={ti}
+                              title={label}
+                              className="inline-flex items-center gap-1 max-w-[160px] truncate rounded-md bg-main px-1.5 py-0.5 text-[9px] sm:text-[10px] font-mono text-text-dim/70"
+                            >
+                              <Send className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">{label}</span>
+                            </span>
+                          );
+                        })}
+                      </>
+                    ) : (
+                      <span className="text-[9px] sm:text-[10px] text-text-dim/30 italic">
+                        {t("scheduler.delivery.no_fanout", { defaultValue: "no fan-out targets" })}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => openEditTargets(s)}
+                      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[9px] sm:text-[10px] font-bold text-brand/80 hover:bg-brand/10 transition-colors"
+                    >
+                      <Pencil className="w-2.5 h-2.5" />
+                      {t("scheduler.delivery.edit_targets", { defaultValue: "Edit targets" })}
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -361,7 +440,7 @@ export function SchedulerPage() {
       </div>
 
       {/* Create Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md" variant="panel-right">
         {/* Mode tabs */}
         <div className="flex gap-1 px-5 pt-4">
           <button
@@ -439,6 +518,11 @@ export function SchedulerPage() {
               <textarea value={message} onChange={e => setMessage(e.target.value)} rows={3}
                 placeholder={t("scheduler.message_placeholder")} className={`${INPUT_CLASS} resize-none`} />
             </div>
+            <DeliveryTargetsEditor
+              value={createDeliveryTargets}
+              onChange={setCreateDeliveryTargets}
+              disabled={createMut.isPending}
+            />
             {createMut.error && (
               <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {createMut.error instanceof Error ? createMut.error.message : String(createMut.error ?? "")}</div>
             )}
@@ -516,8 +600,73 @@ export function SchedulerPage() {
         )}
       </Modal>
 
+      {/* Edit Delivery Targets Modal */}
+      <Modal
+        isOpen={!!editTargetsSchedule}
+        onClose={() => {
+          if (setDeliveryTargetsMut.isPending) return;
+          setEditTargetsSchedule(null);
+          setEditTargetsDraft([]);
+        }}
+        title={t("scheduler.delivery.edit_modal_title", { defaultValue: "Edit delivery targets" })}
+        size="lg"
+        variant="panel-right"
+      >
+        <div className="p-5 space-y-4">
+          {editTargetsSchedule && (
+            <div className="rounded-xl bg-brand/5 border border-brand/20 px-3 py-2 text-[10px] text-text-dim/70">
+              <span className="font-bold text-brand/80">
+                {t("scheduler.job_name", { defaultValue: "Job" })}:{" "}
+              </span>
+              {editTargetsSchedule.name || truncateId(editTargetsSchedule.id)}
+              <span className="ml-2 font-mono text-text-dim/40">{editTargetsSchedule.cron}</span>
+            </div>
+          )}
+          <DeliveryTargetsEditor
+            value={editTargetsDraft}
+            onChange={setEditTargetsDraft}
+            disabled={setDeliveryTargetsMut.isPending}
+          />
+          {setDeliveryTargetsMut.error && (
+            <div className="flex items-center gap-2 text-error text-xs">
+              <AlertCircle className="w-4 h-4" />
+              {setDeliveryTargetsMut.error instanceof Error
+                ? setDeliveryTargetsMut.error.message
+                : String(setDeliveryTargetsMut.error ?? "")}
+            </div>
+          )}
+          <div className="flex gap-2 pt-2">
+            <Button
+              type="button"
+              variant="primary"
+              className="flex-1"
+              onClick={handleSaveTargets}
+              disabled={setDeliveryTargetsMut.isPending}
+            >
+              {setDeliveryTargetsMut.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin mr-1" />
+              ) : (
+                <Send className="w-4 h-4 mr-1" />
+              )}
+              {t("scheduler.delivery.save", { defaultValue: "Save targets" })}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setEditTargetsSchedule(null);
+                setEditTargetsDraft([]);
+              }}
+              disabled={setDeliveryTargetsMut.isPending}
+            >
+              {t("common.cancel")}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Edit Trigger Modal */}
-      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md">
+      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md" variant="panel-right">
         <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
           {editTrigger && (
             <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">

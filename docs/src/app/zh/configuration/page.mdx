@@ -52,6 +52,7 @@
   - [\[oauth\]](#oauth)
   - [\[auth\_profiles\]](#auth_profiles)
   - [\[tool\_policy\]](#tool_policy)
+  - [\[tool\_timeouts\]](#tool_timeouts)
   - [\[proactive\_memory\]](#proactive_memory)
   - [\[context\_engine\]](#context_engine)
   - [\[audit\]](#audit)
@@ -153,6 +154,7 @@ usage_footer = "full"                 # off | tokens | cost | full
 prompt_caching = true                 # 启用 LLM 提示词缓存
 stable_prefix_mode = false            # 减少提示词缓存失效
 max_cron_jobs = 500                   # 全局最大定时任务数
+tool_timeout_secs = 300               # 所有工具的全局超时（秒）
 cors_origin = []                      # CORS 允许的来源
 include = []                          # 配置文件包含
 
@@ -165,6 +167,13 @@ include = []                          # 配置文件包含
 [provider_regions]
 # qwen = "intl"        # 使用 Qwen 国际端点 (dashscope-intl)
 # minimax = "china"    # 使用 MiniMax 中国端点 (MINIMAX_CN_API_KEY)
+
+# --- 工具超时 ---
+[tool_timeouts]
+agent_send = 600                       # agent_send 工具的覆盖
+agent_spawn = 600                      # agent_spawn 工具的覆盖
+"mcp_browser_*" = 900                  # 浏览器 MCP 工具的 glob 模式
+shell_exec = 300                       # shell_exec 工具的覆盖
 
 # --- 默认 LLM 提供商 ---
 [default_model]
@@ -500,6 +509,8 @@ plugin_registries = []
 | `provider_urls` | map of string->string | `{}` | 提供商基础 URL 覆盖。将提供商 ID 映射到自定义基础 URL（例如 `ollama = "http://192.168.1.100:11434/v1"`）。适用于自托管或代理端点。 |
 | `provider_api_keys` | map of string->string | `{}` | 提供商 API Key 环境变量覆盖。将提供商 ID 映射到存放密钥的环境变量名称（例如 `nvidia = "NVIDIA_API_KEY"`）。未设置时，默认使用 `{PROVIDER_UPPER}_API_KEY` 的命名约定。 |
 | `provider_regions` | map of string->string | `{}` | 提供商区域选择。将提供商 ID 映射到提供商注册 TOML 中定义的区域名称（例如 `qwen = "intl"`）。覆盖提供商的基础 URL，并可选择性覆盖其 API Key 环境变量。在 `provider_urls` 之前生效（优先级较低）。 |
+| `tool_timeout_secs` | u64 | `300` | 所有工具执行的全局超时（秒）。可通过 `[tool_timeouts]` 节按工具覆盖。 |
+| `tool_timeouts` | map of string->u64 | `{}` | 每个工具的超时覆盖。键是精确的工具名称或 glob 模式。详见 `[tool_timeouts]` 节。 |
 
 **`mode` 值说明：**
 
@@ -2602,6 +2613,35 @@ tools = ["web_search", "web_fetch"]
 |------|------|------|
 | `name` | string | 组名（例如 `"web_tools"`、`"code_tools"`）。 |
 | `tools` | list of strings | 包含在该组中的工具名称模式。 |
+
+---
+
+### `[tool_timeouts]`
+
+配置每个工具的执行超时时间。全局默认超时适用于所有工具，除非被精确名称或 glob 模式覆盖。
+
+```toml
+# 所有工具的全局默认超时（秒）
+tool_timeout_secs = 300
+
+# 每个工具的超时覆盖（精确匹配或 glob 模式）
+[tool_timeouts]
+agent_send = 600
+agent_spawn = 600
+"mcp_browser_*" = 900
+shell_exec = 300
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `tool_timeout_secs` | u64 | `300` | 所有工具执行的全局超时（秒）。对于浏览器自动化或长时间运行的构建，请增加此值。 |
+| `tool_timeouts` | map of string->u64 | `{}` | 每个工具的超时覆盖。键是精确的工具名称或 glob 模式（例如 `"mcp_browser_*"`）。精确匹配优先于 glob 模式；在多个 glob 模式中，最长的匹配模式获胜（最具体的优先）。当没有匹配项时，回退到 `tool_timeout_secs`。 |
+
+**解析顺序：**
+
+1. `tool_timeouts` 中的精确工具名称匹配
+2. `tool_timeouts` 中最长的匹配 glob 模式
+3. 全局 `tool_timeout_secs`
 
 ---
 

@@ -1262,8 +1262,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         model_override: None,
                         timeout_secs: None,
                         pre_check_script: None,
+                        pre_script: None,
+                        silent_marker: None,
                     },
                     delivery: librefang_types::scheduler::CronDelivery::None,
+                    delivery_targets: Vec::new(),
                     peer_id: None,
                     session_mode: None,
                     created_at: chrono::Utc::now(),
@@ -2728,10 +2731,17 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-revolt")]
     for rv_config in config.revolt.iter() {
         if let Some(token) = read_token(&rv_config.bot_token_env, "Revolt") {
-            let adapter =
-                Arc::new(RevoltAdapter::new(token).with_account_id(rv_config.account_id.clone()));
+            let mut adapter = RevoltAdapter::with_urls(
+                token,
+                rv_config.api_url.clone(),
+                rv_config.ws_url.clone(),
+            )
+            .with_account_id(rv_config.account_id.clone());
+            if !rv_config.allowed_channels.is_empty() {
+                adapter.set_allowed_channels(rv_config.allowed_channels.clone());
+            }
             adapters.push((
-                adapter,
+                Arc::new(adapter),
                 rv_config.default_agent.clone(),
                 rv_config.account_id.clone(),
             ));

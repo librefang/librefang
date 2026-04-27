@@ -15,12 +15,14 @@
 - Fireworks AI
 - Perplexity AI
 - Cohere
-- AI21 Labs
 - Cerebras
 - SambaNova
 - Hugging Face
 - xAI
 - Alibaba Coding Plan
+- Moonshot (Kimi)
+- Novita AI
+- AWS Bedrock
 
 ---
 
@@ -314,29 +316,6 @@
 
 ---
 
-## AI21 Labs
-
-| | |
-|---|---|
-| **显示名称** | AI21 Labs |
-| **驱动** | OpenAI 兼容 |
-| **环境变量** | `AI21_API_KEY` |
-| **基础 URL** | `https://api.ai21.com/studio/v1` |
-| **需要密钥** | 是 |
-| **免费额度** | 有（有限额度） |
-| **认证方式** | `Authorization: Bearer` 请求头 |
-| **模型数** | 1 |
-
-**可用模型：**
-- `jamba-1.5-large` (智能)
-
-**设置：**
-1. 在 [studio.ai21.com](https://studio.ai21.com) 注册账号
-2. 创建 API 密钥
-3. `export AI21_API_KEY="..."`
-
----
-
 ## Cerebras
 
 | | |
@@ -475,3 +454,109 @@
 - 通过阿里云控制台监控请求配额
 - 不适用于自动化脚本或批量 API 调用 — 仅限编码工具
 - 更多信息：[官方文档](https://www.alibabacloud.com/help/en/model-studio/coding-plan)
+
+---
+
+## Moonshot (Kimi)
+
+| | |
+|---|---|
+| **显示名称** | Moonshot / Kimi |
+| **Provider ID** | `moonshot`（别名 `kimi`、`kimi2`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `MOONSHOT_API_KEY` |
+| **基础 URL** | `https://api.moonshot.ai/v1` |
+| **需要密钥** | 是 |
+| **免费额度** | 无 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在 [Moonshot 平台](https://platform.moonshot.cn)(国内) 或 [Moonshot AI](https://platform.moonshot.ai)(海外) 注册
+2. 在控制台创建 API key
+3. `export MOONSHOT_API_KEY="sk-..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "moonshot"
+model = "moonshot-v1-128k"
+```
+
+**能力:** 聊天补全、tool use、vision(在 `kimi-latest` / 视觉模型上)、最大 128K 上下文。支持 `/files` 端点上传文件做多文档 RAG。
+
+**说明:** Kimi 模型由 Moonshot AI 运营。配置短一点可用 `kimi` 别名。
+
+---
+
+## Novita AI
+
+| | |
+|---|---|
+| **显示名称** | Novita AI |
+| **Provider ID** | `novita`（别名：`novita-ai`） |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `NOVITA_API_KEY` |
+| **基础 URL** | `https://api.novita.ai/openai/v1` |
+| **需要密钥** | 是 |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 在 [novita.ai](https://novita.ai) 注册账号
+2. 在控制台生成 API Key
+3. `export NOVITA_API_KEY="..."`
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "novita"
+model = "<在 Novita 模型目录里查到的 model id>"
+```
+
+**能力：** 共享的 OpenAI 兼容驱动支持 tools 和 streaming。视觉支持取决于上游模型 — 启用前请先查 Novita 的模型说明。
+
+**注意事项：** Novita 通过 OpenAI Chat Completions API 格式暴露目录。设置 `NOVITA_API_KEY` 后会被自动检测拾取；如果只想作 fallback，不需要显式写 `provider`。
+
+---
+
+## AWS Bedrock
+
+| | |
+|---|---|
+| **显示名称** | AWS Bedrock |
+| **Provider ID** | `bedrock`（别名：`aws-bedrock`） |
+| **驱动** | 原生 Bedrock Converse API |
+| **环境变量** | `AWS_BEARER_TOKEN_BEDROCK` |
+| **区域变量** | `AWS_REGION`（或 `AWS_DEFAULT_REGION`，默认 `us-east-1`） |
+| **基础 URL** | 按调用拼接：`https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse` |
+| **需要密钥** | 是 |
+| **认证方式** | `Authorization: Bearer` 请求头（Bedrock API Keys，不走 SigV4） |
+
+**设置：**
+1. 在 AWS 控制台创建 Bedrock API Key（长效 bearer token）。这个驱动 **不** 走 SigV4。
+2. 选一个在 Bedrock 模型目录里启用了所需模型的区域。
+3. 导出凭据：
+
+   ```bash
+   export AWS_BEARER_TOKEN_BEDROCK="..."
+   export AWS_REGION="us-east-1"
+   ```
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "bedrock"
+model = "anthropic.claude-sonnet-4-20250514-v1:0"
+```
+
+`model` 字段会原样拼进 endpoint 路径，所以要写完整的 Bedrock model id（区域前缀如 `eu.` 或区域要求的 inference profile id 都要带上）。
+
+**能力：**
+- Tool use（function calling）走 Converse 的 `toolConfig` 结构，包含完整的 `toolResult` / `toolUse` 配对消息修复。
+- 支持 streaming 与非 streaming completion。
+- 视觉**未接入**：image content block 在请求前被丢弃，因为 Bedrock Converse 不接受 LibreFang 的 `Image` / `ImageFile` 形状。
+- prompt-cache token 计数未暴露 — Bedrock Converse 不单独返回 `cache_creation_input_tokens` / `cache_read_input_tokens`，metering 里这两个值恒为 0。
+
+**注意事项：** 区域解析顺序：driver 显式参数 → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`。要用区域 inference profile（比如 `eu.anthropic.…`）就把 `AWS_REGION` 设成对应区域（`eu-west-1` 等）并使用带前缀的 model id。

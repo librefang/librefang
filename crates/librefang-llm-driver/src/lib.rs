@@ -226,11 +226,21 @@ pub struct CompletionRequest {
     pub thinking: Option<librefang_types::config::ThinkingConfig>,
     /// Enable prompt caching for providers that support it.
     ///
-    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` to system
-    ///   message blocks and the last user turn.
+    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` markers
+    ///   on the system block, the last tool, and the trailing 2-3 messages
+    ///   (system_and_3 rolling window — uses all 4 cache breakpoints).
     /// - **OpenAI**: automatic prefix caching (no request changes needed, but
     ///   cached token counts are parsed from the response).
     pub prompt_caching: bool,
+    /// Cache TTL hint when [`Self::prompt_caching`] is enabled.
+    ///
+    /// - `None` (default) → 5-minute ephemeral cache (1.25x write multiplier).
+    /// - `Some("1h")` → 1-hour cache; only honored by the Anthropic driver,
+    ///   which auto-injects the `anthropic-beta: extended-cache-ttl-2025-04-11`
+    ///   header. Other values are treated as 5m.
+    ///
+    /// Ignored by drivers that don't implement `cache_control` markers.
+    pub cache_ttl: Option<&'static str>,
     /// Desired response format (structured output).
     ///
     /// When set, instructs the LLM to return output in the specified format.
@@ -333,6 +343,48 @@ pub enum StreamEvent {
     OwnerNotice { text: String },
 }
 
+/// High-level grouping of LLM providers that share wire format and
+/// policy-relevant behaviour (prompt-cache semantics, tool-schema style,
+/// thinking-block handling, …).
+///
+/// This is intentionally coarser than `provider`/`api_format` — it exists so
+/// that future cross-cutting policy code can be hung off a single dimension
+/// without re-implementing the same logic per concrete driver. No policy
+/// logic is attached to the variants in this PR; consumers should treat the
+/// enum as opaque metadata until follow-up work introduces family-aware
+/// hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmFamily {
+    /// Anthropic Claude family (direct API, Anthropic-compatible providers,
+    /// Claude Code CLI).
+    Anthropic,
+    /// OpenAI Chat Completions wire format (OpenAI, Azure OpenAI, Groq,
+    /// OpenRouter, DeepInfra, Together, Cerebras, …).
+    OpenAi,
+    /// Google Gemini family (Gemini API, Vertex AI Gemini, Gemini CLI).
+    Google,
+    /// Locally-hosted runtimes accessed via their own native protocol
+    /// (Ollama, LM Studio, vLLM, sglang, llama.cpp). Drivers that proxy
+    /// local servers via the OpenAI-compatible shim still report `OpenAi`.
+    Local,
+    /// Anything that does not fit the above (Cohere v2, Aider, custom
+    /// CLIs, etc.). Default for drivers that have not opted into a family.
+    Other,
+}
+
+impl std::fmt::Display for LlmFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmFamily::Anthropic => write!(f, "anthropic"),
+            LlmFamily::OpenAi => write!(f, "open_ai"),
+            LlmFamily::Google => write!(f, "google"),
+            LlmFamily::Local => write!(f, "local"),
+            LlmFamily::Other => write!(f, "other"),
+        }
+    }
+}
+
 /// Trait for LLM drivers.
 #[async_trait]
 pub trait LlmDriver: Send + Sync {
@@ -364,6 +416,16 @@ pub trait LlmDriver: Send + Sync {
     /// Returns false only for StubDriver; all real drivers return true.
     fn is_configured(&self) -> bool {
         true
+    }
+
+    /// The high-level family this driver belongs to.
+    ///
+    /// Defaults to [`LlmFamily::Other`] so that out-of-tree drivers continue
+    /// to compile without modification. Concrete in-tree drivers override
+    /// this to enable future family-level shared policy (prompt-cache
+    /// replay, tool-schema normalisation, …) without per-driver duplication.
+    fn family(&self) -> LlmFamily {
+        LlmFamily::Other
     }
 }
 
@@ -551,6 +613,80 @@ mod tests {
         assert_eq!(events.len(), 5);
     }
 
+    #[test]
+    fn test_llm_family_serializes_to_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LlmFamily::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LlmFamily::OpenAi).unwrap(),
+            "\"open_ai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LlmFamily::Google).unwrap(),
+            "\"google\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LlmFamily::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LlmFamily::Other).unwrap(),
+            "\"other\""
+        );
+    }
+
+    #[test]
+    fn test_llm_family_deserializes_from_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<LlmFamily>("\"anthropic\"").unwrap(),
+            LlmFamily::Anthropic
+        );
+        assert_eq!(
+            serde_json::from_str::<LlmFamily>("\"open_ai\"").unwrap(),
+            LlmFamily::OpenAi
+        );
+        assert_eq!(
+            serde_json::from_str::<LlmFamily>("\"google\"").unwrap(),
+            LlmFamily::Google
+        );
+        assert_eq!(
+            serde_json::from_str::<LlmFamily>("\"local\"").unwrap(),
+            LlmFamily::Local
+        );
+        assert_eq!(
+            serde_json::from_str::<LlmFamily>("\"other\"").unwrap(),
+            LlmFamily::Other
+        );
+    }
+
+    #[test]
+    fn test_llm_family_display_matches_serde() {
+        assert_eq!(LlmFamily::Anthropic.to_string(), "anthropic");
+        assert_eq!(LlmFamily::OpenAi.to_string(), "open_ai");
+        assert_eq!(LlmFamily::Google.to_string(), "google");
+        assert_eq!(LlmFamily::Local.to_string(), "local");
+        assert_eq!(LlmFamily::Other.to_string(), "other");
+    }
+
+    #[test]
+    fn test_llm_driver_family_default_is_other() {
+        struct BareDriver;
+
+        #[async_trait]
+        impl LlmDriver for BareDriver {
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!("test does not call complete")
+            }
+        }
+
+        assert_eq!(BareDriver.family(), LlmFamily::Other);
+    }
+
     #[tokio::test]
     async fn test_default_stream_sends_events() {
         use tokio::sync::mpsc;
@@ -590,6 +726,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

@@ -4,6 +4,7 @@
 api-error-agent-not-found = Agente no encontrado
 api-error-agent-spawn-failed = Error al crear el agente
 api-error-agent-invalid-id = ID de agente no valido
+api-error-session-invalid-id = ID de sesion no valido
 api-error-agent-already-exists = El agente ya existe
 
 # Message errors

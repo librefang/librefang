@@ -643,16 +643,15 @@ async fn summarize_messages(
     if conversation_text.len() > effective_max {
         // Keep the tail (most recent) which is usually more important
         let start = conversation_text.len() - effective_max;
-        // Find valid char boundary at or after start
-        let safe_start = if conversation_text.is_char_boundary(start) {
-            start
-        } else {
-            conversation_text[start..]
-                .char_indices()
-                .next()
-                .map(|(i, _)| start + i)
-                .unwrap_or(conversation_text.len())
-        };
+        // Find the nearest valid char boundary at or after `start`.
+        //
+        // Note: we cannot slice `conversation_text[start..]` to use
+        // `char_indices`, because that slice operation itself panics when
+        // `start` lands inside a multi-byte character.  Walk byte indices
+        // forward instead — this is panic-safe for any UTF-8 input.
+        let safe_start = (start..=conversation_text.len())
+            .find(|&i| conversation_text.is_char_boundary(i))
+            .unwrap_or(conversation_text.len());
         conversation_text = conversation_text[safe_start..].to_string();
     }
 
@@ -683,6 +682,7 @@ async fn summarize_messages(
         ),
         thinking: None,
         prompt_caching: false,
+        cache_ttl: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
@@ -808,6 +808,7 @@ async fn summarize_in_chunks(
         ),
         thinking: None,
         prompt_caching: false,
+        cache_ttl: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,

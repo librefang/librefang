@@ -6,11 +6,26 @@ This page covers providers that integrate through local assistant tooling or CLI
 
 - Claude Code
 - GitHub Copilot
+- ChatGPT (Session Token)
+- Kimi Coding
 - Aider
 - Claude Code CLI
 - Codex CLI
 - Gemini CLI
 - Qwen Code
+
+## CLI logins as first-class default providers
+
+When you have not set a provider API key but **do** have a working CLI login (`claude`, `codex`, `gemini`, `qwen` available on `PATH` and authenticated), LibreFang will pick the CLI provider as the default model for new agents. The detection runs at startup and is rechecked when the daemon refreshes provider availability.
+
+Detection priority (in order, first match wins):
+
+1. `claude-code` — `claude` binary on `PATH`, `claude auth status` reports an active session.
+2. `codex-cli` — `codex` binary on `PATH`, with `OPENAI_API_KEY` (which the Codex CLI itself needs) set.
+3. `gemini-cli` — `gemini` binary on `PATH`, authenticated via `gemini auth login`.
+4. `qwen-code` — `qwen` binary on `PATH`, authenticated.
+
+This behaviour replaced the previous "fallback when API providers fail" heuristic — CLI providers are now treated like any other remote provider. To explicitly override the auto-pick, set `[default_model] provider = "anthropic"` (or whichever) in `config.toml`.
 
 ---
 
@@ -50,6 +65,65 @@ This page covers providers that integrate through local assistant tooling or CLI
 3. `export GITHUB_TOKEN="ghp_..."`
 
 **Notes:** The Copilot driver handles OAuth PKCE token exchange automatically — it obtains a short-lived Copilot API token from `https://api.github.com/copilot_internal/v2/token` and caches it with auto-refresh. The Copilot API uses OpenAI-compatible chat completions format. Tokens are refreshed 5 minutes before expiry.
+
+---
+
+## ChatGPT (Session Token)
+
+| | |
+|---|---|
+| **Display Name** | ChatGPT |
+| **Provider ID** | `chatgpt` |
+| **Driver** | Native ChatGPT (Responses API) |
+| **Env Var** | `CHATGPT_SESSION_TOKEN` (primary), `CHATGPT_REFRESH_TOKEN` (optional) |
+| **Base URL** | `https://chatgpt.com/backend-api` |
+| **Key Required** | Yes (browser session token) |
+| **Free Tier** | Subscription-based (ChatGPT Plus / Pro / Team / Enterprise) |
+| **Auth** | Session token + bearer; OAuth-style refresh with ~7-day TTL |
+
+**Setup:**
+1. Run `librefang auth chatgpt` (browser-based OAuth flow). The CLI captures the session token and caches it.
+2. The token auto-refreshes 1 hour before expiry; no manual rotation needed.
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "chatgpt"
+model = "gpt-4o"
+```
+
+**Notes:** Uses the proprietary Responses API rather than `/v1/chat/completions`. This lets agents reuse a paid ChatGPT subscription without a separate OpenAI API key. **Tools and vision supported.** Embeddings are not available via this driver — use OpenAI hosted instead.
+
+---
+
+## Kimi Coding
+
+| | |
+|---|---|
+| **Display Name** | Kimi Coding |
+| **Provider ID** | `kimi-coding` |
+| **Driver** | Anthropic-compatible (Messages API) |
+| **Env Var** | `KIMI_API_KEY` |
+| **Base URL** | `https://api.kimi.com/coding` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign up at the Kimi console and enable the Coding endpoint
+2. Generate an API key under the Coding product
+3. `export KIMI_API_KEY="sk-..."`
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "kimi-coding"
+model = "kimi-coder"
+```
+
+**Notes:** Coding-specialized variant of Moonshot's stack, exposed in **Anthropic Messages API format** (not OpenAI-compatible). Uses the same internal driver path as Anthropic, including tool-use schema conversion and vision support. Different env var from `MOONSHOT_API_KEY` — Kimi Coding uses its own key.
 
 ---
 

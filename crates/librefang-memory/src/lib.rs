@@ -41,6 +41,7 @@ pub mod decay;
 pub mod http_vector_store;
 pub mod knowledge;
 pub mod migration;
+pub mod namespace_acl;
 pub mod proactive;
 pub mod prompt;
 pub mod provider;
@@ -51,6 +52,7 @@ pub mod usage;
 
 mod backend;
 pub mod backends;
+mod session_store;
 mod substrate;
 pub use backend::{
     DeviceBackend, KnowledgeBackend, KvBackend, MemoryBackend, ProactiveMemoryBackend,
@@ -88,6 +90,7 @@ pub use librefang_types::memory::{
 };
 
 // Re-export proactive memory store
+pub use namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
 pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};
 pub use prompt::PromptStore;
 

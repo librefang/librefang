@@ -74,7 +74,7 @@ impl MigrationKind {
 }
 
 /// Options controlling how a migration runs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrationOptions {
     /// When `true` the migrator only counts source rows and writes
     /// nothing to the target. No receipt file is written either —
@@ -84,15 +84,6 @@ pub struct MigrationOptions {
     /// Directory under which receipt JSON files are written. When
     /// `None` the receipt is returned in memory but never persisted.
     pub receipt_dir: Option<PathBuf>,
-}
-
-impl Default for MigrationOptions {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            receipt_dir: None,
-        }
-    }
 }
 
 /// Source row counts collected during the planning pass.

@@ -434,7 +434,7 @@ function MarketplaceDetailModal({
 }) {
   const isPending = pendingId === skill.slug;
   return (
-    <Modal isOpen onClose={onClose} title={skill.name} size="md">
+    <Modal isOpen onClose={onClose} title={skill.name} size="md" variant="panel-right">
       <div className="p-5 space-y-4">
         <div className="p-4 rounded-xl bg-surface-2">
           <p className="text-sm text-text-dim leading-relaxed">{skill.description}</p>
@@ -628,6 +628,7 @@ function CreateSkillModal({
       onClose={onClose}
       title={t("skills.evo_create_title", { defaultValue: "Create Skill" })}
       size="xl"
+      variant="panel-right"
     >
       <div className="space-y-4 p-1">
         <div>
@@ -1173,6 +1174,7 @@ function SkillDetailModal({
       onClose={onClose}
       title={detail?.name ?? skillName ?? ""}
       size="xl"
+      variant="drawer-right"
     >
       {isLoading ? (
         <div className="flex items-center justify-center py-12">

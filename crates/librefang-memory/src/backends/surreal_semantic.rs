@@ -206,14 +206,14 @@ pub fn memory_to_fragment(mem: surreal_memory::memory::Memory) -> MemoryFragment
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .map(MemoryId)
-        .unwrap_or_else(MemoryId::new);
+        .unwrap_or_default();
 
     let agent_id = mem
         .agent_id
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok())
-        .map(|u| AgentId(u))
-        .unwrap_or_else(AgentId::new);
+        .map(AgentId)
+        .unwrap_or_default();
 
     let scope = mem.categories.into_iter().next().unwrap_or_default();
 

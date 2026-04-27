@@ -6,6 +6,7 @@ import {
   getMcpCatalogEntry,
   getMcpHealth,
   getMcpAuthStatus,
+  listMcpTaintRules,
 } from "../http/client";
 import { mcpKeys } from "./keys";
 import { QueryOverrides, withOverrides } from "./options";
@@ -14,6 +15,11 @@ const SERVERS_STALE_MS = 30_000;
 const SERVERS_REFRESH_MS = 30_000;
 const CATALOG_STALE_MS = 300_000;
 const HEALTH_STALE_MS = 15_000;
+// `[[taint_rules]]` is operator-edited config, not runtime-derived state.
+// 5 minutes matches the catalog cadence — operators don't expect rule-set
+// renames to land instantly in the editor, and reload-config flows already
+// emit a `mcpKeys.taintRules` invalidation on the mutation side.
+const TAINT_RULES_STALE_MS = 300_000;
 
 export const mcpQueries = {
   servers: () =>
@@ -58,6 +64,12 @@ export const mcpQueries = {
       staleTime: 2_000,
       enabled: opts.enabled ?? Boolean(id),
     }),
+  taintRules: () =>
+    queryOptions({
+      queryKey: mcpKeys.taintRules(),
+      queryFn: listMcpTaintRules,
+      staleTime: TAINT_RULES_STALE_MS,
+    }),
 };
 
 export function useMcpServers(options: QueryOverrides = {}) {
@@ -82,4 +94,8 @@ export function useMcpHealth(options: QueryOverrides = {}) {
 
 export function useMcpAuthStatus(id: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(mcpQueries.authStatus(id), options));
+}
+
+export function useMcpTaintRules(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(mcpQueries.taintRules(), options));
 }

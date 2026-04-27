@@ -36,6 +36,26 @@ pub trait KernelHandle: Send + Sync {
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
 
+    /// Like [`send_to_agent`](Self::send_to_agent), but records that the
+    /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
+    /// the parent cascades into the callee's loop (issue #3044). Defaults
+    /// to the plain `send_to_agent` behavior for implementations that
+    /// don't support cancel cascading — a trace log flags the fallthrough
+    /// so operators can tell a non-standard handle is in play.
+    async fn send_to_agent_as(
+        &self,
+        agent_id: &str,
+        message: &str,
+        parent_agent_id: &str,
+    ) -> Result<String, String> {
+        tracing::trace!(
+            agent = %agent_id,
+            parent = %parent_agent_id,
+            "send_to_agent_as: default impl — cancel cascade not supported by this KernelHandle"
+        );
+        self.send_to_agent(agent_id, message).await
+    }
+
     /// List all running agents.
     fn list_agents(&self) -> Vec<AgentInfo>;
 
@@ -177,6 +197,57 @@ pub trait KernelHandle: Send + Sync {
     ) -> bool {
         let _ = (tool_name, sender_id, channel);
         false
+    }
+
+    /// Resolve the per-user memory ACL for the given sender + channel
+    /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
+    /// `UserMemoryAccess` so the runtime can build a
+    /// `MemoryNamespaceGuard` and gate proactive-memory reads.
+    ///
+    /// `None` means RBAC is disabled (no registered users) or the sender
+    /// could not be attributed to any registered user — callers should
+    /// treat this as "no per-user restriction" so the existing single-user
+    /// behaviour is preserved.
+    ///
+    /// Default impl returns `None` so embedders / stubs that haven't
+    /// wired RBAC keep the pre-M3 behaviour.
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        let _ = (sender_id, channel);
+        None
+    }
+
+    /// Resolve the per-user RBAC gate for a tool invocation (RBAC M3,
+    /// issue #3054 Phase 2).
+    ///
+    /// Combines the user's `UserToolPolicy`, `channel_tool_rules`,
+    /// `tool_categories`, and role-based approval escalation into a single
+    /// runtime-facing verdict. Returns:
+    ///
+    /// * `Allow` — no per-user objection; continue with the existing
+    ///   approval/capability gates.
+    /// * `Deny` — hard deny; the dispatcher refuses without prompting.
+    /// * `NeedsApproval` — user's own role would block, but a higher role
+    ///   could authorise; route through the approval queue.
+    ///
+    /// Default impl returns `Allow` so installations without a real
+    /// kernel (test stubs, embedded callers without an `AuthManager`)
+    /// keep their pre-M3 behaviour. The real kernel always overrides
+    /// this; flipping the default to `NeedsApproval` was discussed
+    /// during PR #3205 review but rejected because it broke ~8 unrelated
+    /// runtime tests that rely on the default mock — the loudness gain
+    /// is not worth a fragile contract for stub kernels.
+    fn resolve_user_tool_decision(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> librefang_types::user_policy::UserToolGate {
+        let _ = (tool_name, sender_id, channel);
+        librefang_types::user_policy::UserToolGate::Allow
     }
 
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
@@ -511,6 +582,16 @@ pub trait KernelHandle: Send + Sync {
         5
     }
 
+    /// Operator-side gate over skill `env_passthrough` requests, derived from
+    /// `[skills]` config. `None` = no operator gate (only the built-in
+    /// FORBIDDEN/kernel-reserved hard blocks apply). Default impl returns
+    /// `None`; the kernel overrides this to pull from `KernelConfig.skills`.
+    fn skill_env_passthrough_policy(
+        &self,
+    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
+        None
+    }
+
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
     fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
@@ -578,5 +659,21 @@ pub trait KernelHandle: Send + Sync {
     /// Default: no read-only prefixes (all writes allowed by the sandbox).
     fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
         vec![]
+    }
+
+    /// Return the canonicalized absolute paths of ALL named workspaces declared
+    /// for the given agent, paired with their access modes. Used by file-read,
+    /// file-list, file-write, and apply-patch tools to widen the sandbox
+    /// accept-list to include declared shared workspaces (PR #2958 wired
+    /// `[workspaces]` into write-side denial only; this surfaces the full
+    /// allowlist to the read-side path resolver).
+    ///
+    /// Default: no named workspaces — read-side resolution falls back to the
+    /// primary workspace root only.
+    fn named_workspace_prefixes(
+        &self,
+        _agent_id: &str,
+    ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
+        Vec::new()
     }
 }

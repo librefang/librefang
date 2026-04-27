@@ -1,0 +1,287 @@
+# Cron 调度器
+
+定时 cron 任务是 LibreFang 按时钟跑 agent 回合的方式。每个任务挂在某个 agent 上，按固定 interval / 一次性未来时间戳 / 5 字段 cron 表达式触发。本页文档化让调度器从"发完就不管，响应只发一个 channel"变成可控管道的三个特性：
+
+- **多目标分发** — 一次触发扇出到多个 channel / webhook / 文件 / email 收件人，每个目标失败隔离。
+- **Pre-script** — LLM 回合前跑一段确定性命令，把 stdout 注入 prompt 当额外上下文。
+- **Silent marker** — 让 agent 在运行时决定本次触发不产生任何分发。
+
+## 包含主题
+
+- [CronJob Schema](#cronjob-schema)
+- [多目标分发](#多目标分发)
+- [Webhook 上的 SSRF 防护](#webhook-上的-ssrf-防护)
+- [Pre-Script](#pre-script)
+- [Wake Gate vs Pre-Script](#wake-gate-vs-pre-script)
+- [Silent Marker](#silent-marker)
+- [上限与校验](#上限与校验)
+
+---
+
+## CronJob Schema
+
+cron 任务以 JSON 持久化在 agent 数据目录里，通过 `/api/agents/{id}/cron` 端点暴露。在 API/测试边界可以用 TOML 写出同样形状：
+
+```toml
+# 最小任务
+id = "00000000-0000-0000-0000-000000000000"
+agent_id = "research-agent"
+name = "morning-briefing"
+enabled = true
+created_at = "2026-04-25T00:00:00Z"
+
+[schedule]
+kind = "cron"
+expr = "0 9 * * 1-5"
+tz = "America/New_York"
+
+[action]
+kind = "agent_turn"
+message = "用三条要点总结昨夜市场动态。"
+timeout_secs = 120
+
+[delivery]
+kind = "channel"
+channel = "telegram"
+to = "123456789"
+```
+
+跟新特性相关的字段都在 `CronAction::AgentTurn`（`action.kind = "agent_turn"`）和顶层 `delivery_targets` 列表上：
+
+| 字段 | 位置 | 用途 |
+|---|---|---|
+| `pre_check_script` | `[action]` | 已有的 wake gate。stdout 最后一行非空若是 `{"wakeAgent": false}` 则跳过 LLM 调用。 |
+| `pre_script` | `[action]` | 跑一段脚本把 stdout 作为额外上下文注入 LLM prompt。 |
+| `silent_marker` | `[action]` | 标记字符串。agent 把它放在响应最后一行可抑制本次分发。默认 `"[SILENT]"`。 |
+| `delivery_targets` | 顶层 | `delivery` 之外额外的扇出目标。默认空。 |
+
+---
+
+## 多目标分发
+
+老的单 `delivery` 字段仍然能用，依然是主要目标。`delivery_targets` 是 additive 的列表 — 每条多触发一次额外的发送。多个目标并发跑，单个失败不会中止其他。
+
+```toml
+[action]
+kind = "agent_turn"
+message = "跑一下日运维摘要。"
+timeout_secs = 180
+
+# 主目标 — 跟原来一样。
+[delivery]
+kind = "channel"
+channel = "slack"
+to = "C0OPS"
+
+# 额外扇出目标。
+[[delivery_targets]]
+type = "channel"
+channel_type = "telegram"
+recipient = "987654321"
+
+[[delivery_targets]]
+type = "webhook"
+url = "https://ops.example.com/hooks/daily-digest"
+auth_header = "Bearer prod-token-redacted"
+
+[[delivery_targets]]
+type = "local_file"
+path = "reports/daily-digest.md"
+append = true
+
+[[delivery_targets]]
+type = "email"
+to = "ops-team@example.com"
+subject_template = "Daily digest from {job}"
+```
+
+### Target 变体
+
+每条用带 tag 的 union 形状，`type` 选择变体。
+
+| `type` | 必填字段 | 可选字段 | 备注 |
+|---|---|---|---|
+| `channel` | `channel_type`, `recipient` | `thread_id`, `account_id` | `channel_type` 对应 `[channels]` 里的 adapter key（`"telegram"` / `"slack"` / `"discord"` …）。多账号场景下 `account_id` 解析为 `<channel>:<account_id>`。 |
+| `webhook` | `url` | `auth_header` | URL 必须以 `http://` 或 `https://` 开头。URL 长度上限 2048。SSRF 黑名单中的 host 在校验时拒绝（见下文）。 |
+| `local_file` | `path` | `append`（默认 `false`） | 路径必须**相对 workspace** — 绝对路径和 `..` 穿越被拒。`append = true` 以追加打开；`false`（默认）每次触发都覆盖。 |
+| `email` | `to` | `subject_template` | 走 `"email"` channel adapter — 该 adapter 必须在 `[channels]` 里注册。`subject_template` 里的 `{job}` 占位符在发送时替换成 job 名称。 |
+
+### 失败隔离
+
+任务触发、agent 产出响应后，分派器会迭代老的 `delivery` 和每个 `delivery_targets` 条目。每次发送跑在自己的 task 里。上面例子里如果 webhook 返回 503，Slack 和 Telegram 消息照样发出去，文件照样写入，email 照样入队。每个目标的错误带 job 名和 target 索引记日志，但不会向下个目标传播也不会标记 job 本身失败 — LLM 回合已经成功完成。
+
+这种隔离也是为什么 `[delivery]` 没被并入 `delivery_targets` 的原因：老的单目标任务保持原有语义（分派器走 `cron_deliver_response` 路径），新的扇出目标叠加在上层，无需迁移。
+
+---
+
+## Webhook 上的 SSRF 防护
+
+Webhook URL 在任务创建/更新时校验，触发前不会被拉取。校验器拒绝指向 loopback 接口、link-local 地址、以及著名云元数据服务的 host。
+
+被拦截的 host 模式（大小写无关地匹配 URL 的 host 部分）：
+
+| 模式 | 为什么拦截 |
+|---|---|
+| `localhost` | 按名 loopback。 |
+| `127.*` | IPv4 loopback 段。 |
+| `[::1]` | IPv6 loopback。 |
+| `169.254.*` | IPv4 link-local — 涵盖 AWS / Azure / DigitalOcean 元数据 IP `169.254.169.254`。 |
+| `fe80:*` 和 `[fe80:*` | IPv6 link-local。 |
+| `metadata` | 某些元数据端点用的裸主机名。 |
+| `metadata.google.internal` | GCP 元数据服务。 |
+| `metadata.aws.amazon.com` | AWS 元数据服务主机名。 |
+
+userinfo（`user:pass@host`）和端口在检查前剥掉，所以 `http://attacker@127.0.0.1:8080/x` 会按 `127.0.0.1` host 拒绝，跟 `http://127.0.0.1/x` 一样。
+
+如果你确实需要扇到 loopback 段的 host —— 比如同机的 sidecar — 走 channel adapter 或者 `local_file` 目标，不要用 webhook。webhook 路径就是有意限制为非内部目标。
+
+---
+
+## Pre-Script
+
+pre-script 在 LLM 回合触发前跑，stdout 成为 prompt 的一部分。用它把确定性的数据获取（HTTP 抓取、跟前一状态做 diff、计算）跟 LLM 推理步骤分开 — LLM 拿到新鲜数据无需消耗 token 在 tool-call 开销上，幻觉风险也下降，因为数据是字面注入而不是重构出来的。
+
+```toml
+[action]
+kind = "agent_turn"
+message = "用三条要点总结昨天起新出现的 GitHub issue。如果一个都没有，回复 [SILENT]。"
+timeout_secs = 120
+silent_marker = "[SILENT]"
+
+[action.pre_script]
+argv = ["fetch-new-issues.sh", "myorg/myrepo"]
+cwd = "/home/alice/.librefang/scripts"
+
+[action.pre_script.env]
+GITHUB_REPO_FILTER = "is:open"
+```
+
+任务触发时分派器：
+
+1. 校验 `argv[0]` 是否在 `<home_dir>/scripts/` 白名单内（见 [路径白名单](#路径白名单)）。
+2. 直接 spawn 二进制（不走 shell — `argv` 是分割形式，没有 `$VAR` 展开，没有 piping）。
+3. 在守护进程环境之上叠加 `pre_script.env`，并应用 `cwd`（如果设了）。
+4. 在 60 秒 tokio timeout 下捕获 stdout。超时的子进程通过 `kill_on_drop(true)` 回收。
+5. trim 后 stdout 非空就追加到 prompt：
+
+   ```
+   {scheduled message}
+
+   --- pre_script output ---
+   {stdout}
+   ```
+
+6. 如果校验失败、二进制启动失败、脚本非零退出、或 timeout — agent **仍然跑**，只是没有注入上下文。pre-script 失败是*加性*的，永远不阻塞计划触发。如果你想让失败跳过运行，wake gate（`pre_check_script`）才是合适的工具。
+
+### 路径白名单
+
+`pre_script.argv[0]` 必须 canonicalize 后落在 `<home_dir>/scripts/` 之下，`<home_dir>` 是守护进程 home（通常是 `~/.librefang`）。
+
+- **相对路径** 先拼到 `<home_dir>/scripts/` 上再 canonicalize。`argv = ["fetch.sh"]` 解析为 `~/.librefang/scripts/fetch.sh`。
+- **绝对路径** 直接 canonicalize；结果仍必须在 `<home_dir>/scripts/` 下。symlink 会被跟随，所以白名单内指向外部的 symlink 会被拒。
+- **`..` 穿越** 由 canonicalize 折叠，结果路径在**路径组件**层级做前缀检查 — 所以 `<home_dir>/scripts-other` 没法假装满足 `<home_dir>/scripts`，即使字符串前缀相同。
+- **缺失文件** 校验失败 `NotFound` — 脚本必须在校验时存在于磁盘。
+
+### 危险环境变量
+
+`pre_script.env` 叠在守护进程环境之上，但有 denylist 拒绝那些会破坏路径白名单（劫持被 spawn 的二进制的库或路径解析）的 key：
+
+| 拒绝的 key | 原因 |
+|---|---|
+| `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` | glibc 动态链接器注入。 |
+| `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH` | Darwin 动态链接器注入。 |
+| `PATH` | 脚本自己的 `subprocess.Popen("subcmd")` 调用会经攻击者控制的 `PATH` 解析。 |
+| `IFS` | POSIX shell 字段分隔符。 |
+
+比较是 ASCII 大小写无关的，所以 `path` 和 `Path` 跟 `PATH` 一样被拒。敏感值放进加密 vault（`LIBREFANG_VAULT_KEY` / `~/.librefang/vault.enc`），不要明文写进 `pre_script.env`。
+
+---
+
+## Wake Gate vs Pre-Script
+
+`pre_check_script` 跟 `pre_script` 看着像，但回答不同问题：
+
+| | `pre_check_script`（wake gate） | `pre_script`（context 注入） |
+|---|---|---|
+| 决定 | "agent 该不该跑？" | "这次跑给它什么额外上下文？" |
+| 输出协议 | stdout 最后一行非空必须是 JSON。`{"wakeAgent": false}` 跳过 LLM 调用。其他都唤醒。 | 非空时 stdout 原样追加到 prompt。 |
+| Timeout | 30 秒。timeout 唤醒 agent（failsafe）。 | 60 秒。timeout 让 agent 不带上下文触发（failsafe）。 |
+| 路径白名单 | `<home_dir>/scripts/`（canonicalize + component prefix）。路径违规唤醒 agent。 | `<home_dir>/scripts/`（canonicalize + component prefix）。校验失败让 agent 不带上下文触发。 |
+| 用例 | 没新东西就跳过 LLM 调用。省 token。 | 把确定性数据喂进 prompt。降低数字/diff 上的幻觉。 |
+
+两者可以同时挂在一个 `[action]` 上。常见模式是"用 wake gate 守卫抓取，再注入抓到的数据"：
+
+```toml
+[action]
+kind = "agent_turn"
+message = "处理新 issue。"
+pre_check_script = "/home/alice/.librefang/scripts/has-new-issues.sh"
+
+[action.pre_script]
+argv = ["fetch-new-issues.sh"]
+```
+
+issue 列表为空时 `has-new-issues.sh` 返回 `{"wakeAgent": false}` — agent 永远不被唤醒，没有 LLM token 消耗。有新 issue 时 wake gate 静默返回，然后 `fetch-new-issues.sh` 跑、它的 stdout 注入 prompt。
+
+---
+
+## Silent Marker
+
+`silent_marker` 是 agent 一侧的运行时逃生口：即使 LLM 回合已经跑过并产出响应，agent 也能通过让响应以这个 marker 结尾来抑制所有分发。
+
+```toml
+[action]
+kind = "agent_turn"
+message = "如果日志里有关键告警就总结。否则只回复 [SILENT]。"
+silent_marker = "[SILENT]"
+
+[delivery]
+kind = "channel"
+channel = "telegram"
+to = "123456789"
+
+[[delivery_targets]]
+type = "email"
+to = "oncall@example.com"
+```
+
+行为：
+
+- 不设 `silent_marker` 时默认 `"[SILENT]"`。
+- 匹配是**严格的最后一条非空 trim 行相等**。响应 `"无事可报。\n[SILENT]\n\n  "` 命中（尾部空行被忽略）。响应里段中提到 `[SILENT]`**不**命中 — marker 必须独占最后一行。
+- 空响应不命中 marker。空响应走已有的"silent"处理（agent loop 里的 `result.silent` 标志）。
+- marker 命中时，老的 `delivery` 和每个 `delivery_targets` 条目本次触发都被抑制。任务本身仍记成功 — agent 是有意选择本次保持安静，这不是错误。
+
+这是"嘈杂 no-op"任务的合适工具：每 5 分钟 cron 一次 agent，但只在真有事时给团队发消息。配合 `pre_script` 取数据，安静时段的成本下限就是一次 shell 脚本 + 一次决定输出 `[SILENT]` 的 LLM 回合 — 没有扇出成本。
+
+---
+
+## 上限与校验
+
+job-create / job-update 时强制的硬性上限和校验规则：
+
+| 上限 | 数值 |
+|---|---|
+| 每个 agent 的任务数 | 50 |
+| 任务名长度 | 128 字符（字母、数字、空格、连字符、下划线） |
+| `every_secs` interval | 60 秒 – 86 400 秒（24 小时） |
+| 一次性 `at` 最远 | 未来 1 年内 |
+| `SystemEvent.text` 长度 | 4096 字符 |
+| `AgentTurn.message` 长度 | 16 384 字符 |
+| `AgentTurn.timeout_secs` | 10 秒 – 600 秒 |
+| Webhook URL 长度 | 2048 字符 |
+| Webhook host | 不在 SSRF 黑名单 |
+| `local_file.path` | 非空、相对 workspace、无 `..` |
+| `pre_script.argv[0]` | 解析在 `<home_dir>/scripts/` 之下 |
+| `pre_script.env` 键 | 不属于动态链接器 / `PATH` / `IFS` denylist |
+| Pre-script timeout | 60 秒墙钟 |
+| Wake-gate timeout | 30 秒墙钟 |
+
+校验失败的任务会从 `/api/workflows/cron` 返回带描述的错误 — 规则是"第一个失败优先"，修掉报告的问题再重试。canonical schema 见 `crates/librefang-types/src/scheduler.rs`，分派器见 `crates/librefang-kernel/src/cron_delivery.rs`。
+
+---
+
+## 相关
+
+- [Session 自动 Reset](/zh/configuration/features/session-reset) — 按计划清理消息历史。cron 任务默认共享一个 `(agent, "cron")` session；`session_reset` 是防止那个 session 历史无限增长的方式。
+- [Workflows](/zh/agent/workflows) — `session_mode` 解析顺序和 cron 特定注意。每次 cron 触发需要完全 session 隔离时，per-trigger `session_mode = "new"` 是合适的旋钮。
