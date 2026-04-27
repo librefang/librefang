@@ -40,6 +40,17 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("GET", "/api/status") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/version") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/tools") => NonZeroU32::new(1).unwrap(),
+        // High-frequency dashboard reads. The dashboard SPA polls these
+        // every few seconds (TanStack Query refetchOnFocus + interval
+        // refetch), and they're aggregating reads — not per-record
+        // queries — so the work is constant-cost regardless of fleet
+        // size. Pricing them at the fallback of 5 tokens drained the
+        // 500-token/min budget in seconds and made the dashboard 429
+        // out as soon as a couple of tabs were open. See #3416.
+        ("GET", "/api/dashboard/snapshot") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/approvals/count") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/providers") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/media/providers") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/agents") => NonZeroU32::new(2).unwrap(),
         ("GET", "/api/skills") => NonZeroU32::new(2).unwrap(),
         ("GET", "/api/peers") => NonZeroU32::new(2).unwrap(),
@@ -97,6 +108,18 @@ pub async fn gcra_rate_limit(
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+
+    // Loopback (127.0.0.0/8 + ::1) bypasses the limiter. The dashboard
+    // SPA, the librefang CLI, and any other process on the same host
+    // talking to its own daemon all surface as loopback, and there's no
+    // hostile-burst threat model from a peer that already has local
+    // process privileges. Without this, a single dashboard tab refresh
+    // (snapshot + approvals/count + providers + media/providers + …,
+    // re-fetched on focus + interval) drained the 500-token/min budget
+    // in seconds and 429'd the whole UI. See #3416.
+    if ip.is_loopback() {
+        return next.run(request).await;
+    }
 
     let method = request.method().as_str().to_string();
     let cost = operation_cost(&method, &path);
@@ -224,6 +247,17 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(state, gcra_rate_limit))
     }
 
+    /// Build a request that carries an explicit `ConnectInfo` so the
+    /// middleware sees the IP we want it to see. Without this, requests
+    /// fall back to the loopback default and skip the limiter entirely
+    /// after #3416.
+    fn request_from(uri: &str, ip: IpAddr) -> Request<Body> {
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((ip, 12345))));
+        req
+    }
+
     /// Regression for the production 429 storm on `dash.librefang.ai`:
     /// a cold dashboard load fans out to ~20 static-asset requests, and
     /// the default fallback cost of 5 tokens drained the 500-token/min
@@ -254,20 +288,17 @@ mod tests {
 
     /// Paired with the dashboard test above: the limiter *must* still
     /// bite on metered paths, otherwise the exempt list would be a
-    /// blanket disable in disguise.
+    /// blanket disable in disguise. Uses an RFC 5737 documentation IP
+    /// (198.51.100.1) so the loopback bypass doesn't short-circuit it.
     #[tokio::test]
     async fn metered_api_burst_still_rate_limits() {
         let app = router_with_limiter(1);
+        let public_ip: IpAddr = "198.51.100.1".parse().unwrap();
         let mut saw_429 = false;
         for _ in 0..20 {
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/health")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(request_from("/api/health", public_ip))
                 .await
                 .unwrap();
             if resp.status() == StatusCode::TOO_MANY_REQUESTS {
@@ -279,6 +310,52 @@ mod tests {
             saw_429,
             "metered /api/health burst must eventually hit 429 under a 1-token/min quota"
         );
+    }
+
+    /// Regression for #3416. With the limiter actually enforcing (after
+    /// the `NotUntil` arm fix), a single dashboard tab on the same host
+    /// drained the budget in seconds because every poll surfaces as
+    /// 127.0.0.1. Loopback callers are local processes — there is no
+    /// hostile-burst threat model — so they bypass the limiter outright.
+    #[tokio::test]
+    async fn loopback_v4_burst_bypasses_rate_limit() {
+        let app = router_with_limiter(1); // intentionally starved
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        for i in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(request_from("/api/health", loopback))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback request #{i} must bypass the limiter, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    /// IPv6 loopback (`::1`) is the same trust boundary as `127.0.0.1`
+    /// — both surface for processes on the same host. Test the v6 case
+    /// explicitly so a future refactor can't silently regress it.
+    #[tokio::test]
+    async fn loopback_v6_burst_bypasses_rate_limit() {
+        let app = router_with_limiter(1);
+        let loopback: IpAddr = "::1".parse().unwrap();
+        for i in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(request_from("/api/health", loopback))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback v6 request #{i} must bypass the limiter, got {:?}",
+                resp.status()
+            );
+        }
     }
 
     #[test]
@@ -294,5 +371,11 @@ mod tests {
         assert_eq!(operation_cost("GET", "/api/audit/recent").get(), 5);
         assert_eq!(operation_cost("POST", "/api/skills/install").get(), 50);
         assert_eq!(operation_cost("POST", "/api/migrate").get(), 100);
+        // Dashboard high-frequency reads — kept at cost=1 so a polling
+        // tab can't drain the budget. See #3416.
+        assert_eq!(operation_cost("GET", "/api/dashboard/snapshot").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/approvals/count").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/providers").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/media/providers").get(), 1);
     }
 }
