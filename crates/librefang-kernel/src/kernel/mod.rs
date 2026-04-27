@@ -17018,7 +17018,21 @@ impl KernelHandle for LibreFangKernel {
         };
 
         let cost_usd = {
-            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| {
+                // Lock was poisoned by a panic in another thread that
+                // held the write guard. Reading the inner data is safe
+                // for our purposes (it's a Vec lookup, no invariant we
+                // can violate by reading) and is the existing pattern
+                // elsewhere in the kernel, but the poisoning itself is
+                // an upstream bug that should surface — without this
+                // log, a panic in catalog mutation paths would silently
+                // degrade media billing forever.
+                tracing::error!(
+                    "model_catalog RwLock poisoned during media billing read; \
+                     recovering inner data — investigate the originating panic"
+                );
+                e.into_inner()
+            });
             match catalog.find_model_for_provider(provider, model) {
                 Some(entry) => {
                     let c = entry.per_call_cost_or_zero();
