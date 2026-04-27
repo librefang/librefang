@@ -3,17 +3,26 @@
 //! Each API operation has a token cost (e.g., health=1, spawn=50, message=30).
 //! The GCRA algorithm allows 500 tokens per minute per IP address.
 //!
-//! Non-API paths (dashboard SPA assets, locale JSON, favicon, logo, root) are
-//! exempt from rate limiting — a single dashboard page load fans out to dozens
-//! of static-asset requests, and accounting them at the default fallback cost
-//! drains the budget before the page finishes rendering. See
-//! [`is_rate_limit_exempt`].
+//! Two bypass paths:
+//!
+//! - Path-based: non-API paths (dashboard SPA assets, locale JSON, favicon,
+//!   logo, root) are exempt — a single dashboard page load fans out to
+//!   dozens of static-asset requests and the default fallback cost drains
+//!   the budget before the page finishes rendering. See
+//!   [`is_rate_limit_exempt`].
+//! - IP-based: direct loopback callers (127.0.0.0/8 and ::1, with no
+//!   forwarding headers in the request) bypass the limiter, since they're
+//!   local processes (dashboard SPA, librefang CLI, cron) calling their
+//!   own daemon. The forwarding-header guard means a same-host reverse
+//!   proxy that injects `X-Forwarded-For` / `X-Real-IP` does NOT trigger
+//!   the bypass — proxied traffic still falls through to the limiter.
+//!   See [`gcra_rate_limit`].
 
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::middleware::Next;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -69,6 +78,18 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
     }
 }
 
+/// Detect a forwarding header injected by an upstream reverse proxy.
+///
+/// Used by [`gcra_rate_limit`] to disqualify the loopback bypass: if a
+/// proxy is in front, the loopback peer represents arbitrary public
+/// callers, not a trusted local process. Returns `true` for any of
+/// `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` (RFC 7239).
+fn has_forwarding_header(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded")
+}
+
 pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
 
 /// Shared state for the GCRA rate limiting middleware layer.
@@ -103,11 +124,17 @@ pub async fn gcra_rate_limit(
         return next.run(request).await;
     }
 
+    // Fall back to the unspecified address (`0.0.0.0`) when ConnectInfo
+    // is missing rather than to loopback. With the loopback bypass below,
+    // a missing extension would otherwise silently disable rate limiting
+    // for every request; an unspecified address still enters the limiter
+    // and just shares one bucket across mis-wired callers — annoying,
+    // but visible.
     let ip = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
     // Loopback (127.0.0.0/8 + ::1) bypasses the limiter. The dashboard
     // SPA, the librefang CLI, and any other process on the same host
@@ -117,7 +144,19 @@ pub async fn gcra_rate_limit(
     // (snapshot + approvals/count + providers + media/providers + …,
     // re-fetched on focus + interval) drained the 500-token/min budget
     // in seconds and 429'd the whole UI. See #3416.
-    if ip.is_loopback() {
+    //
+    // Reverse-proxy guard: if the request carries `X-Forwarded-For`,
+    // `X-Real-IP`, or RFC 7239 `Forwarded`, the loopback peer is almost
+    // certainly a same-host proxy (nginx / caddy / traefik) forwarding
+    // traffic from arbitrary public clients. Bypassing in that case
+    // would silently disable rate limiting for the whole internet. We
+    // don't trust those headers to identify the *real* client (no
+    // config-pinned trusted-proxy list yet), but their mere presence is
+    // enough to disqualify the bypass — the limiter still runs against
+    // the proxy's loopback IP, which makes proxied traffic share one
+    // bucket. Less granular than per-real-IP metering, but strictly
+    // safer than wide-open.
+    if ip.is_loopback() && !has_forwarding_header(request.headers()) {
         return next.run(request).await;
     }
 
@@ -249,12 +288,22 @@ mod tests {
 
     /// Build a request that carries an explicit `ConnectInfo` so the
     /// middleware sees the IP we want it to see. Without this, requests
-    /// fall back to the loopback default and skip the limiter entirely
-    /// after #3416.
+    /// fall back to the unspecified-address default (`0.0.0.0`) and the
+    /// loopback bypass added in #3416 doesn't trigger.
     fn request_from(uri: &str, ip: IpAddr) -> Request<Body> {
         let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         req.extensions_mut()
             .insert(axum::extract::ConnectInfo(SocketAddr::from((ip, 12345))));
+        req
+    }
+
+    /// Same as [`request_from`] but also stamps `X-Forwarded-For` so
+    /// the loopback bypass treats the peer as a same-host reverse
+    /// proxy instead of a trusted local process.
+    fn request_from_proxied(uri: &str, ip: IpAddr, xff_value: &str) -> Request<Body> {
+        let mut req = request_from(uri, ip);
+        req.headers_mut()
+            .insert("x-forwarded-for", xff_value.parse().unwrap());
         req
     }
 
@@ -356,6 +405,81 @@ mod tests {
                 resp.status()
             );
         }
+    }
+
+    /// Reverse-proxy guard: a loopback peer carrying `X-Forwarded-For`
+    /// must NOT trigger the bypass. The peer is a same-host proxy
+    /// fronting arbitrary public clients, not a trusted local process,
+    /// so the limiter must still bite.
+    #[tokio::test]
+    async fn loopback_with_xff_does_not_bypass() {
+        let app = router_with_limiter(1);
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut saw_429 = false;
+        for _ in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(request_from_proxied(
+                    "/api/health",
+                    loopback,
+                    "203.0.113.42",
+                ))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "loopback peer with X-Forwarded-For must still be rate-limited (proxy scenario)"
+        );
+    }
+
+    /// Missing `ConnectInfo` (mis-wired middleware order) must NOT
+    /// silently fail open through the loopback bypass. The fallback
+    /// is `0.0.0.0`, which is non-loopback, so every such request
+    /// enters the limiter and shares one bucket.
+    #[tokio::test]
+    async fn missing_connect_info_does_not_bypass() {
+        let app = router_with_limiter(1);
+        let mut saw_429 = false;
+        for _ in 0..20 {
+            // No ConnectInfo extension — simulates a mis-configured stack.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "missing ConnectInfo must fall back to a non-loopback address and stay metered"
+        );
+    }
+
+    #[test]
+    fn test_has_forwarding_header_detects_common_variants() {
+        let mut h = HeaderMap::new();
+        assert!(!has_forwarding_header(&h));
+        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", "1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
+        let mut h = HeaderMap::new();
+        h.insert("forwarded", "for=1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
     }
 
     #[test]
