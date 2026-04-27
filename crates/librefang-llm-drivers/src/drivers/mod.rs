@@ -543,6 +543,26 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: true,
     },
     ProviderEntry {
+        name: "byteplus",
+        aliases: &[],
+        base_url: "https://ark.ap-southeast.bytepluses.com/api/v3",
+        api_key_env: "BYTEPLUS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "byteplus_coding",
+        aliases: &[],
+        base_url: "https://ark.ap-southeast.bytepluses.com/api/coding",
+        api_key_env: "BYTEPLUS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::Anthropic,
+        alt_api_key_env: None,
+        hidden: true,
+    },
+    ProviderEntry {
         name: "alibaba-coding-plan",
         aliases: &[],
         base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
@@ -822,7 +842,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
              azure-openai, vertex-ai, nvidia-nim, novita, bedrock, claude-code, qwen-code, gemini-cli, codex-cli, \
              qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
-             qianfan, volcengine, alibaba-coding-plan. \
+             qianfan, volcengine, byteplus, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
