@@ -148,6 +148,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - RBAC M3 follow-up — namespace traversal + case-insensitive deny + memory audit emit (#3205) (#3249) (@houko)
 - Autonomous-loop tool calls bypass user gate (closes #3243) (#3251) (@houko)
 - Channel dropdown uses /api/channels for full 44-adapter list (#3253) (@houko)
+- Enforce deterministic ordering for LLM-bound MCP server / skill registries to stabilize provider prompt cache (closes #3298) (#3325) (@houko)
 
 ### Changed
 

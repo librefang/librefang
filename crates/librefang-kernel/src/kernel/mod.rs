@@ -14720,7 +14720,6 @@ enum ReviewError {
     Permanent(String),
 }
 
-/// Sanitize a single-line author-supplied string (skill name, description)
 /// Render the MCP-server tool summary that lands in the system prompt.
 ///
 /// Pulled out of [`Kernel::build_mcp_summary`] so it can be unit-tested
@@ -14812,6 +14811,7 @@ fn render_mcp_summary(
     summary
 }
 
+/// Sanitize a single-line author-supplied string (skill name, description)
 /// for safe interpolation into the reviewer's user message.
 ///
 /// Thin wrapper over `librefang_runtime::prompt_builder::sanitize_for_prompt`
