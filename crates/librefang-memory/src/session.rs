@@ -164,7 +164,8 @@ impl SessionStore {
 
     /// Maximum number of messages persisted per session.  Older messages beyond
     /// this limit are trimmed before the blob is written to SQLite.  The
-    /// in-memory limit (agent_loop::MAX_HISTORY_MESSAGES = 40) is much lower,
+    /// in-memory limit (agent_loop::DEFAULT_MAX_HISTORY_MESSAGES = 40, now
+    /// overridable per-agent and globally) is much lower,
     /// so this cap only affects sessions that were built up over many turns
     /// that were individually trimmed in memory but accumulated on disk.
     const MAX_PERSISTED_MESSAGES: usize = 200;

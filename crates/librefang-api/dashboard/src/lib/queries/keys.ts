@@ -199,6 +199,12 @@ export const memoryKeys = {
   stats: (agentId?: string) =>
     [...memoryKeys.statsAll(), agentId] as const,
   config: () => [...memoryKeys.all, "config"] as const,
+  // Per-agent KV memory store — distinct subtree from proactive memory
+  // so invalidating proactive entries doesn't invalidate KV reads (and
+  // vice versa). Always keyed by agentId; no list-level invalidation
+  // needed because each agent's KV is rendered independently.
+  agentKvs: () => [...memoryKeys.all, "agentKv"] as const,
+  agentKv: (agentId: string) => [...memoryKeys.agentKvs(), agentId] as const,
 };
 
 export const usageKeys = {
@@ -269,6 +275,55 @@ export const auditKeys = {
   all: ["audit"] as const,
   recent: (limit: number) => [...auditKeys.all, "recent", limit] as const,
   verify: () => [...auditKeys.all, "verify"] as const,
+  // M5 / #3203 — searchable audit query. The factory ships now so the
+  // dashboard data layer is ready; the daemon endpoint becomes real once
+  // M5 lands.
+  queries: () => [...auditKeys.all, "query"] as const,
+  query: (filters: {
+    limit?: number;
+    offset?: number;
+    user?: string;
+    action?: string;
+    status?: string;
+    since?: string;
+    until?: string;
+  } = {}) => [...auditKeys.queries(), filters] as const,
+};
+
+export const userKeys = {
+  all: ["users"] as const,
+  lists: () => [...userKeys.all, "list"] as const,
+  list: (filters: { role?: string; search?: string } = {}) =>
+    [...userKeys.lists(), filters] as const,
+  details: () => [...userKeys.all, "detail"] as const,
+  detail: (name: string) => [...userKeys.details(), name] as const,
+};
+
+// M5 / #3203 — per-user spend ranking + per-user detail. Endpoint stubbed
+// until budget tracking sprouts a user dimension.
+export const userBudgetKeys = {
+  all: ["userBudget"] as const,
+  details: () => [...userBudgetKeys.all, "detail"] as const,
+  detail: (name: string) => [...userBudgetKeys.details(), name] as const,
+};
+
+// RBAC M3 (#3205) — per-user tool/memory policy. Lives at
+// `/api/users/{name}/policy`; the matrix editor in `UserPolicyPage`
+// consumes this hierarchy.
+export const permissionPolicyKeys = {
+  all: ["permissionPolicy"] as const,
+  details: () => [...permissionPolicyKeys.all, "detail"] as const,
+  detail: (name: string) => [...permissionPolicyKeys.details(), name] as const,
+};
+
+// Effective-permissions snapshot — backs the permission simulator. Read-only,
+// so only `all` and `effective(name)` are needed. Hierarchical so
+// invalidating `authzKeys.all` clears every cached snapshot at once (e.g.
+// after a config reload).
+export const authzKeys = {
+  all: ["authz"] as const,
+  effectives: () => [...authzKeys.all, "effective"] as const,
+  effective: (name: string) => [...authzKeys.effectives(), name] as const,
 };
 
 export const mediaKeys = {
@@ -293,6 +348,9 @@ export const mcpKeys = {
   catalog: () => [...mcpKeys.all, "catalog"] as const,
   catalogEntry: (id: string) => [...mcpKeys.catalog(), id] as const,
   health: () => [...mcpKeys.all, "health"] as const,
+  // Read-only `[[taint_rules]]` registry — drives dashboard validation
+  // that flags rule_set names not registered in config.toml.
+  taintRules: () => [...mcpKeys.all, "taint-rules"] as const,
 };
 
 export const pluginKeys = {

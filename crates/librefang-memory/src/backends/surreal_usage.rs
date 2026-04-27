@@ -16,7 +16,7 @@ use chrono::Utc;
 use surrealdb::{engine::any::Any, Surreal};
 use uuid::Uuid;
 
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 
 use librefang_storage::SurrealSession;
@@ -66,6 +66,8 @@ impl SurrealUsageStore {
             "cost_usd": record.cost_usd,
             "tool_calls": record.tool_calls as i64,
             "latency_ms": record.latency_ms as i64,
+            "user_id": record.user_id.as_ref().map(|u| u.to_string()),
+            "channel": record.channel.clone(),
         });
         self.db
             .create::<Option<serde_json::Value>>(("usage_events", Uuid::new_v4().to_string()))
@@ -526,5 +528,29 @@ impl UsageBackend for SurrealUsageStore {
                 .map_err(|e| LibreFangError::Memory(format!("SurrealDB cleanup_old: {e}")))?;
             Ok::<_, LibreFangError>(deleted.len())
         })
+    }
+
+    fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        block_on(self.query_f64_total(
+            "SELECT math::sum(cost_usd) AS total FROM usage_events \
+             WHERE user_id = $user_id AND timestamp > $since",
+            vec![("user_id", user_id.to_string()), ("since", one_hour_ago())],
+        ))
+    }
+
+    fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64> {
+        block_on(self.query_f64_total(
+            "SELECT math::sum(cost_usd) AS total FROM usage_events \
+             WHERE user_id = $user_id AND timestamp > $since",
+            vec![("user_id", user_id.to_string()), ("since", today_start())],
+        ))
+    }
+
+    fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        block_on(self.query_f64_total(
+            "SELECT math::sum(cost_usd) AS total FROM usage_events \
+             WHERE user_id = $user_id AND timestamp > $since",
+            vec![("user_id", user_id.to_string()), ("since", month_start())],
+        ))
     }
 }

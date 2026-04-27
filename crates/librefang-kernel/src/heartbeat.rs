@@ -99,6 +99,28 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
             })
             .unwrap_or(config.default_timeout_secs) as i64;
 
+        // --- Skip idle agents that have never genuinely processed a message ---
+        //
+        // The earlier heuristic compared `last_active - created_at` against a
+        // small grace window, but administrative writes (set_state, metadata
+        // bumps, etc.) also bump `last_active` and could push an agent past
+        // the window before any real work happened — which then dropped it
+        // into a crash-recover loop (openfang #844).
+        //
+        // Use the sticky `has_processed_message` flag instead. It is set
+        // exactly once per agent, on the real message-dispatch / autonomous
+        // tick paths in the kernel, and never by bookkeeping writes.
+        // Periodic / Hand agents with long schedule intervals are covered by
+        // the same flag: they only flip it on the first genuine tick.
+        if !entry_ref.has_processed_message {
+            debug!(
+                agent = %entry_ref.name,
+                inactive_secs,
+                "Skipping idle agent — never received a message"
+            );
+            continue;
+        }
+
         let unresponsive = inactive_secs > timeout_secs;
 
         // Logging is handled by the caller (heartbeat monitor loop) which
@@ -268,6 +290,9 @@ mod tests {
         registry.register(non_autonomous_entry).unwrap();
 
         // Register a running, autonomous agent that IS inactive.
+        // It has genuinely processed at least one message
+        // (`has_processed_message: true`) so the heartbeat must flag it
+        // as unresponsive.
         let autonomous_manifest = AgentManifest {
             autonomous: Some(AutonomousConfig::default()),
             ..Default::default()
@@ -278,8 +303,57 @@ mod tests {
             manifest: autonomous_manifest,
             state: AgentState::Running,
             mode: AgentMode::default(),
-            created_at: Utc::now(),
+            created_at: Utc::now() - Duration::seconds(3600),
             last_active: Utc::now() - Duration::seconds(300),
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            has_processed_message: true,
+            ..Default::default()
+        };
+        registry.register(autonomous_entry).unwrap();
+
+        let statuses = check_agents(&registry, &config);
+
+        // Only the autonomous agent should appear in the results.
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "autonomous-agent");
+        assert!(statuses[0].unresponsive);
+    }
+
+    #[test]
+    fn test_idle_agent_skipped_by_heartbeat() {
+        // An autonomous agent spawned 5 minutes ago that has never processed a
+        // message (last_active == created_at). It should NOT appear in heartbeat
+        // statuses because it was never genuinely active. Prevents idle agents
+        // from entering a crash-recover loop (openfang #844).
+        use chrono::Duration;
+        use librefang_types::agent::{
+            AgentEntry, AgentIdentity, AgentManifest, AgentMode, AutonomousConfig, SessionId,
+        };
+
+        let registry = AgentRegistry::new();
+        let config = HeartbeatConfig::default();
+
+        let five_min_ago = Utc::now() - Duration::seconds(300);
+        let autonomous_manifest = AgentManifest {
+            autonomous: Some(AutonomousConfig::default()),
+            ..Default::default()
+        };
+        let idle_entry = AgentEntry {
+            id: AgentId::new(),
+            name: "idle-autonomous".to_string(),
+            manifest: autonomous_manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: five_min_ago,
+            last_active: five_min_ago, // never bumped beyond creation
             parent: None,
             children: Vec::new(),
             session_id: SessionId::new(),
@@ -291,14 +365,165 @@ mod tests {
             is_hand: false,
             ..Default::default()
         };
-        registry.register(autonomous_entry).unwrap();
+        registry.register(idle_entry).unwrap();
 
         let statuses = check_agents(&registry, &config);
 
-        // Only the autonomous agent should appear in the results.
+        assert!(
+            statuses.is_empty(),
+            "idle agent (last_active == created_at) must be skipped by heartbeat"
+        );
+    }
+
+    #[test]
+    fn test_admin_bump_without_processed_message_is_skipped() {
+        // Regression for the time-window heuristic: admin operations
+        // (`set_state`, metadata writes, etc.) bump `last_active` even when
+        // no real message was processed. With the sticky-flag approach the
+        // agent must still be skipped because `has_processed_message`
+        // remains `false`, regardless of how far `last_active` has drifted
+        // from `created_at`.
+        use chrono::Duration;
+        use librefang_types::agent::{
+            AgentEntry, AgentIdentity, AgentManifest, AgentMode, AutonomousConfig, SessionId,
+        };
+
+        let registry = AgentRegistry::new();
+        let config = HeartbeatConfig::default();
+
+        let one_hour_ago = Utc::now() - Duration::seconds(3600);
+        // last_active drifted half an hour from creation purely from admin
+        // bookkeeping — well outside any reasonable time-based grace window.
+        let last_active = one_hour_ago + Duration::seconds(1800);
+        let autonomous_manifest = AgentManifest {
+            autonomous: Some(AutonomousConfig::default()),
+            ..Default::default()
+        };
+        let entry = AgentEntry {
+            id: AgentId::new(),
+            name: "admin-bumped".to_string(),
+            manifest: autonomous_manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: one_hour_ago,
+            last_active,
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            has_processed_message: false, // explicit: admin bump did NOT flip the flag
+            ..Default::default()
+        };
+        registry.register(entry).unwrap();
+
+        let statuses = check_agents(&registry, &config);
+
+        assert!(
+            statuses.is_empty(),
+            "admin-bumped agent (last_active moved without a real message) must be skipped"
+        );
+    }
+
+    #[test]
+    fn test_processed_message_flag_enables_timeout_check() {
+        // Mirror image of the admin-bump test: once the flag flips to
+        // `true` (real message dispatched), the heartbeat must enforce
+        // the timeout window normally.
+        use chrono::Duration;
+        use librefang_types::agent::{
+            AgentEntry, AgentIdentity, AgentManifest, AgentMode, AutonomousConfig, SessionId,
+        };
+
+        let registry = AgentRegistry::new();
+        let config = HeartbeatConfig::default(); // default_timeout_secs = 60
+
+        let entry = AgentEntry {
+            id: AgentId::new(),
+            name: "processed-then-silent".to_string(),
+            manifest: AgentManifest {
+                autonomous: Some(AutonomousConfig::default()),
+                ..Default::default()
+            },
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: Utc::now() - Duration::seconds(3600),
+            // 5 minutes silent — well past the 60s default timeout.
+            last_active: Utc::now() - Duration::seconds(300),
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            has_processed_message: true,
+            ..Default::default()
+        };
+        registry.register(entry).unwrap();
+
+        let statuses = check_agents(&registry, &config);
         assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].name, "autonomous-agent");
-        assert!(statuses[0].unresponsive);
+        assert!(
+            statuses[0].unresponsive,
+            "agent with has_processed_message=true past timeout must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_genuinely_active_agent_past_timeout_is_unresponsive() {
+        // An autonomous agent that genuinely processed messages
+        // (`has_processed_message: true`) but has gone silent longer than
+        // the timeout — should be flagged unresponsive.
+        use chrono::Duration;
+        use librefang_types::agent::{
+            AgentEntry, AgentIdentity, AgentManifest, AgentMode, AutonomousConfig, SessionId,
+        };
+
+        let registry = AgentRegistry::new();
+        let config = HeartbeatConfig::default(); // default_timeout_secs = 60
+
+        let one_hour_ago = Utc::now() - Duration::seconds(3600);
+        let last_active = Utc::now() - Duration::seconds(300);
+        let autonomous_manifest = AgentManifest {
+            autonomous: Some(AutonomousConfig::default()),
+            ..Default::default()
+        };
+        let entry = AgentEntry {
+            id: AgentId::new(),
+            name: "active-then-silent".to_string(),
+            manifest: autonomous_manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: one_hour_ago,
+            last_active,
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+            is_hand: false,
+            has_processed_message: true,
+            ..Default::default()
+        };
+        registry.register(entry).unwrap();
+
+        let statuses = check_agents(&registry, &config);
+
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            statuses[0].unresponsive,
+            "genuinely active agent past timeout should be flagged unresponsive"
+        );
     }
 
     #[test]

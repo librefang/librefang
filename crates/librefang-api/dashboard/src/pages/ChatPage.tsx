@@ -13,12 +13,13 @@ import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
 import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
-import { approvalKeys } from "../lib/queries/keys";
+import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -31,8 +32,10 @@ import {
   useCreateAgentSession,
   useDeleteAgentSession,
   usePatchAgentConfig,
+  usePatchHandAgentRuntimeConfig,
   useResolveApproval,
   useStopAgent,
+  useUploadAgentFile,
 } from "../lib/mutations/agents";
 import "katex/dist/katex.min.css";
 
@@ -77,6 +80,15 @@ interface ChatMessage {
   thinking?: string;
   /** Whether the thinking block is collapsed in the UI. */
   thinkingCollapsed?: boolean;
+  /** Image attachments — {file_id, filename} sourced from session history
+   *  (`AgentSessionMessage.images`) or the user's pending uploads at send. */
+  images?: ChatAttachment[];
+}
+
+interface ChatAttachment {
+  file_id: string;
+  filename?: string;
+  content_type?: string;
 }
 
 // Slash commands — desc is an i18n key under "chat.cmd_*"
@@ -200,7 +212,7 @@ const sessionCache = new Map<string, ChatMessage[]>();
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null) {
+function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -324,7 +336,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId)
+    loadAgentSession(loadId, sessionId)
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -342,7 +354,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
             }
 
             const hasTools = msg.tools && msg.tools.length > 0;
-            if (!content.trim() && !hasTools) return [];
+            const hasImages = msg.images && msg.images.length > 0;
+            if (!content.trim() && !hasTools && !hasImages) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -358,6 +371,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               // persisted before the backend started stamping (#2934).
               timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
               tools: msg.tools,
+              images: msg.images?.map((img) => ({
+                file_id: img.file_id,
+                filename: img.filename,
+                content_type: img.content_type,
+              })),
             }];
           });
           // Refresh the cache unconditionally — the data is still correct
@@ -370,7 +388,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           }
         }
       })
-      .catch(() => { /* Session load failure — user will see empty chat */ })
+      .catch((error: unknown) => {
+        // Surface load failures to the user — most commonly a stale
+        // `?sessionId=` URL that no longer points at a session belonging to
+        // this agent (404 from the cross-agent guard) or a malformed UUID
+        // (400). Without this the chat just renders empty with no signal.
+        const message = error instanceof Error ? error.message : t("common.error");
+        onClearError?.(message);
+      })
       .finally(() => setAgentLoading(loadId, false));
   }, [agentId, sessionVersion]);
 
@@ -391,10 +416,15 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, [agentId, onClearError, t]);
 
-  // Send message - WS first, HTTP fallback
-  const sendMessage = useCallback(async (content: string) => {
-    if (!content.trim()) return;
+  // Send message - WS first, HTTP fallback. `attachments` is the list of
+  // already-uploaded files that the agent should attach to this turn (image
+  // bytes are pre-resolved by the backend at /upload time and looked up by
+  // file_id; image blocks land on the user message, non-image bytes are
+  // injected as text content blocks). Slash commands ignore attachments.
+  const sendMessage = useCallback(async (content: string, attachments?: ChatAttachment[]) => {
+    if (!content.trim() && !(attachments && attachments.length > 0)) return;
     const trimmed = content.trim();
+    const hasAttachments = !!(attachments && attachments.length > 0);
 
     // Slash command handling
     if (trimmed.startsWith("/")) {
@@ -454,6 +484,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 if (data.type === "command_result" && cmd === "model") {
                   onModelSwitch?.();
                 }
+                // /new created a fresh backend session; surface its id so the
+                // URL + sessions dropdown reflect the switch in a single step.
+                if (data.type === "command_result" && cmd === "new" && typeof data.session_id === "string" && data.session_id) {
+                  onNewSession?.(data.session_id);
+                }
               }
             } catch { /* ignore non-JSON */ }
           };
@@ -478,6 +513,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       role: "user",
       content: trimmed,
       timestamp: new Date(),
+      images: hasAttachments ? attachments : undefined,
     };
 
     const botMsg: ChatMessage = {
@@ -499,6 +535,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
           session_id: sessionId,
+          attachments: hasAttachments ? attachments : undefined,
         });
         const fullContent = response.response || "";
         updateAgentMessages(sendAgentId, prev => prev.map(m =>
@@ -711,6 +748,9 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           content: trimmed,
           thinking: deepThinking,
           show_thinking: showThinkingProcess,
+          // Backend ws handler reads `parsed["attachments"]` (ws.rs) and
+          // resolves them via the same path as the HTTP /message endpoint.
+          ...(hasAttachments ? { attachments } : {}),
         }));
 
         // Start inactivity timeout — resets on every received event
@@ -859,6 +899,50 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </div>
         )}
 
+        {/* Image attachments — rendered above the text bubble. Backend
+            stores all uploaded files (image/audio/text/pdf) under the
+            same `images` field of `AgentSessionMessage`; we still render
+            non-image entries because text/pdf attachments are otherwise
+            invisible in the transcript. */}
+        {message.images && message.images.length > 0 && (
+          <div className={`flex flex-wrap gap-2 mb-1.5 ${isUser ? "justify-end" : "justify-start"}`}>
+            {message.images.map((img) => {
+              const src = `/api/uploads/${encodeURIComponent(img.file_id)}`;
+              const isImage = !img.content_type || img.content_type.startsWith("image/");
+              if (isImage) {
+                return (
+                  <a
+                    key={img.file_id}
+                    href={src}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="block rounded-lg overflow-hidden border border-border-subtle hover:border-brand/40 transition-colors max-w-[240px]"
+                  >
+                    <img
+                      src={src}
+                      alt={img.filename || "attachment"}
+                      className="block max-h-[240px] w-auto object-contain bg-main/30"
+                    />
+                  </a>
+                );
+              }
+              const label = img.filename || img.file_id;
+              return (
+                <a
+                  key={img.file_id}
+                  href={src}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[11px] text-text hover:border-brand/40 transition-colors max-w-[220px]"
+                >
+                  <FileText className="h-3 w-3 text-text-dim shrink-0" />
+                  <span className="truncate">{label}</span>
+                </a>
+              );
+            })}
+          </div>
+        )}
+
         {/* Message content */}
         {(displayContent || isUser || message.isStreaming || message.error) && (
         <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm min-w-0 [overflow-wrap:anywhere] ${
@@ -974,12 +1058,139 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   );
 });
 
+function AttachmentChip({ attachment, onRemove }: { attachment: PendingAttachment; onRemove: (localId: string) => void }) {
+  const { t } = useTranslation();
+  const isImage = attachment.contentType.startsWith("image/");
+  const isError = attachment.status === "error";
+  const isUploading = attachment.status === "uploading";
+  // Once uploaded, prefer the served URL so the chip survives without
+  // holding a blob URL — but during upload the local preview is all we
+  // have, so fall through to it for images.
+  const imageSrc = attachment.fileId
+    ? `/api/uploads/${encodeURIComponent(attachment.fileId)}`
+    : attachment.previewUrl;
+  return (
+    <div className={`group relative flex items-center gap-2 pl-1 pr-7 py-1 rounded-xl border text-[11px] max-w-[220px] ${
+      isError
+        ? "border-error/30 bg-error/5 text-error"
+        : "border-border-subtle bg-surface"
+    }`}>
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-main/40">
+        {isImage && imageSrc ? (
+          <img src={imageSrc} alt={attachment.filename} className="h-full w-full object-cover" />
+        ) : (
+          <FileText className="h-4 w-4 text-text-dim" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="truncate font-medium text-text">{attachment.filename}</div>
+        <div className="flex items-center gap-1 text-[10px] text-text-dim">
+          {isUploading && <Loader2 className="h-3 w-3 animate-spin" />}
+          <span className="truncate">
+            {isUploading
+              ? t("chat.attachment_uploading", { defaultValue: "Uploading…" })
+              : isError
+                ? (attachment.errorMessage ?? t("common.error"))
+                : `${(attachment.size / 1024).toFixed(0)} KB`}
+          </span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => onRemove(attachment.localId)}
+        title={t("chat.attachment_remove", { defaultValue: "Remove" })}
+        aria-label={t("chat.attachment_remove", { defaultValue: "Remove attachment" })}
+        className="absolute right-1 top-1 h-5 w-5 rounded-md flex items-center justify-center text-text-dim/70 hover:text-text hover:bg-main"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+// Server-side cap (`KernelConfig.max_upload_size_bytes`, default 10MB).
+// Mirrored client-side so we can reject locally before pushing bytes over
+// the wire — the backend still enforces the real limit.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+// Types the agent loop currently consumes via
+// `routes/agents.rs::resolve_attachments()`:
+//   - image/* — passed inline as base64 image blocks
+//   - application/pdf — text-extracted via pdf-extract
+//   - text-like files (text/*, JSON, YAML, TOML, code/data extensions) —
+//     read as UTF-8 and inlined as a text block, truncated at 200K chars
+// audio/* is accepted by `/upload` (auto-transcribed via the media engine)
+// but the transcription path returns a stub today, so it's left out here.
+//
+// Extensions in the accept attribute are needed because browsers commonly
+// set empty / `application/octet-stream` for code files like .rs / .py.
+const PDF_MIME = "application/pdf";
+const TEXT_LIKE_EXTENSIONS = [
+  // Plain text & docs
+  ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".log",
+  // Config & data
+  ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf", ".cfg", ".env", ".properties",
+  // Web
+  ".html", ".htm", ".css", ".scss", ".sass", ".less",
+  // JS/TS family
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+  // Other languages
+  ".py", ".rs", ".go", ".java", ".kt", ".kts", ".swift", ".scala", ".clj", ".ex", ".exs",
+  ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".m", ".mm",
+  ".rb", ".php", ".pl", ".lua", ".r", ".jl", ".dart", ".zig", ".nim",
+  // Shell
+  ".sh", ".bash", ".zsh", ".fish", ".ps1",
+  // Query / schema
+  ".sql", ".graphql", ".gql", ".proto",
+  // Notebooks
+  ".ipynb",
+];
+const TEXT_LIKE_MIMES = [
+  "text/*",
+  "application/json",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/x-toml",
+  "application/x-ipynb+json",
+  "application/javascript",
+  "application/x-javascript",
+  "application/typescript",
+  "application/sql",
+  "application/graphql",
+];
+const ATTACHMENT_ACCEPT = [
+  "image/png", "image/jpeg", "image/webp", "image/gif",
+  PDF_MIME,
+  ...TEXT_LIKE_MIMES,
+  ...TEXT_LIKE_EXTENSIONS,
+].join(",");
+
+interface PendingAttachment {
+  /** Stable client id used to track this entry across upload state changes. */
+  localId: string;
+  filename: string;
+  size: number;
+  contentType: string;
+  /** Local preview URL for images while the upload is in flight. */
+  previewUrl?: string;
+  status: "uploading" | "ready" | "error";
+  /** Set on `status === "ready"`; absent until the server returns. */
+  fileId?: string;
+  errorMessage?: string;
+}
+
 // Input box - with shortcut hints
-function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { onSend: (msg: string) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
+function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabled, placeholder, authMissing, authStatus, providerName, supportsThinking, sttAvailable }: { agentId: string; onSend: (msg: string, attachments?: ChatAttachment[]) => void; onStop?: () => void; isStreaming?: boolean; disabled: boolean; inputDisabled?: boolean; placeholder: string; authMissing?: boolean; authStatus?: string; providerName?: string; supportsThinking?: boolean; sttAvailable?: boolean }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [isDropping, setIsDropping] = useState(false);
+  const dragDepthRef = useRef(0);
+  const uploadMutation = useUploadAgentFile();
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
   const setDeepThinking = useUIStore((s) => s.setDeepThinking);
@@ -1055,12 +1266,189 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
   }, [hasDropdown, dropdownLen, activeIndex, isSlashPrefix, isModelArg, filteredCmds, filteredModels, selectCmd, selectModel]);
 
   // ─────────────────────────────────────────────────────────────────────────
+  // ── Attachment upload pipeline ────────────────────────────────────────────
+
+  const isImageMime = (mime: string) => mime.startsWith("image/");
+  const isPdfMime = (mime: string) => mime === PDF_MIME;
+  const isTextLikeMime = (mime: string) => {
+    if (mime.startsWith("text/")) return true;
+    return TEXT_LIKE_MIMES.includes(mime);
+  };
+  const hasTextLikeExtension = (filename: string) => {
+    const lower = filename.toLowerCase();
+    return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
+  };
+  // Browsers often leave `file.type` empty for code files (e.g. `.rs`),
+  // so we fall back to extension matching — matching the backend's
+  // `is_text_like_attachment` logic.
+  const isSupportedFile = (file: File) =>
+    isImageMime(file.type)
+    || isPdfMime(file.type)
+    || isTextLikeMime(file.type)
+    || hasTextLikeExtension(file.name);
+
+  const enqueueFiles = useCallback((files: File[]) => {
+    if (!agentId || files.length === 0) return;
+    for (const file of files) {
+      const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const tooLarge = file.size > MAX_ATTACHMENT_BYTES;
+      const isImage = isImageMime(file.type);
+      // Local preview only makes sense for images; PDFs render as a file chip.
+      const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
+      // Drop/paste bypasses <input accept>, so we still enforce the
+      // supported-type check here — anything else would upload but the agent
+      // loop would silently discard it.
+      if (!isSupportedFile(file)) {
+        setAttachments(prev => [...prev, {
+          localId,
+          filename: file.name,
+          size: file.size,
+          contentType: file.type || "application/octet-stream",
+          previewUrl,
+          status: "error",
+          errorMessage: t("chat.attachment_unsupported_type", { defaultValue: "Unsupported file type. Allowed: images, PDF, and common text/code files." }),
+        }]);
+        continue;
+      }
+      if (tooLarge) {
+        setAttachments(prev => [...prev, {
+          localId,
+          filename: file.name,
+          size: file.size,
+          contentType: file.type || "application/octet-stream",
+          previewUrl,
+          status: "error",
+          errorMessage: t("chat.attachment_too_large", { defaultValue: "File too large (max 10MB)" }),
+        }]);
+        continue;
+      }
+      setAttachments(prev => [...prev, {
+        localId,
+        filename: file.name,
+        size: file.size,
+        contentType: file.type || "application/octet-stream",
+        previewUrl,
+        status: "uploading",
+      }]);
+      uploadMutation.mutate({ agentId, file }, {
+        onSuccess: (result) => {
+          setAttachments(prev => prev.map(a =>
+            a.localId === localId
+              ? { ...a, status: "ready" as const, fileId: result.file_id, contentType: result.content_type || a.contentType }
+              : a
+          ));
+        },
+        onError: (err) => {
+          const msg = err instanceof Error ? err.message : t("common.error");
+          setAttachments(prev => prev.map(a =>
+            a.localId === localId
+              ? { ...a, status: "error" as const, errorMessage: msg }
+              : a
+          ));
+        },
+      });
+    }
+  }, [agentId, uploadMutation, t]);
+
+  // Revoke any object URLs we created when the component unmounts so we
+  // don't leak memory in a long-lived chat session. We mirror `attachments`
+  // into a ref because the cleanup runs on unmount and would otherwise
+  // capture the empty initial state from first render.
+  const attachmentsRef = useRef<PendingAttachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  useEffect(() => {
+    return () => {
+      attachmentsRef.current.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+    };
+  }, []);
+
+  const removeAttachment = useCallback((localId: string) => {
+    setAttachments(prev => {
+      const target = prev.find(a => a.localId === localId);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter(a => a.localId !== localId);
+    });
+  }, []);
+
+  const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const list = e.target.files;
+    if (list && list.length > 0) {
+      enqueueFiles(Array.from(list));
+    }
+    // Reset value so the same file can be re-picked after removal.
+    e.target.value = "";
+  }, [enqueueFiles]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of items) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      enqueueFiles(files);
+    }
+  }, [enqueueFiles]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    dragDepthRef.current += 1;
+    setIsDropping(true);
+  }, []);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault();
+    }
+  }, []);
+  const handleDragLeave = useCallback(() => {
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDropping(false);
+  }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer?.files || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDropping(false);
+    enqueueFiles(Array.from(e.dataTransfer.files));
+  }, [enqueueFiles]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const anyUploading = attachments.some(a => a.status === "uploading");
+  const readyAttachments = attachments.filter(a => a.status === "ready" && a.fileId);
+  const hasSendableAttachments = readyAttachments.length > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !effectiveDisabled) {
-      onSend(message);
-      setMessage("");
+    if (effectiveDisabled || anyUploading) return;
+    if (!message.trim() && !hasSendableAttachments) return;
+    // Slash commands bypass the LLM send path (they're handled in
+    // useChatMessages.sendMessage), so they cannot carry attachments.
+    // Preserve the chips through a slash so the user doesn't silently lose
+    // their uploads when they run e.g. `/info` with an image already queued.
+    const isSlashCommand = message.trim().startsWith("/");
+    const payload: ChatAttachment[] | undefined = (!isSlashCommand && hasSendableAttachments)
+      ? readyAttachments.map(a => ({
+          file_id: a.fileId!,
+          filename: a.filename,
+          content_type: a.contentType,
+        }))
+      : undefined;
+    onSend(message, payload);
+    setMessage("");
+    if (!isSlashCommand) {
+      // Revoke previews and clear the strip — the optimistic user bubble
+      // already references fileIds via /api/uploads/{id}, so we don't need
+      // the local blob URLs anymore.
+      attachments.forEach(a => { if (a.previewUrl) URL.revokeObjectURL(a.previewUrl); });
+      setAttachments([]);
     }
   };
 
@@ -1080,7 +1468,35 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
   const textareaDisabled = (inputDisabled ?? disabled) || !!authMissing;
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-2">
+    <form
+      onSubmit={handleSubmit}
+      className={`relative space-y-2 ${isDropping ? "ring-2 ring-brand/40 rounded-2xl" : ""}`}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDropping && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-brand/5 border border-dashed border-brand/40 text-xs font-medium text-brand">
+          {t("chat.attachment_drop_hint", { defaultValue: "Drop to attach" })}
+        </div>
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept={ATTACHMENT_ACCEPT}
+        onChange={handleFilePick}
+        className="hidden"
+      />
+      {/* Pending / uploaded attachment chips */}
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {attachments.map(att => (
+            <AttachmentChip key={att.localId} attachment={att} onRemove={removeAttachment} />
+          ))}
+        </div>
+      )}
       {/* Auth missing warning */}
       {authMissing && (
         <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 px-4 py-2.5 text-sm text-warning">
@@ -1150,12 +1566,13 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
         </button>
       </div>
       )}
-      <div className="flex gap-2 sm:gap-3 items-end">
+      <div className="flex gap-2 sm:gap-3 items-start">
         <div className="flex-1">
           <textarea
             ref={textareaRef}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
               // Dropdown navigation takes priority
               if (hasDropdown) {
@@ -1173,13 +1590,23 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
             className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!agentId || textareaDisabled}
+          title={t("chat.attachment_add", { defaultValue: "Attach file" })}
+          aria-label={t("chat.attachment_add", { defaultValue: "Attach file" })}
+          className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3 sm:px-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed bg-surface text-text-dim border border-border-subtle hover:text-text hover:border-border hover:-translate-y-0.5"
+        >
+          <Paperclip className="h-4 w-4" />
+        </button>
         {voiceInput.isSupported && (
           <button
             type="button"
             onClick={sttAvailable ? voiceInput.toggleRecording : undefined}
             disabled={!sttAvailable || textareaDisabled || voiceInput.isTranscribing}
             title={!sttAvailable ? t("chat.voice_not_configured") : voiceInput.isRecording ? t("chat.voice_stop") : t("chat.voice_input")}
-            className={`group relative px-3 sm:px-3.5 py-2.5 sm:py-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
+            className={`group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3 sm:px-3.5 rounded-2xl font-bold text-sm transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed ${
               voiceInput.isRecording
                 ? "bg-error/10 text-error border border-error/30 animate-pulse"
                 : voiceInput.isTranscribing
@@ -1195,7 +1622,7 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
             type="button"
             onClick={onStop}
             title={t("chat.stop_hint")}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
+            className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3.5 sm:px-5 rounded-2xl bg-linear-to-r from-error to-error/90 text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-300"
           >
             <Square className="h-4 w-4 fill-current" />
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
@@ -1205,10 +1632,10 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
         ) : (
           <button
             type="submit"
-            disabled={!message.trim() || effectiveDisabled}
-            className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+            disabled={effectiveDisabled || anyUploading || (!message.trim() && !hasSendableAttachments)}
+            className="group relative inline-flex items-center justify-center min-h-[44px] sm:min-h-[52px] px-3.5 sm:px-5 rounded-2xl bg-linear-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
           >
-            <Send className="h-4 w-4" />
+            {anyUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
               {t("chat.send_hint")}
             </span>
@@ -1220,14 +1647,25 @@ function ChatInput({ onSend, onStop, isStreaming, disabled, inputDisabled, place
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
-  agentId: string; onModelChange: () => void;
+  /** Target agent id for the model picker PATCH. */
+  agentId: string;
+  /** True if `agentId` refers to a hand-role agent. Routes the model PATCH
+   *  to /hand-runtime-config so the HAND.toml-driven live manifest stays
+   *  consistent with the override; also fans out `handKeys.details()`
+   *  invalidation via the hook. */
+  isHand?: boolean;
+  onModelChange: () => void;
   webSearchAugmentation?: "off" | "auto" | "always"; onWebSearchChange?: (mode: "off" | "auto" | "always") => void;
   webSearchAvailable?: boolean;
   onOpenConfig: () => void;
+  /** True while the multi-client SSE attach stream is open. */
+  attached?: boolean;
+  /** Number of SSE events received on the attach stream (for operator visibility). */
+  attachedEventCount?: number;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1244,7 +1682,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
 
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
+  // Route by role: hand agents go through the hand-runtime-config endpoint,
+  // everyone else hits the standalone /config route. Both hooks share the
+  // same AgentConfigPatch payload shape.
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const modelConfigMutation = isHand
+    ? patchHandAgentRuntimeConfigMutation
+    : patchAgentConfigMutation;
   const modelsQuery = useModels(
     { available: true },
     {
@@ -1329,7 +1774,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     setPatchPending(true);
     setPatchError(null);
     try {
-      await patchAgentConfigMutation.mutateAsync({
+      await modelConfigMutation.mutateAsync({
         agentId,
         config: { model: model.id, provider: model.provider },
       });
@@ -1357,6 +1802,15 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
             {t("chat.ws_connected")}
+          </Badge>
+        )}
+        {attached && (
+          <Badge variant="brand" dot>
+            <Eye className="h-2.5 w-2.5 mr-0.5" />
+            {t("chat.session_attach_watching", { defaultValue: "Watching" })}
+            {typeof attachedEventCount === "number" && attachedEventCount > 0
+              ? ` (${attachedEventCount})`
+              : ""}
           </Badge>
         )}
         <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
@@ -1754,6 +2208,7 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
 export function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const search = useSearch({ from: "/chat" });
   const initialAgentId = search?.agentId || "";
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
@@ -1766,6 +2221,7 @@ export function ChatPage() {
   // use the endpoint for registry-canonical switching.
   const deleteSessionMutation = useDeleteAgentSession();
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
 
   // Sync agent selection to URL search params
   const selectAgent = useCallback((id: string) => {
@@ -1883,6 +2339,17 @@ export function ChatPage() {
   // param is present, it wins over the server's canonical active session so
   // two browser tabs on the same agent can hold independent sessions.
   const urlSessionId = search?.sessionId || null;
+  const handleBackendNewSession = useCallback((newSessionId: string) => {
+    if (!selectedAgentId) return;
+    navigate({
+      to: "/chat",
+      search: { agentId: selectedAgentId, sessionId: newSessionId },
+      replace: false,
+    });
+    setSessionVersion(v => v + 1);
+    void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
+  }, [selectedAgentId, navigate, queryClient]);
+
   const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
     selectedAgentId || null,
     agents,
@@ -1890,6 +2357,7 @@ export function ChatPage() {
     () => void agentsQuery.refetch(),
     (message) => addToast(message, "error"),
     urlSessionId,
+    handleBackendNewSession,
   );
   // Track LLM text streaming (cleared on `typing:stop`) independently of
   // `isLoading`, which stays true through post-processing until the final
@@ -1950,6 +2418,17 @@ export function ChatPage() {
   }, [sessionsQuery.data]);
   const activeSessionId = urlSessionId ?? serverActiveSessionId;
 
+  // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
+  // server-side route ships in a separate PR; until that lands the hook
+  // silently no-ops on the 404 it returns. We watch a session that another
+  // client (CLI, desktop, second browser tab) may already be driving over
+  // its own /message/stream connection.
+  const attachEnabled = search?.attach === "1" && !!selectedAgentId && !!activeSessionId;
+  const sessionStream = useSessionStream(
+    attachEnabled ? selectedAgentId : null,
+    attachEnabled ? activeSessionId ?? null : null,
+  );
+
   // Sidebar clicks update the URL — no switch_agent_session POST. Each tab's
   // URL carries its own sessionId, and the send path forwards it per-request.
   const handleSwitchSession = useCallback(async (sessionId: string) => {
@@ -1993,10 +2472,17 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
-    if (!agents.some(a => a.id === selectedAgentId)) {
-      setSelectedAgentId("");
+    if (agents.some(a => a.id === selectedAgentId)) return;
+    // Not in the current list — before clearing, try expanding the query
+    // to include hand-spawned agents. The URL may point at a hand agent
+    // while `showHandAgents` (a localStorage toggle) is off, which would
+    // otherwise dump the user back to the default agent on every refresh.
+    if (!showHandAgents) {
+      setShowHandAgents(true);
+      return;
     }
-  }, [agents, selectedAgentId, agentsQuery.data]);
+    setSelectedAgentId("");
+  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent
@@ -2194,13 +2680,21 @@ export function ChatPage() {
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
               agentId={selectedAgentId}
+              isHand={selectedAgent?.is_hand}
               onModelChange={() => void agentsQuery.refetch()}
-              onOpenConfig={() => navigate({ to: "/config" })}
+              onOpenConfig={() => navigate({ to: "/config/tools" })}
               webSearchAugmentation={selectedAgent?.web_search_augmentation}
               webSearchAvailable={webSearchAvailable}
+              attached={attachEnabled && sessionStream.isAttached}
+              attachedEventCount={sessionStream.events.length}
               onWebSearchChange={async (mode) => {
                 try {
-                  await patchAgentConfigMutation.mutateAsync({
+                  // Branch in the caller — only the caller knows from the
+                  // cached agent detail whether this is a hand role.
+                  const mutation = selectedAgent?.is_hand
+                    ? patchHandAgentRuntimeConfigMutation
+                    : patchAgentConfigMutation;
+                  await mutation.mutateAsync({
                     agentId: selectedAgentId,
                     config: { web_search_augmentation: mode },
                   });
@@ -2261,6 +2755,7 @@ export function ChatPage() {
           {/* Input area */}
           <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
+              agentId={selectedAgentId ?? ""}
               onSend={sendMessage}
               onStop={stopMessage}
               isStreaming={isStreaming}
@@ -2279,4 +2774,3 @@ export function ChatPage() {
     </div>
   );
 }
-

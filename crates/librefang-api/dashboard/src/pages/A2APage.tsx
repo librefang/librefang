@@ -7,6 +7,7 @@ import { useA2AAgents } from "../lib/queries/network";
 import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
+import { Modal } from "../components/ui/Modal";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -205,41 +206,45 @@ export function A2APage() {
             )}
           </div>
 
-          {/* Send task modal */}
+          {/* Send task panel */}
           {taskAgent && (
-            <div className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTaskAgent(null)}>
-              <div className="w-full sm:max-w-lg sm:mx-4 animate-fade-in-scale" onClick={(e) => e.stopPropagation()}>
-                <Card padding="lg">
-                  <h3 className="text-lg font-black mb-1">{t("a2a.send_task")}</h3>
-                  <p className="text-xs text-text-dim mb-4">
-                    {t("a2a.send_to")} <span className="font-bold text-primary">{taskAgent.name || taskAgent.url}</span>
-                  </p>
-                  <textarea
-                    value={taskMessage}
-                    onChange={(e) => setTaskMessage(e.target.value)}
-                    placeholder={t("a2a.task_placeholder")}
-                    rows={4}
-                    className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none resize-none"
-                  />
-                  <div className="flex justify-end gap-3 mt-4">
-                    <button
-                      onClick={() => setTaskAgent(null)}
-                      className="px-4 py-2 rounded-xl text-sm font-bold text-text-dim hover:bg-surface-hover transition-colors"
-                    >
-                      {t("common.cancel")}
-                    </button>
-                    <button
-                      onClick={handleSendTask}
-                      disabled={isSending || !taskMessage.trim()}
-                      className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2 text-sm font-bold text-white hover:bg-primary/90 disabled:opacity-40 transition-colors"
-                    >
-                      {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                      {t("a2a.send")}
-                    </button>
-                  </div>
-                </Card>
+            <Modal
+              isOpen
+              onClose={() => setTaskAgent(null)}
+              variant="panel-right"
+              size="lg"
+              title={t("a2a.send_task")}
+              zIndex={200}
+            >
+              <div className="p-5 space-y-4">
+                <p className="text-xs text-text-dim">
+                  {t("a2a.send_to")} <span className="font-bold text-primary">{taskAgent.name || taskAgent.url}</span>
+                </p>
+                <textarea
+                  value={taskMessage}
+                  onChange={(e) => setTaskMessage(e.target.value)}
+                  placeholder={t("a2a.task_placeholder")}
+                  rows={4}
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none resize-none"
+                />
+                <div className="flex justify-end gap-3">
+                  <button
+                    onClick={() => setTaskAgent(null)}
+                    className="px-4 py-2 rounded-xl text-sm font-bold text-text-dim hover:bg-surface-hover transition-colors"
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    onClick={handleSendTask}
+                    disabled={isSending || !taskMessage.trim()}
+                    className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2 text-sm font-bold text-white hover:bg-primary/90 disabled:opacity-40 transition-colors"
+                  >
+                    {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {t("a2a.send")}
+                  </button>
+                </div>
               </div>
-            </div>
+            </Modal>
           )}
 
           {/* Tracked tasks */}

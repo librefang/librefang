@@ -1149,6 +1149,10 @@ impl LlmDriver for ClaudeCodeDriver {
             usage: final_usage,
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::Anthropic
+    }
 }
 
 /// Check if the Claude Code CLI is available.
@@ -1162,22 +1166,29 @@ pub fn claude_code_available() -> bool {
     ClaudeCodeDriver::detect().is_some() || claude_credentials_exist()
 }
 
-/// Check if Claude Code appears to be installed by looking for known artifacts.
+/// Check if Claude Code credentials exist on disk.
 ///
-/// Checks multiple indicators across CLI versions and auth mechanisms:
+/// Only looks for actual credential files:
 /// - `~/.claude/.credentials.json` — older CLI versions (file-based auth)
 /// - `~/.claude/credentials.json`  — newer CLI versions (file-based auth)
-/// - `~/.claude/settings.json`     — present on all installs; newer versions use the
-///   system keychain instead of a credentials file, so the above files will not exist
+///
+/// `settings.json` is intentionally NOT checked. It is created on first launch
+/// as a preference file (theme, default model, etc.) whether or not the user
+/// ever authenticates, so treating it as a credential falsely marks Claude
+/// Code as "configured" for anyone who merely installed the CLI.
+///
+/// Keychain-based auth (newer versions) is already covered by the primary
+/// `detect()` path, which finds the `claude` binary on PATH or at common
+/// install locations (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`).
+/// The credentials-file fallback is only relevant for non-standard installs.
 fn claude_credentials_exist() -> bool {
-    if let Some(home) = home_dir() {
-        let claude_dir = home.join(".claude");
-        claude_dir.join(".credentials.json").exists()
-            || claude_dir.join("credentials.json").exists()
-            || claude_dir.join("settings.json").exists()
-    } else {
-        false
-    }
+    home_dir()
+        .map(|h| claude_credentials_in_dir(&h.join(".claude")))
+        .unwrap_or(false)
+}
+
+fn claude_credentials_in_dir(dir: &std::path::Path) -> bool {
+    dir.join(".credentials.json").exists() || dir.join("credentials.json").exists()
 }
 
 /// Cross-platform home directory.
@@ -1216,6 +1227,7 @@ mod tests {
             system: Some("You are helpful.".to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1260,6 +1272,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1321,6 +1334,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1398,6 +1412,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1551,53 +1566,51 @@ mod tests {
         assert!(candidates.contains(&"/usr/local/bin/claude"));
     }
 
-    #[test]
-    fn test_claude_credentials_exist_checks_settings_json() {
-        use std::fs;
-
-        // Create a temp dir that looks like ~/.claude with only settings.json present
-        // (simulating keychain-based auth where no credentials file is written).
-        let tmp = std::env::temp_dir().join(format!(
-            "librefang-test-claude-dir-{}",
-            uuid::Uuid::new_v4()
+    fn make_claude_tmp_dir(label: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "librefang-test-claude-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
         ));
-        fs::create_dir_all(&tmp).unwrap();
-        let settings = tmp.join("settings.json");
-        fs::write(&settings, "{}").unwrap();
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 
-        // Temporarily override HOME so home_dir() resolves to our temp parent.
-        // We test the helper directly since home_dir() reads HOME/USERPROFILE.
-        let _parent = tmp.parent().unwrap();
-        let _dir_name = tmp.file_name().unwrap().to_str().unwrap();
-
-        // Manually replicate the check logic against our temp path.
-        let has_credentials = tmp.join(".credentials.json").exists()
-            || tmp.join("credentials.json").exists()
-            || tmp.join("settings.json").exists();
-
+    #[test]
+    fn settings_json_alone_is_not_a_credential() {
+        // `settings.json` is created on first launch as a preference file
+        // (theme, default model) even when the user never signs in. It must
+        // not be treated as proof of authentication.
+        let dir = make_claude_tmp_dir("settings-only");
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
         assert!(
-            has_credentials,
-            "settings.json alone should be enough to signal Claude Code is installed"
+            !claude_credentials_in_dir(&dir),
+            "settings.json must not be treated as a Claude Code credential"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
-        // Verify that without settings.json the check returns false.
-        fs::remove_file(&settings).unwrap();
-        let has_credentials_after = tmp.join(".credentials.json").exists()
-            || tmp.join("credentials.json").exists()
-            || tmp.join("settings.json").exists();
-        assert!(
-            !has_credentials_after,
-            "should return false when no credential artifacts exist"
-        );
+    #[test]
+    fn credentials_json_variants_are_recognised() {
+        for name in [".credentials.json", "credentials.json"] {
+            let dir = make_claude_tmp_dir(&format!("creds-{name}"));
+            std::fs::write(dir.join(name), "{}").unwrap();
+            assert!(
+                claude_credentials_in_dir(&dir),
+                "{name} should be recognised"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
 
-        // Verify that the old-style credentials.json still works.
-        fs::write(tmp.join("credentials.json"), "{}").unwrap();
-        let has_old_creds = tmp.join(".credentials.json").exists()
-            || tmp.join("credentials.json").exists()
-            || tmp.join("settings.json").exists();
-        assert!(has_old_creds, "credentials.json should still be recognised");
-
-        fs::remove_dir_all(&tmp).unwrap();
+    #[test]
+    fn claude_empty_dir_has_no_credentials() {
+        let dir = make_claude_tmp_dir("empty");
+        assert!(!claude_credentials_in_dir(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::MemorySubstrate;
 use async_trait::async_trait;
 use librefang_types::agent::{
     AgentEntry, AgentId, AgentId as PromptAgentId, ExperimentStatus, ExperimentVariantMetrics,
-    PromptExperiment, PromptVersion, SessionId,
+    PromptExperiment, PromptVersion, SessionId, UserId,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::Message;
@@ -332,6 +332,15 @@ pub trait UsageBackend: Send + Sync {
 
     /// Delete usage records older than `days` days.  Returns rows deleted.
     fn cleanup_old(&self, days: u32) -> LibreFangResult<usize>;
+
+    /// Cost for a given user in the last calendar hour.
+    fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64>;
+
+    /// Cost for a given user since the start of the current UTC day.
+    fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64>;
+
+    /// Cost for a given user since the start of the current UTC month.
+    fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64>;
 }
 
 impl UsageBackend for crate::usage::UsageStore {
@@ -451,6 +460,18 @@ impl UsageBackend for crate::usage::UsageStore {
 
     fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
         crate::usage::UsageStore::cleanup_old(self, days)
+    }
+
+    fn query_user_hourly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        crate::usage::UsageStore::query_user_hourly(self, user_id)
+    }
+
+    fn query_user_daily(&self, user_id: UserId) -> LibreFangResult<f64> {
+        crate::usage::UsageStore::query_user_daily(self, user_id)
+    }
+
+    fn query_user_monthly(&self, user_id: UserId) -> LibreFangResult<f64> {
+        crate::usage::UsageStore::query_user_monthly(self, user_id)
     }
 }
 

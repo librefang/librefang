@@ -4,6 +4,7 @@
 api-error-agent-not-found = 未找到智能体
 api-error-agent-spawn-failed = 创建智能体失败
 api-error-agent-invalid-id = 无效的智能体 ID
+api-error-session-invalid-id = 无效的会话 ID
 api-error-agent-already-exists = 智能体已存在
 
 # Message errors
@@ -61,6 +62,12 @@ api-error-profile-not-found = 未找到配置文件 '{ $name }'
 api-error-cron-invalid-id = 无效的定时任务 ID
 api-error-cron-not-found = 未找到定时任务
 api-error-cron-create-failed = 创建定时任务失败：{ $error }
+
+# Tool errors
+api-error-tool-not-found = 未找到工具：{ $name }
+api-error-tool-invoke-disabled = 直接调用工具已禁用。请在配置中设置 '[tool_invoke] enabled = true'，并把工具名加入 'allowlist'。
+api-error-tool-invoke-denied = 工具 '{ $name }' 不在 '[tool_invoke] allowlist' 白名单中
+api-error-tool-requires-agent = 工具 '{ $name }' 需要人工审批，无法在无智能体上下文的情况下调用；请通过智能体发起调用
 
 # General errors
 api-error-not-found = 未找到资源

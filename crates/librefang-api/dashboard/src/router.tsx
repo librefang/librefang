@@ -79,6 +79,11 @@ const TelemetryPage = lazyWithReload(() => import("./pages/TelemetryPage").then(
 const TerminalPage = lazyWithReload(() => import("./pages/TerminalPage").then(m => ({ default: m.TerminalPage })));
 const McpServersPage = lazyWithReload(() => import("./pages/McpServersPage").then(m => ({ default: m.McpServersPage })));
 const ConfigPage = lazyWithReload(() => import("./pages/ConfigPage").then(m => ({ default: m.ConfigPage })));
+const UsersPage = lazyWithReload(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
+const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionSimulatorPage").then(m => ({ default: m.PermissionSimulatorPage })));
+const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
+const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
+const UserPolicyPage = lazyWithReload(() => import("./pages/UserPolicyPage").then(m => ({ default: m.UserPolicyPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
 function L({ children }: { children: React.ReactNode }) {
@@ -138,10 +143,14 @@ const channelsRoute = createRoute({
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/chat",
-  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string } => {
-    const out: { agentId?: string; sessionId?: string } = {};
+  validateSearch: (search: Record<string, unknown>): { agentId?: string; sessionId?: string; attach?: string } => {
+    const out: { agentId?: string; sessionId?: string; attach?: string } = {};
     if (typeof search.agentId === "string") out.agentId = search.agentId;
     if (typeof search.sessionId === "string") out.sessionId = search.sessionId;
+    // Hidden flag: enables the multi-attach SSE viewer (see useSessionStream).
+    // Functionally testable once #3078 lands; before then the hook silently
+    // no-ops on the 404 the route returns.
+    if (typeof search.attach === "string") out.attach = search.attach;
     return out;
   },
   component: () => <L><ChatPage /></L>
@@ -272,6 +281,35 @@ const mcpServersRoute = createRoute({
   component: () => <L><McpServersPage /></L>
 });
 
+// RBAC M6 — users, identity wizard, permission simulator. Per-user budget
+// and per-user policy pages stub the M3/M5 endpoints; the route is live so
+// query hooks stay wired.
+const usersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/users",
+  component: () => <L><UsersPage /></L>
+});
+const usersSimulatorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/users/simulator",
+  component: () => <L><PermissionSimulatorPage /></L>
+});
+const userBudgetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/users/$name/budget",
+  component: () => <L><UserBudgetPage /></L>
+});
+const userPolicyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/users/$name/policy",
+  component: () => <L><UserPolicyPage /></L>
+});
+const auditRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/audit",
+  component: () => <L><AuditPage /></L>
+});
+
 const configIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config",
@@ -351,6 +389,11 @@ const routeTree = rootRoute.addChildren([
   configSecurityRoute,
   configNetworkRoute,
   configInfraRoute,
+  usersRoute,
+  usersSimulatorRoute,
+  userBudgetRoute,
+  userPolicyRoute,
+  auditRoute,
 ]);
 
 function ChunkErrorBoundary({ error }: { error: Error }) {

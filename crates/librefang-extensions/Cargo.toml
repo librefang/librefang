@@ -12,7 +12,6 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true }
@@ -25,15 +24,22 @@ zeroize = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 dirs = { workspace = true }
-url = { workspace = true }
 base64 = { workspace = true }
 
 # Encryption
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 
+# OS keyring (libsecret / Keychain / Credential Manager). Target-gated so
+# that musl-static and Android cross builds don't pull libdbus-sys (the
+# secret-service backend's C-FFI), which has no usable backend on those
+# targets and breaks the build looking for libdbus-1-dev. The vault
+# transparently falls back to the AES-256-GCM file-based store when no
+# OS keyring backend is compiled in (see vault.rs::os_keyring).
+[target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { workspace = true }
+
 [dev-dependencies]
-tokio-test = { workspace = true }
 tempfile = { workspace = true }
 serial_test = "3"
 librefang-runtime = { path = "../librefang-runtime" }

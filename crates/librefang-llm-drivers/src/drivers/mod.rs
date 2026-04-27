@@ -5,6 +5,7 @@
 //! Together, Mistral, Fireworks, Ollama, vLLM, Alibaba Coding Plan, and any
 //! OpenAI-compatible endpoint.
 pub mod anthropic;
+pub mod bedrock;
 pub mod chatgpt;
 pub mod claude_code;
 pub mod codex_cli;
@@ -131,6 +132,8 @@ pub enum ApiFormat {
     VertexAI,
     /// Azure OpenAI (OpenAI format with `api-key` header and deployment-based URL).
     AzureOpenAI,
+    /// AWS Bedrock Converse API (Bearer token auth via `AWS_BEARER_TOKEN_BEDROCK`).
+    Bedrock,
 }
 
 /// A provider entry in the static registry.
@@ -270,7 +273,11 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "ollama",
         aliases: &[],
-        base_url: "http://localhost:11434/v1",
+        // Use 127.0.0.1 instead of localhost: on dual-stack hosts (e.g. macOS)
+        // localhost resolves to both ::1 and 127.0.0.1, IPv6 is tried first,
+        // and these local servers usually bind IPv4 only, causing instant
+        // connection-refused errors that don't always fall back to IPv4.
+        base_url: "http://127.0.0.1:11434/v1",
         api_key_env: "OLLAMA_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -280,7 +287,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vllm",
         aliases: &[],
-        base_url: "http://localhost:8000/v1",
+        base_url: "http://127.0.0.1:8000/v1",
         api_key_env: "VLLM_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -290,7 +297,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lmstudio",
         aliases: &[],
-        base_url: "http://localhost:1234/v1",
+        base_url: "http://127.0.0.1:1234/v1",
         api_key_env: "LMSTUDIO_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -300,7 +307,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "lemonade",
         aliases: &[],
-        base_url: "http://localhost:8888/api/v1",
+        base_url: "http://127.0.0.1:8888/api/v1",
         api_key_env: "LEMONADE_API_KEY",
         key_required: false,
         api_format: ApiFormat::OpenAI,
@@ -538,6 +545,26 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: true,
     },
     ProviderEntry {
+        name: "byteplus",
+        aliases: &[],
+        base_url: "https://ark.ap-southeast.bytepluses.com/api/v3",
+        api_key_env: "BYTEPLUS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "byteplus_coding",
+        aliases: &[],
+        base_url: "https://ark.ap-southeast.bytepluses.com/api/coding",
+        api_key_env: "BYTEPLUS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::Anthropic,
+        alt_api_key_env: None,
+        hidden: true,
+    },
+    ProviderEntry {
         name: "alibaba-coding-plan",
         aliases: &[],
         base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
@@ -574,6 +601,27 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         api_key_env: "NVIDIA_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "novita",
+        aliases: &["novita-ai"],
+        base_url: "https://api.novita.ai/openai/v1",
+        api_key_env: "NOVITA_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "bedrock",
+        aliases: &["aws-bedrock"],
+        // Endpoint is built dynamically from AWS_REGION + model name by BedrockDriver.
+        base_url: "",
+        api_key_env: "AWS_BEARER_TOKEN_BEDROCK",
+        key_required: true,
+        api_format: ApiFormat::Bedrock,
         alt_api_key_env: None,
         hidden: false,
     },
@@ -621,20 +669,18 @@ fn create_driver_from_entry(
         .clone()
         .unwrap_or_else(|| entry.base_url.to_string());
 
-    // Resolve API key: explicit config > primary env var > alt env var
-    let mut api_key = config
+    // Resolve API key: explicit config > primary env var > alt env var.
+    //
+    // Intentionally does NOT fall back to the Codex CLI credential file for
+    // the `openai` provider. CLI logins are surfaced as their own provider
+    // (`codex-cli`) so the user sees exactly what they configured; running
+    // `provider = "openai"` requires an explicit `OPENAI_API_KEY`.
+    let api_key = config
         .api_key
         .clone()
         .or_else(|| std::env::var(entry.api_key_env).ok())
         .or_else(|| entry.alt_api_key_env.and_then(|v| std::env::var(v).ok()))
         .unwrap_or_default();
-
-    // Special: OpenAI also checks Codex credential
-    if api_key.is_empty() && entry.api_format == ApiFormat::OpenAI && entry.name == "openai" {
-        if let Some(codex_key) = read_codex_credential() {
-            api_key = codex_key;
-        }
-    }
 
     if entry.key_required && entry.api_format != ApiFormat::VertexAI && api_key.is_empty() {
         return Err(LlmError::MissingApiKey(format!(
@@ -727,6 +773,17 @@ fn create_driver_from_entry(
                 proxy_url,
             )))
         }
+        ApiFormat::Bedrock => {
+            // Region falls back to AWS_REGION → AWS_DEFAULT_REGION → us-east-1
+            // inside the driver. Endpoint is built per-call from region+model.
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .ok();
+            Ok(Arc::new(bedrock::BedrockDriver::new_with_credentials(
+                Some(api_key),
+                region,
+            )?))
+        }
     }
 }
 
@@ -793,9 +850,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             azure-openai, vertex-ai, nvidia-nim, claude-code, qwen-code, gemini-cli, codex-cli, \
+             azure-openai, vertex-ai, nvidia-nim, novita, bedrock, claude-code, qwen-code, gemini-cli, codex-cli, \
              qwen, minimax, zhipu, zhipu_coding, zai, moonshot, kimi_coding, \
-             qianfan, volcengine, alibaba-coding-plan. \
+             qianfan, volcengine, byteplus, alibaba-coding-plan. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
@@ -862,6 +919,24 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
         }
     }
 
+    // Phase 3: CLI-backed providers. No env var is involved — a CLI login
+    // is detected via binary-on-PATH or on-disk credential files. These are
+    // tried only after all API-key providers so that a user with both an
+    // API key and a CLI login gets the direct-API path (cheaper, faster).
+    //
+    // An empty `api_key_env` in the returned tuple signals to the caller
+    // that no env var lookup is needed; the CLI driver manages its own
+    // authentication (OAuth token, keychain, or subprocess login).
+    //
+    // Order matches typical install prevalence — claude-code first, then
+    // codex-cli, then Google's Gemini CLI, then Qwen's fork.
+    const CLI_PRIORITY: &[&str] = &["claude-code", "codex-cli", "gemini-cli", "qwen-code"];
+    for &name in CLI_PRIORITY {
+        if cli_provider_available(name) {
+            return Some((name, "", ""));
+        }
+    }
+
     None
 }
 
@@ -920,8 +995,12 @@ pub fn is_cli_provider(name: &str) -> bool {
     )
 }
 
-/// Resolve the API key for a provider by checking all known sources:
-/// primary env var → alt env var → Codex credential file (for openai).
+/// Resolve the API key for a provider by checking the declared env vars.
+///
+/// Sources (in order): primary env var → alt env var (e.g. `GOOGLE_API_KEY`
+/// for Gemini). Does NOT read CLI credential files — CLI logins are exposed
+/// as their own provider entries (`claude-code` / `codex-cli` / `gemini-cli`
+/// / `qwen-code`) rather than silently substituting for an API provider.
 ///
 /// Returns `None` if no key is found through any source.
 pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
@@ -937,59 +1016,6 @@ pub fn resolve_provider_api_key(provider: &str) -> Option<String> {
                 .and_then(|v| std::env::var(v).ok())
                 .and_then(non_empty)
         })
-        .or_else(|| {
-            if entry.name == "openai" {
-                read_codex_credential()
-            } else {
-                None
-            }
-        })
-}
-
-/// Read an OpenAI API key from the Codex CLI credential file.
-///
-/// Checks `$CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-/// Returns `Some(api_key)` if the file exists and contains a valid, non-expired token.
-fn read_codex_credential() -> Option<String> {
-    let codex_home = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var("USERPROFILE")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| std::path::PathBuf::from(h).join(".codex"))
-            }
-        })?;
-
-    let auth_path = codex_home.join("auth.json");
-    let content = std::fs::read_to_string(&auth_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    if let Some(expires_at) = parsed.get("expires_at").and_then(|v| v.as_i64()) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if now >= expires_at {
-            return None;
-        }
-    }
-
-    parsed
-        .get("api_key")
-        .or_else(|| parsed.get("token"))
-        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -1099,6 +1125,7 @@ mod tests {
         assert!(providers.contains(&"kimi_coding"));
         assert!(providers.contains(&"qianfan"));
         assert!(providers.contains(&"volcengine"));
+        assert!(providers.contains(&"byteplus"));
         assert!(providers.contains(&"alibaba-coding-plan"));
         assert!(providers.contains(&"deepinfra"));
         assert!(providers.contains(&"claude-code"));
@@ -1108,7 +1135,9 @@ mod tests {
         assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 39);
+        assert!(providers.contains(&"novita"));
+        assert!(providers.contains(&"bedrock"));
+        assert_eq!(providers.len(), 42);
     }
 
     #[test]
@@ -1155,6 +1184,61 @@ mod tests {
         assert_eq!(d.base_url, "https://api-inference.huggingface.co/v1");
         assert_eq!(d.api_key_env, "HF_API_KEY");
         assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_novita() {
+        let d = provider_defaults("novita").unwrap();
+        assert_eq!(d.base_url, "https://api.novita.ai/openai/v1");
+        assert_eq!(d.api_key_env, "NOVITA_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_novita_ai_alias() {
+        let d = provider_defaults("novita-ai").unwrap();
+        assert_eq!(d.base_url, "https://api.novita.ai/openai/v1");
+        assert_eq!(d.api_key_env, "NOVITA_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_bedrock() {
+        let d = provider_defaults("bedrock").unwrap();
+        assert_eq!(d.api_key_env, "AWS_BEARER_TOKEN_BEDROCK");
+        assert!(d.key_required);
+        // base_url is built dynamically per-call from AWS_REGION + model.
+        assert_eq!(d.base_url, "");
+    }
+
+    #[test]
+    fn test_provider_defaults_aws_bedrock_alias() {
+        let d = provider_defaults("aws-bedrock").unwrap();
+        assert_eq!(d.api_key_env, "AWS_BEARER_TOKEN_BEDROCK");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_bedrock_driver_with_explicit_api_key() {
+        // Explicit api_key bypasses the AWS_BEARER_TOKEN_BEDROCK env lookup so
+        // the test is hermetic regardless of the host environment.
+        let config = DriverConfig {
+            provider: "bedrock".to_string(),
+            api_key: Some("test-bedrock-bearer-token".to_string()),
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+            message_timeout_secs: 300,
+            mcp_bridge: None,
+            proxy_url: None,
+            request_timeout_secs: None,
+        };
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_ok(),
+            "Bedrock with explicit api_key should construct successfully"
+        );
     }
 
     #[test]

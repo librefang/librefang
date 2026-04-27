@@ -64,12 +64,63 @@ import {
   useDeletePromptVersion,
   usePatchAgent,
   usePatchAgentConfig,
+  usePatchHandAgentRuntimeConfig,
   usePauseExperiment,
   useResumeAgent,
   useSpawnAgent,
   useStartExperiment,
   useSuspendAgent,
 } from "../lib/mutations/agents";
+
+/** Two-column row used inside the detail modal's value cards. */
+function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="flex justify-between items-center gap-3 min-h-[28px]">
+      <span className="text-text-dim text-sm">{label}</span>
+      <span className="text-sm text-right min-w-0">{children}</span>
+    </div>
+  );
+}
+
+/** Collapsible system-prompt card. Long prompts (>6 lines or >400 chars)
+ *  start collapsed with an expand toggle; short prompts render as-is. */
+function SystemPromptSection({ prompt }: { prompt: string }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const isLong = prompt.split("\n").length > 6 || prompt.length > 400;
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-semibold">{t("agents.system_prompt")}</h4>
+        {isLong && (
+          <button
+            onClick={() => setExpanded(v => !v)}
+            className="text-xs text-brand hover:underline font-medium"
+          >
+            {expanded
+              ? t("common.collapse", { defaultValue: "Collapse" })
+              : t("common.expand", { defaultValue: "Expand" })}
+          </button>
+        )}
+      </div>
+      <div className="relative">
+        <div
+          className={`rounded-lg bg-main border border-border-subtle p-4 text-sm text-text leading-relaxed whitespace-pre-wrap ${
+            isLong && !expanded ? "max-h-40 overflow-hidden" : ""
+          }`}
+        >
+          {prompt}
+        </div>
+        {isLong && !expanded && (
+          // Fade-out at the bottom so the cut feels intentional rather than
+          // a clip, without introducing an inner scroll. The modal's outer
+          // scroll is the single source of truth — no nested scrolling.
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-lg bg-linear-to-t from-main to-transparent" />
+        )}
+      </div>
+    </section>
+  );
+}
 
 export function AgentsPage() {
   const { t } = useTranslation();
@@ -107,6 +158,7 @@ export function AgentsPage() {
   const [showHandAgents, setShowHandAgents] = useState(false);
   const [showToolsEditor, setShowToolsEditor] = useState(false);
   const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
+  const [capabilitiesToolsDraft, setCapabilitiesToolsDraft] = useState<string[]>([]);
   const [toolAllowlistDraft, setToolAllowlistDraft] = useState<string[]>([]);
   const [toolBlocklistDraft, setToolBlocklistDraft] = useState<string[]>([]);
   const [toolsDisabledState, setToolsDisabledState] = useState(false);
@@ -139,6 +191,7 @@ export function AgentsPage() {
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
   const patchAgentConfigMutation = usePatchAgentConfig();
+  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const qc = useQueryClient();
@@ -252,6 +305,7 @@ export function AgentsPage() {
     setToolsEditorLoading(false);
     setToolsEditorSaving(false);
     setAvailableToolNames([]);
+    setCapabilitiesToolsDraft([]);
     setToolAllowlistDraft([]);
     setToolBlocklistDraft([]);
     setToolsDisabledState(false);
@@ -276,6 +330,7 @@ export function AgentsPage() {
           ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
           : [];
         setAvailableToolNames(names);
+        setCapabilitiesToolsDraft(Array.isArray(agentTools?.capabilities_tools) ? agentTools.capabilities_tools : []);
         setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
         setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
         setToolsDisabledState(Boolean(agentTools?.disabled));
@@ -325,7 +380,13 @@ export function AgentsPage() {
       return;
     }
 
-    patchAgentConfigMutation.mutate(
+    // Caller picks the mutation based on cached agent-detail knowledge: hand
+    // agents go through the hand-runtime-config endpoint (also invalidates
+    // handKeys.details()), everyone else hits the standalone /config route.
+    const mutation = detailAgent.is_hand
+      ? patchHandAgentRuntimeConfigMutation
+      : patchAgentConfigMutation;
+    mutation.mutate(
       { agentId: detailAgent.id, config: patch },
       {
         onSuccess: async () => {
@@ -693,45 +754,56 @@ export function AgentsPage() {
           {coreAgents.map(agent => renderAgentCard(agent))}
         </div>
       )}
-      {/* Agent Detail / Edit Modal — uses the shared <Modal> shell with the
-          same `size="4xl"` as the Create modal so create and edit feel
-          uniform (issue #2798). The custom rich header (avatar, status,
-          inline rename) lives inside; <Modal> provides backdrop, focus
-          trap, Escape-to-close, mobile bottom-sheet, and standard sizing. */}
+      {/* Agent Detail Drawer. Right-side inspector pattern (Linear / Figma):
+          the agents list stays interactive while the drawer is open, so
+          clicking another agent in the list updates the drawer's content
+          in place — no close-then-reopen needed. Sticky header / footer
+          keep identity and primary actions pinned while the inspectable
+          sections scroll in the middle. */}
       {detailAgent && (() => {
         const detailState = ((detailAgent as any).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
-        const statusColor = isDetailSuspended ? "bg-warning" : detailState === "crashed" ? "bg-error" : "bg-success";
-        // Only hand-managed sub-agents are locked from rename — their
-        // names are referenced by the parent hand and changing them
-        // would orphan the parent's call sites. Built-in templates
-        // (`assistant`, etc.) ARE renameable: a fresh agent spawned
-        // from a template is a regular user-owned agent that just
-        // happens to start with a translated display name. A previous
-        // i18n-key heuristic locked them too, which created a
-        // dead-end: rename to "assistant" → next open the agent looks
-        // built-in → rename UI disabled forever.
+        const isDetailCrashed = detailState === "crashed";
+        const statusColor = isDetailSuspended ? "bg-warning" : isDetailCrashed ? "bg-error" : "bg-success";
+        // Only hand-managed sub-agents are locked from rename — their names
+        // are referenced by the parent hand and changing them would orphan
+        // the parent's call sites. Built-in templates (`assistant`, etc.)
+        // ARE renameable: a fresh agent spawned from a template is a regular
+        // user-owned agent.
         const lockRename = !!detailAgent.is_hand;
-        // Backdrop click closing while a rename PATCH is in flight
-        // would dismiss the modal but still toast "Agent renamed"
-        // afterward — confusing. Hold the backdrop until the user is
-        // out of the editing flow.
+        // Pick the config mutation that matches this agent's role; mirrors
+        // the branching in saveModelEdit / web-search toggle below.
+        const activeConfigMutation = detailAgent.is_hand
+          ? patchHandAgentRuntimeConfigMutation
+          : patchAgentConfigMutation;
+        // Hold backdrop dismissal during edit-in-flight so a stray click
+        // doesn't close the modal mid-PATCH and still toast "Agent renamed".
         const lockBackdropDismiss = editingName || patchAgentMutation.isPending;
+        const saveModelDisabled =
+          activeConfigMutation.isPending
+          || !modelDraft.provider.trim()
+          || !modelDraft.model.trim()
+          || isNaN(parseInt(modelDraft.max_tokens, 10))
+          || parseInt(modelDraft.max_tokens, 10) <= 0
+          || isNaN(parseFloat(modelDraft.temperature))
+          || parseFloat(modelDraft.temperature) < 0
+          || parseFloat(modelDraft.temperature) > 2;
         return (
         <Modal
           isOpen
           onClose={closeDetailModal}
-          size="4xl"
+          variant="drawer-right"
+          size="xl"
           hideCloseButton
           disableBackdropClose={lockBackdropDismiss}
         >
-            {/* Modal Header */}
-            <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4 min-w-0 flex-1">
+            {/* Header — sticky, identity + state. */}
+            <div className="px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface z-10">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && detailState !== "crashed" ? "animate-pulse" : ""}`} />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} />
                   </div>
                   <div className="min-w-0 flex-1">
                     {editingName ? (
@@ -743,18 +815,14 @@ export function AgentsPage() {
                           onChange={e => setNameDraft(e.target.value)}
                           onKeyDown={e => {
                             // `isComposing` guard: in CJK IMEs Enter
-                            // confirms the candidate (pinyin → hanzi),
-                            // it does NOT submit. Without this check,
-                            // Chinese/Japanese users get their input
-                            // hijacked mid-composition.
+                            // confirms the candidate (pinyin → hanzi);
+                            // submitting on it would hijack composition.
                             if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                               saveName();
                             } else if (e.key === "Escape") {
-                              // stopPropagation so this Escape only
-                              // cancels the inline edit — Modal also
-                              // listens for Escape on window and would
-                              // otherwise close the entire detail
-                              // modal at the same time.
+                              // stopPropagation so Escape cancels the inline
+                              // edit only — the Modal's window Escape listener
+                              // would otherwise close the whole modal too.
                               e.stopPropagation();
                               cancelNameEdit();
                             }
@@ -772,7 +840,7 @@ export function AgentsPage() {
                         </button>
                         <button
                           onClick={cancelNameEdit}
-                          className="px-3 py-1 rounded-lg text-xs font-bold bg-main hover:bg-main/80 text-text-dim border border-border-subtle shrink-0"
+                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle shrink-0"
                         >
                           {t("common.cancel")}
                         </button>
@@ -787,32 +855,34 @@ export function AgentsPage() {
                           ? t("agents.rename_hand_disabled", { defaultValue: "Hand-managed agents cannot be renamed" })
                           : t("agents.rename_hint", { defaultValue: "Click to rename" })}
                       >
-                        <h3 className="text-lg font-black tracking-tight truncate">
+                        <h3 className="text-base font-bold truncate">
                           {t(`agents.builtin.${detailAgent.name}.name`, { defaultValue: detailAgent.name })}
                         </h3>
                         {!lockRename && (
-                          <Pencil className="w-3 h-3 text-text-dim opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+                          <Pencil className="w-3.5 h-3.5 text-text-dim opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
                         )}
                       </button>
                     )}
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <p className="text-[10px] text-text-dim font-mono">{truncateId(detailAgent.id, 16)}</p>
+                    {(detailAgent as any).description && (
+                      <p className="text-xs text-text-dim mt-1 leading-relaxed">{(detailAgent as any).description}</p>
+                    )}
+                    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                      <span className="text-[11px] text-text-dim/70 font-mono">{truncateId(detailAgent.id, 16)}</span>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
-                      <Badge variant={isDetailSuspended ? "warning" : "success"} dot>
+                      <Badge variant={isDetailSuspended ? "warning" : isDetailCrashed ? "error" : "success"} dot>
                         {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
                       </Badge>
                     </div>
                   </div>
                 </div>
-                <button onClick={closeDetailModal} className="p-2 rounded-xl hover:bg-main transition-colors shrink-0" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
+                <button onClick={closeDetailModal} className="p-2 rounded-lg hover:bg-main transition-colors shrink-0" aria-label={t("common.close", { defaultValue: "Close" })}>
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             </div>
-            <div className="p-6 space-y-5">
+            {/* Body — scrollable inspectable sections. */}
+            <div className="px-6 py-5 space-y-5">
 
-              {/* Description */}
-              {(detailAgent as any).description && (
-                <p className="text-xs text-text-dim leading-relaxed">{(detailAgent as any).description}</p>
-              )}
               {/* Model */}
               {detailAgent.model && (
                 <div>
@@ -826,10 +896,11 @@ export function AgentsPage() {
                         {t("agents.hand_agent_hint", { defaultValue: "You are editing the active runtime agent created by a hand." })}
                       </p>
                     )}
+                  </div>
+                  <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
                     {editingModel ? (
                       <>
-                        <div className="flex justify-between items-center gap-2">
-                          <span className="text-text-dim">{t("agents.provider")}</span>
+                        <DetailRow label={t("agents.provider")}>
                           <select
                             value={modelDraft.provider}
                             onChange={e => setModelDraft(d => ({ ...d, provider: e.target.value, model: "" }))}
@@ -846,9 +917,8 @@ export function AgentsPage() {
                               <option key={p.id} value={p.id}>{p.display_name || p.id}</option>
                             ))}
                           </select>
-                        </div>
-                        <div className="flex justify-between items-center gap-2">
-                          <span className="text-text-dim">{t("agents.model")}</span>
+                        </DetailRow>
+                        <DetailRow label={t("agents.model")}>
                           <select
                             value={modelDraft.model}
                             onChange={e => setModelDraft(d => ({ ...d, model: e.target.value }))}
@@ -865,9 +935,8 @@ export function AgentsPage() {
                               <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
                             ))}
                           </select>
-                        </div>
-                        <div className="flex justify-between items-center gap-2">
-                          <span className="text-text-dim">{t("agents.max_tokens")}</span>
+                        </DetailRow>
+                        <DetailRow label={t("agents.max_tokens")}>
                           <input
                             type="number"
                             min={1}
@@ -876,9 +945,8 @@ export function AgentsPage() {
                             onChange={e => setModelDraft(d => ({ ...d, max_tokens: e.target.value }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                           />
-                        </div>
-                        <div className="flex justify-between items-center gap-2">
-                          <span className="text-text-dim">{t("agents.temperature")}</span>
+                        </DetailRow>
+                        <DetailRow label={t("agents.temperature")}>
                           <input
                             type="number"
                             min={0}
@@ -888,11 +956,11 @@ export function AgentsPage() {
                             onChange={e => setModelDraft(d => ({ ...d, temperature: e.target.value }))}
                             className="w-40 px-2 py-1 rounded-xl border border-border-subtle bg-main text-xs font-mono outline-none focus:border-primary text-right"
                           />
-                        </div>
-                        <div className="flex justify-end gap-1 pt-1">
+                        </DetailRow>
+                        <div className="flex justify-end gap-2 pt-1">
                           <button
                             onClick={cancelModelEdit}
-                            className="px-3 py-1 rounded text-xs font-bold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
+                            className="px-3 py-1 rounded-md text-xs font-semibold bg-main hover:bg-main/80 text-text-dim border border-border-subtle"
                           >
                             {t("common.cancel")}
                           </button>
@@ -901,7 +969,7 @@ export function AgentsPage() {
                             disabled={patchAgentConfigMutation.isPending || !modelDraft.provider.trim() || !modelDraft.model.trim() || isNaN(parseInt(modelDraft.max_tokens, 10)) || parseInt(modelDraft.max_tokens, 10) <= 0 || isNaN(parseFloat(modelDraft.temperature)) || parseFloat(modelDraft.temperature) < 0 || parseFloat(modelDraft.temperature) > 2}
                             className="px-3 py-1 rounded text-xs font-bold bg-primary hover:bg-primary/90 text-white disabled:opacity-50"
                           >
-                            {patchAgentConfigMutation.isPending ? t("common.saving") : t("common.save")}
+                            {activeConfigMutation.isPending ? t("common.saving") : t("common.save")}
                           </button>
                         </div>
                       </>
@@ -911,7 +979,9 @@ export function AgentsPage() {
                         <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
                         <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.max_tokens")}</span><span className="font-black">{(detailAgent.model.max_tokens ?? 4096).toLocaleString()}</span></div>
                         {detailAgent.model.temperature != null && (
-                          <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.temperature")}</span><span className="font-black">{detailAgent.model.temperature}</span></div>
+                          <DetailRow label={t("agents.temperature")}>
+                            <span className="font-mono">{detailAgent.model.temperature}</span>
+                          </DetailRow>
                         )}
                         <div className="flex justify-end pt-1">
                           <button onClick={startModelEdit} className="px-3 py-1 rounded text-xs font-bold bg-primary/10 hover:bg-primary/20 text-primary">{t("common.edit")}</button>
@@ -923,19 +993,29 @@ export function AgentsPage() {
               )}
 
               {/* Web Search Augmentation */}
-              <div>
-                <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.web_search", { defaultValue: "Web Search" })}</h4>
-                <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50">
-                  <div className="flex justify-between items-center gap-2">
-                    <div>
-                      <span className="text-xs text-text-dim">{t("agents.web_search_augmentation", { defaultValue: "Search Augmentation" })}</span>
-                      <p className="text-[10px] text-text-dim/60 mt-0.5">{t("agents.web_search_augmentation_hint", { defaultValue: "Auto-search the web and inject results into context before LLM call" })}</p>
+              <section>
+                <h4 className="text-sm font-semibold mb-2">
+                  {t("agents.web_search", { defaultValue: "Web Search" })}
+                </h4>
+                <div className="rounded-lg bg-main border border-border-subtle p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm">{t("agents.web_search_augmentation", { defaultValue: "Search Augmentation" })}</p>
+                      <p className="text-xs text-text-dim mt-0.5 leading-relaxed">
+                        {t("agents.web_search_augmentation_hint", { defaultValue: "Auto-search the web and inject results into context before LLM call" })}
+                      </p>
                     </div>
                     <select
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        patchAgentConfigMutation.mutate(
+                        // Branch in the caller, not the hook — only the
+                        // caller knows from the cached detail whether this
+                        // agent is a hand role.
+                        const mutation = detailAgent.is_hand
+                          ? patchHandAgentRuntimeConfigMutation
+                          : patchAgentConfigMutation;
+                        mutation.mutate(
                           { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
                           {
                             onSuccess: async () => {
@@ -952,21 +1032,13 @@ export function AgentsPage() {
                     </select>
                   </div>
                 </div>
-              </div>
-
-              {/* System Prompt */}
-              {detailAgent.system_prompt && (
-                <div>
-                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.system_prompt")}</h4>
-                  <pre className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 text-xs text-text-dim whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed font-mono">{detailAgent.system_prompt}</pre>
-                </div>
-              )}
+              </section>
 
               {/* Capabilities */}
               {detailAgent.capabilities && (
-                <div>
-                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <div className="w-5 h-5 rounded bg-success/10 flex items-center justify-center"><Wrench className="w-3 h-3 text-success" /></div>
+                <section>
+                  <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
+                    <Wrench className="w-3.5 h-3.5 text-success" />
                     {t("agents.capabilities")}
                   </h4>
                   <div className="flex flex-wrap gap-2">
@@ -988,143 +1060,192 @@ export function AgentsPage() {
                     )}
                     {detailAgent.capabilities.network && <Badge variant="brand" dot>{t("agents.network")}</Badge>}
                   </div>
-                </div>
+                </section>
+              )}
+
+              {/* System Prompt — collapsible */}
+              {detailAgent.system_prompt && (
+                <SystemPromptSection prompt={detailAgent.system_prompt} />
               )}
 
               {/* Skills */}
               {detailAgent.skills && detailAgent.skills.length > 0 && (
-                <div>
-                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.skills")}</h4>
-                  <div className="flex flex-wrap gap-2">
+                <section>
+                  <h4 className="text-sm font-semibold mb-2">{t("agents.skills")}</h4>
+                  <div className="flex flex-wrap gap-1.5">
                     {detailAgent.skills.map((s: string, i: number) => (
                       <Badge key={i} variant="default">{s}</Badge>
                     ))}
                   </div>
-                </div>
+                </section>
               )}
 
               {/* Tags */}
               {detailAgent.tags && detailAgent.tags.length > 0 && (
-                <div>
-                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.tags")}</h4>
+                <section>
+                  <h4 className="text-sm font-semibold mb-2">{t("agents.tags")}</h4>
                   <div className="flex flex-wrap gap-1.5">
                     {detailAgent.tags.map((tag: string, i: number) => (
-                      <span key={i} className="text-[10px] px-2.5 py-1 rounded-lg bg-main border border-border-subtle/50 text-text-dim font-medium">{tag}</span>
+                      <span
+                        key={i}
+                        className="text-xs px-2.5 py-1 rounded-md bg-main border border-border-subtle text-text-dim"
+                      >
+                        {tag}
+                      </span>
                     ))}
                   </div>
-                </div>
+                </section>
               )}
 
               {/* Mode */}
               {detailAgent.mode && (
-                <div className="flex items-center gap-3 p-3 rounded-xl bg-main/50 border border-border-subtle/50">
-                  <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center"><Shield className="w-3 h-3 text-warning" /></div>
-                  <span className="text-xs font-bold flex-1">{t("agents.mode")}</span>
+                <section className="flex items-center gap-3 rounded-lg bg-main border border-border-subtle px-4 py-3">
+                  <Shield className="w-4 h-4 text-warning shrink-0" />
+                  <span className="text-sm font-semibold flex-1">{t("agents.mode")}</span>
                   <Badge variant="warning">{detailAgent.mode}</Badge>
-                </div>
+                </section>
               )}
 
               {/* Thinking / Extended Reasoning */}
               {detailAgent.thinking && (
-                <div>
-                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <div className="w-5 h-5 rounded bg-purple-500/10 flex items-center justify-center"><Brain className="w-3 h-3 text-purple-500" /></div>
+                <section>
+                  <h4 className="text-sm font-semibold mb-2 flex items-center gap-2">
+                    <Brain className="w-3.5 h-3.5 text-purple-500" />
                     {t("agents.thinking")}
                   </h4>
-                  <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
-                    <div className="flex justify-between items-center">
-                      <span className="text-text-dim">{t("agents.thinking_enabled")}</span>
+                  <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
+                    <DetailRow label={t("agents.thinking_enabled")}>
                       <Badge variant={(detailAgent.thinking.budget_tokens ?? 0) > 0 ? "success" : "default"}>
                         {(detailAgent.thinking.budget_tokens ?? 0) > 0 ? t("common.yes") : t("common.no")}
                       </Badge>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-text-dim">{t("agents.budget_tokens")}</span>
-                      <span className="font-black text-sm">{detailAgent.thinking.budget_tokens?.toLocaleString() ?? 0}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-text-dim">{t("agents.stream_thinking")}</span>
+                    </DetailRow>
+                    <DetailRow label={t("agents.budget_tokens")}>
+                      <span className="font-mono">{detailAgent.thinking.budget_tokens?.toLocaleString() ?? 0}</span>
+                    </DetailRow>
+                    <DetailRow label={t("agents.stream_thinking")}>
                       <Badge variant={detailAgent.thinking.stream_thinking ? "brand" : "default"}>
                         {detailAgent.thinking.stream_thinking ? t("common.yes") : t("common.no")}
                       </Badge>
-                    </div>
-                    <p className="text-[10px] text-text-dim/50 flex items-center gap-1 pt-1">
+                    </DetailRow>
+                    <p className="text-xs text-text-dim flex items-center gap-1.5 pt-1">
                       <Zap className="w-3 h-3" />
                       {t("agents.thinking_hint")}
                     </p>
                   </div>
-                </div>
+                </section>
               )}
+            </div>
 
-              {/* Actions */}
-              <div className="space-y-3 pt-3 border-t border-border-subtle">
-                {/* Primary action */}
-                <Button variant="primary" size="sm" className="w-full" onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
-                  <MessageCircle className="w-3.5 h-3.5 mr-1.5" />
-                  {t("common.interact")}
-                </Button>
+            {/* Footer — sticky, primary + secondary actions reachable on long specs. */}
+            <div className="sticky bottom-0 px-6 py-4 border-t border-border-subtle bg-surface space-y-2.5">
+              <Button
+                variant="primary"
+                size="md"
+                className="w-full"
+                onClick={() => { closeDetailModal(); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}
+              >
+                <MessageCircle className="w-4 h-4 mr-2" />
+                {t("common.interact")}
+              </Button>
 
-                {/* Management actions */}
-                <div className="grid grid-cols-4 gap-2">
-                  {isDetailSuspended ? (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await resumeMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
-                      <Play className="w-4 h-4" />
-                      <span className="text-[9px]">{t("agents.resume")}</span>
-                    </Button>
-                  ) : (
-                    <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await suspendMutation.mutateAsync(detailAgent.id); await refreshDetailAgent(detailAgent.id, detailAgent.is_hand); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
-                      <Pause className="w-4 h-4" />
-                      <span className="text-[9px]">{t("agents.suspend")}</span>
-                    </Button>
-                  )}
-                  <Button variant="secondary" size="sm" className="flex-col gap-1 py-2.5 h-auto" onClick={async () => { try { await cloneMutation.mutateAsync(detailAgent.id); } catch (err: any) { addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error"); } }}>
-                    <Copy className="w-4 h-4" />
-                    <span className="text-[9px]">{t("agents.clone")}</span>
-                  </Button>
+              <div className="flex flex-wrap gap-2">
+                {isDetailSuspended ? (
                   <Button
                     variant="secondary"
                     size="sm"
-                    className="flex-col gap-1 py-2.5 h-auto"
+                    className="flex-1 min-w-[88px]"
+                    onClick={async () => {
+                      try {
+                        await resumeMutation.mutateAsync(detailAgent.id);
+                        await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                      } catch (err: any) {
+                        addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error");
+                      }
+                    }}
+                  >
+                    <Play className="w-3.5 h-3.5 mr-1.5" />
+                    {t("agents.resume")}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-1 min-w-[88px]"
+                    onClick={async () => {
+                      try {
+                        await suspendMutation.mutateAsync(detailAgent.id);
+                        await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                      } catch (err: any) {
+                        addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error");
+                      }
+                    }}
+                  >
+                    <Pause className="w-3.5 h-3.5 mr-1.5" />
+                    {t("agents.suspend")}
+                  </Button>
+                )}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="flex-1 min-w-[88px]"
+                  onClick={async () => {
+                    try {
+                      await cloneMutation.mutateAsync(detailAgent.id);
+                    } catch (err: any) {
+                      addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error");
+                    }
+                  }}
+                >
+                  <Copy className="w-3.5 h-3.5 mr-1.5" />
+                  {t("agents.clone")}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="flex-1 min-w-[88px]"
+                  onClick={() =>
+                    setConfirmDialog({
+                      title: t("agents.reset_title", { defaultValue: "Reset session?" }),
+                      message: t("agents.reset_confirm"),
+                      onConfirm: async () => {
+                        await resetAgentSession(detailAgent.id);
+                        await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
+                      },
+                    })
+                  }
+                >
+                  <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                  {t("agents.reset")}
+                </Button>
+                {!detailAgent.is_hand && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="flex-1 min-w-[88px] text-error/80 hover:text-error"
                     onClick={() =>
                       setConfirmDialog({
-                        title: t("agents.reset_title", { defaultValue: "Reset session?" }),
-                        message: t("agents.reset_confirm"),
-                        onConfirm: async () => {
-                          await resetAgentSession(detailAgent.id);
-                          await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                        },
+                        title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
+                        message: t("agents.delete_confirm", { name: detailAgent.name }),
+                        tone: "destructive",
+                        onConfirm: () => deleteMutation.mutate(detailAgent.id),
                       })
                     }
                   >
-                    <RotateCcw className="w-4 h-4" />
-                    <span className="text-[9px]">{t("agents.reset")}</span>
+                    <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                    {t("common.delete")}
                   </Button>
-                  {!detailAgent.is_hand && (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="flex-col gap-1 py-2.5 h-auto text-error/70 hover:text-error"
-                      onClick={() =>
-                        setConfirmDialog({
-                          title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
-                          message: t("agents.delete_confirm", { name: detailAgent.name }),
-                          tone: "destructive",
-                          onConfirm: () => deleteMutation.mutate(detailAgent.id),
-                        })
-                      }
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      <span className="text-[9px]">{t("common.delete")}</span>
-                    </Button>
-                  )}
-                </div>
-
-                {/* Prompts link */}
-                <Button variant="secondary" size="sm" className="w-full" onClick={() => setShowPrompts(true)}>
-                  <FlaskConical className="w-3.5 h-3.5 mr-1.5" />
-                  {t("agents.prompts")}
-                </Button>
+                )}
               </div>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                onClick={() => setShowPrompts(true)}
+              >
+                <FlaskConical className="w-3.5 h-3.5 mr-1.5" />
+                {t("agents.prompts")}
+              </Button>
             </div>
         </Modal>
         );
@@ -1132,15 +1253,15 @@ export function AgentsPage() {
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
-        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible>
+        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible variant="panel-right">
           <div className="p-6 space-y-5">
             <div>
               <p className="text-[11px] text-text-dim/70">
-                {t("agents.tools_editor_desc", { defaultValue: "Review the current tools state for this agent. Empty allowlist means no allow restriction; blocklist still removes selected tools." })}
+                {t("agents.tools_editor_desc", { defaultValue: "Review and manage the agent's tools. Declared tools are the primary set; allowlist/blocklist are additional filters." })}
               </p>
               {!toolsEditorLoading && (
                 <p className="mt-2 text-[10px] text-text-dim/50 font-mono">
-                  {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
+                  {capabilitiesToolsDraft.length} {t("agents.tools_declared_count", { defaultValue: "declared" })} · {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
                 </p>
               )}
             </div>
@@ -1171,10 +1292,28 @@ export function AgentsPage() {
                 <div className="space-y-2">
                   <div>
                     <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_declared_title", { defaultValue: "Declared Tools" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_declared_desc", { defaultValue: "Tools this agent can use. Leave empty for unrestricted access to all tools." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={capabilitiesToolsDraft}
+                    onChange={setCapabilitiesToolsDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
                       {t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
                     </h4>
                     <p className="text-[11px] text-text-dim/70 mb-3">
-                      {t("agents.tools_allowlist_desc", { defaultValue: "These tools are explicitly allowed. Leave empty to allow all tools except blocked ones." })}
+                      {t("agents.tools_allowlist_desc", { defaultValue: "Additional filter: only these tools remain available. Leave empty to skip this filter." })}
                     </p>
                   </div>
                   <MultiSelectCmdk
@@ -1228,6 +1367,7 @@ export function AgentsPage() {
                 try {
                   const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
                   await updateAgentTools(toolsEditorAgentId, {
+                    capabilities_tools: capabilitiesToolsDraft,
                     tool_allowlist: resolvedAllowlist,
                     tool_blocklist: toolBlocklistDraft,
                   });
@@ -1265,7 +1405,8 @@ export function AgentsPage() {
         isOpen={showCreate}
         onClose={closeCreateModal}
         title={t("agents.create_agent")}
-        size="4xl"
+        size="2xl"
+        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported media types for understanding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaType {
     Image,
@@ -22,7 +22,7 @@ impl std::fmt::Display for MediaType {
 }
 
 /// Source of media content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum MediaSource {
     /// Path to a local file.
@@ -34,7 +34,7 @@ pub enum MediaSource {
 }
 
 /// A media attachment to be analyzed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaAttachment {
     /// What kind of media this is.
     pub media_type: MediaType,
@@ -47,7 +47,7 @@ pub struct MediaAttachment {
 }
 
 /// Result of media analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaUnderstanding {
     /// What type of media was analyzed.
     pub media_type: MediaType,
@@ -60,7 +60,7 @@ pub struct MediaUnderstanding {
 }
 
 /// Configuration for media understanding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MediaConfig {
     /// Enable image description. Default: true.
@@ -94,7 +94,7 @@ impl Default for MediaConfig {
 }
 
 /// Configuration for link understanding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LinkConfig {
     /// Enable automatic link understanding. Default: false.
@@ -194,7 +194,9 @@ impl MediaAttachment {
 }
 
 /// Supported image generation models.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImageGenModel {
     #[default]
@@ -215,7 +217,7 @@ impl std::fmt::Display for ImageGenModel {
 }
 
 /// Image generation request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageGenRequest {
     /// The prompt describing the image to generate.
     pub prompt: String,
@@ -336,7 +338,7 @@ impl ImageGenRequest {
 }
 
 /// Result of image generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageGenResult {
     /// Generated images.
     pub images: Vec<GeneratedImage>,
@@ -347,7 +349,7 @@ pub struct ImageGenResult {
 }
 
 /// A single generated image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GeneratedImage {
     /// Base64-encoded image data.
     pub data_base64: String,
@@ -360,7 +362,7 @@ pub struct GeneratedImage {
 // ===========================================================================
 
 /// What media capabilities a driver supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaCapability {
     ImageGeneration,
@@ -381,7 +383,7 @@ impl std::fmt::Display for MediaCapability {
 }
 
 /// Status of an async media generation task (e.g. video).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum MediaTaskStatus {
     Pending,
@@ -406,7 +408,7 @@ impl std::fmt::Display for MediaTaskStatus {
 // ── Image Generation (generic) ─────────────────────────────────────────
 
 /// Provider-agnostic image generation request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaImageRequest {
     /// Text prompt describing the image.
     pub prompt: String,
@@ -469,7 +471,7 @@ impl MediaImageRequest {
 }
 
 /// Provider-agnostic image generation result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaImageResult {
     /// Generated images.
     pub images: Vec<GeneratedImage>,
@@ -484,7 +486,7 @@ pub struct MediaImageResult {
 // ── Text-to-Speech (generic) ───────────────────────────────────────────
 
 /// Provider-agnostic TTS request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaTtsRequest {
     /// Text to synthesize.
     pub text: String,
@@ -540,7 +542,7 @@ impl MediaTtsRequest {
 }
 
 /// Provider-agnostic TTS result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaTtsResult {
     /// Raw audio bytes.
     #[serde(skip)]
@@ -560,7 +562,7 @@ pub struct MediaTtsResult {
 // ── Video Generation (generic, async) ──────────────────────────────────
 
 /// Provider-agnostic video generation request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaVideoRequest {
     /// Text prompt describing the video.
     pub prompt: String,
@@ -608,7 +610,7 @@ impl MediaVideoRequest {
 }
 
 /// Result of a video generation submit (returns task ID for polling).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaVideoSubmitResult {
     /// Task ID for polling status.
     pub task_id: String,
@@ -617,7 +619,7 @@ pub struct MediaVideoSubmitResult {
 }
 
 /// Result of a completed video generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaVideoResult {
     /// URL to download the video (may expire).
     pub file_url: String,
@@ -636,7 +638,7 @@ pub struct MediaVideoResult {
 // ── Music Generation (generic) ─────────────────────────────────────────
 
 /// Provider-agnostic music generation request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaMusicRequest {
     /// Style/mood description (e.g. "upbeat pop song").
     #[serde(default)]
@@ -689,7 +691,7 @@ impl MediaMusicRequest {
 }
 
 /// Provider-agnostic music generation result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MediaMusicResult {
     /// Raw audio bytes.
     #[serde(skip)]

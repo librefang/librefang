@@ -1013,6 +1013,7 @@ pub async fn mcp_http(
             None, // interrupt (MCP HTTP calls have no session-scoped cancellation)
             None, // session_id (MCP HTTP is not tied to a live session)
             None, // dangerous_command_checker (no session-scoped checker here)
+            None, // available_tools (lazy-load pool not applicable to MCP bridge)
         )
         .await;
 

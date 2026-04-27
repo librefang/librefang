@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -11,17 +13,18 @@ func main() {
 	client := librefang.New("http://localhost:4545")
 
 	// Check server health
-	health, err := client.Health()
+	health, err := client.System.Health()
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Server:", health)
 
 	// List existing agents
-	agents, err := client.Agents.List()
+	raw, err := client.Agents.ListAgents()
 	if err != nil {
 		log.Fatal(err)
 	}
+	agents := librefang.ToSlice(raw)
 	fmt.Println("Agents:", len(agents))
 
 	// Use existing agent or create a new one
@@ -32,20 +35,22 @@ func main() {
 		agentID = agents[0]["id"].(string)
 		fmt.Println("Using existing agent:", agentID)
 	} else {
-		agent, err := client.Agents.Create(map[string]interface{}{
+		agent, err := client.Agents.SpawnAgent(map[string]interface{}{
 			"template": "assistant",
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
-		agentID = agent["id"].(string)
+		agentID = librefang.ToMap(agent)["id"].(string)
 		shouldDelete = true
 		fmt.Println("Created agent:", agentID)
 	}
 
 	// Send a message
 	fmt.Println("\n--- Sending message ---")
-	reply, err := client.Agents.Message(agentID, "Say hello in 5 words.")
+	reply, err := client.Agents.SendMessage(agentID, map[string]interface{}{
+		"message": "Say hello in 5 words.",
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,7 +58,7 @@ func main() {
 
 	// Clean up only if we created it
 	if shouldDelete {
-		client.Agents.Delete(agentID)
+		client.Agents.KillAgent(agentID)
 		fmt.Println("Agent deleted.")
 	}
 }

@@ -64,6 +64,20 @@ impl AgentRegistry {
         }
     }
 
+    /// Flip the sticky `has_processed_message` flag and bump `last_active`.
+    ///
+    /// Called from the real message-dispatch path
+    /// (`execute_llm_agent`) — never from administrative bookkeeping. This
+    /// is what the heartbeat monitor checks to distinguish "agent that has
+    /// genuinely been alive" from "agent that was spawned and never used".
+    /// Idempotent: once `true`, repeated calls only refresh `last_active`.
+    pub fn mark_processed_message(&self, id: AgentId) {
+        if let Some(mut entry) = self.agents.get_mut(&id) {
+            entry.has_processed_message = true;
+            entry.last_active = chrono::Utc::now();
+        }
+    }
+
     /// Update agent state.
     pub fn set_state(&self, id: AgentId, state: AgentState) -> LibreFangResult<()> {
         let mut entry = self
@@ -321,10 +335,12 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's tool allowlist and blocklist.
-    pub fn update_tool_filters(
+    /// Update an agent's declared tools and/or allowlist/blocklist in a
+    /// single registry lock. Fields left as `None` are not modified.
+    pub fn update_tool_config(
         &self,
         id: AgentId,
+        capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
     ) -> LibreFangResult<()> {
@@ -332,6 +348,9 @@ impl AgentRegistry {
             .agents
             .get_mut(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        if let Some(ct) = capabilities_tools {
+            entry.manifest.capabilities.tools = ct;
+        }
         if let Some(al) = allowlist {
             entry.manifest.tool_allowlist = al;
         }
@@ -605,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_tool_filters_reenables_disabled_tools() {
+    fn test_update_tool_config_reenables_disabled_tools() {
         let registry = AgentRegistry::new();
         let mut entry = test_entry("tools-disabled");
         entry.manifest.tools_disabled = true;
@@ -613,7 +632,7 @@ mod tests {
         registry.register(entry).unwrap();
 
         registry
-            .update_tool_filters(id, Some(vec!["file_read".to_string()]), None)
+            .update_tool_config(id, None, Some(vec!["file_read".to_string()]), None)
             .expect("update should succeed");
 
         let updated = registry.get(id).expect("agent should exist");

@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
+import * as http from "../http/client";
 import { renderHook } from "@testing-library/react";
 import {
   useSwitchAgentSession,
   useDeleteAgentSession,
   usePatchAgent,
   usePatchAgentConfig,
+  usePatchHandAgentRuntimeConfig,
+  useClearHandAgentRuntimeConfig,
   useSpawnAgent,
   useSpawnUarAgent,
   useCloneAgent,
@@ -14,7 +17,7 @@ import {
   useCreateAgentSession,
   useResolveApproval,
 } from "./agents";
-import { agentKeys, sessionKeys, overviewKeys, approvalKeys } from "../queries/keys";
+import { agentKeys, handKeys, sessionKeys, overviewKeys, approvalKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
@@ -22,6 +25,8 @@ vi.mock("../http/client", () => ({
   deleteSession: vi.fn().mockResolvedValue({}),
   patchAgent: vi.fn().mockResolvedValue({}),
   patchAgentConfig: vi.fn().mockResolvedValue({}),
+  patchHandAgentRuntimeConfig: vi.fn().mockResolvedValue({}),
+  clearHandAgentRuntimeConfig: vi.fn().mockResolvedValue(undefined),
   spawnAgent: vi.fn().mockResolvedValue({}),
   spawnUarAgent: vi.fn().mockResolvedValue({}),
   cloneAgent: vi.fn().mockResolvedValue({}),
@@ -125,10 +130,12 @@ describe("usePatchAgent", () => {
   });
 });
 
-describe("usePatchAgentConfig", () => {
-  it("invalidates agent lists and agent detail", async () => {
+describe("usePatchAgentConfig (non-hand)", () => {
+  it("calls patchAgentConfig (→ /api/agents/{id}/config) and invalidates agent lists + detail", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    vi.mocked(http.patchAgentConfig).mockClear();
+    vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
 
     const { result } = renderHook(() => usePatchAgentConfig(), {
       wrapper,
@@ -139,11 +146,110 @@ describe("usePatchAgentConfig", () => {
       config: { max_tokens: 4096 },
     });
 
+    // Hits the standalone /config route, never the hand override endpoint.
+    expect(http.patchAgentConfig).toHaveBeenCalledTimes(1);
+    expect(http.patchAgentConfig).toHaveBeenCalledWith("agent-1", {
+      max_tokens: 4096,
+    });
+    expect(http.patchHandAgentRuntimeConfig).not.toHaveBeenCalled();
+
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.lists(),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.detail("agent-1"),
+    });
+    // Non-hand mutations MUST NOT dirty hand-detail caches — asserting this
+    // guards against regressions that widen invalidation unnecessarily.
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: handKeys.details(),
+    });
+  });
+});
+
+describe("usePatchHandAgentRuntimeConfig (hand)", () => {
+  it("calls patchHandAgentRuntimeConfig (→ /api/agents/{id}/hand-runtime-config) and invalidates agent lists + detail + handKeys.details()", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    vi.mocked(http.patchAgentConfig).mockClear();
+    vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
+
+    const { result } = renderHook(() => usePatchHandAgentRuntimeConfig(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync({
+      agentId: "hand-agent-1",
+      // Tri-state payload: api_key_env set, base_url cleared via empty string.
+      config: { model: "gpt-4o", api_key_env: "OPENAI_KEY", base_url: "" },
+    });
+
+    // Hits the hand-runtime-config route, never the standalone /config path.
+    expect(http.patchHandAgentRuntimeConfig).toHaveBeenCalledTimes(1);
+    expect(http.patchHandAgentRuntimeConfig).toHaveBeenCalledWith(
+      "hand-agent-1",
+      { model: "gpt-4o", api_key_env: "OPENAI_KEY", base_url: "" },
+    );
+    expect(http.patchAgentConfig).not.toHaveBeenCalled();
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("hand-agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.details(),
+    });
+  });
+
+  it("forwards whitespace-only hand override fields to the hand runtime API helper", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
+
+    const { result } = renderHook(() => usePatchHandAgentRuntimeConfig(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync({
+      agentId: "hand-agent-1",
+      config: {
+        model: "gpt-4o",
+        api_key_env: "   ",
+        base_url: "   ",
+      },
+    });
+
+    expect(http.patchHandAgentRuntimeConfig).toHaveBeenCalledWith(
+      "hand-agent-1",
+      { model: "gpt-4o", api_key_env: "   ", base_url: "   " },
+    );
+  });
+});
+
+describe("useClearHandAgentRuntimeConfig", () => {
+  it("calls clearHandAgentRuntimeConfig (→ DELETE /api/agents/{id}/hand-runtime-config) and invalidates agent lists + detail + handKeys.details()", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    vi.mocked(http.clearHandAgentRuntimeConfig).mockClear();
+
+    const { result } = renderHook(() => useClearHandAgentRuntimeConfig(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync("hand-agent-1");
+
+    expect(http.clearHandAgentRuntimeConfig).toHaveBeenCalledTimes(1);
+    expect(http.clearHandAgentRuntimeConfig).toHaveBeenCalledWith("hand-agent-1");
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("hand-agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: handKeys.details(),
     });
   });
 });

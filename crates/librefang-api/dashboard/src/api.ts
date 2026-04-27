@@ -290,6 +290,28 @@ export interface AgentTool {
 export interface AgentSessionImage {
   file_id: string;
   filename?: string;
+  /** Optional — backend currently only emits image attachments here, so
+   *  the renderer treats a missing value as image. Threading the field
+   *  through keeps the chat transcript correct if the server starts
+   *  serializing non-image attachments (PDF/text) into history. */
+  content_type?: string;
+}
+
+/** Reference passed back to the agent's `/message` endpoint or WS frame
+ *  after a successful upload. Mirrors `crate::types::AttachmentRef`. */
+export interface AttachmentRef {
+  file_id: string;
+  filename?: string;
+  content_type?: string;
+}
+
+export interface AgentFileUploadResult {
+  file_id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  /** Whisper transcription, populated only for audio uploads. */
+  transcription?: string;
 }
 
 export interface AgentSessionMessage {
@@ -335,6 +357,8 @@ export interface SendAgentMessageOptions {
    * two browser tabs on the same agent don't race each other.
    */
   session_id?: string | null;
+  /** File attachments uploaded via `/api/agents/{id}/upload`. */
+  attachments?: AttachmentRef[];
 }
 
 export interface ApiActionResponse {
@@ -372,6 +396,64 @@ export interface WorkflowRunItem {
   completed_at?: string | null;
 }
 
+/**
+ * Multi-destination cron output fan-out target.
+ *
+ * Mirrors the Rust enum `librefang_types::scheduler::CronDeliveryTarget`,
+ * which is `#[serde(tag = "type", rename_all = "snake_case")]`. Each variant
+ * is an object with a `type` discriminator plus variant-specific fields.
+ *
+ * Empty/optional fields (`auth_header`, `subject_template`) MUST be omitted
+ * from the payload rather than sent as empty strings — the Rust side uses
+ * `Option<String>` and treating `""` as `Some("")` would leak through.
+ */
+export type CronDeliveryTarget =
+  | {
+      type: "channel";
+      /** Adapter name, e.g. "telegram", "slack", "discord". */
+      channel_type: string;
+      /** Platform-specific recipient (chat ID, user ID, channel ID). */
+      recipient: string;
+      /**
+       * Optional thread/topic id (Slack `thread_ts`, Telegram forum-topic
+       * id). Omit unless the adapter supports threading. Empty strings are
+       * stripped at submit time so the wire shape matches the Rust
+       * `Option<String>` exactly.
+       */
+      thread_id?: string;
+      /**
+       * Optional adapter-key suffix used to disambiguate multiple
+       * configured accounts of the same channel (e.g. two Slack workspaces
+       * keyed `slack:workspace-a` vs `slack:workspace-b`). Omit when only
+       * one account of `channel_type` is configured.
+       */
+      account_id?: string;
+    }
+  | {
+      type: "webhook";
+      /** Destination URL. Must start with http:// or https://. */
+      url: string;
+      /** Optional Authorization header value (sent verbatim). */
+      auth_header?: string;
+    }
+  | {
+      type: "local_file";
+      /** Absolute or relative path on the daemon host. */
+      path: string;
+      /** If true, append to the file; if false, overwrite. */
+      append?: boolean;
+    }
+  | {
+      type: "email";
+      /** Recipient email address. */
+      to: string;
+      /** Optional subject template. `{job}` is replaced with the job name. */
+      subject_template?: string;
+    };
+
+/** Discriminator string for `CronDeliveryTarget` — useful for switch arms. */
+export type CronDeliveryTargetType = CronDeliveryTarget["type"];
+
 export interface ScheduleItem {
   id: string;
   name?: string;
@@ -385,6 +467,12 @@ export interface ScheduleItem {
   next_run?: string | null;
   agent_id?: string;
   workflow_id?: string;
+  /**
+   * Optional fan-out destinations. Empty/missing means single-target
+   * delivery via the legacy `delivery` field. Backend sends an array
+   * (possibly empty) on round-trip.
+   */
+  delivery_targets?: CronDeliveryTarget[];
 }
 
 export interface TriggerItem {
@@ -435,12 +523,21 @@ export interface QueueLaneStatus {
   capacity?: number;
 }
 
+export interface QueueConcurrencyConfig {
+  main_lane?: number;
+  cron_lane?: number;
+  subagent_lane?: number;
+  trigger_lane?: number;
+  default_per_agent?: number;
+}
+
 export interface QueueStatusResponse {
   lanes?: QueueLaneStatus[];
   config?: {
     max_depth_per_agent?: number;
     max_depth_global?: number;
     task_ttl_secs?: number;
+    concurrency?: QueueConcurrencyConfig;
   };
 }
 
@@ -521,6 +618,9 @@ export interface MemoryListResponse {
   total?: number;
   offset?: number;
   limit?: number;
+  // Server signals whether proactive memory is enabled in config so the
+  // dashboard can render an explanatory note + fall back to per-agent KV.
+  proactive_enabled?: boolean;
 }
 
 export interface MemoryStatsResponse {
@@ -533,6 +633,23 @@ export interface MemoryStatsResponse {
   auto_memorize_enabled?: boolean;
   auto_retrieve_enabled?: boolean;
   llm_extraction?: boolean;
+  // Mirrors MemoryListResponse — see field doc above.
+  proactive_enabled?: boolean;
+}
+
+// Per-agent KV pair returned by `GET /api/memory/agents/:id/kv`.
+//
+// `created_at` and `source` are best-effort: the underlying substrate may not
+// populate them today, so the dashboard treats them as optional.
+export interface AgentKvPair {
+  key: string;
+  value: unknown;
+  source?: string;
+  created_at?: string;
+}
+
+export interface AgentKvResponse {
+  kv_pairs?: AgentKvPair[];
 }
 
 export interface UsageSummaryResponse {
@@ -892,8 +1009,100 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
-export async function patchAgentConfig(agentId: string, config: { max_tokens?: number; model?: string; provider?: string; temperature?: number; web_search_augmentation?: "off" | "auto" | "always" }): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/config`, config);
+export async function patchAgentConfig(
+  agentId: string,
+  config: {
+    max_tokens?: number;
+    model?: string;
+    provider?: string;
+    temperature?: number;
+    web_search_augmentation?: "off" | "auto" | "always";
+  },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/config`,
+    config,
+  );
+}
+
+function trimOptionalHandRuntimeString(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return value.trim();
+}
+
+/**
+ * Hand runtime PATCH is the only agent-config write path with tri-state string
+ * semantics: absent leaves the override untouched, empty string clears it.
+ * Keep this serializer scoped to `/hand-runtime-config` so other PATCH payloads
+ * do not silently inherit those semantics.
+ */
+function serializeHandAgentRuntimeConfigPatch(config: {
+  max_tokens?: number;
+  model?: string;
+  provider?: string;
+  temperature?: number;
+  api_key_env?: string;
+  base_url?: string;
+  web_search_augmentation?: "off" | "auto" | "always";
+}): {
+  max_tokens?: number;
+  model?: string;
+  provider?: string;
+  temperature?: number;
+  api_key_env?: string;
+  base_url?: string;
+  web_search_augmentation?: "off" | "auto" | "always";
+} {
+  return {
+    ...config,
+    api_key_env: trimOptionalHandRuntimeString(config.api_key_env),
+    base_url: trimOptionalHandRuntimeString(config.base_url),
+  };
+}
+
+/** PATCH /api/agents/{id}/hand-runtime-config — partial update of per-agent
+ * hand runtime overrides. Empty string for `api_key_env` / `base_url` clears
+ * that specific field (tri-state: absent = leave as-is, empty = clear,
+ * value = set). Distinct from `/agents/{id}/config` which targets the
+ * standalone agent config path. */
+export async function patchHandAgentRuntimeConfig(
+  agentId: string,
+  config: {
+    max_tokens?: number;
+    model?: string;
+    provider?: string;
+    temperature?: number;
+    api_key_env?: string;
+    base_url?: string;
+    web_search_augmentation?: "off" | "auto" | "always";
+  },
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`,
+    serializeHandAgentRuntimeConfigPatch(config),
+  );
+}
+
+/** DELETE /api/agents/{id}/hand-runtime-config — drop all per-agent runtime
+ * overrides for the hand role, restoring the live manifest to the HAND.toml
+ * defaults. The server returns 204 No Content on success, so we bypass the
+ * shared `del<T>` helper (which assumes a JSON body) and handle the empty
+ * response explicitly. */
+export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void> {
+  const response = await fetch(
+    `/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`,
+    {
+      method: "DELETE",
+      headers: buildHeaders({
+        "Content-Type": "application/json",
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
 }
 
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
@@ -904,6 +1113,7 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
 }
 
 export interface AgentToolsResponse {
+  capabilities_tools?: string[] | null;
   tool_allowlist?: string[] | null;
   tool_blocklist?: string[] | null;
   disabled?: boolean;
@@ -918,7 +1128,7 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
+export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
@@ -973,8 +1183,12 @@ export async function resetAgentSession(agentId: string): Promise<ApiActionRespo
   return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
 }
 
-export async function loadAgentSession(agentId: string): Promise<AgentSessionResponse> {
-  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session`);
+export async function loadAgentSession(
+  agentId: string,
+  sessionId?: string | null,
+): Promise<AgentSessionResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return get<AgentSessionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session${qs}`);
 }
 
 export async function sendAgentMessage(
@@ -986,6 +1200,7 @@ export async function sendAgentMessage(
   if (options?.thinking !== undefined) body.thinking = options.thinking;
   if (options?.show_thinking !== undefined) body.show_thinking = options.show_thinking;
   if (options?.session_id) body.session_id = options.session_id;
+  if (options?.attachments && options.attachments.length > 0) body.attachments = options.attachments;
   return post<AgentMessageResponse>(
     `/api/agents/${encodeURIComponent(agentId)}/message`,
     body,
@@ -1128,6 +1343,36 @@ export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; 
     throw await parseError(response);
   }
   return (await response.json()) as { text: string; provider: string; model: string };
+}
+
+// HTTP header values must be visible-ASCII (RFC 7230). Browsers reject
+// non-ASCII bytes in fetch headers, so we replace anything outside
+// 0x20–0x7e (and the header-breaking quote/CR/LF) with `_` before sending
+// the original filename. This loses fidelity for unicode names but never
+// throws, and keeps the server-side label render-safe — no decode pass
+// needed at display time.
+function sanitizeFilenameForHeader(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.replace(/[^\x20-\x7e]|["\r\n]/g, "_");
+}
+
+// Upload a chat attachment for an agent. Body is the raw file bytes; backend
+// expects `Content-Type` to match the file MIME and `X-Filename` for the
+// original name. Server-side limits: 10MB and an exact MIME allowlist
+// (image/audio/text/pdf) — callers should still pre-validate to fail fast.
+export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/upload`, {
+    method: "POST",
+    headers: buildHeaders({
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Filename": sanitizeFilenameForHeader(file.name),
+    }),
+    body: file,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as AgentFileUploadResult;
 }
 
 export async function submitVideo(req: { prompt: string; provider?: string; model?: string }): Promise<MediaVideoSubmitResult> {
@@ -1573,6 +1818,8 @@ export async function createSchedule(payload: {
   workflow_id?: string;
   message?: string;
   enabled?: boolean;
+  /** Fan-out destinations. Empty array clears any existing list on update. */
+  delivery_targets?: CronDeliveryTarget[];
 }): Promise<ScheduleItem> {
   return post<ScheduleItem>("/api/schedules", payload);
 }
@@ -1586,6 +1833,12 @@ export async function updateSchedule(
     tz?: string;
     agent_id?: string;
     message?: string;
+    /**
+     * Replace fan-out delivery targets. The backend treats this as a full
+     * replace (an empty array clears the list). Omit the field to leave it
+     * unchanged.
+     */
+    delivery_targets?: CronDeliveryTarget[];
   }
 ): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/schedules/${encodeURIComponent(scheduleId)}`, payload);
@@ -1758,22 +2011,100 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
 }
 
-export interface ConfigFieldSchema {
-  type?: string;
-  options?: (string | { id: string; name: string; provider: string } | { value: string; label: string })[];
+/* ------------------------------------------------------------------ */
+/*  Config schema (draft-07)                                           */
+/* ------------------------------------------------------------------ */
+/* The backend now emits a draft-07 JSON Schema generated from the   */
+/* `KernelConfig` Rust type via `schemars`, plus two extensions:     */
+/*   - `x-sections`: ordered UI section groupings                    */
+/*   - `x-ui-options`: per-field UI hints (min/max/step/select opts) */
+/* keyed by JSON pointer (e.g. `/memory/decay_rate`).                */
+
+/** A draft-07 JSON Schema node (partial — only the fields the UI reads). */
+export interface JsonSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  properties?: Record<string, JsonSchema>;
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema;
+  required?: string[];
+  minimum?: number;
+  maximum?: number;
+  multipleOf?: number;
+  format?: string;
+  $ref?: string;
+  definitions?: Record<string, JsonSchema>;
+}
+
+/** UI-only option overrides the struct cannot carry. */
+export interface UiFieldOptions {
+  /** Curated select options — strings or `{value,label}` objects. */
+  select?: (string | { value: string; label: string })[];
+  /** `{id,name,provider}`-shaped options (the model picker). */
+  select_objects?: { id: string; name: string; provider: string }[];
+  /** Select whose values are numeric-strings (e.g. `["0","1","6"]`). */
+  number_select?: string[];
+  /** UI numeric constraints. `min`/`max` may differ from the struct's
+      `#[schemars(range)]` bounds when the UI wants tighter suggestion
+      limits than runtime validation. */
   min?: number;
   max?: number;
   step?: number;
+  placeholder?: string;
 }
 
-export interface ConfigSectionSchema {
-  fields: Record<string, string | ConfigFieldSchema>;
+export interface ConfigSectionDescriptor {
+  key: string;
+  title?: string;
+  /** `true` → fields read from the root of `KernelConfig`. `false`/omitted →
+      fields are inside `properties[struct_field]`. */
   root_level?: boolean;
+  /** Name of the `KernelConfig` field holding this section's sub-struct. */
+  struct_field?: string;
+  /** When true, changes to this section are hot-reloaded without restart. */
   hot_reloadable?: boolean;
+  /** For `root_level` sections: explicit field ordering. */
+  fields?: string[];
 }
 
-export async function getConfigSchema(): Promise<{ sections: Record<string, ConfigSectionSchema> }> {
-  return get<{ sections: Record<string, ConfigSectionSchema> }>("/api/config/schema");
+export interface ConfigSchemaRoot extends JsonSchema {
+  "x-sections"?: ConfigSectionDescriptor[];
+  "x-ui-options"?: Record<string, UiFieldOptions>;
+}
+
+export async function getConfigSchema(): Promise<ConfigSchemaRoot> {
+  return get<ConfigSchemaRoot>("/api/config/schema");
+}
+
+/** Resolve a `$ref` (e.g. `#/definitions/MemoryConfig`) in the root schema. */
+export function resolveRef(
+  root: ConfigSchemaRoot,
+  ref: string,
+): JsonSchema | undefined {
+  if (!ref.startsWith("#/")) return undefined;
+  const path = ref.slice(2).split("/");
+  let node: unknown = root;
+  for (const seg of path) {
+    if (typeof node !== "object" || node === null) return undefined;
+    node = (node as Record<string, unknown>)[seg];
+  }
+  return (node as JsonSchema) ?? undefined;
+}
+
+/** Get a property's schema with `$ref`s resolved one level. */
+export function deref(
+  root: ConfigSchemaRoot,
+  node: JsonSchema | undefined,
+): JsonSchema | undefined {
+  if (!node) return undefined;
+  if (node.$ref) return resolveRef(root, node.$ref);
+  return node;
 }
 
 export async function setConfigValue(
@@ -2042,6 +2373,13 @@ export async function getMemoryStats(agentId?: string): Promise<MemoryStatsRespo
     return get<MemoryStatsResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/stats`);
   }
   return get<MemoryStatsResponse>("/api/memory/stats");
+}
+
+// List the per-agent KV memory store (always available — independent of
+// `[proactive_memory] enabled`). Used as the fallback view when proactive
+// memory is disabled, and as a complementary view when it is enabled.
+export async function getAgentKvMemory(agentId: string): Promise<AgentKvResponse> {
+  return get<AgentKvResponse>(`/api/memory/agents/${encodeURIComponent(agentId)}/kv`);
 }
 
 export async function addMemoryFromText(
@@ -2766,6 +3104,44 @@ export interface McpTransport {
   url?: string;
 }
 
+/** TaintRuleId — must match the snake-cased serde tag of the Rust enum. */
+export type TaintRuleId =
+  | "authorization_literal"
+  | "key_value_secret"
+  | "well_known_prefix"
+  | "opaque_token"
+  | "pii_email"
+  | "pii_phone"
+  | "pii_credit_card"
+  | "pii_ssn"
+  | "sensitive_key_name";
+
+/** Tool-level baseline action when no path entry matches. */
+export type McpTaintToolAction = "scan" | "skip";
+
+/** Severity action for a named rule set. */
+export type McpTaintRuleSetAction = "block" | "warn" | "log";
+
+export interface McpTaintPathPolicy {
+  skip_rules: TaintRuleId[];
+}
+
+export interface McpTaintToolPolicy {
+  default?: McpTaintToolAction;
+  paths?: Record<string, McpTaintPathPolicy>;
+  rule_sets?: string[];
+}
+
+export interface McpTaintPolicy {
+  tools?: Record<string, McpTaintToolPolicy>;
+}
+
+export interface NamedTaintRuleSet {
+  name: string;
+  action?: McpTaintRuleSetAction;
+  rules?: TaintRuleId[];
+}
+
 export interface McpServerConfigured {
   /** Stable identifier; falls back to `name` when the backend omits it. */
   id?: string;
@@ -2777,6 +3153,10 @@ export interface McpServerConfigured {
   /** Catalog template this server was installed from, when applicable. */
   template_id?: string;
   auth_state?: { state: string; auth_url?: string; message?: string };
+  /** Issue #3050: per-server taint scanning toggle. */
+  taint_scanning?: boolean;
+  /** Issue #3050: granular per-tool / per-path / per-rule taint policy. */
+  taint_policy?: McpTaintPolicy;
 }
 
 export interface McpServerConnected {
@@ -2867,6 +3247,21 @@ export async function updateMcpServer(
   return put<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`, server);
 }
 
+export interface PatchMcpTaintRequest {
+  taint_scanning?: boolean;
+  taint_policy?: McpTaintPolicy;
+}
+
+export async function patchMcpServerTaint(
+  id: string,
+  body: PatchMcpTaintRequest,
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/taint`,
+    body,
+  );
+}
+
 export async function deleteMcpServer(id: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/mcp/servers/${encodeURIComponent(id)}`);
 }
@@ -2900,6 +3295,29 @@ export async function getMcpHealth(): Promise<McpHealthResponse> {
 
 export async function reloadMcp(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/mcp/reload", {});
+}
+
+// ── MCP `[[taint_rules]]` Registry ──────────────────────────────────────
+
+/** Summary of one named taint rule set defined by `[[taint_rules]]`. */
+export interface McpTaintRuleSummary {
+  /** Identifier referenced by `McpTaintToolPolicy.rule_sets`. */
+  name: string;
+  /** Severity action this set applies when one of its rules fires. */
+  action: "block" | "warn" | "log";
+  /** Number of `TaintRuleId` variants this set covers (display-only). */
+  rule_count: number;
+}
+
+/**
+ * Read-only list of `[[taint_rules]]` for dashboard validation.
+ *
+ * Used by `TaintPolicyEditor` to flag rule_set names that don't match any
+ * registered set — without this, typos sit silent in production until a
+ * scanner WARN line happens to be noticed in logs.
+ */
+export async function listMcpTaintRules(): Promise<McpTaintRuleSummary[]> {
+  return get<McpTaintRuleSummary[]>("/api/mcp/taint-rules");
 }
 
 // ── MCP OAuth Auth ──────────────────────────────────────────────────────
@@ -3205,4 +3623,334 @@ export async function unlinkUarStorage(body?: {
   purge_user?: boolean;
 }): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>("/api/storage/unlink-uar", body ?? {});
+}
+
+// ---------------------------------------------------------------------------
+// RBAC users (Phase 4 / M6)
+// ---------------------------------------------------------------------------
+
+export type UserRoleName = "owner" | "admin" | "user" | "viewer";
+
+export interface UserItem {
+  name: string;
+  role: string;
+  channel_bindings: Record<string, string>;
+  has_api_key: boolean;
+  // Summary flags — true when the user overrides the role default for
+  // that slot. Bodies stay on the per-user detail endpoints.
+  has_policy: boolean;
+  has_memory_access: boolean;
+  has_budget: boolean;
+}
+
+export interface UserUpsertPayload {
+  name: string;
+  role: string;
+  channel_bindings?: Record<string, string>;
+  api_key_hash?: string | null;
+}
+
+export interface BulkImportRow {
+  index: number;
+  name: string;
+  status: string;
+  error: string | null;
+}
+
+export interface BulkImportResult {
+  created: number;
+  updated: number;
+  failed: number;
+  dry_run: boolean;
+  rows: BulkImportRow[];
+}
+
+export async function listUsers(): Promise<UserItem[]> {
+  return get<UserItem[]>("/api/users");
+}
+
+export async function getUser(name: string): Promise<UserItem> {
+  return get<UserItem>(`/api/users/${encodeURIComponent(name)}`);
+}
+
+export async function createUser(payload: UserUpsertPayload): Promise<UserItem> {
+  return post<UserItem>("/api/users", payload);
+}
+
+export async function updateUser(
+  originalName: string,
+  payload: UserUpsertPayload,
+): Promise<UserItem> {
+  return put<UserItem>(
+    `/api/users/${encodeURIComponent(originalName)}`,
+    payload,
+  );
+}
+
+export async function deleteUser(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/users/${encodeURIComponent(name)}`);
+}
+
+export async function importUsers(
+  rows: UserUpsertPayload[],
+  options: { dryRun?: boolean } = {},
+): Promise<BulkImportResult> {
+  return post<BulkImportResult>("/api/users/import", {
+    rows,
+    dry_run: options.dryRun ?? false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// API-key rotation (RBAC follow-up to #3054 / M3 / M6)
+//
+// Owner-only. Returns the new plaintext key in the response — that is the
+// only time the server exposes it; we never log, persist, or re-derive it.
+// ---------------------------------------------------------------------------
+
+export interface RotateUserKeyResponse {
+  status: string;
+  new_api_key: string;
+  sessions_invalidated: number;
+}
+
+export async function rotateUserKey(name: string): Promise<RotateUserKeyResponse> {
+  return post<RotateUserKeyResponse>(
+    `/api/users/${encodeURIComponent(name)}/rotate-key`,
+    {},
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit query (RBAC M5 / #3203). Shape mirrors `routes/audit.rs::audit_query`
+// — keep field names in lockstep, the server returns raw `serde_json::Value`
+// so a drift here is silently wrong wire-format on the page.
+// ---------------------------------------------------------------------------
+
+export interface AuditQueryFilters {
+  user?: string; // UUID or configured name
+  action?: string; // AuditAction variant name, case-insensitive
+  agent?: string;
+  channel?: string;
+  from?: string; // ISO-8601 lower bound (inclusive)
+  to?: string; // ISO-8601 upper bound (inclusive)
+  limit?: number; // default 200, hard cap 5000
+}
+
+export interface AuditQueryEntry {
+  seq: number;
+  timestamp: string;
+  agent_id: string;
+  action: string;
+  detail: string;
+  outcome: string;
+  user_id: string | null;
+  channel: string | null;
+  hash: string;
+}
+
+export interface AuditQueryResponse {
+  entries: AuditQueryEntry[];
+  count: number;
+  limit: number;
+}
+
+export async function queryAudit(
+  filters: AuditQueryFilters = {},
+): Promise<AuditQueryResponse> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters)) {
+    if (v === undefined || v === null || v === "") continue;
+    params.set(k, String(v));
+  }
+  const qs = params.toString();
+  return get<AuditQueryResponse>(
+    `/api/audit/query${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-user budget (RBAC M5)
+// ---------------------------------------------------------------------------
+
+/// Per-window spend + cap pair returned by GET /api/budget/users/{user_id}.
+export interface UserBudgetWindow {
+  spend: number;
+  limit: number;
+  pct: number;
+}
+
+/// Shape returned by GET /api/budget/users/{user_id} — see
+/// `routes/budget.rs::user_budget_detail`.
+export interface UserBudgetResponse {
+  user_id: string;
+  name: string | null;
+  role: string | null;
+  hourly: UserBudgetWindow;
+  daily: UserBudgetWindow;
+  monthly: UserBudgetWindow;
+  alert_threshold: number;
+  alert_breach: boolean;
+  /// True once the M5 enforcement arm is wired (commit 4a00a646). Kept
+  /// in the payload so the dashboard can surface a "deferred" notice
+  /// against older daemons that may still report `false`.
+  enforced: boolean;
+}
+
+/// Body shape for PUT /api/budget/users/{user_id}. Mirrors
+/// `librefang_types::config::UserBudgetConfig`. Any window left at 0
+/// means "unlimited on that window"; same semantics as the kernel
+/// metering check.
+export interface UserBudgetPayload {
+  max_hourly_usd: number;
+  max_daily_usd: number;
+  max_monthly_usd: number;
+  alert_threshold: number;
+}
+
+export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
+  return get<UserBudgetResponse>(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+  );
+}
+
+export async function updateUserBudget(
+  name: string,
+  payload: UserBudgetPayload,
+): Promise<{ status: string; budget: UserBudgetPayload }> {
+  return put(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+    payload,
+  );
+}
+
+export async function deleteUserBudget(
+  name: string,
+): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(
+    `/api/budget/users/${encodeURIComponent(name)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-user permission policy (RBAC M3 / #3205 — wired to the real daemon)
+// ---------------------------------------------------------------------------
+
+export interface UserToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface UserToolCategories {
+  allowed_groups: string[];
+  denied_groups: string[];
+}
+
+export interface UserMemoryAccess {
+  readable_namespaces: string[];
+  writable_namespaces: string[];
+  pii_access: boolean;
+  export_allowed: boolean;
+  delete_allowed: boolean;
+}
+
+export interface ChannelToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+// Mirrors the `UserPolicyView` returned by `GET /api/users/{name}/policy`.
+// `null` on a top-level slot = "no opinion configured" (kernel falls back
+// to role-default). Empty `channel_tool_rules` map = no per-channel rules.
+export interface PermissionPolicy {
+  tool_policy: UserToolPolicy | null;
+  tool_categories: UserToolCategories | null;
+  memory_access: UserMemoryAccess | null;
+  channel_tool_rules: Record<string, ChannelToolPolicy>;
+}
+
+// PUT body shape: every key independently nullable. `undefined` = preserve
+// existing, `null` = clear. `channel_tool_rules` collapses absent/null to
+// "preserve"; pass `{}` to clear.
+export interface PermissionPolicyUpdate {
+  tool_policy?: UserToolPolicy | null;
+  tool_categories?: UserToolCategories | null;
+  memory_access?: UserMemoryAccess | null;
+  channel_tool_rules?: Record<string, ChannelToolPolicy>;
+}
+
+export async function getUserPolicy(name: string): Promise<PermissionPolicy> {
+  return get<PermissionPolicy>(
+    `/api/users/${encodeURIComponent(name)}/policy`,
+  );
+}
+
+export async function updateUserPolicy(
+  name: string,
+  policy: PermissionPolicyUpdate,
+): Promise<PermissionPolicy> {
+  return put<PermissionPolicy>(
+    `/api/users/${encodeURIComponent(name)}/policy`,
+    policy,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Effective permissions snapshot (RBAC follow-up to M3/M5/M6)
+// ---------------------------------------------------------------------------
+
+// Mirrors the shape of `librefang_kernel::auth::EffectivePermissions`.
+// Per-slice fields are nullable so the simulator can distinguish "no policy
+// declared" (null) from "explicit empty allow-list" (object with empty
+// arrays). Server returns 404 for unknown users — callers handle that via
+// the query hook's error state, not by getting a synthesised default.
+
+export interface EffectiveToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface EffectiveToolCategories {
+  allowed_groups: string[];
+  denied_groups: string[];
+}
+
+export interface EffectiveMemoryAccess {
+  readable_namespaces: string[];
+  writable_namespaces: string[];
+  pii_access: boolean;
+  export_allowed: boolean;
+  delete_allowed: boolean;
+}
+
+export interface EffectiveBudget {
+  max_hourly_usd: number;
+  max_daily_usd: number;
+  max_monthly_usd: number;
+  alert_threshold: number;
+}
+
+export interface EffectiveChannelToolPolicy {
+  allowed_tools: string[];
+  denied_tools: string[];
+}
+
+export interface EffectivePermissions {
+  user_id: string;
+  name: string;
+  role: string;
+  tool_policy: EffectiveToolPolicy | null;
+  tool_categories: EffectiveToolCategories | null;
+  memory_access: EffectiveMemoryAccess | null;
+  budget: EffectiveBudget | null;
+  channel_tool_rules: Record<string, EffectiveChannelToolPolicy>;
+  channel_bindings: Record<string, string>;
+}
+
+export async function getEffectivePermissions(
+  name: string,
+): Promise<EffectivePermissions> {
+  return get<EffectivePermissions>(
+    `/api/authz/effective/${encodeURIComponent(name)}`,
+  );
 }

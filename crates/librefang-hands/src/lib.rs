@@ -7,7 +7,9 @@
 pub mod registry;
 
 use chrono::{DateTime, Utc};
-use librefang_types::agent::{AgentId, AgentManifest, AutonomousConfig, ModelConfig};
+use librefang_types::agent::{
+    AgentId, AgentManifest, AutonomousConfig, ModelConfig, WebSearchAugmentationMode,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -311,6 +313,8 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 system_prompt: legacy.system_prompt,
                 api_key_env: legacy.api_key_env,
                 base_url: legacy.base_url,
+                context_window: None,
+                max_output_tokens: None,
                 extra_params: std::collections::HashMap::new(),
             },
             autonomous: legacy.max_iterations.map(|max_iter| AutonomousConfig {
@@ -902,6 +906,10 @@ pub struct HandInstance {
     pub coordinator_role: Option<String>,
     /// User-provided configuration overrides.
     pub config: HashMap<String, serde_json::Value>,
+    /// Runtime-only per-agent overrides that survive daemon restart but are
+    /// cleared when the hand instance is deactivated.
+    #[serde(default)]
+    pub agent_runtime_overrides: BTreeMap<String, HandAgentRuntimeOverride>,
     /// When activated.
     pub activated_at: DateTime<Utc>,
     /// Last status change.
@@ -917,6 +925,7 @@ impl HandInstance {
     pub fn new(
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
+        agent_runtime_overrides: BTreeMap<String, HandAgentRuntimeOverride>,
         instance_id: Option<Uuid>,
     ) -> Self {
         let now = Utc::now();
@@ -927,6 +936,7 @@ impl HandInstance {
             agent_ids: BTreeMap::new(),
             coordinator_role: None,
             config,
+            agent_runtime_overrides,
             activated_at: now,
             updated_at: now,
         }
@@ -970,6 +980,24 @@ impl HandInstance {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HandAgentRuntimeOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_augmentation: Option<WebSearchAugmentationMode>,
+}
+
 /// Request to activate a hand.
 #[derive(Debug, Deserialize)]
 pub struct ActivateHandRequest {
@@ -1001,7 +1029,7 @@ mod tests {
 
     #[test]
     fn hand_instance_new() {
-        let instance = HandInstance::new("clip", HashMap::new(), None);
+        let instance = HandInstance::new("clip", HashMap::new(), BTreeMap::new(), None);
         assert_eq!(instance.hand_id, "clip");
         assert_eq!(instance.status, HandStatus::Active);
         assert!(instance.agent_ids.is_empty());
@@ -1010,7 +1038,7 @@ mod tests {
 
     #[test]
     fn hand_instance_prefers_explicit_coordinator_role() {
-        let mut instance = HandInstance::new("research", HashMap::new(), None);
+        let mut instance = HandInstance::new("research", HashMap::new(), BTreeMap::new(), None);
         instance
             .agent_ids
             .insert("analyst".to_string(), AgentId::new());
@@ -1568,7 +1596,7 @@ metrics = []
 
     #[test]
     fn hand_instance_agent_id_backward_compat() {
-        let mut instance = HandInstance::new("clip", HashMap::new(), None);
+        let mut instance = HandInstance::new("clip", HashMap::new(), BTreeMap::new(), None);
         // Brak agent_ids → agent_id() zwraca None
         assert!(instance.agent_id().is_none());
 

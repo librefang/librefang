@@ -81,6 +81,16 @@ let server = axum::serve(listener, app.into_make_service_with_connect_info::<Soc
 
 ## 功能
 
+### 连接屏
+
+桌面 app 无法连到 daemon 时（首次启动、或捆绑的 daemon 起不来），现在会渲染一个**专门的连接屏**，而不是白屏错误。屏幕提供：
+
+- "重试" — 重新尝试连接。
+- "在浏览器打开" — 嵌入 WebView 是问题时回退到 daemon 自带的 web UI。
+- "卸载" — 在 app 内完整移除，daemon 坏到从菜单栏都点不到时有用。
+
+连接屏作为嵌入资源打包，用自定义 URI scheme（`librefang://connection`）渲染而不是经 daemon HTTP — 所以 daemon 停止或 IPC 桥断开时也能跑。Windows / Linux / macOS 走同一路径。
+
 ### 系统托盘
 
 系统托盘（定义在 `src/tray.rs` 中）提供快捷操作，无需打开主窗口：

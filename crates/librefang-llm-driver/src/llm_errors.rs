@@ -672,12 +672,19 @@ fn cap_message(msg: &str, max: usize) -> String {
     if msg.chars().count() <= max {
         msg.to_string()
     } else {
+        let take = max.saturating_sub(3);
         let end = msg
             .char_indices()
-            .nth(max - 3)
+            .nth(take)
             .map(|(i, _)| i)
             .unwrap_or(msg.len());
-        format!("{}...", &msg[..end])
+        // Defense in depth: walk back to the nearest char boundary so we never
+        // panic on multi-byte UTF-8 (CJK, emoji) input.
+        let mut safe = end.min(msg.len());
+        while safe > 0 && !msg.is_char_boundary(safe) {
+            safe -= 1;
+        }
+        format!("{}...", &msg[..safe])
     }
 }
 
@@ -1304,5 +1311,45 @@ mod tests {
             let suggestion = generate_suggestion(cat, provider, model);
             assert!(suggestion.is_some(), "No suggestion for {:?}", cat);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // cap_message — UTF-8 boundary safety
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cap_message_handles_cjk_without_panic() {
+        // Each CJK char is 3 bytes; 200 chars in is mid-string.
+        let input: String = "\u{4f60}\u{597d}\u{4e16}\u{754c}".repeat(100);
+        // Must not panic and must end at a char boundary.
+        let out = cap_message(&input, 50);
+        assert!(out.ends_with("..."));
+        let prefix = out.trim_end_matches("...");
+        // The prefix must itself be valid UTF-8 (any slice on a non-boundary
+        // would have panicked above before reaching this assertion).
+        assert!(!prefix.is_empty());
+        assert!(prefix.chars().count() <= 50);
+    }
+
+    #[test]
+    fn cap_message_handles_emoji_without_panic() {
+        let input: String = "\u{1f600}\u{1f601}\u{1f602}".repeat(50);
+        let out = cap_message(&input, 30);
+        assert!(out.ends_with("..."));
+        assert!(out.trim_end_matches("...").chars().count() <= 30);
+    }
+
+    #[test]
+    fn cap_message_short_max_does_not_underflow() {
+        // max < 3 used to underflow `max - 3` and panic.
+        let input = "hello world";
+        let out = cap_message(input, 2);
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn cap_message_within_limit_returns_unchanged() {
+        let input = "\u{4f60}\u{597d}";
+        assert_eq!(cap_message(input, 10), input);
     }
 }

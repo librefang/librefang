@@ -259,6 +259,7 @@ pub fn convert_skillmd(dir: &Path) -> Result<ConvertedSkillMd, SkillError> {
         source: Some(SkillSource::OpenClaw),
         config: std::collections::HashMap::new(),
         config_vars: Vec::new(),
+        env_passthrough: Vec::new(),
     };
 
     info!(
@@ -353,6 +354,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
         source: Some(SkillSource::OpenClaw),
         config: std::collections::HashMap::new(),
         config_vars: Vec::new(),
+        env_passthrough: Vec::new(),
     };
 
     Ok(ConvertedSkillMd {
@@ -472,6 +474,7 @@ pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
         source: Some(SkillSource::OpenClaw),
         config: std::collections::HashMap::new(),
         config_vars: Vec::new(),
+        env_passthrough: Vec::new(),
     })
 }
 

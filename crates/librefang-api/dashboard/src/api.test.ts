@@ -5,6 +5,7 @@ import {
   getMetricsText,
   listTools,
   patchAgentConfig,
+  patchHandAgentRuntimeConfig,
   setApiKey,
   updateAgentTools,
   verifyStoredAuth,
@@ -129,16 +130,43 @@ describe("dashboard auth helpers", () => {
     expect(body.max_tokens).toBe(8192);
   });
 
+  it("patchHandAgentRuntimeConfig trims tri-state string fields before sending", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await patchHandAgentRuntimeConfig("test-hand-agent-id", {
+      model: "gpt-4o",
+      api_key_env: "  OPENAI_KEY  ",
+      base_url: "   ",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/test-hand-agent-id/hand-runtime-config");
+    expect(options.method).toBe("PATCH");
+    expect(JSON.parse(options.body)).toEqual({
+      model: "gpt-4o",
+      api_key_env: "OPENAI_KEY",
+      base_url: "",
+    });
+  });
+
   it("getAgentTools requests the agent tools endpoint", async () => {
     setApiKey("secret-token");
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ tool_allowlist: ["bash"], tool_blocklist: ["rm"], disabled: false }), {
+      new Response(JSON.stringify({ capabilities_tools: ["bash"], tool_allowlist: ["bash"], tool_blocklist: ["rm"], disabled: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
     );
 
     await expect(getAgentTools("agent-123")).resolves.toEqual({
+      capabilities_tools: ["bash"],
       tool_allowlist: ["bash"],
       tool_blocklist: ["rm"],
       disabled: false,

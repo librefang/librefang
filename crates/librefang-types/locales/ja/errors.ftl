@@ -283,6 +283,10 @@ api-error-file-workspace-error = ワークスペースパスエラー
 # ツールエラー
 api-error-tool-provide-allowlist = 'tool_allowlist' および/または 'tool_blocklist' を指定してください
 api-error-tool-unknown = 不明なツール: { $name }
+api-error-tool-not-found = ツールが見つかりません: { $name }
+api-error-tool-invoke-disabled = 直接ツール呼び出しが無効です。'[tool_invoke] enabled = true' を設定し、ツール名を 'allowlist' に追加してください。
+api-error-tool-invoke-denied = ツール '{ $name }' は '[tool_invoke] allowlist' に含まれていません
+api-error-tool-requires-agent = ツール '{ $name }' は承認が必要であり、エージェントコンテキストなしでは呼び出せません。エージェント経由で実行してください
 
 # バリデーションエラー
 api-error-validation-content-empty = 内容は空にできません

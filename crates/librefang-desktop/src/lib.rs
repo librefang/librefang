@@ -176,7 +176,17 @@ pub fn run(server_url: Option<String>, force_local: bool) {
 
     let show_connection_screen = matches!(mode, StartupMode::ConnectionScreen);
 
+    // Serve the connection screen HTML through a custom URI scheme instead of
+    // about:blank + document.write. The old approach no-ops on WebKitGTK 2.50
+    // (stock NixOS, current AppImage), leaving a blank window — see #3052.
     let mut builder = tauri::Builder::default()
+        .register_uri_scheme_protocol("lfconnect", |_ctx, _req| {
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(connection::connection_html().into_bytes())
+                .expect("connection response must build")
+        })
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init());
@@ -266,14 +276,14 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         ])
         .setup(move |app| {
             if show_connection_screen {
-                // Serve the connection screen through the app asset protocol so
-                // the Tauri IPC bridge (`window.__TAURI__`) is properly injected.
-                // Using `about:blank` + `document.write()` destroys the bridge
-                // because `document.open()` tears down the window context.
                 let _window = WebviewWindowBuilder::new(
                     app,
                     "main",
-                    WebviewUrl::App("connection.html".into()),
+                    WebviewUrl::CustomProtocol(
+                        "lfconnect://localhost/"
+                            .parse()
+                            .expect("lfconnect URL must parse"),
+                    ),
                 )
                 .title("BossFang — Connect")
                 .inner_size(1280.0, 800.0)

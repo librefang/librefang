@@ -66,6 +66,10 @@ struct AuditRow {
     action: String,
     detail: String,
     outcome: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
     prev_hash: String,
     hash: String,
 }
@@ -79,12 +83,15 @@ impl AuditRow {
             action: entry.action.to_string(),
             detail: entry.detail.clone(),
             outcome: entry.outcome.clone(),
+            user_id: entry.user_id.as_ref().map(|u| u.to_string()),
+            channel: entry.channel.clone(),
             prev_hash: entry.prev_hash.clone(),
             hash: entry.hash.clone(),
         }
     }
 
     fn into_entry(self) -> AuditEntry {
+        use librefang_types::agent::UserId;
         AuditEntry {
             seq: self.seq,
             timestamp: self.timestamp,
@@ -92,6 +99,11 @@ impl AuditRow {
             action: parse_action(&self.action),
             detail: self.detail,
             outcome: self.outcome,
+            user_id: self
+                .user_id
+                .as_deref()
+                .and_then(|s| s.parse::<UserId>().ok()),
+            channel: self.channel,
             prev_hash: self.prev_hash,
             hash: self.hash,
         }
@@ -196,6 +208,8 @@ impl SurrealAuditStore {
         action: AuditAction,
         detail: &str,
         outcome: &str,
+        user_id: Option<librefang_types::agent::UserId>,
+        channel: Option<String>,
     ) -> AuditEntry {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut tip = self.tip.lock().unwrap_or_else(|e| e.into_inner());
@@ -204,7 +218,15 @@ impl SurrealAuditStore {
         let timestamp = Utc::now().to_rfc3339();
         let prev_hash = tip.clone();
         let hash = compute_hash(
-            seq, &timestamp, agent_id, &action, detail, outcome, &prev_hash,
+            seq,
+            &timestamp,
+            agent_id,
+            &action,
+            detail,
+            outcome,
+            &prev_hash,
+            user_id.as_ref(),
+            channel.as_deref(),
         );
 
         let entry = AuditEntry {
@@ -214,6 +236,8 @@ impl SurrealAuditStore {
             action,
             detail: detail.to_string(),
             outcome: outcome.to_string(),
+            user_id,
+            channel,
             prev_hash,
             hash,
         };
@@ -242,7 +266,19 @@ impl SurrealAuditStore {
 
 impl AuditStore for SurrealAuditStore {
     fn record(&self, agent_id: &str, action: AuditAction, detail: &str, outcome: &str) {
-        let _ = self.append_entry(agent_id, action, detail, outcome);
+        let _ = self.append_entry(agent_id, action, detail, outcome, None, None);
+    }
+
+    fn record_with_context(
+        &self,
+        agent_id: &str,
+        action: AuditAction,
+        detail: &str,
+        outcome: &str,
+        user_id: Option<librefang_types::agent::UserId>,
+        channel: Option<String>,
+    ) {
+        let _ = self.append_entry(agent_id, action, detail, outcome, user_id, channel);
     }
 
     fn verify_integrity(&self) -> Result<(), String> {
@@ -257,6 +293,8 @@ impl AuditStore for SurrealAuditStore {
                 &entry.detail,
                 &entry.outcome,
                 &prev,
+                entry.user_id.as_ref(),
+                entry.channel.as_deref(),
             );
             if expected != entry.hash {
                 return Err(format!("hash mismatch at seq {}", entry.seq));
@@ -345,8 +383,84 @@ impl AuditStore for SurrealAuditStore {
         }
         pruned
     }
+
+    fn trim(
+        &self,
+        config: &librefang_types::config::AuditRetentionConfig,
+        now: chrono::DateTime<Utc>,
+    ) -> crate::audit::TrimReport {
+        use crate::audit::TrimReport;
+        use std::collections::BTreeMap;
+
+        let mut dropped_by_action: BTreeMap<String, usize> = BTreeMap::new();
+        let mut new_chain_anchor: Option<String> = None;
+
+        // Per-action retention: delete entries whose action exceeds its window.
+        for (action_str, &days) in &config.retention_days_by_action {
+            let cutoff = (now - chrono::Duration::days(i64::from(days))).to_rfc3339();
+            let action_str = action_str.clone();
+            let result = block_on(async {
+                self.db
+                    .query(
+                        "SELECT count() AS n FROM audit_entries \
+                         WHERE action = $action AND timestamp < $cutoff GROUP ALL",
+                    )
+                    .bind(("action", action_str.clone()))
+                    .bind(("cutoff", cutoff.clone()))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .take::<Vec<serde_json::Value>>(0)
+                    .map_err(|e| e.to_string())
+            });
+            let n = result
+                .ok()
+                .and_then(|rows| rows.into_iter().next().and_then(|v| v.get("n")?.as_u64()))
+                .unwrap_or(0) as usize;
+
+            if n > 0 {
+                if let Err(e) = block_on(async {
+                    self.db
+                        .query("DELETE FROM audit_entries WHERE action = $action AND timestamp < $cutoff RETURN NONE")
+                        .bind(("action", action_str.clone()))
+                        .bind(("cutoff", cutoff.clone()))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .take::<Vec<serde_json::Value>>(0)
+                        .map_err(|e| e.to_string())
+                }) {
+                    warn!(error = %e, action = %action_str, "failed to trim persistent audit entries by action");
+                } else {
+                    dropped_by_action.insert(action_str, n);
+                }
+            }
+        }
+
+        let total_dropped: usize = dropped_by_action.values().sum();
+
+        // Rebuild in-memory mirror after DB trim.
+        let refreshed = block_on(load_all(&self.db));
+        match refreshed {
+            Ok(entries) => {
+                new_chain_anchor = entries.last().map(|e| e.hash.clone());
+                let tip = entries
+                    .last()
+                    .map(|e| e.hash.clone())
+                    .unwrap_or_else(|| ZERO_HASH.to_string());
+                *self.entries.lock().unwrap_or_else(|e| e.into_inner()) = entries;
+                *self.tip.lock().unwrap_or_else(|e| e.into_inner()) = tip;
+            }
+            Err(e) => warn!(error = %e, "failed to reload audit entries after trim"),
+        }
+
+        TrimReport {
+            dropped_by_action,
+            total_dropped,
+            new_chain_anchor,
+        }
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_hash(
     seq: u64,
     timestamp: &str,
@@ -355,6 +469,8 @@ fn compute_hash(
     detail: &str,
     outcome: &str,
     prev_hash: &str,
+    user_id: Option<&librefang_types::agent::UserId>,
+    channel: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(seq.to_string().as_bytes());
@@ -363,6 +479,14 @@ fn compute_hash(
     hasher.update(action.to_string().as_bytes());
     hasher.update(detail.as_bytes());
     hasher.update(outcome.as_bytes());
+    if let Some(uid) = user_id {
+        hasher.update(b"\x1fuser_id=");
+        hasher.update(uid.0.as_bytes());
+    }
+    if let Some(ch) = channel {
+        hasher.update(b"\x1fchannel=");
+        hasher.update(ch.as_bytes());
+    }
     hasher.update(prev_hash.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -382,7 +506,8 @@ async fn persist_entry(db: &Surreal<Any>, entry: &AuditEntry) -> Result<(), Stri
 async fn load_all(db: &Surreal<Any>) -> Result<Vec<AuditEntry>, String> {
     let rows: Vec<serde_json::Value> = db
         .query(
-            "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash \
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, \
+             user_id, channel, prev_hash, hash \
              FROM audit_entries ORDER BY seq ASC",
         )
         .await

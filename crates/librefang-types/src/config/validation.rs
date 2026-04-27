@@ -609,6 +609,13 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Searxng => {
+                if self.web.searxng.url.is_empty() {
+                    warnings.push(
+                        "Searxng search selected but searxng.url is not configured".to_string(),
+                    );
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
@@ -732,6 +739,59 @@ impl KernelConfig {
             }
         }
 
+        // RBAC M3 review follow-up: per-user `memory_access` flags only
+        // matter alongside the namespace list they actually depend on.
+        // `MemoryNamespaceGuard` gates each flag like this:
+        //
+        //   pii_access     → needs READ access (redaction only runs on
+        //                    items the user can read).
+        //   export_allowed → needs READ access (`check_export` calls
+        //                    `check_read` after the flag check).
+        //   delete_allowed → needs WRITE access (`check_delete` calls
+        //                    `check_write`).
+        //
+        // The earlier version of this pass grouped `delete_allowed` under
+        // `readable_namespaces` — wrong; a user with read but no write
+        // access who set `delete_allowed = true` would NOT have been
+        // warned even though delete silently fails. Split into two
+        // independent passes that mirror the runtime gates.
+        for user in &self.users {
+            let Some(ref acl) = user.memory_access else {
+                continue;
+            };
+
+            // Pass 1 — read-dependent flags vs readable_namespaces.
+            if acl.readable_namespaces.is_empty() {
+                let read_dependent: Vec<&'static str> = [
+                    ("pii_access", acl.pii_access),
+                    ("export_allowed", acl.export_allowed),
+                ]
+                .into_iter()
+                .filter_map(|(name, on)| on.then_some(name))
+                .collect();
+                if !read_dependent.is_empty() {
+                    warnings.push(format!(
+                        "[users.{}.memory_access] sets {:?} = true but \
+                         `readable_namespaces` is empty — these flags are no-ops without \
+                         read access. Likely a typo: did you mean to add \
+                         `readable_namespaces = [\"...\"]`?",
+                        user.name, read_dependent,
+                    ));
+                }
+            }
+
+            // Pass 2 — write-dependent flags vs writable_namespaces.
+            if acl.delete_allowed && acl.writable_namespaces.is_empty() {
+                warnings.push(format!(
+                    "[users.{}.memory_access] sets `delete_allowed` = true but \
+                     `writable_namespaces` is empty — delete is gated on write \
+                     access (not read). Likely a typo: did you mean to add \
+                     `writable_namespaces = [\"...\"]`?",
+                    user.name,
+                ));
+            }
+        }
+
         warnings
     }
 
@@ -786,6 +846,12 @@ impl KernelConfig {
         if self.queue.concurrency.subagent_lane == 0 {
             self.queue.concurrency.subagent_lane = 1;
         }
+        if self.queue.concurrency.trigger_lane == 0 {
+            self.queue.concurrency.trigger_lane = 1;
+        }
+        if self.queue.concurrency.default_per_agent == 0 {
+            self.queue.concurrency.default_per_agent = 1;
+        }
 
         // Triggers: max_per_event must be >= 1 (0 would prevent any trigger from firing)
         if self.triggers.max_per_event == 0 {
@@ -810,6 +876,24 @@ impl KernelConfig {
             self.max_cron_jobs = 500;
         } else if self.max_cron_jobs > 10_000 {
             self.max_cron_jobs = 10_000;
+        }
+
+        // RBAC M5: per-user `alert_threshold` is documented as "clamped to
+        // 0..=1" but the field type is bare `f64` and TOML will accept any
+        // value. Without this clamp, `alert_threshold = 5.0` makes
+        // `alert_breach` permanently false (no alert ever fires) and
+        // `-1.0` makes it permanently true (alerts on zero spend). Clamp
+        // both ends so the documented contract holds.
+        for user in &mut self.users {
+            if let Some(ref mut budget) = user.budget {
+                if !budget.alert_threshold.is_finite() {
+                    budget.alert_threshold = 0.8;
+                } else if budget.alert_threshold < 0.0 {
+                    budget.alert_threshold = 0.0;
+                } else if budget.alert_threshold > 1.0 {
+                    budget.alert_threshold = 1.0;
+                }
+            }
         }
     }
 }

@@ -4,8 +4,12 @@
 //! for sending responses. No external Discord crate — just `tokio-tungstenite` + `reqwest`.
 
 use crate::message_truncator::{split_to_utf16_chunks, DISCORD_MESSAGE_LIMIT};
-use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType, ChannelUser,
+    PlatformRole,
+};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -54,6 +58,17 @@ pub struct DiscordAdapter {
     session_id: Arc<RwLock<Option<String>>>,
     /// Resume gateway URL.
     resume_gateway_url: Arc<RwLock<Option<String>>>,
+    /// Channel-id → guild-id resolution cache. Populated on first
+    /// `lookup_role` call for a given channel; channels almost never
+    /// move guilds, so this stays valid for the adapter's lifetime.
+    /// Keeps `lookup_role` to one Discord API call after the first hit
+    /// (the `/guilds/.../members/...` request) instead of three.
+    ///
+    /// `Some(guild_id)` for guild text/voice channels; `None` for DM
+    /// and group-DM channels (no `guild_id` in the channel object).
+    /// Caching the `None` case stops the resolver from re-hitting
+    /// Discord every time a user DMs the bot.
+    channel_to_guild: Arc<DashMap<String, Option<String>>>,
 }
 
 impl DiscordAdapter {
@@ -82,6 +97,7 @@ impl DiscordAdapter {
             bot_user_id: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
+            channel_to_guild: Arc::new(DashMap::new()),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -157,6 +173,168 @@ impl DiscordAdapter {
             .send()
             .await?;
         Ok(())
+    }
+
+    /// Resolve a Discord channel ID to its guild ID.
+    ///
+    /// `lookup_role` receives a channel ID (because that is what every
+    /// `ChannelMessage` carries as `sender.platform_id`, see
+    /// `parse_message_create` ~line 715), but Discord's
+    /// `/guilds/{id}/members/{uid}` endpoint expects the guild ID. We
+    /// resolve via `GET /channels/{channel_id}` once per channel and
+    /// cache the result for the adapter's lifetime — channels do not
+    /// move guilds in normal operation, so cache invalidation is a
+    /// non-issue.
+    ///
+    /// Returns `Ok(None)` for DM channels (no `guild_id` in the
+    /// response) so the caller falls through to default-deny rather
+    /// than 404-ing on a phantom guild lookup.
+    pub async fn api_resolve_channel_guild(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(cached) = self.channel_to_guild.get(channel_id) {
+            return Ok(cached.clone());
+        }
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get channel failed ({status}): {body_text}").into());
+        }
+        let channel: serde_json::Value = resp.json().await?;
+        let resolved = channel["guild_id"].as_str().map(str::to_string);
+        // Cache both `Some(guild_id)` and `None` (DM / group-DM) so
+        // subsequent calls for the same channel skip the API round-trip
+        // entirely. Discord channels do not change guild affiliation in
+        // normal operation, and snowflake ids are globally unique, so a
+        // permanent cache for the adapter's lifetime is safe.
+        self.channel_to_guild
+            .insert(channel_id.to_string(), resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Fetch a guild member and the set of guild-role names they hold.
+    ///
+    /// Discord's `GET /guilds/{guild_id}/members/{user_id}` returns role IDs;
+    /// we resolve them to names via `GET /guilds/{guild_id}/roles` so the
+    /// kernel mapping logic can match by human-readable role name (which is
+    /// what operators put in `config.toml: [channel_role_mapping.discord]`).
+    ///
+    /// Returns `Ok(None)` when the user is not in the guild (HTTP 404).
+    pub async fn api_get_guild_member_roles(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<Option<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
+        // 1. Fetch the member's role IDs.
+        let member_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/members/{user_id}");
+        let resp = self
+            .client
+            .get(&member_url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get guild member failed ({status}): {body_text}").into());
+        }
+        let member: serde_json::Value = resp.json().await?;
+        let role_ids = parse_guild_member_role_ids(&member);
+        if role_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        // 2. Resolve role IDs → role names. The roles list is small (≤ a few
+        // hundred per guild) so a single fetch + linear lookup is fine.
+        let roles_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/roles");
+        let roles_resp = self
+            .client
+            .get(&roles_url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if !roles_resp.status().is_success() {
+            let status = roles_resp.status();
+            let body_text = roles_resp.text().await.unwrap_or_default();
+            return Err(format!("Discord get guild roles failed ({status}): {body_text}").into());
+        }
+        let roles_json: serde_json::Value = roles_resp.json().await?;
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        Ok(Some(names))
+    }
+}
+
+/// Extract the `roles` array (list of role IDs) from a guild-member payload.
+pub(crate) fn parse_guild_member_role_ids(member: &serde_json::Value) -> Vec<String> {
+    member["roles"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve role IDs to role names using a `GET /guilds/{id}/roles` payload.
+pub(crate) fn resolve_role_ids_to_names(
+    role_ids: &[String],
+    roles_json: &serde_json::Value,
+) -> Vec<String> {
+    let id_to_name: HashMap<String, String> = roles_json
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let id = r["id"].as_str()?.to_string();
+                    let name = r["name"].as_str()?.to_string();
+                    Some((id, name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    role_ids
+        .iter()
+        .filter_map(|id| id_to_name.get(id).cloned())
+        .collect()
+}
+
+#[async_trait]
+impl ChannelRoleQuery for DiscordAdapter {
+    /// `chat_id` here is the Discord **channel** ID (matches what every
+    /// `ChannelMessage` carries as `sender.platform_id`); we resolve it
+    /// to the owning guild internally before hitting the members API.
+    /// DM channels (no guild) yield `Ok(None)` → default-deny `Viewer`.
+    async fn lookup_role(
+        &self,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<Option<PlatformRole>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(guild_id) = self.api_resolve_channel_guild(chat_id).await? else {
+            return Ok(None);
+        };
+        let Some(roles) = self.api_get_guild_member_roles(&guild_id, user_id).await? else {
+            return Ok(None);
+        };
+        if roles.is_empty() {
+            return Ok(None);
+        }
+        // Discord users hold an unordered set of guild roles; pass them
+        // all through and let the kernel translator pick the highest-
+        // privilege match from `role_map` (Discord-side ordering must
+        // not decide LibreFang permissions).
+        Ok(Some(PlatformRole::many(roles)))
     }
 }
 
@@ -694,6 +872,93 @@ fn parse_discord_attachment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_resolution_parses_member_role_ids() {
+        let member = serde_json::json!({
+            "roles": ["role-mod", "role-vip"],
+            "user": { "id": "u1" }
+        });
+        assert_eq!(
+            parse_guild_member_role_ids(&member),
+            vec!["role-mod".to_string(), "role-vip".to_string()]
+        );
+    }
+
+    #[test]
+    fn role_resolution_resolves_ids_to_names_in_order() {
+        let role_ids = vec!["role-mod".to_string(), "role-vip".to_string()];
+        let roles_json = serde_json::json!([
+            { "id": "role-mod", "name": "Moderator" },
+            { "id": "role-vip", "name": "VIP" },
+            { "id": "role-other", "name": "Lurker" },
+        ]);
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        assert_eq!(names, vec!["Moderator".to_string(), "VIP".to_string()]);
+    }
+
+    #[test]
+    fn role_resolution_drops_unknown_role_ids() {
+        // A role the user holds but that no longer exists in the guild
+        // (e.g. just deleted) is silently filtered out.
+        let role_ids = vec!["role-stale".to_string(), "role-mod".to_string()];
+        let roles_json = serde_json::json!([
+            { "id": "role-mod", "name": "Moderator" },
+        ]);
+        let names = resolve_role_ids_to_names(&role_ids, &roles_json);
+        assert_eq!(names, vec!["Moderator".to_string()]);
+    }
+
+    #[test]
+    fn role_resolution_handles_empty_roles() {
+        let member = serde_json::json!({ "roles": [] });
+        assert!(parse_guild_member_role_ids(&member).is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_to_guild_cache_serves_dm_entry_without_http() {
+        // Regression: prior to caching the `None` arm, every DM
+        // message round-tripped a `GET /channels/{id}` to Discord on
+        // every resolve_role call. The `Option<String>` cache must
+        // hold the DM marker so a second lookup is a pure cache hit.
+        //
+        // We exercise the cache hit path directly (pre-populating the
+        // map) so the test does not need HTTP mocking. If the read
+        // path stops honoring the cached `None`, this returns Some
+        // (or panics on the unwrap from a real HTTP call) and the
+        // assertion fires.
+        let adapter = DiscordAdapter::new(
+            "test-token".to_string(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            Vec::new(),
+            0,
+        );
+        // Pre-populate as if a previous DM lookup had cached None.
+        adapter
+            .channel_to_guild
+            .insert("dm-channel-1".to_string(), None);
+        adapter
+            .channel_to_guild
+            .insert("guild-channel-2".to_string(), Some("guild-x".to_string()));
+
+        // DM hit must return Ok(None) without touching the network.
+        // (If the cache read regressed and HTTP was called, the test
+        // would fail with a connection error against discord.com.)
+        let dm = adapter
+            .api_resolve_channel_guild("dm-channel-1")
+            .await
+            .expect("cached DM lookup must not error");
+        assert_eq!(dm, None);
+
+        // Guild hit must return the cached guild id.
+        let guild = adapter
+            .api_resolve_channel_guild("guild-channel-2")
+            .await
+            .expect("cached guild lookup must not error");
+        assert_eq!(guild.as_deref(), Some("guild-x"));
+    }
 
     #[tokio::test]
     async fn test_parse_discord_message_basic() {

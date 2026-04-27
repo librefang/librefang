@@ -8,9 +8,11 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod desktop_install;
+pub mod doctor;
 mod http_client;
 pub mod i18n;
 mod launcher;
+mod log_filter;
 mod mcp;
 pub mod progress;
 pub mod table;
@@ -365,7 +367,7 @@ enum Commands {
     Cron(CronCommands),
     /// List conversation sessions.
     #[command(
-        long_about = "List conversation sessions stored by agents.\n\nOptionally filter by agent name or ID.\n\nExamples:\n  librefang sessions              # List all sessions\n  librefang sessions coder        # Filter by agent name\n  librefang sessions --json       # JSON output for scripting"
+        long_about = "List conversation sessions stored by agents.\n\nOptionally filter by agent name or ID. The STATE column reflects whether the session has an in-flight loop (running) or is idle.\n\nExamples:\n  librefang sessions              # List all sessions\n  librefang sessions coder        # Filter by agent name\n  librefang sessions --active     # Only currently-executing sessions\n  librefang sessions --json       # JSON output for scripting"
     )]
     Sessions {
         /// Optional agent name or ID to filter by.
@@ -373,6 +375,9 @@ enum Commands {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Only show sessions that currently have an in-flight loop.
+        #[arg(long)]
+        active: bool,
     },
     /// Tail the BossFang log file.
     #[command(
@@ -1731,9 +1736,81 @@ enum ServiceCommands {
     Status,
 }
 
+/// Wraps an inner `FormatEvent` impl so every emitted log line carries a
+/// `trace_id=<32-hex>` suffix whenever the current tracing span is part of
+/// an OpenTelemetry-traced flow (i.e. the OTel reload layer has been swapped
+/// in by `init_otel_tracing` and the span has a valid trace context).
+///
+/// The trace_id sits at the **end** of the line as a logfmt-style structured
+/// suffix rather than at the front. This keeps the human-readable
+/// timestamp/level/message portion at the start of the line where readers
+/// expect it, matching the convention that structured key=value fields
+/// follow the unstructured prose of a log entry.
+///
+/// When telemetry is compiled out, the wrapper still exists but the
+/// `cfg(feature = "telemetry")` block is empty — every call delegates to
+/// the inner formatter unchanged, so non-telemetry builds see no behaviour
+/// change. When telemetry is compiled in but no OTel context is active
+/// (e.g. an early boot log before the reload swap, a CLI subcommand that
+/// never started the API), the trace context is invalid and the suffix is
+/// omitted — again the inner formatter's output is passed through verbatim.
+///
+/// The suffix uses bare logfmt `trace_id=<hex>` (no quotes) — the matching
+/// `derivedFields` regex in `deploy/grafana/provisioning/datasources/loki.yml`
+/// is `trace_id="?([0-9a-f]{32})"?`, which is anchored on the literal
+/// `trace_id=` token rather than line position, so the suffix placement
+/// resolves the same clickable trace link as a prefix would.
+struct WithTraceId<F>(F);
+
+impl<S, N, F> tracing_subscriber::fmt::format::FormatEvent<S, N> for WithTraceId<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+    F: tracing_subscriber::fmt::format::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        #[allow(unused_mut)] mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        #[cfg(feature = "telemetry")]
+        {
+            use opentelemetry::trace::TraceContextExt;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            // Bind `cx` and the span via separate `let` bindings: `cx.span()`
+            // returns a `SpanRef` that borrows from `cx`, and `span_context()`
+            // returns a reference into the `SpanRef`'s inner state. Inlining
+            // either one drops a temporary while a later borrow still needs
+            // it (E0716 — verified with rustc 1.90 on this branch).
+            let cx = tracing::Span::current().context();
+            let span_ref = cx.span();
+            let span_cx = span_ref.span_context();
+            if span_cx.is_valid() {
+                // Capture the inner formatter's output into a buffer so we
+                // can append the trace_id suffix before the trailing newline.
+                // The inner formatter writes its own `\n`; we strip it,
+                // append ` trace_id=<hex>`, then re-emit a single newline.
+                // Allocates one String per traced log event — acceptable,
+                // and the no-OTel path below avoids the alloc entirely.
+                let mut buf = String::new();
+                self.0.format_event(
+                    ctx,
+                    tracing_subscriber::fmt::format::Writer::new(&mut buf),
+                    event,
+                )?;
+                let trimmed = buf.trim_end_matches('\n');
+                return writeln!(writer, "{trimmed} trace_id={:032x}", span_cx.trace_id());
+            }
+        }
+        self.0.format_event(ctx, writer, event)
+    }
+}
+
 fn init_tracing_stderr(log_level: &str) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
 
     // One-shot CLI commands (status, stop, doctor, …) load config.toml as a
     // side effect. librefang_kernel::config emits INFO on every load and WARN
@@ -1743,55 +1820,88 @@ fn init_tracing_stderr(log_level: &str) {
     // see everything, and daemon/foreground boots route through a different
     // initialiser where the full log is expected.
     let user_set_rust_log = std::env::var("RUST_LOG").is_ok();
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-    let env_filter = if user_set_rust_log {
-        env_filter
+    // Per-target overrides applied unconditionally on top of the user-visible
+    // level (and reapplied on every hot-reload via `install_with_baseline` —
+    // see Codex P2-1 #3200). Stored as strings so the filter installer can
+    // reparse them after a `log_level` swap; without that, a dashboard
+    // "give me debug" toggle would silently drop these and flood operators
+    // with kernel/runtime DEBUG noise that boot specifically masked.
+    let baseline_directives: Vec<String> = if user_set_rust_log {
+        // RUST_LOG is the explicit "I want full control" knob — don't layer
+        // any opinionated overrides on top of it, and don't carry any across
+        // reloads either.
+        Vec::new()
     } else {
-        // For one-shot CLI commands, downgrade library-level chatter so the
-        // user sees only their command's own output. WARN and above still
-        // surface everywhere — the filter is per-target verbosity, not a
-        // global mute. Setting RUST_LOG restores full detail.
-        env_filter
-            .add_directive("librefang_kernel=warn".parse().expect("static directive"))
-            .add_directive("librefang_runtime=warn".parse().expect("static directive"))
-            .add_directive(
-                "librefang_extensions=warn"
-                    .parse()
-                    .expect("static directive"),
-            )
-            .add_directive(
-                "librefang_kernel::config=error"
-                    .parse()
-                    .expect("static directive"),
-            )
-            .add_directive(
-                "librefang_runtime::registry_sync=error"
-                    .parse()
-                    .expect("static directive"),
-            )
+        vec![
+            "librefang_kernel=warn".to_string(),
+            "librefang_runtime=warn".to_string(),
+            "librefang_extensions=warn".to_string(),
+            "librefang_kernel::config=error".to_string(),
+            "librefang_runtime::registry_sync=error".to_string(),
+        ]
     };
+    let mut env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+    for d in &baseline_directives {
+        // Per-string parse keeps the boot-time directive list and the
+        // reload-time directive list literally identical.
+        env_filter = env_filter.add_directive(d.parse().expect("baseline directive must parse"));
+    }
 
     // Compact stderr format: in a one-shot CLI context the user cares about
     // the WARN/ERROR text, not the timestamp or the fully-qualified target.
     // One-shot CLI runs are transient — stderr is the only sink; the daemon
     // has its own file appender under `logs/daemon.log`.
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    //
+    // `.with_filter(env_filter)` applies the user-visible log filter to the
+    // fmt layer ONLY. A registry-level filter would also suppress span
+    // CREATION, which would starve the OTel exporter layer attached below
+    // (`librefang_kernel`/`librefang_runtime` downgraded to WARN means all
+    // INFO-level `#[instrument]` spans are filtered out before OTel ever
+    // sees them). Per-layer filtering keeps stderr terse while OTel
+    // receives the full span tree.
+    //
+    // The filter is wrapped in `ReloadableEnvFilter` so the daemon can swap
+    // it at runtime when `KernelConfig::log_level` changes via hot-reload.
+    // `install_with_baseline` hands the per-target directives above to the
+    // filter installer so a dashboard `log_level` edit reapplies them after
+    // the swap — i.e. the kernel/runtime overrides survive reloads instead
+    // of being silently dropped. `RUST_LOG` itself is *not* re-read on
+    // reload (it's a boot-time knob); operators wanting env-driven
+    // filtering after a config edit need to restart.
+    //
+    // Force stderr explicitly: machine-readable subcommands like
+    // `doctor --json` expect a clean stdout stream. The fmt layer's
+    // default writer is stdout, which would interleave tracing output
+    // with the JSON payload and corrupt downstream parsers.
+    //
+    // Build the inner format separately so we can wrap it in `WithTraceId`,
+    // which appends the OTel `trace_id` as a logfmt suffix on every line when
+    // an OTel context is active. The wrapper is unconditional but no-ops
+    // without the `telemetry` feature; see `WithTraceId` doc above.
+    let inner_format = tracing_subscriber::fmt::format()
         .without_time()
         .with_target(false)
         .compact();
+    let reloadable_filter =
+        log_filter::ReloadableEnvFilter::install_with_baseline(env_filter, baseline_directives);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .event_format(WithTraceId(inner_format))
+        .with_filter(reloadable_filter);
 
     // Register a no-op reload slot so `init_otel_tracing` can swap a real
     // OTel layer in later without needing to claim the global dispatcher.
     // The slot is stacked **first** (directly on Registry) so its boxed
     // `Layer<Registry>` trait object matches the innermost subscriber type.
+    // No filter is attached to this layer on purpose — see comment above.
     #[cfg(feature = "telemetry")]
     let registry =
         tracing_subscriber::registry().with(librefang_api::telemetry::install_otel_reload_layer());
     #[cfg(not(feature = "telemetry"))]
     let registry = tracing_subscriber::registry();
 
-    registry.with(env_filter).with(fmt_layer).init();
+    registry.with(fmt_layer).init();
 }
 
 /// Get the BossFang home directory, respecting LIBREFANG_HOME env var.
@@ -1840,13 +1950,24 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
 
     match std::fs::File::create(&log_path) {
         Ok(file) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-                )
+            // Same `WithTraceId` wrapper as `init_tracing_stderr` so the TUI
+            // log file carries `trace_id=<hex>` suffixes when OTel is on.
+            // We have to build the subscriber by hand here (rather than the
+            // `tracing_subscriber::fmt()` builder shortcut) because the
+            // builder owns its formatter and doesn't expose `event_format`.
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+            let inner_format = tracing_subscriber::fmt::format();
+            let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
+                .event_format(WithTraceId(inner_format));
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
                 .init();
         }
         Err(_) => {
@@ -1890,6 +2011,29 @@ fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateCh
         .ok()
 }
 
+/// Load the `[skills]` config block and derive the `EnvPassthroughPolicy`
+/// the daemon would apply. Falls back to `SkillsConfig::default()` so the
+/// conservative built-in deny patterns still apply when no config exists —
+/// otherwise `librefang skill test` would silently allow vars that
+/// production strips. Errors during read/parse degrade to default; this is
+/// a dev-time gate, not a security boundary, but its job is to mirror
+/// what prod will do. Returns `None` only when the operator has explicitly
+/// cleared both `env_passthrough_denied_patterns` and
+/// `env_passthrough_per_skill` — matching the kernel-side semantics.
+fn load_skill_env_policy_from_config() -> Option<librefang_types::config::EnvPassthroughPolicy> {
+    let cfg = (|| -> Option<librefang_types::config::SkillsConfig> {
+        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let value: toml::Value = toml::from_str(&content).ok()?;
+        let skills = value.get("skills")?.clone();
+        skills
+            .try_into::<librefang_types::config::SkillsConfig>()
+            .ok()
+    })()
+    .unwrap_or_default();
+    librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg)
+}
+
 /// Load just the `log_dir` field from config.toml without fully deserializing.
 /// Returns the configured custom log directory, or `None` to use the default.
 fn load_log_dir_from_config() -> Option<PathBuf> {
@@ -1897,6 +2041,23 @@ fn load_log_dir_from_config() -> Option<PathBuf> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("log_dir")?.as_str().map(PathBuf::from)
+}
+
+/// Write `msg` followed by a newline to stdout, exiting with code 0 on
+/// `BrokenPipe`. Use this instead of `println!` for machine-readable (JSON)
+/// output that is commonly piped into other tools — e.g.
+/// `librefang doctor --json | head -1`. Without this wrapper, SIGPIPE/EPIPE
+/// surfaces as a panic on the next write attempt.
+fn write_stdout_safe(msg: &str) {
+    let out = std::io::stdout();
+    let mut lock = out.lock();
+    if let Err(e) = writeln!(lock, "{}", msg) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("error: failed writing to stdout: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn main() {
@@ -2177,7 +2338,11 @@ fn main() {
             CronCommands::Enable { id } => cmd_cron_toggle(&id, true),
             CronCommands::Disable { id } => cmd_cron_toggle(&id, false),
         },
-        Some(Commands::Sessions { agent, json }) => cmd_sessions(agent.as_deref(), json),
+        Some(Commands::Sessions {
+            agent,
+            json,
+            active,
+        }) => cmd_sessions(agent.as_deref(), json, active),
         Some(Commands::Logs { lines, follow }) => cmd_logs(cli.config, lines, follow),
         Some(Commands::Health { json }) => cmd_health(json),
         Some(Commands::Security(sub)) => match sub {
@@ -2963,9 +3128,17 @@ fn detect_best_provider() -> (String, String, String) {
                 Some(first) => first.to_uppercase().to_string() + c.as_str(),
             }
         };
+        // CLI-backed providers return an empty env_var (auth via OAuth token
+        // or keychain, not an env variable). Display a readable placeholder
+        // so the i18n message doesn't end with an empty parenthetical.
+        let auth_display = if env_var.is_empty() {
+            "CLI login"
+        } else {
+            env_var
+        };
         ui::success(&i18n::t_args(
             "detected-provider",
-            &[("display", &display_name), ("env_var", env_var)],
+            &[("display", &display_name), ("env_var", auth_display)],
         ));
         return (
             provider.to_string(),
@@ -3302,6 +3475,36 @@ impl Drop for ForegroundTeeGuard {
 /// spawn a background thread that copies to both terminal and log file.
 #[cfg(unix)]
 fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
+    // Ensure the parent directory exists (e.g. `~/.librefang/logs/`) before we
+    // try to open the log file. Fresh installations and test environments may
+    // not have this directory yet.
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            // Report the failure on the real stderr (not yet redirected), then
+            // exit instead of limping forward into the silent-hang regime the
+            // old ordering produced.
+            eprintln!("Failed to create log directory {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+
+    // Open the log file BEFORE redirecting stdout/stderr. If the open panics
+    // (permissions, read-only fs, parent still missing, …) the panic message
+    // reaches the real stderr the user is watching. Previously we opened the
+    // file AFTER `dup2`, so a failure wrote its panic message into a pipe
+    // whose reader hadn't been spawned yet — the message was trapped in the
+    // pipe buffer and the process appeared to hang at "Starting daemon…".
+    let log_file = std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to open daemon log file {}: {e}", log_path.display());
+                std::process::exit(1);
+            }),
+    );
+
     // Create pipe for stdout+stderr (we'll write to it, background thread reads)
     let mut fds = [0i32, 0i32];
     unsafe {
@@ -3314,21 +3517,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
     let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
-    // Redirect stdout and stderr to the pipe
+    // Redirect stdout and stderr to the pipe. From here on any write to the
+    // standard streams goes through the pipe and must be drained by the
+    // read thread below — do not fail between this point and `thread::spawn`.
     unsafe {
         libc::dup2(pipe_write, libc::STDOUT_FILENO);
         libc::dup2(pipe_write, libc::STDERR_FILENO);
         libc::close(pipe_write);
     }
-
-    // Create log file (append mode)
-    let log_file = std::sync::Mutex::new(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .expect("daemon log file"),
-    );
 
     // Spawn background thread that reads from pipe and writes to both terminal and log
     std::thread::spawn(move || {
@@ -3510,6 +3706,13 @@ fn cmd_start(
                 std::process::exit(1);
             }
         };
+
+        // Wire the live tracing filter into the kernel's hot-reload path so
+        // dashboard edits to `log_level` take effect immediately instead of
+        // requiring a daemon restart. Only the daemon path needs this — TUI
+        // / one-shot CLI commands route through `init_tracing_file` (no
+        // dashboard) so the slot stays unwired there.
+        kernel.set_log_reloader(std::sync::Arc::new(log_filter::CliLogLevelReloader));
 
         let cfg = kernel.config_ref();
         // CLI --bind wins over LIBREFANG_LISTEN (applied by kernel boot) and config.toml.
@@ -5011,6 +5214,24 @@ fn format_uptime(secs: u64) -> String {
 }
 
 fn cmd_doctor(json: bool, repair: bool) {
+    // BrokenPipe protection for the WHOLE command, not just the --json
+    // branch. `librefang doctor | head -5` and similar pipelines drop the
+    // reader after a few lines, which on the next stdout write turns into a
+    // panic — Rust ignores SIGPIPE by default and translates EPIPE into an
+    // io::Error that `println!` unwraps.
+    //
+    // The pre-existing `write_stdout_safe` helper only covered the
+    // `--json` final emission. Hundreds of `ui::*` and bare `println!`
+    // calls between the start of cmd_doctor and that emission were still
+    // unprotected. Restoring the default SIGPIPE handler for the duration
+    // of this command makes the kernel terminate the process cleanly on
+    // pipe close instead, covering every print path in this function and
+    // the `ui::*` helpers it calls.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
     let mut repaired = false;
@@ -5390,6 +5611,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         ("TOGETHER_API_KEY", "Together", "together"),
         ("MISTRAL_API_KEY", "Mistral", "mistral"),
         ("FIREWORKS_API_KEY", "Fireworks", "fireworks"),
+        ("BYTEPLUS_API_KEY", "BytePlus", "byteplus"),
     ];
 
     let mut any_key_set = false;
@@ -6028,14 +6250,57 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
     }
 
+    // Framework-based audit checks (see crates/librefang-cli/src/doctor.rs).
+    // Each check is its own struct, registered in `doctor::registered_checks`.
+    // Migrating the legacy inline checks above into this framework can happen
+    // incrementally — adding a new check is one struct + one registry entry,
+    // no edits to this function.
+    {
+        let ctx = doctor::AuditContext {
+            librefang_home: cli_librefang_home(),
+        };
+        for result in doctor::run_all(&ctx) {
+            if !json {
+                match result.severity {
+                    doctor::Severity::Pass | doctor::Severity::Info => {
+                        ui::check_ok(&result.summary);
+                    }
+                    doctor::Severity::Warn => {
+                        ui::check_warn(&result.summary);
+                        if let Some(hint) = &result.hint {
+                            ui::hint(hint);
+                        }
+                    }
+                    doctor::Severity::Error => {
+                        ui::check_fail(&result.summary);
+                        if let Some(hint) = &result.hint {
+                            ui::hint(hint);
+                        }
+                    }
+                }
+            }
+            let mut entry = serde_json::json!({
+                "check": result.name,
+                "status": result.severity.as_str(),
+                "summary": result.summary,
+            });
+            if let Some(h) = &result.hint {
+                entry["hint"] = serde_json::Value::String(h.clone());
+            }
+            checks.push(entry);
+            if matches!(result.severity, doctor::Severity::Error) {
+                all_ok = false;
+            }
+        }
+    }
+
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        write_stdout_safe(
+            &serde_json::to_string_pretty(&serde_json::json!({
                 "all_ok": all_ok,
                 "checks": checks,
             }))
-            .unwrap_or_default()
+            .unwrap_or_default(),
         );
     } else {
         println!();
@@ -6915,11 +7180,13 @@ fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<Str
     };
 
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let env_policy = load_skill_env_policy_from_config();
     let result = rt.block_on(librefang_skills::loader::execute_skill_tool(
         &prepared.manifest,
         &prepared.source_dir,
         &tool_name,
         &input_json,
+        env_policy.as_ref(),
     ));
     match result {
         Ok(result) => {
@@ -8404,6 +8671,10 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
             .send(),
         "openrouter" => client
             .get("https://openrouter.ai/api/v1/models")
+            .bearer_auth(key)
+            .send(),
+        "byteplus" => client
+            .get("https://ark.ap-southeast.bytepluses.com/api/v3/models")
             .bearer_auth(key)
             .send(),
         "elevenlabs" => client
@@ -10176,7 +10447,7 @@ fn cmd_cron_toggle(id: &str, enable: bool) {
     }
 }
 
-fn cmd_sessions(agent: Option<&str>, json: bool) {
+fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
     let base = require_daemon("sessions");
     let client = daemon_client();
     let url = match agent {
@@ -10184,27 +10455,100 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         None => format!("{base}/api/sessions"),
     };
     let body = daemon_json(client.get(&url).send());
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        );
-        return;
-    }
-    if let Some(arr) = body
+
+    // Build a (agent_id -> set<session_id>) map of currently-running sessions.
+    // Walks the unique agent ids in the listing once and asks the per-agent
+    // runtime endpoint added in #3172. Cheap on dev-scale agent counts; if
+    // this ever becomes a hotspot we can add a single-call /api/runtime.
+    let session_arr_owned: Option<Vec<serde_json::Value>> = body
         .get("sessions")
         .and_then(|v| v.as_array())
-        .or_else(|| body.as_array())
-    {
-        if arr.is_empty() {
-            println!("No sessions found.");
+        .cloned()
+        .or_else(|| body.as_array().cloned());
+    let mut active_sessions: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(arr) = session_arr_owned.as_ref() {
+        let agent_ids: std::collections::HashSet<String> = arr
+            .iter()
+            .filter_map(|s| s["agent_id"].as_str().map(|id| id.to_string()))
+            .collect();
+        for aid in agent_ids {
+            let runtime_url = format!("{base}/api/agents/{aid}/runtime");
+            if let Ok(resp) = client.get(&runtime_url).send() {
+                if let Ok(items) = resp.json::<Vec<serde_json::Value>>() {
+                    let sids: std::collections::HashSet<String> = items
+                        .iter()
+                        .filter_map(|v| v["session_id"].as_str().map(|s| s.to_string()))
+                        .collect();
+                    active_sessions.insert(aid, sids);
+                }
+            }
+        }
+    }
+
+    let is_running = |s: &serde_json::Value| -> bool {
+        let aid = match s["agent_id"].as_str() {
+            Some(a) => a,
+            None => return false,
+        };
+        let sid = match s["session_id"].as_str().or_else(|| s["id"].as_str()) {
+            Some(s) => s,
+            None => return false,
+        };
+        active_sessions
+            .get(aid)
+            .is_some_and(|set| set.contains(sid))
+    };
+
+    if json {
+        // Annotate each session with `state` so JSON consumers see the same
+        // signal as the table renderer.
+        if let Some(arr) = session_arr_owned.as_ref() {
+            let annotated: Vec<serde_json::Value> = arr
+                .iter()
+                .filter(|s| !active_only || is_running(s))
+                .map(|s| {
+                    let mut out = s.clone();
+                    out["state"] = serde_json::Value::String(
+                        if is_running(s) { "running" } else { "idle" }.into(),
+                    );
+                    out
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&annotated).unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+        }
+        return;
+    }
+    if let Some(arr) = session_arr_owned.as_ref() {
+        let filtered: Vec<&serde_json::Value> = arr
+            .iter()
+            .filter(|s| !active_only || is_running(s))
+            .collect();
+        if filtered.is_empty() {
+            if active_only {
+                println!("No active sessions.");
+            } else {
+                println!("No sessions found.");
+            }
             return;
         }
-        println!("{:<38} {:<16} {:<8} LAST ACTIVE", "ID", "AGENT", "MSGS");
-        println!("{}", "-".repeat(80));
-        for s in arr {
+        println!(
+            "{:<38} {:<16} {:<8} {:<8} LAST ACTIVE",
+            "ID", "AGENT", "MSGS", "STATE"
+        );
+        println!("{}", "-".repeat(90));
+        for s in filtered {
+            let state = if is_running(s) { "running" } else { "idle" };
             println!(
-                "{:<38} {:<16} {:<8} {}",
+                "{:<38} {:<16} {:<8} {:<8} {}",
                 s["session_id"]
                     .as_str()
                     .or_else(|| s["id"].as_str())
@@ -10214,6 +10558,7 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
                     .map(|id| if id.len() > 16 { &id[..16] } else { id })
                     .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
                 s["message_count"].as_u64().unwrap_or(0),
+                state,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())
@@ -13401,5 +13746,114 @@ input_schema = { type = "object" }
         let resolved =
             resolve_hand_instance(&instances, "inst-1").expect("instance should resolve");
         assert_eq!(resolved["hand_id"].as_str(), Some("researcher"));
+    }
+
+    // --- WithTraceId log-format wrapper tests ---
+    //
+    // The wrapper is the Rust-side counterpart of the Loki `derivedFields`
+    // regex provisioned in `deploy/grafana/provisioning/datasources/loki.yml`.
+    // It must (a) be a transparent passthrough when no OTel context is active
+    // (the common case for one-shot CLI commands and early boot), and (b)
+    // emit `trace_id=<32-hex>` exactly when a context is live so the Loki
+    // regex resolves it into a clickable trace link.
+    //
+    // We can't easily build a live OTel context inside a unit test without
+    // spinning up an exporter, so the OTel-active path is covered by the
+    // live integration test described in `deploy/OBSERVABILITY.md`. These
+    // tests pin the no-OTel-context behaviour, which is what regresses
+    // first if someone refactors the wrapper.
+
+    #[test]
+    fn test_with_trace_id_passthrough_without_otel_context() {
+        use super::WithTraceId;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Capture writer: collects every byte written by the fmt layer so the
+        // test can assert on the rendered line. Wrapped in Arc<Mutex<Vec<u8>>>
+        // so both the subscriber and the test body share a view.
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let inner = tracing_subscriber::fmt::format()
+            .without_time()
+            .with_target(false)
+            .compact();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .event_format(WithTraceId(inner));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        // Scope the dispatcher to this test so we don't fight the global
+        // subscriber installed by other tests in the binary.
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("hello world");
+        });
+
+        let line = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            line.contains("hello world"),
+            "expected the inner formatter to render the message, got: {line:?}"
+        );
+        assert!(
+            !line.contains("trace_id="),
+            "expected NO trace_id prefix when no OTel context is active, got: {line:?}"
+        );
+    }
+
+    #[test]
+    fn test_with_trace_id_format_matches_loki_regex() {
+        // Pin the exact format we emit so the Loki `derivedFields` regex in
+        // `deploy/grafana/provisioning/datasources/loki.yml` keeps resolving:
+        // `matcherRegex: 'trace_id="?([0-9a-f]{32})"?'`.
+        //
+        // If someone changes the format string in `WithTraceId::format_event`
+        // (e.g. to `traceId={...}` or to upper-case hex), this test fails
+        // before the change reaches Grafana and silently breaks log↔trace
+        // linking in the dashboards.
+        let trace_id_u128: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+        let rendered = format!("trace_id={trace_id_u128:032x} ");
+        assert_eq!(
+            rendered, "trace_id=0123456789abcdef0123456789abcdef ",
+            "trace_id format must be 32 lowercase hex chars with no quotes"
+        );
+
+        // Mimic the Loki regex `trace_id="?([0-9a-f]{32})"?` without pulling
+        // in a regex crate just for one assertion: locate the `trace_id=`
+        // prefix, optionally consume a quote, then take 32 chars and verify
+        // they are all lowercase hex.
+        let needle = "trace_id=";
+        let pos = rendered
+            .find(needle)
+            .expect("emitted line must contain trace_id=");
+        let after = &rendered[pos + needle.len()..];
+        let after = after.strip_prefix('"').unwrap_or(after);
+        let hex: String = after.chars().take(32).collect();
+        assert_eq!(hex.len(), 32, "expected 32 hex chars, got {hex:?}");
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "expected lowercase hex, got {hex:?}"
+        );
+        assert_eq!(hex, "0123456789abcdef0123456789abcdef");
     }
 }

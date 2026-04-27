@@ -183,6 +183,10 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     let pre_merge_len = cleaned.len();
     let mut merged: Vec<Message> = Vec::with_capacity(cleaned.len());
     for msg in cleaned {
+        // Snapshot the would-be merge target's index before borrowing
+        // `merged` mutably below — `merged.last_mut()` holds the borrow
+        // for the rest of the if-let scope.
+        let target_idx = merged.len().wrapping_sub(1);
         if let Some(last) = merged.last_mut() {
             if last.role == msg.role
                 && !message_has_tool_use(last)
@@ -190,6 +194,16 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
                 && !message_has_tool_use(&msg)
                 && !message_is_only_tool_results(last)
             {
+                let last_chars = content_char_len(&last.content);
+                let msg_chars = content_char_len(&msg.content);
+                let role = last.role;
+                debug!(
+                    target_idx,
+                    role = ?role,
+                    last_chars,
+                    msg_chars,
+                    "Merging consecutive same-role messages"
+                );
                 merge_content(&mut last.content, msg.content);
                 stats.messages_merged += 1;
                 continue;
@@ -206,7 +220,53 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
         );
     }
 
-    if stats != RepairStats::default() {
+    // Normalize each message's blocks: collapse adjacent Text blocks into a
+    // single Text. Why this lives here, not in each driver:
+    //   • After consecutive same-role messages get merged above, a typical
+    //     attachment send produces `Blocks([Text(attach_header+content),
+    //     Text(user_prompt)])`. Provider APIs accept array content, but
+    //     small chat-tuned local models behind Ollama / llama.cpp / vLLM /
+    //     LM Studio frequently attend only to the first or last Text part
+    //     and drop the rest — the user reports "the model didn't see my
+    //     attachment". Frontier models handle multi-part fine, but they
+    //     don't actually need it for plain-text payloads either; they
+    //     happily read one big text part.
+    //   • Image / ToolUse / ToolResult / Thinking blocks stay separate so
+    //     vision and tool-calling pipelines are unchanged.
+    // Doing it here keeps every driver's serialization logic simple and
+    // delivers the same "attachments work everywhere" UX without a
+    // backend-detection special case in each driver.
+    let mut text_blocks_coalesced = 0usize;
+    for msg in merged.iter_mut() {
+        if let MessageContent::Blocks(blocks) = &mut msg.content {
+            let saved = coalesce_adjacent_text_blocks(blocks);
+            text_blocks_coalesced += saved;
+        }
+    }
+    if text_blocks_coalesced > 0 {
+        debug!(
+            text_blocks_coalesced,
+            "Coalesced adjacent Text blocks within messages"
+        );
+    }
+
+    // Distinguish "real repair" (data-integrity issues we had to clean
+    // up) from "routine normalization" (consecutive same-role merge or
+    // tool-result reordering — both are legitimate session-history
+    // shapes that this pass intentionally collapses every turn).
+    // `messages_merged` fires on every multi-turn streaming session with
+    // back-to-back assistant chunks, so logging it at WARN trains
+    // operators to ignore the message — and a real
+    // `orphaned`/`synthetic`/`rescued`/`positional_synthetic`/
+    // `duplicates`/`empty_messages` event later gets tuned out with it.
+    let had_real_repair = stats.orphaned_results_removed > 0
+        || stats.empty_messages_removed > 0
+        || stats.synthetic_results_inserted > 0
+        || stats.duplicates_removed > 0
+        || stats.misplaced_results_rescued > 0
+        || stats.positional_synthetic_inserted > 0;
+
+    if had_real_repair {
         warn!(
             orphaned = stats.orphaned_results_removed,
             empty = stats.empty_messages_removed,
@@ -216,11 +276,48 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
             duplicates = stats.duplicates_removed,
             rescued = stats.misplaced_results_rescued,
             positional_synthetic = stats.positional_synthetic_inserted,
+            messages_before = pre_merge_len,
+            messages_after = post_merge_len,
             "Session repair applied fixes"
+        );
+    } else if stats != RepairStats::default() {
+        debug!(
+            merged = stats.messages_merged,
+            reordered = stats.results_reordered,
+            messages_before = pre_merge_len,
+            messages_after = post_merge_len,
+            "Session repair normalized history (no integrity issues)"
         );
     }
 
     (merged, stats)
+}
+
+/// Ensure the message history starts with a user turn.
+///
+/// After context trimming the drain boundary may land on an assistant turn,
+/// leaving it at position 0. Providers (especially Gemini) require the first
+/// message to be from the user. This function drops leading assistant messages
+/// and re-validates to clean up newly-orphaned ToolResults.
+///
+/// The loop handles the edge case where the first user turn consisted entirely
+/// of ToolResult blocks that became orphaned (dropped by `validate_and_repair`),
+/// which would re-expose another leading assistant turn.
+pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
+    loop {
+        match messages.iter().position(|m| m.role == Role::User) {
+            Some(0) | None => break,
+            Some(i) => {
+                warn!(
+                    dropped = i,
+                    "Dropping leading assistant turn(s) to ensure history starts with user"
+                );
+                messages.drain(..i);
+                messages = validate_and_repair(&messages);
+            }
+        }
+    }
+    messages
 }
 
 /// Phase 2a: Rescue ToolResult blocks from assistant-role messages.
@@ -984,6 +1081,77 @@ pub fn prune_heartbeat_turns(messages: &mut Vec<Message>, keep_recent: usize) {
     );
 }
 
+/// In-place coalesce: if the block list contains runs of `ContentBlock::Text`,
+/// merge each run into a single Text block (joined with a blank-line
+/// separator). All other block kinds — Image, ImageFile, ToolUse,
+/// ToolResult, Thinking, Unknown — are kept untouched and act as run
+/// boundaries. Returns the number of blocks removed (i.e. how many merges
+/// happened) so the caller can summarize the work.
+///
+/// Provider-side rationale lives at the call site in
+/// `validate_and_repair_with_stats` — this is the pure transform.
+fn coalesce_adjacent_text_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
+    if blocks.len() < 2 {
+        return 0;
+    }
+    let original_len = blocks.len();
+    let drained: Vec<ContentBlock> = std::mem::take(blocks);
+    let mut out: Vec<ContentBlock> = Vec::with_capacity(drained.len());
+    for block in drained {
+        match block {
+            ContentBlock::Text {
+                text,
+                provider_metadata,
+            } => {
+                if let Some(ContentBlock::Text {
+                    text: existing,
+                    provider_metadata: existing_meta,
+                }) = out.last_mut()
+                {
+                    existing.push_str("\n\n");
+                    existing.push_str(&text);
+                    // Keep the first non-None provider_metadata; if both
+                    // sides set it, keep the existing (older) value so we
+                    // don't lose any field the provider needs to round-trip.
+                    if existing_meta.is_none() {
+                        *existing_meta = provider_metadata;
+                    }
+                    continue;
+                }
+                out.push(ContentBlock::Text {
+                    text,
+                    provider_metadata,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    *blocks = out;
+    original_len.saturating_sub(blocks.len())
+}
+
+/// Diagnostic helper: rough char count of a message's text payload.
+/// Used only for debug logging when consecutive same-role messages
+/// are merged — gives operators a sense of "is this a tiny reconnect
+/// duplicate or a large dropped streaming response?". Image data is
+/// counted as `[image]` placeholder length, not the base64 size.
+fn content_char_len(content: &MessageContent) -> usize {
+    match content {
+        MessageContent::Text(s) => s.chars().count(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { text, .. } => text.chars().count(),
+                ContentBlock::Thinking { thinking, .. } => thinking.chars().count(),
+                ContentBlock::ToolResult { content, .. } => content.chars().count(),
+                ContentBlock::ToolUse { .. } => 16,
+                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. } => 8,
+                ContentBlock::Unknown => 0,
+            })
+            .sum(),
+    }
+}
+
 /// Merge the content of `src` into `dst`.
 fn merge_content(dst: &mut MessageContent, src: MessageContent) {
     // Convert both to blocks, then append
@@ -1089,6 +1257,111 @@ fn is_safe_boundary(messages: &[Message], i: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_block(t: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: t.to_string(),
+            provider_metadata: None,
+        }
+    }
+
+    fn image_block() -> ContentBlock {
+        ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "xxx".to_string(),
+        }
+    }
+
+    #[test]
+    fn coalesce_merges_consecutive_text_blocks() {
+        let mut blocks = vec![text_block("a"), text_block("b"), text_block("c")];
+        let removed = coalesce_adjacent_text_blocks(&mut blocks);
+        assert_eq!(removed, 2);
+        assert_eq!(blocks.len(), 1);
+        if let ContentBlock::Text { text, .. } = &blocks[0] {
+            assert_eq!(text, "a\n\nb\n\nc");
+        } else {
+            panic!("expected Text block");
+        }
+    }
+
+    #[test]
+    fn coalesce_keeps_image_as_run_boundary() {
+        // Real chat scenario: attach text + image + user prompt.
+        // Image must stay where it is; surrounding text runs collapse.
+        let mut blocks = vec![
+            text_block("attach"),
+            text_block("more attach"),
+            image_block(),
+            text_block("user prompt"),
+            text_block("more prompt"),
+        ];
+        let removed = coalesce_adjacent_text_blocks(&mut blocks);
+        assert_eq!(removed, 2);
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            matches!(&blocks[0], ContentBlock::Text { text, .. } if text == "attach\n\nmore attach")
+        );
+        assert!(matches!(&blocks[1], ContentBlock::Image { .. }));
+        assert!(
+            matches!(&blocks[2], ContentBlock::Text { text, .. } if text == "user prompt\n\nmore prompt")
+        );
+    }
+
+    #[test]
+    fn coalesce_noop_on_single_block() {
+        let mut blocks = vec![text_block("solo")];
+        assert_eq!(coalesce_adjacent_text_blocks(&mut blocks), 0);
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn coalesce_noop_on_empty() {
+        let mut blocks: Vec<ContentBlock> = vec![];
+        assert_eq!(coalesce_adjacent_text_blocks(&mut blocks), 0);
+    }
+
+    #[test]
+    fn validate_and_repair_attachment_then_prompt_yields_single_text_block() {
+        // End-to-end: simulate the inject_attachments_into_session flow
+        // followed by the user's typed prompt. Two consecutive user
+        // messages: attach (Blocks([Text])) + prompt (Text). After repair
+        // they merge into one user message, and the resulting Blocks must
+        // contain a single Text — what every driver downstream relies on.
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![text_block(
+                    "[Attached file: spec.md (4181 bytes)]\n\n# Spec\n\nbody",
+                )]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Text("总结一下".to_string()),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+        let (repaired, _stats) = validate_and_repair_with_stats(&messages);
+        assert_eq!(repaired.len(), 1, "two same-role messages merge");
+        match &repaired[0].content {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1, "adjacent text blocks coalesce");
+                if let ContentBlock::Text { text, .. } = &blocks[0] {
+                    assert!(text.contains("[Attached file: spec.md"));
+                    assert!(text.contains("总结一下"));
+                    let attach_pos = text.find("[Attached").unwrap();
+                    let prompt_pos = text.find("总结一下").unwrap();
+                    assert!(attach_pos < prompt_pos, "order preserved");
+                } else {
+                    panic!("expected Text block");
+                }
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
 
     fn tool_use_block(id: &str) -> ContentBlock {
         ContentBlock::ToolUse {
@@ -2503,5 +2776,62 @@ mod tests {
             has_synthetic_result_for(after_assistant, "call_1"),
             "user message after assistant must contain synthetic ToolResult for call_1"
         );
+    }
+
+    #[test]
+    fn ensure_starts_with_user_drops_leading_assistant() {
+        // Trim left an assistant turn at position 0 — Gemini rejects this.
+        let messages = vec![
+            Message::assistant("orphaned reply"),
+            Message::user("first user turn"),
+            Message::assistant("response"),
+        ];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, Role::User);
+        assert_eq!(result[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_no_op_when_already_user() {
+        let messages = vec![Message::user("hi"), Message::assistant("hello")];
+        let result = ensure_starts_with_user(messages.clone());
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, Role::User);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_handles_no_user_at_all() {
+        // No user turns anywhere — function returns input unchanged
+        // (the caller's post-trim safety path will synthesize a user turn).
+        let messages = vec![Message::assistant("orphan")];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn ensure_starts_with_user_recovers_after_orphan_tool_result() {
+        // First user turn consists solely of an orphaned ToolResult that
+        // validate_and_repair will drop, re-exposing another assistant turn.
+        // The loop must keep dropping until a real user turn surfaces.
+        let messages = vec![
+            Message::assistant("first orphan"),
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![tool_result_block("missing", "x")]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::assistant("second orphan"),
+            Message::user("real user turn"),
+            Message::assistant("real reply"),
+        ];
+        let result = ensure_starts_with_user(messages);
+        assert_eq!(result[0].role, Role::User);
+        match &result[0].content {
+            MessageContent::Text(t) => assert_eq!(t, "real user turn"),
+            other => panic!("expected text user turn, got {other:?}"),
+        }
     }
 }

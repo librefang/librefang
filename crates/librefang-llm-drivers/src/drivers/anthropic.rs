@@ -4,7 +4,9 @@
 //! system prompt extraction, and retry on 429/529 errors.
 
 use crate::backoff::standard_retry_delay;
-use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CompletionRequest, CompletionResponse, LlmDriver, LlmError, LlmFamily, StreamEvent,
+};
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -236,11 +238,19 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         append_response_format_instructions(&mut system_text, rf);
     }
 
+    // Resolve cache TTL once. `None` here means caching is disabled for
+    // this request and no markers should be written anywhere.
+    let cache_ttl = if request.prompt_caching {
+        Some(CacheTtl::from_request_field(request.cache_ttl))
+    } else {
+        None
+    };
+
     // Build the system field: structured blocks with cache_control when
     // prompt caching is enabled, plain string otherwise.
-    let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
+    let system = system_text.map(|text| build_system_value(&text, cache_ttl));
 
-    // Build API messages, filtering out system messages
+    // Build API messages, filtering out system messages.
     let mut api_messages: Vec<ApiMessage> = request
         .messages
         .iter()
@@ -248,29 +258,11 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         .map(convert_message)
         .collect();
 
-    // When prompt caching is on, stamp `cache_control: ephemeral` on the
-    // last content block of the last message. Anthropic caches the prefix
-    // up through that block — so the next turn (which shares everything
-    // except a new trailing user message) hits cache for the whole
-    // conversation history so far, not just system + tools. This is what
-    // turns forkedAgent into a meaningful cost saver on multi-turn
-    // conversations.
-    //
-    // Text-content messages (the common plain-string form) are upgraded
-    // to a single-block `Blocks` payload so the marker has somewhere to
-    // live — Anthropic doesn't allow cache_control on the shorthand
-    // plain-string content form.
-    if request.prompt_caching {
-        if let Some(last_msg) = api_messages.last_mut() {
-            stamp_last_block_cache_control(last_msg);
-        }
-    }
-
-    // Build tools. When prompt caching is enabled, stamp `cache_control`
-    // on the last tool so Anthropic caches the system + tools prefix as a
-    // single unit. Without this, only the system block cached — tools
-    // (often several KB of schema) were rewritten on every call.
+    // Build tools. When caching is on, stamp the last tool so Anthropic
+    // caches the (system + tools) prefix as a single unit — without this
+    // the multi-KB tool schemas would be rewritten on every call.
     let tool_count = request.tools.len();
+    let has_tools = tool_count > 0;
     let api_tools: Vec<ApiTool> = request
         .tools
         .iter()
@@ -281,14 +273,24 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 input_schema: t.input_schema.clone(),
-                cache_control: if request.prompt_caching && is_last {
-                    Some(serde_json::json!({"type": "ephemeral"}))
-                } else {
-                    None
+                cache_control: match cache_ttl {
+                    Some(ttl) if is_last => Some(ttl.to_marker()),
+                    _ => None,
                 },
             }
         })
         .collect();
+
+    // Apply system_and_3 rolling-window markers on the message list.
+    // Anthropic allows up to 4 cache_control breakpoints per request,
+    // counted across system + tools + messages. We've already used 1 for
+    // system and (when present) 1 for the last tool, leaving 2-3 slots
+    // for the trailing messages. This is what makes mid-conversation
+    // tool_use/tool_result rounds cache-eligible — the previous turn's
+    // tail enters the prefix instead of being re-billed every call.
+    if let Some(ttl) = cache_ttl {
+        apply_cache_markers_system_and_3(&mut api_messages, has_tools, ttl);
+    }
 
     // Anthropic requires budget_tokens >= 1024 for extended thinking.
     // Skip thinking if budget is too low.
@@ -355,8 +357,11 @@ impl LlmDriver for AnthropicDriver {
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&api_request);
+                .header("content-type", "application/json");
+            if request_uses_1h_cache(&request) {
+                req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
+            }
+            let mut req_builder = req_builder.json(&api_request);
             if let Some(secs) = self.request_timeout_secs {
                 req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
             }
@@ -457,8 +462,11 @@ impl LlmDriver for AnthropicDriver {
                 .post(&url)
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&api_request);
+                .header("content-type", "application/json");
+            if request_uses_1h_cache(&request) {
+                req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
+            }
+            let mut req_builder = req_builder.json(&api_request);
             if let Some(secs) = self.request_timeout_secs {
                 req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
             }
@@ -762,6 +770,10 @@ impl LlmDriver for AnthropicDriver {
             message: "Max retries exceeded".to_string(),
         })
     }
+
+    fn family(&self) -> LlmFamily {
+        LlmFamily::Anthropic
+    }
 }
 
 /// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
@@ -838,54 +850,135 @@ fn append_response_format_instructions(system: &mut Option<String>, rf: &Respons
     }
 }
 
-/// Stamp `cache_control: ephemeral` on the last content block of this
-/// message. If the message is in the plain-string form (`ApiContent::Text`),
-/// upgrade it to a single-element `Blocks` payload first — Anthropic's
-/// API only accepts `cache_control` on structured content blocks, not on
-/// shorthand strings.
-fn stamp_last_block_cache_control(msg: &mut ApiMessage) {
-    let marker = serde_json::json!({"type": "ephemeral"});
-    // Upgrade plain string content to block form so the marker has a
-    // block to live on. This is a lossless transformation — Anthropic
-    // treats `{type: text, text: "…"}` identically to the raw string.
+/// Cache TTL hint for Anthropic prompt caching. `Short` is the default
+/// 5-minute ephemeral cache; `Long` is the 1-hour cache (gated by the
+/// `extended-cache-ttl-2025-04-11` beta header — driver attaches it).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheTtl {
+    Short,
+    Long,
+}
+
+impl CacheTtl {
+    /// Resolve the TTL from the user-facing `cache_ttl` field. Anything
+    /// other than `Some("1h")` collapses to the default 5-minute window.
+    fn from_request_field(field: Option<&'static str>) -> Self {
+        match field {
+            Some("1h") => Self::Long,
+            _ => Self::Short,
+        }
+    }
+
+    /// JSON marker to write into a `cache_control` slot.
+    fn to_marker(self) -> serde_json::Value {
+        match self {
+            Self::Short => serde_json::json!({"type": "ephemeral"}),
+            Self::Long => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+        }
+    }
+}
+
+/// Beta header required for 1-hour prompt cache TTL. See
+/// <https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration-beta>.
+const ANTHROPIC_1H_CACHE_BETA: &str = "extended-cache-ttl-2025-04-11";
+
+/// Whether this request needs the 1h cache beta header.
+fn request_uses_1h_cache(req: &CompletionRequest) -> bool {
+    req.prompt_caching && matches!(req.cache_ttl, Some("1h"))
+}
+
+/// Apply `system_and_3` rolling-window cache markers on the trailing
+/// messages.
+///
+/// Anthropic allows at most 4 `cache_control` breakpoints per request,
+/// counted across system + tools + messages. The system block always
+/// consumes 1; the tools-last marker consumes another when tools are
+/// non-empty. This function fills the remaining slots from the tail of
+/// the message list — newest first, so the cached prefix always covers
+/// the maximum amount of recent history.
+fn apply_cache_markers_system_and_3(
+    api_messages: &mut [ApiMessage],
+    has_tools: bool,
+    ttl: CacheTtl,
+) {
+    let used_outside = 1usize + if has_tools { 1 } else { 0 }; // system [+ tools]
+    let remaining = 4usize.saturating_sub(used_outside); // 2 or 3
+    if remaining == 0 || api_messages.is_empty() {
+        return;
+    }
+    let marker = ttl.to_marker();
+    let mut stamped = 0usize;
+    // Walk tail → head and only count messages where a marker actually
+    // landed. Empty `Blocks` (e.g. messages whose only content was a
+    // Thinking block, filtered by `convert_message`) are skipped without
+    // consuming the budget — otherwise the rolling window silently
+    // shrinks below its 2-3 message target and the promised cache reuse
+    // is not realised.
+    for msg in api_messages.iter_mut().rev() {
+        if stamped >= remaining {
+            break;
+        }
+        if try_stamp_block_with_marker(msg, &marker) {
+            stamped += 1;
+        }
+    }
+}
+
+/// Attempt to stamp `marker` on the last content block of this message.
+/// Returns `true` iff a marker actually landed (i.e. either the
+/// plain-string `Text` form was upgraded into a single-element block
+/// list, or the existing `Blocks` payload had a last block that could
+/// carry `cache_control`). Returns `false` for empty `Blocks` payloads
+/// — in that case the caller should not consume a breakpoint slot, so
+/// the rolling window can keep walking backwards.
+///
+/// If the message uses the plain-string `ApiContent::Text` form it is
+/// upgraded to a single-element `Blocks` payload first — Anthropic only
+/// accepts `cache_control` on structured content blocks, not on
+/// shorthand strings. This upgrade is a lossless wire-format change.
+fn try_stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value) -> bool {
     if let ApiContent::Text(text) = &msg.content {
         let text = text.clone();
         msg.content = ApiContent::Blocks(vec![ApiContentBlock::Text {
             text,
-            cache_control: Some(marker),
+            cache_control: Some(marker.clone()),
         }]);
-        return;
+        return true;
     }
     if let ApiContent::Blocks(blocks) = &mut msg.content {
-        // Walk backward to the last serializable block (some Thinking-like
-        // entries were already filtered out during convert_message, so the
-        // raw tail is fine to mark). Empty `Blocks` → nothing to do;
-        // downstream code already handles zero-block messages, marker
-        // would have nowhere to live.
+        // Thinking blocks were already filtered out by `convert_message`,
+        // so any block reachable here can safely carry `cache_control`.
         if let Some(last) = blocks.last_mut() {
             match last {
                 ApiContentBlock::Text { cache_control, .. }
                 | ApiContentBlock::Image { cache_control, .. }
                 | ApiContentBlock::ToolUse { cache_control, .. }
                 | ApiContentBlock::ToolResult { cache_control, .. } => {
-                    *cache_control = Some(marker);
+                    *cache_control = Some(marker.clone());
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
-fn build_system_value(text: &str, prompt_caching: bool) -> serde_json::Value {
-    if prompt_caching {
-        serde_json::json!([
-            {
-                "type": "text",
-                "text": text,
-                "cache_control": {"type": "ephemeral"}
-            }
-        ])
-    } else {
-        serde_json::Value::String(text.to_string())
+/// Render the system field. When caching is disabled (`ttl: None`) the
+/// shorthand string form is used; otherwise the value is upgraded to a
+/// single-element block array carrying the cache marker.
+fn build_system_value(text: &str, ttl: Option<CacheTtl>) -> serde_json::Value {
+    match ttl {
+        Some(t) => {
+            let marker = t.to_marker();
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": text,
+                    "cache_control": marker,
+                }
+            ])
+        }
+        None => serde_json::Value::String(text.to_string()),
     }
 }
 
@@ -1032,6 +1125,15 @@ mod tests {
     }
 
     #[test]
+    fn test_anthropic_driver_family_is_anthropic() {
+        let driver = AnthropicDriver::new(
+            "test-key".to_string(),
+            "https://api.anthropic.com".to_string(),
+        );
+        assert_eq!(driver.family(), LlmFamily::Anthropic);
+    }
+
+    #[test]
     fn test_convert_response() {
         let api_response = ApiResponse {
             content: vec![
@@ -1062,13 +1164,13 @@ mod tests {
 
     #[test]
     fn test_build_system_value_plain() {
-        let val = build_system_value("You are helpful.", false);
+        let val = build_system_value("You are helpful.", None);
         assert_eq!(val.as_str().unwrap(), "You are helpful.");
     }
 
     #[test]
     fn test_build_system_value_cached() {
-        let val = build_system_value("You are helpful.", true);
+        let val = build_system_value("You are helpful.", Some(CacheTtl::Short));
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["type"], "text");
@@ -1217,6 +1319,7 @@ mod tests {
             system: Some("sys".to_string()),
             thinking: None,
             prompt_caching: true,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1254,6 +1357,7 @@ mod tests {
             system: Some("sys".to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1263,18 +1367,35 @@ mod tests {
         assert!(api_request.tools[0].cache_control.is_none());
     }
 
-    /// Last message gets cache_control: ephemeral on its last content block
-    /// when prompt caching is on. This is what turns forkedAgent into a real
-    /// cost saver for multi-turn conversations — the full message prefix
-    /// caches, not just system + tools.
+    /// Helper: extract the cache_control marker from a message's last block,
+    /// or `None` if the message is in plain-string form (no marker possible).
+    fn last_block_cache_control(msg: &ApiMessage) -> Option<&serde_json::Value> {
+        let blocks = match &msg.content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => return None,
+        };
+        match blocks.last()? {
+            ApiContentBlock::Text { cache_control, .. }
+            | ApiContentBlock::Image { cache_control, .. }
+            | ApiContentBlock::ToolUse { cache_control, .. }
+            | ApiContentBlock::ToolResult { cache_control, .. } => cache_control.as_ref(),
+        }
+    }
+
+    /// In a 5-turn conversation with no tools, system_and_3 fills 3 message
+    /// breakpoints (the 1 system slot + 3 message slots = 4 total, the
+    /// Anthropic per-request cap). Messages [2..=4] (trailing 3) carry the
+    /// marker; [0..=1] do not.
     #[test]
-    fn test_messages_cache_control_on_last_block() {
+    fn multi_turn_rolling_window_stamps_last_three() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: vec![
-                Message::user("first user msg"),
-                Message::assistant("first assistant reply"),
-                Message::user("second user msg (last)"),
+                Message::user("u1"),
+                Message::assistant("a1"),
+                Message::user("u2"),
+                Message::assistant("a2"),
+                Message::user("u3 (last)"),
             ],
             tools: vec![],
             max_tokens: 100,
@@ -1282,6 +1403,104 @@ mod tests {
             system: Some("sys".to_string()),
             thinking: None,
             prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let api_request = build_anthropic_request(&request);
+        // Trailing 3 must carry the marker.
+        for i in 2..5 {
+            let cc = last_block_cache_control(&api_request.messages[i])
+                .unwrap_or_else(|| panic!("message[{i}] missing cache_control"));
+            assert_eq!(cc["type"], "ephemeral");
+            assert!(cc.get("ttl").is_none(), "default ttl should be 5m (no key)");
+        }
+        // Earlier messages must NOT carry a marker — burning a breakpoint
+        // there would split the cache and waste the 4-slot budget.
+        for i in 0..2 {
+            assert!(
+                last_block_cache_control(&api_request.messages[i]).is_none(),
+                "message[{i}] should not be marked",
+            );
+        }
+    }
+
+    /// When tools are present, the tools-last marker consumes 1 of the 4
+    /// breakpoints; only 2 message slots remain (1 system + 1 tools-last
+    /// + 2 messages = 4). Messages [4..=5] are stamped; [0..=3] are not.
+    #[test]
+    fn rolling_window_reserves_slot_for_tools() {
+        let tool = ToolDefinition {
+            name: "alpha".to_string(),
+            description: "x".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![
+                Message::user("u1"),
+                Message::assistant("a1"),
+                Message::user("u2"),
+                Message::assistant("a2"),
+                Message::user("u3"),
+                Message::assistant("a3 (last)"),
+            ],
+            tools: vec![tool.clone(), tool],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let api_request = build_anthropic_request(&request);
+        // Last 2 messages carry the marker.
+        for i in 4..6 {
+            let cc = last_block_cache_control(&api_request.messages[i])
+                .unwrap_or_else(|| panic!("message[{i}] missing cache_control"));
+            assert_eq!(cc["type"], "ephemeral");
+        }
+        // Earlier 4 messages must not.
+        for i in 0..4 {
+            assert!(
+                last_block_cache_control(&api_request.messages[i]).is_none(),
+                "message[{i}] should not be marked",
+            );
+        }
+        // Tools-last keeps its marker.
+        assert!(api_request.tools[0].cache_control.is_none());
+        assert!(api_request.tools[1].cache_control.is_some());
+    }
+
+    /// A `ToolResult` content block at the tail of the rolling window must
+    /// receive its `cache_control` field — not just the `Text` arm. This
+    /// guards the `match` arm coverage in `stamp_block_with_marker`.
+    #[test]
+    fn tool_result_block_in_window_is_stamped() {
+        let tool_result_msg = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "tu_1".to_string(),
+            tool_name: "alpha".to_string(),
+            content: "ok".to_string(),
+            is_error: false,
+            status: Default::default(),
+            approval_request_id: None,
+        }]);
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![tool_result_msg],
+            tools: vec![],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1289,33 +1508,132 @@ mod tests {
         };
         let api_request = build_anthropic_request(&request);
         let last = api_request.messages.last().expect("has last message");
-        // Plain-string Text content was upgraded to Blocks form so the
-        // marker has somewhere to live. Anthropic rejects cache_control
-        // on shorthand strings, so this upgrade is load-bearing.
         let blocks = match &last.content {
             ApiContent::Blocks(b) => b,
-            ApiContent::Text(_) => {
-                panic!("cache_control on last msg requires Blocks form, got Text")
-            }
+            ApiContent::Text(_) => panic!("expected Blocks for tool_result"),
         };
-        let last_block = blocks.last().expect("has last block");
-        let cc = match last_block {
-            ApiContentBlock::Text { cache_control, .. } => cache_control.as_ref(),
-            _ => panic!("expected Text block"),
+        let cc = match blocks.last().expect("has last block") {
+            ApiContentBlock::ToolResult { cache_control, .. } => cache_control
+                .as_ref()
+                .expect("tool_result must carry cache_control"),
+            _ => panic!("expected ToolResult"),
         };
-        assert_eq!(cc.expect("cache_control set")["type"], "ephemeral");
+        assert_eq!(cc["type"], "ephemeral");
+    }
 
-        // Only the LAST message's last block is marked — earlier messages
-        // would split the cache into fragments and waste the 4-breakpoint
-        // budget Anthropic allows per request.
-        let first = &api_request.messages[0];
-        if let ApiContent::Blocks(blocks) = &first.content {
-            for block in blocks {
-                if let ApiContentBlock::Text { cache_control, .. } = block {
-                    assert!(cache_control.is_none(), "first message must NOT be marked");
-                }
-            }
-        }
+    /// Even with zero non-system messages, the system block carries a
+    /// cache_control marker — `build_system_value` must always upgrade
+    /// the system field to the structured form when caching is on, so
+    /// the system breakpoint is preserved for tools-only or probe calls.
+    #[test]
+    fn system_block_always_stamped_when_caching_on() {
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![Message::user("hi")], // dummy: api requires >=1 user msg
+            tools: vec![],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys-prompt".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let api_request = build_anthropic_request(&request);
+        let system = api_request.system.expect("system field set");
+        // Caching on → system rendered as a single-element block array.
+        let arr = system.as_array().expect("system must be array form");
+        let cc = arr[0]
+            .get("cache_control")
+            .expect("system block must carry cache_control");
+        assert_eq!(cc["type"], "ephemeral");
+    }
+
+    /// `cache_ttl: Some("1h")` propagates the `"ttl":"1h"` field into every
+    /// marker (system + tools + messages) and triggers the 1h beta header
+    /// gate (`request_uses_1h_cache`). The header itself is attached at
+    /// the HTTP layer; here we verify the request-shaping logic.
+    #[test]
+    fn ttl_1h_propagates_into_all_markers() {
+        let tool = ToolDefinition {
+            name: "alpha".to_string(),
+            description: "x".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![
+                Message::user("u1"),
+                Message::assistant("a1"),
+                Message::user("u2 (last)"),
+            ],
+            tools: vec![tool],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: Some("1h"),
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        // HTTP-layer header gate.
+        assert!(request_uses_1h_cache(&request));
+        let api_request = build_anthropic_request(&request);
+        // System carries 1h ttl.
+        let sys_arr = api_request
+            .system
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .expect("system in array form");
+        assert_eq!(sys_arr[0]["cache_control"]["ttl"], "1h");
+        // Tools-last carries 1h ttl.
+        let tool_cc = api_request.tools[0]
+            .cache_control
+            .as_ref()
+            .expect("tools-last marked");
+        assert_eq!(tool_cc["ttl"], "1h");
+        // Last message (only 1 slot left after system + tools) carries 1h ttl.
+        let last_cc = last_block_cache_control(api_request.messages.last().unwrap())
+            .expect("last message marked");
+        assert_eq!(last_cc["ttl"], "1h");
+    }
+
+    /// 5m default: caching on but `cache_ttl = None` → markers carry no
+    /// `ttl` key (the wire format Anthropic interprets as 5-minute
+    /// ephemeral cache), and the 1h beta header gate stays closed.
+    #[test]
+    fn ttl_default_omits_ttl_field_and_skips_beta_header() {
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        assert!(!request_uses_1h_cache(&request));
+        let api_request = build_anthropic_request(&request);
+        let sys_arr = api_request
+            .system
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .expect("system in array form");
+        let cc = &sys_arr[0]["cache_control"];
+        assert_eq!(cc["type"], "ephemeral");
+        assert!(cc.get("ttl").is_none(), "5m default must not write ttl key");
     }
 
     /// With caching disabled, no message block gets cache_control — ensures
@@ -1332,6 +1650,7 @@ mod tests {
             system: Some("sys".to_string()),
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1345,6 +1664,171 @@ mod tests {
         match &last.content {
             ApiContent::Text(_) => { /* expected */ }
             ApiContent::Blocks(_) => panic!("expected Text form when caching off"),
+        }
+    }
+
+    /// Regression: a message whose `convert_message` output is an empty
+    /// `Blocks` payload (e.g. only a Thinking block, which gets filtered)
+    /// must NOT consume a rolling-window slot. Otherwise the budget is
+    /// burnt on a no-op stamp and the trailing window silently shrinks
+    /// below its 2-3 message target — defeating the cache reuse this PR
+    /// promised.
+    #[test]
+    fn empty_blocks_message_does_not_consume_breakpoint() {
+        // 5 ApiMessages, no tools → remaining budget = 3.
+        // Index 3 is an empty-Blocks message (synthetic stand-in for a
+        // post-filter Thinking-only turn). Expected: indices [4, 2, 1]
+        // get stamped (3 stamps walking tail → head, skipping idx 3),
+        // index 0 stays clean. Old algorithm would have stamped only
+        // [4, 2] and burnt the third slot on the empty message at idx 3.
+        let mut api_messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u1".to_string()),
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: ApiContent::Text("a1".to_string()),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u2".to_string()),
+            },
+            // Empty Blocks — what convert_message produces when an
+            // assistant turn carried only a Thinking block.
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: ApiContent::Blocks(vec![]),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: ApiContent::Text("u3".to_string()),
+            },
+        ];
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
+
+        // Index 4 (newest) — stamped.
+        assert!(
+            last_block_cache_control(&api_messages[4]).is_some(),
+            "tail message must be stamped",
+        );
+        // Index 3 — empty Blocks, untouched (no slot consumed).
+        match &api_messages[3].content {
+            ApiContent::Blocks(b) => assert!(b.is_empty(), "empty Blocks must stay empty"),
+            ApiContent::Text(_) => panic!("empty Blocks must not be re-shaped to Text"),
+        }
+        // Index 2 — stamped (would NOT be stamped under the old `take`
+        // algorithm, which is exactly the regression this test guards).
+        assert!(
+            last_block_cache_control(&api_messages[2]).is_some(),
+            "third-from-tail must be stamped after skipping empty Blocks",
+        );
+        // Index 1 — stamped (3rd successful stamp).
+        assert!(
+            last_block_cache_control(&api_messages[1]).is_some(),
+            "second-from-head must be stamped to fill the 3-slot budget",
+        );
+        // Index 0 — clean, budget exhausted.
+        assert!(
+            last_block_cache_control(&api_messages[0]).is_none(),
+            "head must stay unmarked once budget is exhausted",
+        );
+    }
+
+    /// Invariant: across the whole `ApiRequest` the total number of
+    /// `cache_control` markers MUST never exceed Anthropic's per-request
+    /// cap of 4 — system block + tools-last + at most 2 message blocks
+    /// in this configuration. Counts every `cache_control: Some(_)`
+    /// occurrence in system, tools and every message block.
+    #[test]
+    fn total_cache_control_breakpoints_at_most_4_invariant() {
+        let tool = ToolDefinition {
+            name: "alpha".to_string(),
+            description: "x".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+        };
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: vec![
+                Message::user("u1"),
+                Message::assistant("a1"),
+                Message::user("u2"),
+                Message::assistant("a2"),
+                Message::user("u3 (last)"),
+            ],
+            tools: vec![tool],
+            max_tokens: 100,
+            temperature: 0.0,
+            system: Some("sys".to_string()),
+            thinking: None,
+            prompt_caching: true,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let api_request = build_anthropic_request(&request);
+        let mut total = 0usize;
+
+        // System: array form → count entries with cache_control set.
+        if let Some(arr) = api_request.system.as_ref().and_then(|v| v.as_array()) {
+            total += arr
+                .iter()
+                .filter(|b| b.get("cache_control").is_some())
+                .count();
+        }
+
+        // Tools: count tools whose cache_control is Some.
+        total += api_request
+            .tools
+            .iter()
+            .filter(|t| t.cache_control.is_some())
+            .count();
+
+        // Messages: walk every block of every message.
+        for msg in &api_request.messages {
+            if let ApiContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    let cc = match block {
+                        ApiContentBlock::Text { cache_control, .. }
+                        | ApiContentBlock::Image { cache_control, .. }
+                        | ApiContentBlock::ToolUse { cache_control, .. }
+                        | ApiContentBlock::ToolResult { cache_control, .. } => cache_control,
+                    };
+                    if cc.is_some() {
+                        total += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            total <= 4,
+            "total cache_control markers must be <= 4, got {total}",
+        );
+    }
+
+    /// Pathological: every message in the conversation is empty Blocks
+    /// (every assistant turn was Thinking-only). The function must
+    /// gracefully no-op — no panic, no out-of-bounds, and no stamps —
+    /// rather than spinning forever or splattering markers onto blocks
+    /// that don't exist.
+    #[test]
+    fn rolling_window_when_all_messages_have_thinking_only_falls_back_gracefully() {
+        let mut api_messages: Vec<ApiMessage> = (0..5)
+            .map(|i| ApiMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: ApiContent::Blocks(vec![]),
+            })
+            .collect();
+        apply_cache_markers_system_and_3(&mut api_messages, false, CacheTtl::Short);
+
+        for (i, msg) in api_messages.iter().enumerate() {
+            assert!(
+                last_block_cache_control(msg).is_none(),
+                "message[{i}] must remain unmarked when no block exists to carry the marker",
+            );
         }
     }
 
@@ -1363,6 +1847,7 @@ mod tests {
             system: Some("sys".to_string()),
             thinking: None,
             prompt_caching: true,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

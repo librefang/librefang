@@ -57,6 +57,7 @@ import {
 } from "../lib/mutations/hands";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
+import { Modal } from "../components/ui/Modal";
 import { useCronJobs } from "../lib/queries/runtime";
 
 
@@ -138,16 +139,11 @@ function HandDetailPanel({
       : "bg-warning/10 text-warning";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[90vh] sm:max-h-[85vh] flex flex-col overflow-hidden animate-fade-in-scale"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Hero header */}
-        <div className="px-6 py-5 border-b border-border-subtle shrink-0">
+    <>
+      <Modal isOpen onClose={onClose} variant="drawer-right" size="2xl" hideCloseButton>
+        {/* Hero header — sticky inside the drawer's single scroll container
+            so identity + close stay reachable on long detail content. */}
+        <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface z-10">
           <div className="flex items-start gap-4">
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${heroIconClass}`}>
               <Hand className="w-5 h-5" />
@@ -192,9 +188,10 @@ function HandDetailPanel({
           </div>
         </div>
 
-        {/* Scrollable body */}
-        <div className="flex-1 overflow-y-auto scrollbar-thin">
-          <div className="px-6 py-5 space-y-5">
+        {/* Body — Modal already wraps children in a single overflow-y-auto,
+            so this section just supplies padding/spacing without its own
+            scroll container (nested scroll inside a drawer is annoying). */}
+        <div className="px-6 py-5 space-y-5">
             {/* Description */}
             {hand.description && (
               <p className="text-sm text-text-dim leading-relaxed">{hand.description}</p>
@@ -295,9 +292,8 @@ function HandDetailPanel({
               settings={settings}
               settingsQuery={settingsQuery}
             />
-          </div>
         </div>
-      </div>
+      </Modal>
       <Suspense fallback={null}>
         <TomlViewer
           isOpen={showManifest}
@@ -312,7 +308,7 @@ function HandDetailPanel({
           }
         />
       </Suspense>
-    </div>
+    </>
   );
 }
 
@@ -704,6 +700,7 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
   handName: string;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const addToast = useUIStore((s) => s.addToast);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const toggleSchedule = useUpdateSchedule();
@@ -865,6 +862,20 @@ function HandSchedulesTab({ cronJobs, isLoading, onRefresh, agentId, handName }:
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold truncate">{job.name || "Unnamed"}</p>
                 <p className="text-[10px] font-mono text-text-dim/60 truncate">{schedule}</p>
+                {/*
+                  Cross-link to the full SchedulerPage editor instead of
+                  reimplementing DeliveryTargetsEditor inline. Keeps this
+                  widget compact and the editor lives in exactly one place.
+                */}
+                <button
+                  type="button"
+                  onClick={() => navigate({ to: "/scheduler" })}
+                  className="text-[10px] text-brand hover:underline mt-0.5"
+                >
+                  {t("hands.configure_delivery_targets", {
+                    defaultValue: "Configure delivery targets →",
+                  })}
+                </button>
               </div>
               <button
                 onClick={() => handleToggle(job)}

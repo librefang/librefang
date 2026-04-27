@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{
-    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat,
+    AutoRouteStrategy, ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat, PrefixStyle,
 };
 use librefang_types::message::ContentBlock;
 use regex::{Regex, RegexSet};
@@ -1501,7 +1501,7 @@ fn leading_vocative_name(text: &str) -> Option<String> {
 /// the matched pattern — this captures the Beeper-screenshot case
 /// `"Caterina, chiedi al Signore..."` where "Signore" is mentioned but the
 /// turn is addressed to Caterina.
-pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
+fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
     if text.is_empty() || pattern.is_empty() {
         return false;
     }
@@ -1541,7 +1541,7 @@ pub fn is_vocative_trigger(text: &str, pattern: &str) -> bool {
 /// Heuristic: extract a leading `<Capitalized>[,!]` token and look it up
 /// (case-insensitively) in the participant roster. If found and not equal
 /// to `agent_name`, the turn is addressed to someone else.
-pub fn is_addressed_to_other_participant(
+fn is_addressed_to_other_participant(
     text: &str,
     participants: &[ParticipantRef],
     agent_name: &str,
@@ -1809,6 +1809,111 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .unwrap_or(&message.sender.platform_id)
 }
 
+/// Wrap an outbound message with the responding agent's name according to
+/// `style`.
+///
+/// Applied once at the top of the final response text (never per streaming
+/// chunk). If the text already starts with the exact bracketed agent label
+/// (e.g. the agent echoed its own name, or an inner agent already prefixed a
+/// delegated reply), the wrap is skipped to keep things idempotent.
+///
+/// # Idempotency caveats
+///
+/// The "starts-with" check uses the literal `[name]` / `**[name]**` string. If
+/// `agent_name` itself contains `[`, `]`, or `*` characters, the detection is
+/// best-effort:
+///
+/// - The function never panics or corrupts UTF-8 — output stays well-formed.
+/// - For pathological names like `"a]b"`, repeated invocations may produce
+///   nested prefixes like `"[a]b] [a]b] text"` because the outer `[a]b]`
+///   isn't recognized as already-prefixed by a naive `starts_with`.
+///
+/// Worst-case degradation is therefore "extra prefix" rather than data loss
+/// or crash. Agents authoring outbound replies should pick names without
+/// bracket / asterisk characters; the dashboard's agent rename UI does not
+/// enforce this today.
+///
+/// Per-platform native identity features (Slack `username` override, Discord
+/// embed `author`, Telegram `From:` in rich messages) are intentionally not
+/// handled here.
+pub(crate) fn apply_agent_prefix(style: PrefixStyle, agent_name: &str, text: &str) -> String {
+    if matches!(style, PrefixStyle::Off) || agent_name.is_empty() {
+        return text.to_string();
+    }
+    let bracket = format!("[{agent_name}]");
+    let bold = format!("**[{agent_name}]**");
+    if text.starts_with(&bracket) || text.starts_with(&bold) {
+        return text.to_string();
+    }
+    match style {
+        PrefixStyle::Off => text.to_string(),
+        PrefixStyle::Bracket => format!("{bracket} {text}"),
+        PrefixStyle::BoldBracket => format!("{bold} {text}"),
+    }
+}
+
+/// Look up an agent's display name by id.
+///
+/// Returns `None` if the kernel can't list agents or the id is not currently
+/// known. Only called when `prefix_agent_name` is enabled, so the extra
+/// `list_agents()` round-trip is pay-per-use.
+async fn resolve_agent_name(handle: &Arc<dyn ChannelBridgeHandle>, id: AgentId) -> Option<String> {
+    handle
+        .list_agents()
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|(aid, name)| (aid == id).then_some(name))
+}
+
+/// Apply `prefix_agent_name` to an outbound agent response if configured.
+///
+/// Safe to call on every success path: resolves the agent name lazily and
+/// returns the original text unchanged when the style is `Off`.
+async fn maybe_prefix_response(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+    text: String,
+) -> String {
+    let style = overrides
+        .map(|o| o.prefix_agent_name)
+        .unwrap_or(PrefixStyle::Off);
+    if matches!(style, PrefixStyle::Off) {
+        return text;
+    }
+    match resolve_agent_name(handle, agent_id).await {
+        Some(name) => apply_agent_prefix(style, &name, &text),
+        None => text,
+    }
+}
+
+/// Resolve the leading prefix chunk (e.g. `"[coder] "`) for streaming output,
+/// or `None` if prefixing is disabled / agent name unknown.
+///
+/// Used by the streaming success path to inject the prefix as the first
+/// delta — `apply_agent_prefix` only handles the non-streaming "wrap full
+/// text" case.
+async fn resolve_prefix_chunk(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    overrides: Option<&ChannelOverrides>,
+    agent_id: AgentId,
+) -> Option<String> {
+    let style = overrides.map(|o| o.prefix_agent_name)?;
+    if matches!(style, PrefixStyle::Off) {
+        return None;
+    }
+    let name = resolve_agent_name(handle, agent_id).await?;
+    if name.is_empty() {
+        return None;
+    }
+    match style {
+        PrefixStyle::Off => None,
+        PrefixStyle::Bracket => Some(format!("[{name}] ")),
+        PrefixStyle::BoldBracket => Some(format!("**[{name}]** ")),
+    }
+}
+
 /// Send a response, applying output formatting and optional threading.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
@@ -1920,6 +2025,7 @@ async fn handle_send_error<F, Fut>(
     ct_str: &str,
     thread_id: Option<&str>,
     output_format: OutputFormat,
+    overrides: Option<&ChannelOverrides>,
     send_fn: F,
 ) where
     F: FnOnce(AgentId) -> Fut,
@@ -1933,6 +2039,7 @@ async fn handle_send_error<F, Fut>(
             Ok(response) => {
                 send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Done).await;
                 if !response.is_empty() {
+                    let response = maybe_prefix_response(handle, overrides, new_id, response).await;
                     send_response(adapter, sender, response, thread_id, output_format).await;
                 }
                 handle
@@ -2349,6 +2456,7 @@ async fn dispatch_message(
                 router,
                 &message.sender,
                 &message.channel,
+                overrides.as_ref(),
             )
             .await;
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -2407,11 +2515,172 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
-        if blocks.iter().any(|b| match b {
-            ContentBlock::ImageFile { .. } => true,
-            ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
-            _ => false,
-        }) {
+        if has_file_saved_block(&blocks) {
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
+    // For voice messages: download to disk and send as content blocks so
+    // tools like media_transcribe can read the saved file directly.
+    if let ChannelContent::Voice {
+        ref url,
+        ref caption,
+        duration_seconds,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        if has_file_saved_block(&blocks) {
+            // Prepend a context block carrying duration + caption so the
+            // model knows this is voice (not an arbitrary file) and any
+            // user-supplied caption survives the save-path replacement.
+            let context = match caption {
+                Some(c) if !c.is_empty() => {
+                    format!("[Voice message ({duration_seconds}s)]\nCaption: {c}")
+                }
+                _ => format!("[Voice message ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
+    // For audio (music/podcast — distinct from voice memos): same pattern
+    // as Voice. Audio carries optional title/performer metadata which we
+    // surface in the prepended context block.
+    if let ChannelContent::Audio {
+        ref url,
+        ref caption,
+        duration_seconds,
+        ref title,
+        ref performer,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
+        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        if has_file_saved_block(&blocks) {
+            let mut header = format!("[Audio ({duration_seconds}s)");
+            match (title.as_deref(), performer.as_deref()) {
+                (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
+                    header.push_str(&format!(" — {t} by {p}"));
+                }
+                (Some(t), _) if !t.is_empty() => header.push_str(&format!(" — {t}")),
+                (_, Some(p)) if !p.is_empty() => header.push_str(&format!(" by {p}")),
+                _ => {}
+            }
+            header.push(']');
+            let context = match caption {
+                Some(c) if !c.is_empty() => format!("{header}\nCaption: {c}"),
+                _ => header,
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
+            dispatch_with_blocks(
+                blocks,
+                message,
+                handle,
+                router,
+                adapter,
+                ct_str,
+                thread_id,
+                output_format,
+                overrides.as_ref(),
+                journal,
+            )
+            .await;
+            return;
+        }
+        // Download failed — fall through to text description below
+    }
+
+    // For video messages: same pattern as Voice. Prefer the channel-
+    // provided `filename` when present, otherwise derive from URL, then
+    // fall back to a stable default so the saved file always has an
+    // extension hint for `media_transcribe` / vision tools.
+    if let ChannelContent::Video {
+        ref url,
+        ref caption,
+        duration_seconds,
+        ref filename,
+    } = message.content
+    {
+        let download_dir = handle
+            .channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let max_bytes = handle
+            .channels_download_max_bytes()
+            .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
+        let resolved_filename = filename
+            .clone()
+            .or_else(|| filename_from_url(url))
+            .unwrap_or_else(|| "video.mp4".to_string());
+        let mut blocks =
+            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
+        if has_file_saved_block(&blocks) {
+            let context = match caption {
+                Some(c) if !c.is_empty() => {
+                    format!("[Video ({duration_seconds}s)]\nCaption: {c}")
+                }
+                _ => format!("[Video ({duration_seconds}s)]"),
+            };
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: context,
+                    provider_metadata: None,
+                },
+            );
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -2683,38 +2952,7 @@ async fn dispatch_message(
             vec![]
         };
 
-        if matches!(
-            cmd,
-            "start"
-                | "help"
-                | "agents"
-                | "agent"
-                | "status"
-                | "models"
-                | "providers"
-                | "new"
-                | "reboot"
-                | "compact"
-                | "model"
-                | "stop"
-                | "usage"
-                | "think"
-                | "skills"
-                | "hands"
-                | "btw"
-                | "workflows"
-                | "workflow"
-                | "triggers"
-                | "trigger"
-                | "schedules"
-                | "schedule"
-                | "approvals"
-                | "approve"
-                | "reject"
-                | "budget"
-                | "peers"
-                | "a2a"
-        ) {
+        if crate::commands::is_channel_command(cmd) {
             if is_command_allowed(cmd, overrides.as_ref()) {
                 // Special-case /agents: send an inline keyboard with one button per agent.
                 if cmd == "agents" {
@@ -2797,6 +3035,7 @@ async fn dispatch_message(
                     router,
                     &message.sender,
                     &message.channel,
+                    overrides.as_ref(),
                 )
                 .await;
                 send_response(adapter, &message.sender, result, thread_id, output_format).await;
@@ -2925,6 +3164,7 @@ async fn dispatch_message(
     // Auto-reply check — if enabled, the engine decides whether to process this message.
     // If auto-reply is enabled but suppressed for this message, skip agent call entirely.
     if let Some(reply) = handle.check_auto_reply(agent_id, &text).await {
+        let reply = maybe_prefix_response(handle, overrides.as_ref(), agent_id, reply).await;
         send_response(adapter, &message.sender, reply, thread_id, output_format).await;
         handle
             .record_delivery(
@@ -2996,13 +3236,32 @@ async fn dispatch_message(
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
+                // Resolve the agent-name prefix once up-front so it can be
+                // injected as the very first delta — without this, streaming
+                // adapters (e.g. Telegram) would never show the prefix on the
+                // success path. `None` when prefix is disabled, agent unknown,
+                // or the agent has no display name.
+                let prefix_chunk = resolve_prefix_chunk(handle, overrides.as_ref(), agent_id).await;
+
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
                 let mut buffered_text = String::new();
                 let buffer_handle = tokio::spawn({
+                    let prefix_chunk = prefix_chunk.clone();
                     let mut buffered = String::new();
                     async move {
+                        // Inject the prefix as the first delta so it becomes
+                        // part of the streamed message. Mirror it into the
+                        // buffer so the stream-fail fallback path's
+                        // idempotency check (`apply_agent_prefix`) sees an
+                        // already-prefixed buffer and skips re-prefixing.
+                        if let Some(ref p) = prefix_chunk {
+                            buffered.push_str(p);
+                            if adapter_tx.send(p.clone()).await.is_err() {
+                                return buffered;
+                            }
+                        }
                         while let Some(delta) = delta_rx.recv().await {
                             buffered.push_str(&delta);
                             // Best-effort forward — if adapter dropped rx, stop.
@@ -3075,6 +3334,17 @@ async fn dispatch_message(
                         if !buffered_text.is_empty()
                             && (kernel_ok || !adapter.suppress_error_responses())
                         {
+                            let buffered_text = if kernel_ok {
+                                maybe_prefix_response(
+                                    handle,
+                                    overrides.as_ref(),
+                                    agent_id,
+                                    buffered_text,
+                                )
+                                .await
+                            } else {
+                                buffered_text
+                            };
                             send_response(
                                 adapter,
                                 &message.sender,
@@ -3201,6 +3471,11 @@ async fn dispatch_message(
         };
         send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
         if !accumulated.is_empty() && (success || !adapter.suppress_error_responses()) {
+            let accumulated = if success {
+                maybe_prefix_response(handle, overrides.as_ref(), agent_id, accumulated).await
+            } else {
+                accumulated
+            };
             send_response(
                 adapter,
                 &message.sender,
@@ -3241,6 +3516,8 @@ async fn dispatch_message(
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             if !response.is_empty() {
+                let response =
+                    maybe_prefix_response(handle, overrides.as_ref(), agent_id, response).await;
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             handle
@@ -3276,6 +3553,7 @@ async fn dispatch_message(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides.as_ref(),
                 |new_id| {
                     let h = handle.clone();
                     let t = text.clone();
@@ -3342,6 +3620,44 @@ const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// Used both by `download_file_to_blocks` to produce the text and by
 /// `dispatch_message` to detect success vs failure.
 const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
+
+/// Returns `true` when [`download_file_to_blocks`] produced a block that
+/// represents a successfully saved download — either an inline `ImageFile`
+/// (when the response was image-typed) or a `Text` block whose content
+/// starts with [`FILE_SAVED_BLOCK_PREFIX`] (the canonical save-success
+/// marker).
+///
+/// All four media-download arms in `dispatch_message` (File, Voice, Audio,
+/// Video) use this single check so any future change to the success
+/// representation lands in one place. The check is intentionally broad:
+/// even when a non-image arm (Voice/Audio/Video) receives an image-typed
+/// response, the bytes are already on disk and the agent should still
+/// receive the dispatched block — falling through to the text fallback
+/// here would orphan the saved file.
+fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|b| match b {
+        ContentBlock::ImageFile { .. } => true,
+        ContentBlock::Text { text, .. } => text.starts_with(FILE_SAVED_BLOCK_PREFIX),
+        _ => false,
+    })
+}
+
+/// Extract a basename-style filename from the path component of a URL.
+///
+/// Returns `None` when the URL is unparseable, has no path basename, or the
+/// basename collapses to empty after trimming. Query/fragment portions are
+/// dropped. Used by the voice/file dispatch path to derive a stable filename
+/// for the on-disk saved copy when the channel didn't provide one.
+fn filename_from_url(url: &str) -> Option<String> {
+    let parsed = ::url::Url::parse(url).ok()?;
+    let last = parsed.path_segments()?.next_back()?;
+    let trimmed = last.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
 
 /// Sanitize a file extension to alphanumeric characters only.
 ///
@@ -3906,6 +4222,7 @@ async fn dispatch_with_blocks(
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             if !response.is_empty() {
+                let response = maybe_prefix_response(handle, overrides, agent_id, response).await;
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             if let Some(j) = journal {
@@ -3941,6 +4258,7 @@ async fn dispatch_with_blocks(
                 ct_str,
                 thread_id,
                 output_format,
+                overrides,
                 |new_id| {
                     let h = handle.clone();
                     async move {
@@ -3963,6 +4281,11 @@ async fn dispatch_with_blocks(
 }
 
 /// Handle a bot command (returns the response text).
+///
+/// `overrides` reflects the merged agent + channel policy for the calling
+/// context. It currently affects `/help` rendering (so disabled/blocked
+/// commands don't appear in the help text); other branches treat it as
+/// advisory.
 async fn handle_command(
     name: &str,
     args: &[String],
@@ -3970,6 +4293,7 @@ async fn handle_command(
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
     channel_type: &crate::types::ChannelType,
+    overrides: Option<&ChannelOverrides>,
 ) -> String {
     match name {
         "start" => {
@@ -3987,50 +4311,7 @@ async fn handle_command(
             msg.push_str("\nCommands:\n/agents - list agents\n/agent <name> - select an agent\n/help - show this help");
             msg
         }
-        "help" => "LibreFang Bot Commands:\n\
-             \n\
-             Session:\n\
-             /agents - list running agents\n\
-             /agent <name> - select which agent to talk to\n\
-             /new - reset session (clear messages)\n\
-             /reboot - hard reset session (full context clear, no summary)\n\
-             /compact - trigger LLM session compaction\n\
-             /model [name] - show or switch agent model\n\
-             /stop - cancel current agent run\n\
-             /usage - show session token usage and cost\n\
-             /think [on|off] - toggle extended thinking\n\
-             \n\
-             Info:\n\
-             /models - list available AI models\n\
-             /providers - show configured providers\n\
-             /skills - list installed skills\n\
-             /hands - list available and active hands\n\
-             /status - show system status\n\
-             \n\
-             Automation:\n\
-             /workflows - list workflows\n\
-             /workflow run <name> [input] - run a workflow\n\
-             /triggers - list event triggers\n\
-             /trigger add <agent> <pattern> <prompt> - create trigger\n\
-             /trigger del <id> - remove trigger\n\
-             /schedules - list cron jobs\n\
-             /schedule add <agent> <cron-5-fields> <message> - create job\n\
-             /schedule del <id> - remove job\n\
-             /schedule run <id> - run job now\n\
-             /approvals - list pending approvals\n\
-             /approve <id> - approve a request\n\
-             /reject <id> - reject a request\n\
-             \n\
-             Monitoring:\n\
-             /budget - show spending limits and current costs\n\
-             /peers - show OFP peer network status\n\
-             /a2a - list discovered external A2A agents\n\
-             \n\
-             /btw <question> - ask a side question (ephemeral, not saved to session)\n\
-             \n\
-             /start - show welcome message\n\
-             /help - show this help"
-            .to_string(),
+        "help" => crate::commands::channel_help_text(overrides),
         "status" => handle.uptime_info().await,
         "agents" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -4485,12 +4766,28 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("agents", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "agents",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("coder"));
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/agents"));
     }
 
@@ -4515,6 +4812,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("Now talking to agent: coder"));
@@ -4719,6 +5017,230 @@ mod tests {
             default_output_format_for_channel("discord"),
             OutputFormat::Markdown
         );
+        assert_eq!(
+            default_output_format_for_channel("signal"),
+            OutputFormat::PlainText
+        );
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_off_is_identity() {
+        let text = "hello world";
+        let out = apply_agent_prefix(PrefixStyle::Off, "coder", text);
+        assert_eq!(out, text);
+        assert_eq!(out.as_bytes(), text.as_bytes());
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_bracket() {
+        let out = apply_agent_prefix(
+            PrefixStyle::Bracket,
+            "platform-architect",
+            "Here's my take.",
+        );
+        assert_eq!(out, "[platform-architect] Here's my take.");
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_bold_bracket() {
+        let out = apply_agent_prefix(PrefixStyle::BoldBracket, "coder", "All green.");
+        assert_eq!(out, "**[coder]** All green.");
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_idempotent_bracket() {
+        let already = "[coder] already prefixed";
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "coder", already);
+        assert_eq!(out, already);
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_idempotent_bold_bracket() {
+        let already = "**[coder]** already bold";
+        let out = apply_agent_prefix(PrefixStyle::BoldBracket, "coder", already);
+        assert_eq!(out, already);
+        let out2 = apply_agent_prefix(PrefixStyle::Bracket, "coder", already);
+        assert_eq!(out2, already);
+    }
+
+    #[test]
+    fn test_apply_agent_prefix_empty_name_is_noop() {
+        let text = "no author";
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "", text);
+        assert_eq!(out, text);
+    }
+
+    /// Names containing `]` / `[` / `*` are pathological because our naive
+    /// `starts_with("[name]")` idempotency check can misfire.
+    ///
+    /// Required behaviors verified here (per the doc-comment caveat):
+    ///   1. Function MUST NOT panic on bracket / asterisk in the name.
+    ///   2. Output MUST stay well-formed UTF-8.
+    ///   3. Worst-case degradation is "extra/duplicated prefix", never data
+    ///      loss or corruption of the body text.
+    #[test]
+    fn test_apply_agent_prefix_bracket_in_name_does_not_panic() {
+        // `]` inside the name. First call produces `[a]b] hello`.
+        let out = apply_agent_prefix(PrefixStyle::Bracket, "a]b", "hello");
+        assert_eq!(out, "[a]b] hello");
+        assert!(out.is_char_boundary(out.len()));
+
+        // Second call: starts_with("[a]b]") matches because the literal is
+        // `[a]b]` and the text begins with that — this is the "lucky" case
+        // where the caveat doesn't bite. Idempotent here.
+        let out2 = apply_agent_prefix(PrefixStyle::Bracket, "a]b", &out);
+        assert_eq!(out2, "[a]b] hello");
+
+        // `[` inside the name — the documented worst case. Repeated calls
+        // legitimately stack a fresh prefix because `starts_with("[a[b]")`
+        // does NOT match `[a[b] [a[b] hello`. Body ("hello") is preserved.
+        let stacked = apply_agent_prefix(
+            PrefixStyle::Bracket,
+            "a[b",
+            &apply_agent_prefix(PrefixStyle::Bracket, "a[b", "hello"),
+        );
+        assert!(
+            stacked.ends_with("hello"),
+            "body must be preserved: {stacked}"
+        );
+        assert!(stacked.is_char_boundary(stacked.len()));
+
+        // `*` inside the name — bold style relies on `**[name]**`; an
+        // asterisk in the name produces `**[a*b]**` which still passes the
+        // `starts_with` check on a second invocation.
+        let bold = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", "hi");
+        assert_eq!(bold, "**[a*b]** hi");
+        let bold2 = apply_agent_prefix(PrefixStyle::BoldBracket, "a*b", &bold);
+        assert_eq!(bold2, bold);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_off_is_byte_identical() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides::default();
+        let input = "Hello from the agent.".to_string();
+        let original_bytes = input.clone();
+        let out = maybe_prefix_response(&handle, Some(&overrides), agent_id, input).await;
+        assert_eq!(out.as_bytes(), original_bytes.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_bracket_wraps() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out =
+            maybe_prefix_response(&handle, Some(&overrides), agent_id, "Hi".to_string()).await;
+        assert_eq!(out, "[coder] Hi");
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_bold_bracket_wraps() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::BoldBracket,
+            ..Default::default()
+        };
+        let out =
+            maybe_prefix_response(&handle, Some(&overrides), agent_id, "Hi".to_string()).await;
+        assert_eq!(out, "**[coder]** Hi");
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prefix_response_unknown_agent_falls_back() {
+        let known = AgentId::new();
+        let unknown = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(known, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = maybe_prefix_response(&handle, Some(&overrides), unknown, "Hi".to_string()).await;
+        assert_eq!(out, "Hi");
+    }
+
+    #[test]
+    fn test_prefix_style_default_is_off_and_serde_snake_case() {
+        assert_eq!(PrefixStyle::default(), PrefixStyle::Off);
+        let v: PrefixStyle = serde_json::from_str("\"bracket\"").unwrap();
+        assert_eq!(v, PrefixStyle::Bracket);
+        let v: PrefixStyle = serde_json::from_str("\"bold_bracket\"").unwrap();
+        assert_eq!(v, PrefixStyle::BoldBracket);
+        let v: PrefixStyle = serde_json::from_str("\"off\"").unwrap();
+        assert_eq!(v, PrefixStyle::Off);
+    }
+
+    #[test]
+    fn test_channel_overrides_default_prefix_off() {
+        let o = ChannelOverrides::default();
+        assert_eq!(o.prefix_agent_name, PrefixStyle::Off);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_off_returns_none() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides::default();
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("[coder] "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_bold_bracket() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::BoldBracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), agent_id).await;
+        assert_eq!(out.as_deref(), Some("**[coder]** "));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prefix_chunk_unknown_agent() {
+        let known = AgentId::new();
+        let unknown = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(known, "coder".to_string())]),
+        });
+        let overrides = ChannelOverrides {
+            prefix_agent_name: PrefixStyle::Bracket,
+            ..Default::default()
+        };
+        let out = resolve_prefix_chunk(&handle, Some(&overrides), unknown).await;
+        assert!(out.is_none());
     }
 
     #[tokio::test]
@@ -4821,7 +5343,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result = handle_command("btw", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "btw",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("Usage:"));
     }
 
@@ -4846,6 +5377,7 @@ mod tests {
             &router,
             &sender,
             &ChannelType::CLI,
+            None,
         )
         .await;
         assert!(result.contains("No agent selected"));
@@ -4863,8 +5395,16 @@ mod tests {
             librefang_user: None,
         };
 
-        let result =
-            handle_command("help", &[], &handle, &router, &sender, &ChannelType::CLI).await;
+        let result = handle_command(
+            "help",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+        )
+        .await;
         assert!(result.contains("/btw"));
     }
 
@@ -4966,6 +5506,28 @@ mod tests {
             content_to_text(&voice),
             "[Voice message (30s): https://example.com/voice.ogg]"
         );
+    }
+
+    #[test]
+    fn test_filename_from_url_basic() {
+        assert_eq!(
+            filename_from_url("https://example.com/path/voice_42.oga").as_deref(),
+            Some("voice_42.oga")
+        );
+    }
+
+    #[test]
+    fn test_filename_from_url_strips_query_and_fragment() {
+        assert_eq!(
+            filename_from_url("https://example.com/x/file.ogg?token=abc#t=1").as_deref(),
+            Some("file.ogg")
+        );
+    }
+
+    #[test]
+    fn test_filename_from_url_no_basename() {
+        assert!(filename_from_url("https://example.com/").is_none());
+        assert!(filename_from_url("not a url").is_none());
     }
 
     #[test]

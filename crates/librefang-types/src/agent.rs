@@ -10,14 +10,35 @@ use uuid::Uuid;
 /// Metadata key for stable prefix mode flag.
 pub const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Stable namespace for deriving deterministic [`UserId`] values from
+/// [`UserConfig::name`]. Generated once and frozen — changing this constant
+/// rotates every existing `UserId` and breaks audit-log correlation across
+/// the whole fleet, so it must never be changed.
+pub const LIBREFANG_USER_NAMESPACE: Uuid =
+    Uuid::from_u128(0x4c46_4147_5f55_5345_525f_4e53_5f76_3501);
+
 /// Unique identifier for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UserId(pub Uuid);
 
 impl UserId {
     /// Generate a new random UserId.
+    ///
+    /// Prefer [`UserId::from_name`] for users that come from configuration —
+    /// random UUIDs change on every restart, which makes audit-log
+    /// correlation across daemon restarts impossible.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Derive a stable UserId from a user's configured name.
+    ///
+    /// Uses UUID v5 with [`LIBREFANG_USER_NAMESPACE`] so the same name
+    /// always maps to the same id — across restarts, across config reloads,
+    /// across nodes. Renaming a user produces a new id (intentionally —
+    /// rename = new identity, old audit history stays attached to the old id).
+    pub fn from_name(name: &str) -> Self {
+        Self(Uuid::new_v5(&LIBREFANG_USER_NAMESPACE, name.as_bytes()))
     }
 }
 
@@ -94,11 +115,19 @@ pub struct AutonomousConfig {
     pub heartbeat_channel: Option<String>,
 }
 
+impl AutonomousConfig {
+    /// Default cap on LLM iterations per agent-loop invocation. Policy
+    /// constant shared with `librefang-runtime` — see `agent_loop::MAX_ITERATIONS`
+    /// which re-exports this value so the runtime's own fallback path
+    /// stays in lockstep with the manifest default.
+    pub const DEFAULT_MAX_ITERATIONS: u32 = 50;
+}
+
 impl Default for AutonomousConfig {
     fn default() -> Self {
         Self {
             quiet_hours: None,
-            max_iterations: 50,
+            max_iterations: Self::DEFAULT_MAX_ITERATIONS,
             max_restarts: 10,
             heartbeat_interval_secs: 30,
             heartbeat_timeout_secs: None,
@@ -126,7 +155,7 @@ pub enum HookEvent {
 }
 
 /// Unique identifier for an agent instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentId(pub Uuid);
 
 impl AgentId {
@@ -212,6 +241,13 @@ const CHANNEL_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0xa3, 0x4e, 0x7c, 0x01, 0x8f, 0x2b, 0x4d, 0x6a, 0x91, 0x5c, 0xd7, 0x3e, 0xf4, 0x0a, 0xb8, 0x52,
 ]);
 
+/// Distinct UUID v5 namespace for per-fire cron session IDs. Disjoint from
+/// `CHANNEL_SESSION_NAMESPACE` so a `for_cron_run` id can never collide with
+/// a `for_channel` id even if input strings happen to coincide.
+const CRON_RUN_SESSION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x7e, 0x91, 0x2c, 0x4f, 0xb5, 0xa3, 0x48, 0xd1, 0xa0, 0x6c, 0xe2, 0x83, 0x1f, 0x57, 0xc4, 0x09,
+]);
+
 impl SessionId {
     /// Create a new random SessionId.
     pub fn new() -> Self {
@@ -224,6 +260,64 @@ impl SessionId {
     /// produces the same `SessionId`, even across process restarts.
     pub fn for_channel(agent_id: AgentId, channel: &str) -> Self {
         let name = format!("{}:{}", agent_id.0, channel.to_lowercase());
+        Self(uuid::Uuid::new_v5(
+            &CHANNEL_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+
+    /// Derive a per-fire cron session id keyed by `(agent, run_key)`.
+    ///
+    /// Used when a cron job is configured with `session_mode = "new"` and
+    /// each fire must land on its own isolated session — prior fires must
+    /// not leak context into the current run, and the agent's persistent
+    /// `(agent, "cron")` session must stay untouched.
+    ///
+    /// `run_key` should uniquely identify the fire (typical choice:
+    /// `"<job_uuid>:<rfc3339_timestamp>"`). Lower-cased before hashing so
+    /// a caller's case quirks don't fan id space. Determinism (vs.
+    /// `SessionId::new()`) makes a fire's session id reproducible from logs
+    /// for debugging.
+    pub fn for_cron_run(agent_id: AgentId, run_key: &str) -> Self {
+        let name = format!("{}:{}", agent_id.0, run_key.to_lowercase());
+        Self(uuid::Uuid::new_v5(
+            &CRON_RUN_SESSION_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+
+    /// Derive a session ID from a structured (channel, account, conversation) key.
+    ///
+    /// Backward compatible with `for_channel`: when `account` is empty, the
+    /// resulting id is identical to `for_channel(agent, channel)` if
+    /// `conversation` is also empty, or to `for_channel(agent, format!("{channel}:{conversation}"))`
+    /// when only `conversation` is set. This preserves existing session ids for
+    /// channels that never carried an account dimension.
+    ///
+    /// When `account` is non-empty, a `v2:` byte prefix is mixed in so the
+    /// hash space is disjoint from the legacy format — avoids collisions even
+    /// if a real channel/account ever lines up textually with a legacy scope.
+    pub fn from_route_key(
+        agent_id: AgentId,
+        channel: &str,
+        account: &str,
+        conversation: &str,
+    ) -> Self {
+        if account.is_empty() {
+            let scope = if conversation.is_empty() {
+                channel.to_string()
+            } else {
+                format!("{channel}:{conversation}")
+            };
+            return Self::for_channel(agent_id, &scope);
+        }
+        let name = format!(
+            "v2:{}:{}:{}:{}",
+            agent_id.0,
+            channel.to_lowercase(),
+            account.to_lowercase(),
+            conversation.to_lowercase()
+        );
         Self(uuid::Uuid::new_v5(
             &CHANNEL_SESSION_NAMESPACE,
             name.as_bytes(),
@@ -248,6 +342,37 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Snapshot of a single in-flight (agent, session) loop, returned by
+/// `GET /api/agents/{id}/runtime`.
+///
+/// The state field is intentionally a single `Running` variant for now —
+/// fine-grained sub-states (`WaitingLLM` / `ExecutingTool(name)`) require
+/// the agent loop to write back its current step, which is a separate
+/// follow-up. The wire format leaves room for that without a breaking
+/// change: deserialisers should treat unknown variants as opaque.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningSessionSnapshot {
+    /// The session that's currently executing.
+    pub session_id: SessionId,
+    /// When the loop was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Coarse-grained execution state.
+    #[serde(default)]
+    pub state: RunningSessionState,
+}
+
+/// Coarse-grained execution state for a `RunningSessionSnapshot`. Only
+/// `Running` is emitted today; the enum exists so callers can pattern-match
+/// instead of hard-coding strings, and so future fine-grained states slot
+/// in without breaking the wire format.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningSessionState {
+    /// Loop has been spawned and not yet completed.
+    #[default]
+    Running,
 }
 
 /// How sessions are resolved for non-channel (automated) invocations.
@@ -528,6 +653,25 @@ pub struct ModelConfig {
     pub api_key_env: Option<String>,
     /// Optional base URL override for the provider.
     pub base_url: Option<String>,
+    /// Optional override for this model's context window (in tokens).
+    ///
+    /// When set, takes precedence over registry / runtime-probed values.
+    /// Use it to force a value when the model's actual context differs
+    /// from what the catalog reports (e.g. a self-hosted Ollama model
+    /// configured with `num_ctx` smaller than the model's nominal
+    /// length, or a vLLM endpoint with a custom `--max-model-len`).
+    ///
+    /// `None` (the default) means "let the runtime resolve it from the
+    /// registry, persisted cache, or live `/v1/models` probe".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Optional override for this model's maximum output tokens.
+    ///
+    /// Same precedence and semantics as [`Self::context_window`]. Useful
+    /// when a self-hosted endpoint advertises a smaller usable cap than
+    /// the catalog default (e.g. a quantised checkpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Provider-specific extension parameters that are flattened directly
     /// into the API request body.
     ///
@@ -550,6 +694,8 @@ impl Default for ModelConfig {
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: std::collections::HashMap::new(),
         }
     }
@@ -750,6 +896,47 @@ pub struct AgentManifest {
     /// for this specific agent. Follows the same pattern as `exec_policy`.
     #[serde(default)]
     pub channel_overrides: Option<crate::config::ChannelOverrides>,
+    /// Per-agent override for the message-history trim cap. When set,
+    /// takes precedence over `KernelConfig.max_history_messages` and the
+    /// compiled-in default (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`).
+    /// `None` means inherit from kernel config / default. Values below 4
+    /// are silently clamped at runtime with a warning log.
+    #[serde(default)]
+    pub max_history_messages: Option<usize>,
+    /// Trigger-dispatch-only: cap on concurrent invocations from the
+    /// kernel's event-trigger fan-out (`TaskPosted` / `MessageReceived`
+    /// / …). Channel messages, cron jobs, and `agent_send` are NOT
+    /// throttled by this knob — they continue to serialize at the
+    /// existing per-agent / per-session locks inside `send_message_full`.
+    /// Despite the unqualified field name, the scope is intentionally
+    /// narrow.
+    ///
+    /// `None` means inherit from `KernelConfig.queue.concurrency.default_per_agent`
+    /// (today: 1). `Some(1)` is identical to the legacy per-agent
+    /// serialization behavior. `Some(0)` is treated as `Some(1)` (the
+    /// resolver floors at 1 — `0` would deadlock the agent).
+    ///
+    /// Concurrent fires only make sense when each fire runs in its own
+    /// session, so caps `> 1` require `session_mode = "new"` on the
+    /// **manifest** (per-trigger `session_mode` overrides do NOT unlock
+    /// the cap — the per-agent semaphore is sized once from the
+    /// manifest default). `persistent` + cap `> 1` is auto-clamped to
+    /// `1` with a `WARN` log; parallel writes to a single persistent
+    /// session's history are undefined.
+    ///
+    /// Hot-reload: the per-agent semaphore is sized on first dispatch
+    /// and is NOT invalidated by `manifest_swap`. To pick up a new cap
+    /// the agent must be killed and respawned (or the daemon restarted);
+    /// an in-place activate / status flip silently retains the old
+    /// capacity.
+    #[serde(default)]
+    pub max_concurrent_invocations: Option<u32>,
+    /// If true, the agent's `context.md` is read once at session start and
+    /// reused. Default is `false`: the runtime re-reads `context.md` before
+    /// every turn so external writers (cron jobs, integrations) reach the LLM
+    /// on the next message.
+    #[serde(default)]
+    pub cache_context: bool,
 }
 
 /// Access mode for a named workspace.
@@ -766,13 +953,39 @@ pub enum WorkspaceMode {
 }
 
 /// Declaration of a named workspace in `agent.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Exactly one of `path` or `mount` must be set:
+/// * `path` — relative to the configured `workspaces_dir`. The kernel
+///   creates the directory if it does not exist. This is the original
+///   shared-workspace mechanism and is the right choice for directories
+///   that LibreFang owns.
+/// * `mount` — an absolute path to a directory that already exists on
+///   the host (e.g. an Obsidian vault). The kernel never creates the
+///   target. The path must canonicalize to a prefix of one of the
+///   `allowed_mount_roots` entries in `config.toml`; otherwise the
+///   declaration is rejected at boot. See issue #3230.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceDecl {
     /// Path relative to `workspaces_dir` (e.g. `"shared/library"`).
-    pub path: PathBuf,
+    /// Mutually exclusive with `mount`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Absolute path to an existing host directory (e.g. an Obsidian
+    /// vault). Mutually exclusive with `path`. Must be whitelisted via
+    /// `config.toml: allowed_mount_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<PathBuf>,
     /// Access mode. Defaults to read-write.
     #[serde(default)]
     pub mode: WorkspaceMode,
+}
+
+impl WorkspaceDecl {
+    /// Whether this declaration targets a directory outside `workspaces_dir`.
+    /// External targets require an entry in `config.toml: allowed_mount_roots`.
+    pub fn is_external_mount(&self) -> bool {
+        self.mount.is_some()
+    }
 }
 
 fn default_true() -> bool {
@@ -824,7 +1037,10 @@ impl Default for AgentManifest {
             auto_dream_min_sessions: None,
             show_progress: true,
             auto_evolve: true,
+            max_concurrent_invocations: None,
             channel_overrides: None,
+            max_history_messages: None,
+            cache_context: false,
         }
     }
 }
@@ -982,6 +1198,23 @@ pub struct AgentEntry {
     /// `None` until the first auto-reset occurs.
     #[serde(default)]
     pub reset_reason: Option<crate::config::SessionResetReason>,
+
+    /// Sticky flag: `true` once the agent has processed at least one real
+    /// inbound message, channel event, or autonomous tick.
+    ///
+    /// Used by the heartbeat monitor (`crate::heartbeat::check_agents`) to
+    /// distinguish agents that have genuinely been alive (and may now be
+    /// hanging) from agents that were spawned but never received any work
+    /// — the latter must not be flagged unresponsive, which would push them
+    /// into a crash-recover loop (openfang #844).
+    ///
+    /// Replaces the older time-window heuristic
+    /// (`last_active - created_at <= IDLE_GRACE_SECS`) which was fragile
+    /// because administrative `set_state` / metadata writes also bump
+    /// `last_active`. Bookkeeping bumps must NOT flip this flag — only
+    /// real message-dispatch paths.
+    #[serde(default)]
+    pub has_processed_message: bool,
 }
 
 impl Default for AgentEntry {
@@ -1007,6 +1240,7 @@ impl Default for AgentEntry {
             force_session_wipe: false,
             resume_pending: false,
             reset_reason: None,
+            has_processed_message: false,
         }
     }
 }
@@ -1181,6 +1415,28 @@ mod tests {
     }
 
     #[test]
+    fn test_user_id_from_name_is_stable() {
+        // Same name → same id, across calls. This is the contract that lets
+        // audit log entries survive daemon restarts.
+        assert_eq!(UserId::from_name("Alice"), UserId::from_name("Alice"));
+        assert_eq!(UserId::from_name(""), UserId::from_name(""));
+    }
+
+    #[test]
+    fn test_user_id_from_name_differs_per_name() {
+        assert_ne!(UserId::from_name("Alice"), UserId::from_name("Bob"));
+        // Case-sensitive — caller controls normalization.
+        assert_ne!(UserId::from_name("alice"), UserId::from_name("Alice"));
+    }
+
+    #[test]
+    fn test_user_id_from_name_is_v5() {
+        // UUID v5 (SHA-1 + namespace) — version nibble must be 5.
+        let id = UserId::from_name("Alice");
+        assert_eq!(id.0.get_version_num(), 5);
+    }
+
+    #[test]
     fn test_model_routing_config_defaults() {
         let cfg = ModelRoutingConfig::default();
         assert!(!cfg.simple_model.is_empty());
@@ -1198,10 +1454,17 @@ mod tests {
     #[test]
     fn test_autonomous_config_defaults() {
         let cfg = AutonomousConfig::default();
-        assert_eq!(cfg.max_iterations, 50);
+        assert_eq!(cfg.max_iterations, AutonomousConfig::DEFAULT_MAX_ITERATIONS);
         assert_eq!(cfg.max_restarts, 10);
         assert_eq!(cfg.heartbeat_interval_secs, 30);
         assert!(cfg.quiet_hours.is_none());
+    }
+
+    #[test]
+    fn test_default_max_iterations_is_policy_constant() {
+        // Tripwire: if anyone changes the policy cap, at least one test must
+        // break so a second reviewer sees the intent.
+        assert_eq!(AutonomousConfig::DEFAULT_MAX_ITERATIONS, 50);
     }
 
     #[test]
@@ -1883,6 +2146,8 @@ model = "llama-3.3-70b-versatile"
             system_prompt: "test".to_string(),
             api_key_env: None,
             base_url: None,
+            context_window: None,
+            max_output_tokens: None,
             extra_params: extra,
         };
 
@@ -1974,5 +2239,137 @@ model = "llama-3.3-70b-versatile"
     fn session_id_from_str_rejects_garbage() {
         use std::str::FromStr;
         assert!(SessionId::from_str("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn for_cron_run_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let a = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        let b = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn for_cron_run_distinguishes_fires() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let fire_a = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:00:00Z");
+        let fire_b = SessionId::for_cron_run(agent, "job-uuid:2026-04-25T10:05:00Z");
+        assert_ne!(
+            fire_a, fire_b,
+            "different fires must yield different sessions"
+        );
+    }
+
+    #[test]
+    fn for_cron_run_distinct_from_for_channel_cron() {
+        // Same input string, different namespaces → different UUIDs. Prevents
+        // a per-fire cron session from ever colliding with the persistent
+        // (agent, channel="cron") session.
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let persistent = SessionId::for_channel(agent, "cron");
+        let isolated = SessionId::for_cron_run(agent, "cron");
+        assert_ne!(persistent, isolated);
+    }
+
+    #[test]
+    fn from_route_key_empty_account_matches_for_channel() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        // Plain channel, no conversation: must equal for_channel(agent, channel).
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", ""),
+            SessionId::for_channel(agent, "telegram"),
+        );
+        // Channel + conversation, empty account: must equal for_channel(agent, "channel:conv")
+        // — preserves legacy `format!("{channel}:{chat_id}")` scope.
+        assert_eq!(
+            SessionId::from_route_key(agent, "telegram", "", "12345"),
+            SessionId::for_channel(agent, "telegram:12345"),
+        );
+    }
+
+    #[test]
+    fn from_route_key_separates_accounts() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let alice = SessionId::from_route_key(agent, "telegram", "alice", "12345");
+        let bob = SessionId::from_route_key(agent, "telegram", "bob", "12345");
+        assert_ne!(
+            alice, bob,
+            "Different accounts on same channel+conversation must yield different sessions"
+        );
+        // And neither should collide with the legacy account-less id.
+        let legacy = SessionId::from_route_key(agent, "telegram", "", "12345");
+        assert_ne!(alice, legacy);
+        assert_ne!(bob, legacy);
+    }
+
+    #[test]
+    fn from_route_key_normalizes_case() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let mixed = SessionId::from_route_key(agent, "Telegram", "Alice", "ABC");
+        let lower = SessionId::from_route_key(agent, "telegram", "alice", "abc");
+        assert_eq!(
+            mixed, lower,
+            "channel/account/conversation must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn from_route_key_deterministic() {
+        let agent = AgentId(uuid::Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6").unwrap());
+        let a = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        let b = SessionId::from_route_key(agent, "matrix", "alice@example.org", "!room:server");
+        assert_eq!(a, b);
+    }
+
+    // ── WorkspaceDecl: path / mount mutual-exclusion (#3230) ──────────────
+
+    #[test]
+    fn workspace_decl_path_only_deserializes() {
+        let s = r#"path = "shared/library"
+mode = "rw"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.path.as_deref(),
+            Some(std::path::Path::new("shared/library"))
+        );
+        assert!(d.mount.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadWrite);
+        assert!(!d.is_external_mount());
+    }
+
+    #[test]
+    fn workspace_decl_mount_only_deserializes() {
+        let s = r#"mount = "/Users/me/Obsidian"
+mode = "r"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert_eq!(
+            d.mount.as_deref(),
+            Some(std::path::Path::new("/Users/me/Obsidian"))
+        );
+        assert!(d.path.is_none());
+        assert_eq!(d.mode, WorkspaceMode::ReadOnly);
+        assert!(d.is_external_mount());
+    }
+
+    /// Both fields can deserialize together — the kernel rejects the
+    /// combination at boot (see `resolve_workspace_decl`). Schema-level
+    /// rejection would break agent.toml hot-reload from the dashboard
+    /// (the user couldn't even see the validation error in context).
+    #[test]
+    fn workspace_decl_both_fields_deserialize_runtime_rejects() {
+        let s = r#"path = "rel"
+mount = "/abs"
+"#;
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_some() && d.mount.is_some());
+    }
+
+    #[test]
+    fn workspace_decl_neither_field_deserializes() {
+        let s = "mode = \"r\"\n";
+        let d: WorkspaceDecl = toml::from_str(s).unwrap();
+        assert!(d.path.is_none() && d.mount.is_none());
     }
 }

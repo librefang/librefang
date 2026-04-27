@@ -1,0 +1,27 @@
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    uid: librefang-loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Once the daemon stamps trace_id into log lines (planned in a
+      # follow-up Rust-side PR), this regex extracts it and turns it
+      # into a clickable link that opens the matching trace in Tempo.
+      # Until then, the field stays inert — but the wiring is here so
+      # no Grafana provisioning change is needed when the daemon
+      # change lands.
+      derivedFields:
+        - name: trace_id
+          datasourceUid: librefang-tempo
+          matcherRegex: 'trace_id="?([0-9a-f]{32})"?'
+          url: "$${__value.raw}"
+          urlDisplayLabel: "View trace in Tempo"
+        - name: trace_id_jaeger
+          datasourceUid: librefang-jaeger
+          matcherRegex: 'trace_id="?([0-9a-f]{32})"?'
+          url: "$${__value.raw}"
+          urlDisplayLabel: "View trace in Jaeger"

@@ -33,7 +33,7 @@ GET /api/agents/&lbrace;id&rbrace;/ws
 
 | 命令 | 说明 |
 |------|------|
-| `/new` | 开始新会话（清除历史） |
+| `/new` | 分叉出新会话 — 旧会话被保留，仍可恢复 |
 | `/compact` | 触发 LLM 会话压缩 |
 | `/model <name>` | 切换 Agent 的模型 |
 | `/stop` | 取消当前 LLM 运行 |

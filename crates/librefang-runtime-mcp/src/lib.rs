@@ -8,13 +8,18 @@
 
 pub mod mcp_oauth;
 
+use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
-use librefang_types::config::McpTaintPolicy;
 use librefang_types::config::{
     HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
     HttpCompatToolConfig,
 };
-use librefang_types::taint::{check_outbound_text_violation_with_skip, TaintRuleId, TaintSink};
+use librefang_types::config::{
+    McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolAction, NamedTaintRuleSet,
+};
+use librefang_types::taint::{
+    detect_outbound_text_violation_rules_with_skip, TaintRuleId, TaintSink,
+};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,6 +69,20 @@ fn is_sensitive_key_name(key: &str) -> bool {
 /// - `$.a.*`   — any direct child of `$.a`
 /// - `$.a[*]`  — any array element of `$.a`
 /// - `$.*`     — any top-level property
+///
+/// # Limitation: object keys containing `.` or `[`
+///
+/// Both the pattern parser ([`split_jsonpath`]) and the walker that
+/// builds runtime paths concatenate segments with a literal `.` and do
+/// not escape special characters in JSON object keys. As a result a
+/// JSON key such as `"content-type"` works (no special chars) but keys
+/// like `"a.b"`, `"items[0]"`, or any name containing `.`/`[` cannot
+/// be addressed precisely — the matcher will treat the `.`/`[` as
+/// segment delimiters and likely miss the intended path. Quoted
+/// JSONPath segments (e.g. `$.headers."content-type"`) are also not
+/// supported. In practice MCP tool argument schemas almost never use
+/// such keys, but if you hit one, write a broader pattern (`$.*` or
+/// `$.headers.*`) or fall through to the default rule set.
 fn jsonpath_matches(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
@@ -141,6 +160,131 @@ fn resolve_skip_rules(
     skip
 }
 
+/// Per-process dedup set of rule-set names we've already warned about.
+/// Hit by [`lookup_rule_set_action`] when an `McpTaintToolPolicy.rule_sets`
+/// entry doesn't match any registered `[[taint_rules]]` set — the first
+/// scan that observes a missing name logs a WARN, all subsequent scans
+/// stay silent so a noisy tool doesn't flood logs.
+static UNKNOWN_RULE_SET_WARNED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+fn warn_unknown_rule_set_once(set_name: &str, tool_name: &str) {
+    let cell = UNKNOWN_RULE_SET_WARNED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut warned = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(set_name.to_string()) {
+        warn!(
+            target: "librefang_runtime_mcp::taint",
+            rule_set = %set_name,
+            tool = %tool_name,
+            "MCP taint policy references unknown rule_set name — check \
+             `[[taint_rules]]` in config.toml for typos. The reference is \
+             a silent no-op until the name is registered. This warning is \
+             emitted once per process per missing name."
+        );
+    }
+}
+
+/// Look up the [`McpTaintRuleSetAction`] (and rule set name) for a rule fired
+/// during scanning. Returns the *most permissive* action across all rule sets
+/// referenced by `tool_name` that contain `rule`, in order: `Log` > `Warn` >
+/// `Block`. `Block` is the implicit baseline and is returned only when an
+/// explicit `block`-action set names the rule (so callers can still surface
+/// the rule-set name in tracing if they want).
+///
+/// Returns `None` when no referenced rule set covers the rule, in which case
+/// the caller should block (default scanner behaviour).
+///
+/// Names listed in `tool_policy.rule_sets` that don't match any registered
+/// `[[taint_rules]]` set are skipped (treated as no-op) but trigger a
+/// one-shot WARN via [`warn_unknown_rule_set_once`] so operator typos
+/// don't sit silent in production.
+fn lookup_rule_set_action<'a>(
+    policy: Option<&McpTaintPolicy>,
+    tool_name: &str,
+    rule: &TaintRuleId,
+    registry: &'a [NamedTaintRuleSet],
+) -> Option<(McpTaintRuleSetAction, &'a str)> {
+    let tool_policy = policy?.tools.get(tool_name)?;
+    if tool_policy.rule_sets.is_empty() || registry.is_empty() {
+        return None;
+    }
+    let mut best: Option<(McpTaintRuleSetAction, &str)> = None;
+    for set_name in &tool_policy.rule_sets {
+        let Some(set) = registry.iter().find(|s| &s.name == set_name) else {
+            warn_unknown_rule_set_once(set_name, tool_name);
+            continue;
+        };
+        if !set.rules.contains(rule) {
+            continue;
+        }
+        let candidate = (set.action, set.name.as_str());
+        best = Some(match best {
+            None => candidate,
+            Some(prev) => {
+                if action_priority(set.action) > action_priority(prev.0) {
+                    candidate
+                } else {
+                    prev
+                }
+            }
+        });
+    }
+    best
+}
+
+/// Higher value = more permissive (further from `block`). Used to merge
+/// rule-set actions when a tool references multiple sets that cover the
+/// same rule.
+fn action_priority(a: McpTaintRuleSetAction) -> u8 {
+    match a {
+        McpTaintRuleSetAction::Block => 0,
+        McpTaintRuleSetAction::Warn => 1,
+        McpTaintRuleSetAction::Log => 2,
+    }
+}
+
+/// Decide whether a rule fire should be downgraded from `block` and emit the
+/// matching tracing event. Returns `true` to continue blocking, `false` to
+/// allow the call through (warn / log).
+fn apply_rule_set_action(
+    policy: Option<&McpTaintPolicy>,
+    tool_name: &str,
+    rule: &TaintRuleId,
+    json_path: &str,
+    registry: &[NamedTaintRuleSet],
+) -> bool {
+    let Some((action, set_name)) = lookup_rule_set_action(policy, tool_name, rule, registry) else {
+        return true;
+    };
+    match action {
+        McpTaintRuleSetAction::Block => true,
+        McpTaintRuleSetAction::Warn => {
+            warn!(
+                target: "librefang_runtime_mcp::taint",
+                rule = ?rule,
+                rule_set = %set_name,
+                tool = %tool_name,
+                path = %json_path,
+                "MCP taint rule fired but downgraded by rule_set (action=warn)"
+            );
+            false
+        }
+        McpTaintRuleSetAction::Log => {
+            info!(
+                target: "librefang_runtime_mcp::taint",
+                rule = ?rule,
+                rule_set = %set_name,
+                tool = %tool_name,
+                path = %json_path,
+                "MCP taint rule fired and audited by rule_set (action=log)"
+            );
+            false
+        }
+    }
+}
+
 // ── Taint scanner ──────────────────────────────────────────────────────────
 
 /// Walk every string leaf in a JSON argument tree and check it against
@@ -148,8 +292,13 @@ fn resolve_skip_rules(
 /// (JSON path + rule name) if any leaf trips the denylist, `None` otherwise.
 ///
 /// When `taint_policy` and `tool_name` are supplied, per-path skip rules
-/// from the policy are applied before calling
-/// [`check_outbound_text_violation_with_skip`].
+/// from the policy are applied before calling the underlying detector.
+/// Named rule sets in `rule_set_registry` referenced by the tool's policy
+/// can downgrade `Block` to `Warn` / `Log` — when a downgrade applies, the
+/// rule fires only as a tracing event and the call is allowed through.
+///
+/// If the tool's policy has `default = Skip`, scanning is bypassed
+/// entirely for this tool — see [`scan_mcp_arguments_for_taint_with_policy`].
 ///
 /// IMPORTANT: the returned string must NOT contain the offending payload.
 /// It flows back to the LLM as an error and is emitted to logs — echoing
@@ -161,16 +310,40 @@ fn resolve_skip_rules(
 /// Recursion is hard-capped at [`MCP_TAINT_SCAN_MAX_DEPTH`].
 #[cfg(test)]
 fn scan_mcp_arguments_for_taint(value: &serde_json::Value) -> Option<String> {
-    scan_mcp_arguments_for_taint_with_policy(value, None, "")
+    scan_mcp_arguments_for_taint_with_policy(value, None, &[], "")
 }
 
 fn scan_mcp_arguments_for_taint_with_policy(
     value: &serde_json::Value,
     taint_policy: Option<&McpTaintPolicy>,
+    rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
 ) -> Option<String> {
+    // Tool-level kill switch: `default = "skip"` bypasses scanning for the
+    // entire tool, including sensitive object-key blocking. This is the
+    // single-line equivalent of disabling scanning on noisy tools.
+    if let Some(policy) = taint_policy {
+        if let Some(tool_policy) = policy.tools.get(tool_name) {
+            if tool_policy.default == McpTaintToolAction::Skip {
+                debug!(
+                    target: "librefang_runtime_mcp::taint",
+                    tool = %tool_name,
+                    "MCP taint scanning bypassed: tool policy default=skip"
+                );
+                return None;
+            }
+        }
+    }
     let sink = TaintSink::mcp_tool_call();
-    walk_taint(value, &sink, "$", 0, taint_policy, tool_name)
+    walk_taint(
+        value,
+        &sink,
+        "$",
+        0,
+        taint_policy,
+        rule_set_registry,
+        tool_name,
+    )
 }
 
 fn walk_taint(
@@ -179,6 +352,7 @@ fn walk_taint(
     path: &str,
     depth: usize,
     policy: Option<&McpTaintPolicy>,
+    rule_set_registry: &[NamedTaintRuleSet],
     tool_name: &str,
 ) -> Option<String> {
     if depth > MCP_TAINT_SCAN_MAX_DEPTH {
@@ -194,19 +368,34 @@ fn walk_taint(
         serde_json::Value::String(s) => {
             // Discard the underlying violation string entirely — it may be
             // derived from the payload — and report only the JSON path.
-            if check_outbound_text_violation_with_skip(s, sink, &skip).is_some() {
-                Some(format!(
-                    "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
-                    path, sink.name
-                ))
-            } else {
-                None
+            //
+            // CRITICAL: iterate over EVERY fired rule, not just the first.
+            // A rule_set authorized to downgrade rule A must not silently
+            // mask an unauthorized rule B that fires in the same payload
+            // (e.g. a Secret-rule warn downgrade masking a PII-rule fire).
+            // We block as soon as any fired rule is not downgraded.
+            for rule in detect_outbound_text_violation_rules_with_skip(s, sink, &skip) {
+                if apply_rule_set_action(policy, tool_name, &rule, path, rule_set_registry) {
+                    return Some(format!(
+                        "taint violation: sensitive value in MCP argument '{}' (blocked by sink '{}')",
+                        path, sink.name
+                    ));
+                }
             }
+            None
         }
         serde_json::Value::Array(items) => {
             for (i, item) in items.iter().enumerate() {
                 let child = format!("{path}[{i}]");
-                if let Some(v) = walk_taint(item, sink, &child, depth + 1, policy, tool_name) {
+                if let Some(v) = walk_taint(
+                    item,
+                    sink,
+                    &child,
+                    depth + 1,
+                    policy,
+                    rule_set_registry,
+                    tool_name,
+                ) {
                     return Some(v);
                 }
             }
@@ -225,7 +414,15 @@ fn walk_taint(
                 if is_sensitive_key_name(k) && !child_skip.contains(&TaintRuleId::SensitiveKeyName)
                 {
                     if let serde_json::Value::String(s) = val {
-                        if !s.trim().is_empty() {
+                        if !s.trim().is_empty()
+                            && apply_rule_set_action(
+                                policy,
+                                tool_name,
+                                &TaintRuleId::SensitiveKeyName,
+                                &child,
+                                rule_set_registry,
+                            )
+                        {
                             return Some(format!(
                                 "taint violation: sensitive MCP argument key at '{}' (blocked by sink '{}')",
                                 child, sink.name
@@ -233,7 +430,15 @@ fn walk_taint(
                         }
                     }
                 }
-                if let Some(v) = walk_taint(val, sink, &child, depth + 1, policy, tool_name) {
+                if let Some(v) = walk_taint(
+                    val,
+                    sink,
+                    &child,
+                    depth + 1,
+                    policy,
+                    rule_set_registry,
+                    tool_name,
+                ) {
                     return Some(v);
                 }
             }
@@ -246,6 +451,32 @@ fn walk_taint(
 // ---------------------------------------------------------------------------
 // Configuration types
 // ---------------------------------------------------------------------------
+
+/// Shared, atomically-swappable handle to the kernel's named taint rule sets.
+///
+/// One [`ArcSwap`] per kernel; cloned (via the outer [`Arc`]) into every
+/// connected [`McpServerConfig`]. The kernel updates by calling
+/// `handle.store(Arc::new(new_rules))`; readers take a `.load()` snapshot at
+/// scan time which stays stable for the duration of that scan.
+pub type TaintRuleSetsHandle = std::sync::Arc<ArcSwap<Vec<NamedTaintRuleSet>>>;
+
+/// Construct an empty rule-set handle. Used as the [`serde::Deserialize`]
+/// default for [`McpServerConfig::taint_rule_sets`] (the field is `serde(skip)`)
+/// and as the canonical "no rule sets configured" value for tests and
+/// stand-alone callers that don't go through the kernel.
+pub fn empty_taint_rule_sets_handle() -> TaintRuleSetsHandle {
+    std::sync::Arc::new(ArcSwap::from_pointee(Vec::new()))
+}
+
+/// Construct a rule-set handle from a static, never-changing list.
+/// Useful for tests and callers that don't need hot-reload semantics.
+pub fn static_taint_rule_sets_handle(rules: Vec<NamedTaintRuleSet>) -> TaintRuleSetsHandle {
+    std::sync::Arc::new(ArcSwap::from_pointee(rules))
+}
+
+fn default_taint_rule_sets_handle() -> TaintRuleSetsHandle {
+    empty_taint_rule_sets_handle()
+}
 
 /// Configuration for an MCP server connection.
 #[derive(Serialize, Deserialize)]
@@ -297,6 +528,24 @@ pub struct McpServerConfig {
     /// Ignored when `taint_scanning = false`.
     #[serde(default)]
     pub taint_policy: Option<McpTaintPolicy>,
+    /// Live handle to the kernel's named taint rule sets, used by the
+    /// scanner to downgrade `Block` to `Warn` / `Log` for rules covered by
+    /// sets referenced from this server's [`McpTaintPolicy::tools`] entries.
+    ///
+    /// **Hot-reload contract:** the kernel owns a single
+    /// [`ArcSwap`] for the workspace and clones the same outer [`Arc`] into
+    /// every connected server. When `[[taint_rules]]` is edited and config
+    /// is reloaded, the kernel calls `.store(Arc::new(new_rules))` on the
+    /// shared swap; the next [`McpConnection::call`] picks up the new
+    /// rules without restarting the server. A `.load()` taken at the start
+    /// of a single scan stays stable for the entire argument-tree walk —
+    /// rules cannot change underneath an in-flight tool call.
+    ///
+    /// `#[serde(skip)]`: the swap is constructed at runtime, never
+    /// serialised. Deserialised callers default to an empty registry —
+    /// scanner behaviour is identical to setting `[[taint_rules]] = []`.
+    #[serde(skip, default = "default_taint_rule_sets_handle")]
+    pub taint_rule_sets: TaintRuleSetsHandle,
     /// Root directories advertised to this MCP server via the MCP Roots capability.
     ///
     /// Each entry is an absolute path (e.g. `/home/user/project`).  librefang
@@ -343,6 +592,7 @@ impl Clone for McpServerConfig {
             oauth_config: self.oauth_config.clone(),
             taint_scanning: self.taint_scanning,
             taint_policy: self.taint_policy.clone(),
+            taint_rule_sets: self.taint_rule_sets.clone(),
             roots: self.roots.clone(),
         }
     }
@@ -648,8 +898,16 @@ impl McpConnection {
                 // Tools already discovered during connect (rmcp handles this)
                 for tool in tools {
                     let description = tool.description.as_deref().unwrap_or("");
-                    let input_schema =
+                    let mut input_schema =
                         serde_json::Value::Object(tool.input_schema.as_ref().clone());
+                    // Preserve MCP `annotations` hints by translating them into
+                    // a `metadata.tool_class` entry on the schema so the
+                    // runtime tool classifier can pick safe parallel candidates.
+                    let ann_value = tool
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| serde_json::to_value(a).ok());
+                    inject_annotation_class(&mut input_schema, ann_value.as_ref());
                     conn.register_tool(&tool.name, description, input_schema);
                 }
             }
@@ -1049,7 +1307,7 @@ impl McpConnection {
                 for tool in tools_array {
                     let raw_name = tool["name"].as_str().unwrap_or("unnamed");
                     let description = tool["description"].as_str().unwrap_or("");
-                    let input_schema = tool
+                    let mut input_schema = tool
                         .get("inputSchema")
                         .cloned()
                         .and_then(|v| match &v {
@@ -1062,6 +1320,11 @@ impl McpConnection {
                             _ => None,
                         })
                         .unwrap_or(serde_json::json!({"type": "object"}));
+
+                    // Preserve MCP `annotations` hints (readOnlyHint /
+                    // destructiveHint) by translating them into a
+                    // `metadata.tool_class` entry the runtime classifier can read.
+                    inject_annotation_class(&mut input_schema, tool.get("annotations"));
 
                     self.register_tool(raw_name, description, input_schema);
                 }
@@ -1249,7 +1512,67 @@ impl McpConnection {
             input_schema,
         });
     }
+}
 
+/// Translate MCP `tools/list` annotations into a `metadata.tool_class` field
+/// inside the tool's JSON Schema so `runtime/tool_classifier.rs` can pick it
+/// up via `explicit_class_from_schema`.
+///
+/// MCP spec defaults: `readOnlyHint = false`, `destructiveHint = true`.
+/// We map `(read_only=true, destructive=false)` to `readonly_search`; any
+/// other combination is treated as `mutating`. When `annotations` is absent,
+/// the schema is left untouched so existing heuristics still apply.
+///
+/// `idempotentHint` and `openWorldHint` are intentionally ignored at this
+/// layer — the current `ToolApprovalClass` enum has no idempotent / open-world
+/// variants, so threading them through would just mean noise that the
+/// classifier discards. If the projection in
+/// `runtime/tool_classifier.rs::ParallelSafety` ever grows finer-grained
+/// classes (e.g. an idempotent_mutating tier for safer batch retries), wire
+/// the additional hints in here.
+///
+/// Inputs come from server-controlled `tools/list` payloads, so the helper
+/// must never panic on malformed shapes — it silently no-ops if `schema`
+/// is not an object or `annotations` is not an object.
+fn inject_annotation_class(
+    schema: &mut serde_json::Value,
+    annotations: Option<&serde_json::Value>,
+) {
+    let Some(ann) = annotations.and_then(|v| v.as_object()) else {
+        return;
+    };
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // Spec defaults when a hint is missing.
+    let read_only = ann
+        .get("readOnlyHint")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let destructive = ann
+        .get("destructiveHint")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let class = if read_only && !destructive {
+        "readonly_search"
+    } else {
+        "mutating"
+    };
+
+    if !obj.contains_key("metadata") {
+        obj.insert("metadata".to_string(), serde_json::json!({}));
+    }
+    if let Some(meta) = obj.get_mut("metadata").and_then(|v| v.as_object_mut()) {
+        meta.insert(
+            "tool_class".to_string(),
+            serde_json::Value::String(class.to_string()),
+        );
+    }
+}
+
+impl McpConnection {
     /// Call a tool on the MCP server.
     pub async fn call_tool(
         &mut self,
@@ -1281,9 +1604,16 @@ impl McpConnection {
         // disable specific rules for known-safe fields.
         if self.config.taint_scanning {
             let policy = self.config.taint_policy.as_ref();
-            if let Some(violation) =
-                scan_mcp_arguments_for_taint_with_policy(arguments, policy, &raw_name)
-            {
+            // Take a `.load()` snapshot at scan start so config reloads
+            // mid-walk can't change the rule set under us. The snapshot
+            // is dropped when the borrow ends.
+            let rule_sets_guard = self.config.taint_rule_sets.load();
+            if let Some(violation) = scan_mcp_arguments_for_taint_with_policy(
+                arguments,
+                policy,
+                rule_sets_guard.as_slice(),
+                &raw_name,
+            ) {
                 // `violation` is already a redacted rule description from
                 // the scanner — do NOT concatenate the raw payload or the
                 // offending value into the error surface.
@@ -1964,7 +2294,13 @@ mod tests {
             },
         );
         let mut tools = std::collections::HashMap::new();
-        tools.insert("navigate".to_string(), McpTaintToolPolicy { paths });
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
         let policy = McpTaintPolicy { tools };
 
         // Opaque-looking tab handle — blocked without policy, allowed with it.
@@ -1974,7 +2310,8 @@ mod tests {
             "must block without policy"
         );
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "navigate").is_none(),
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+                .is_none(),
             "OpaqueToken skip must allow browser tab ID under navigate.tabId"
         );
     }
@@ -1994,7 +2331,13 @@ mod tests {
             },
         );
         let mut tools = std::collections::HashMap::new();
-        tools.insert("send_request".to_string(), McpTaintToolPolicy { paths });
+        tools.insert(
+            "send_request".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
         let policy = McpTaintPolicy { tools };
 
         let args = serde_json::json!({ "authorization": "some-non-empty-value" });
@@ -2007,14 +2350,15 @@ mod tests {
 
         // With SensitiveKeyName skipped for "$.authorization": allowed.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "send_request")
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
                 .is_none(),
             "SensitiveKeyName skip at child path must allow the key"
         );
 
         // Policy on different tool must NOT apply.
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "other_tool").is_some(),
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "other_tool")
+                .is_some(),
             "skip for send_request must not affect other_tool"
         );
     }
@@ -2034,13 +2378,330 @@ mod tests {
             },
         );
         let mut tools = std::collections::HashMap::new();
-        tools.insert("call".to_string(), McpTaintToolPolicy { paths });
+        tools.insert(
+            "call".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
         let policy = McpTaintPolicy { tools };
 
         let args = serde_json::json!({ "token": "api_key=sk-not-real" });
         assert!(
-            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), "call").is_some(),
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "call").is_some(),
             "non-skipped KeyValueSecret must still fire even when OpaqueToken is skipped"
+        );
+    }
+
+    // ── tool-level `default = "skip"` kill-switch tests ───────────────────
+
+    #[test]
+    fn test_tool_default_skip_bypasses_scanning_for_target_tool() {
+        use librefang_types::config::{McpTaintPolicy, McpTaintToolAction, McpTaintToolPolicy};
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                default: McpTaintToolAction::Skip,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        // Heavily credential-shaped payload that would normally block.
+        let args = serde_json::json!({
+            "tabId": "ghp_abcdefghij1234567890abcdefghij1234567890",
+            "headers": { "Authorization": "Bearer sk-zzz-not-real-but-shaped" }
+        });
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_some(),
+            "must block without policy"
+        );
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "navigate")
+                .is_none(),
+            "tool-level default=skip must bypass scanning entirely"
+        );
+    }
+
+    #[test]
+    fn test_tool_default_skip_does_not_leak_to_other_tools() {
+        use librefang_types::config::{McpTaintPolicy, McpTaintToolAction, McpTaintToolPolicy};
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                default: McpTaintToolAction::Skip,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        // Same payload as the previous test, but called against a tool that
+        // does NOT have a skip policy — must still block.
+        let args = serde_json::json!({ "Authorization": "Bearer sk-not-real-token-12345" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "send_request")
+                .is_some(),
+            "default=skip on `navigate` must not affect `send_request`"
+        );
+    }
+
+    // ── named rule sets / warn / log severity tests ───────────────────────
+
+    #[test]
+    fn test_rule_set_warn_action_allows_call_through() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["browser_handles".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "browser_handles".to_string(),
+            action: McpTaintRuleSetAction::Warn,
+            rules: vec![TaintRuleId::OpaqueToken],
+        }];
+
+        let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint(&args).is_some(),
+            "must block without policy"
+        );
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
+                .is_none(),
+            "rule_set with action=warn must allow the call through"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_log_action_also_allows_through() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "audit_tool".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["pii_audit".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "pii_audit".to_string(),
+            action: McpTaintRuleSetAction::Log,
+            rules: vec![TaintRuleId::PiiEmail, TaintRuleId::PiiPhone],
+        }];
+
+        let args = serde_json::json!({ "to": "alice@example.com" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "audit_tool")
+                .is_none(),
+            "rule_set with action=log must allow the call through"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_block_action_is_no_op() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["explicit_block".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "explicit_block".to_string(),
+            action: McpTaintRuleSetAction::Block,
+            rules: vec![TaintRuleId::OpaqueToken],
+        }];
+
+        let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
+                .is_some(),
+            "rule_set with action=block must keep the call blocked"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_warn_only_skips_listed_rules() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // rule_set warns OpaqueToken only — KeyValueSecret must still block.
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "do_thing".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["browser_handles".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "browser_handles".to_string(),
+            action: McpTaintRuleSetAction::Warn,
+            rules: vec![TaintRuleId::OpaqueToken],
+        }];
+
+        let args = serde_json::json!({ "blob": "api_key=sk-not-real" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "do_thing")
+                .is_some(),
+            "rule_set covering OpaqueToken must not exempt KeyValueSecret"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_warn_takes_precedence_over_block() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Tool references two rule sets; the more permissive `warn` wins.
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["strict".to_string(), "lenient".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![
+            NamedTaintRuleSet {
+                name: "strict".to_string(),
+                action: McpTaintRuleSetAction::Block,
+                rules: vec![TaintRuleId::OpaqueToken],
+            },
+            NamedTaintRuleSet {
+                name: "lenient".to_string(),
+                action: McpTaintRuleSetAction::Warn,
+                rules: vec![TaintRuleId::OpaqueToken],
+            },
+        ];
+
+        let args = serde_json::json!({ "tabId": "xAbCdEfGhIjKlMnOpQrStUvWxYz1234567890AB" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &registry, "navigate")
+                .is_none(),
+            "warn must override block when both sets cover the same rule"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_warn_downgrades_sensitive_key_name() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Sensitive key-name blocking is also subject to rule_set downgrade.
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "send_request".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["loose".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "loose".to_string(),
+            action: McpTaintRuleSetAction::Warn,
+            rules: vec![TaintRuleId::SensitiveKeyName],
+        }];
+
+        let args = serde_json::json!({ "authorization": "anything-non-empty" });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "send_request"
+            )
+            .is_none(),
+            "rule_set warn covering SensitiveKeyName must allow object key through"
+        );
+    }
+
+    #[test]
+    fn test_rule_set_downgrade_does_not_mask_unrelated_rule() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Regression for the multi-rule masking issue: a rule set that
+        // downgrades a Secret rule must NOT silently allow a PII rule that
+        // also fires on the same payload but is not covered by any set.
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "post_message".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["secret_warn".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "secret_warn".to_string(),
+            action: McpTaintRuleSetAction::Warn,
+            // Covers Secret-family rules only — PII rules are intentionally
+            // omitted to model an operator who downgraded one family but
+            // never authorized PII downgrade.
+            rules: vec![
+                TaintRuleId::WellKnownPrefix,
+                TaintRuleId::OpaqueToken,
+                TaintRuleId::AuthorizationLiteral,
+                TaintRuleId::KeyValueSecret,
+            ],
+        }];
+
+        // Single string trips BOTH KeyValueSecret (matches `api_key=`) AND
+        // PiiEmail (matches the email regex). The Secret-family rule is
+        // downgraded by the rule set; PiiEmail is not — call must still
+        // block. The pre-fix scanner returned only the first match
+        // (KeyValueSecret), saw it downgraded, and silently allowed the
+        // PII through; the regression check below would have failed there.
+        let args = serde_json::json!({
+            "blob": "api_key=alice@example.com"
+        });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(
+                &args,
+                Some(&policy),
+                &registry,
+                "post_message"
+            )
+            .is_some(),
+            "rule_set warn for Secret must NOT mask an unauthorized PII rule firing on the same payload"
         );
     }
 
@@ -2083,6 +2744,139 @@ mod tests {
         assert!(jsonpath_matches("$.a.*", "$.a.y"));
         assert!(!jsonpath_matches("$.a.*", "$.b.x"));
         assert!(!jsonpath_matches("$.a.*", "$.a.x.z"));
+    }
+
+    /// Doc-test: validate the wildcard syntax called out in the rustdoc on
+    /// `librefang_types::config::McpTaintPathPolicy`.
+    #[test]
+    fn test_documented_wildcards_match_expected_paths() {
+        // `$.foo` — exact property.
+        assert!(jsonpath_matches("$.foo", "$.foo"));
+        assert!(!jsonpath_matches("$.foo", "$.foo.bar"));
+
+        // `$.foo.*` — any direct child of `$.foo` (single segment, non-array).
+        assert!(jsonpath_matches("$.foo.*", "$.foo.bar"));
+        assert!(jsonpath_matches("$.foo.*", "$.foo.baz"));
+        assert!(!jsonpath_matches("$.foo.*", "$.foo.bar.qux"));
+        assert!(!jsonpath_matches("$.foo.*", "$.foo[0]"));
+
+        // `$.foo[*]` — any array element of `$.foo`.
+        assert!(jsonpath_matches("$.foo[*]", "$.foo[0]"));
+        assert!(jsonpath_matches("$.foo[*]", "$.foo[7]"));
+        assert!(!jsonpath_matches("$.foo[*]", "$.foo[0].bar"));
+
+        // `$.*` — any top-level property.
+        assert!(jsonpath_matches("$.*", "$.alpha"));
+        assert!(!jsonpath_matches("$.*", "$.alpha.beta"));
+    }
+
+    /// Documents the known limitation: object keys containing `.` or `[`
+    /// can't be addressed precisely because the matcher splits patterns on
+    /// `.` and treats `[` as the start of array notation. The matcher MUST
+    /// fail closed (no false positive skip) when the limitation bites, so
+    /// the scanner errs toward blocking rather than letting a payload slip
+    /// past via path mismatch.
+    #[test]
+    fn test_jsonpath_dotted_keys_are_known_limitation() {
+        // Naive intent: skip on header `content-type` only.
+        // The pattern parses as `["$","headers","content-type"]` and the
+        // walker also produces `"content-type"` as a single segment, so
+        // simple kebab-case keys actually work.
+        assert!(jsonpath_matches(
+            "$.headers.content-type",
+            "$.headers.content-type"
+        ));
+
+        // Intent: address a key literally containing a `.` (e.g. a config
+        // entry `"a.b"`). The matcher cannot represent this — pattern is
+        // split into segments `["$","a","b"]`, never matching the
+        // walker-produced `["$","a.b"]` path. There is no quoted-segment
+        // syntax. Operators must use a broader pattern (`$.*`).
+        assert!(!jsonpath_matches("$.\"a.b\"", "$.a.b"));
+
+        // Quoted-segment forms in the pattern are not parsed; the matcher
+        // sees them as literal characters and fails to match either form.
+        assert!(!jsonpath_matches("$.headers.\"x.y\"", "$.headers.x.y"));
+    }
+
+    #[test]
+    fn test_lookup_rule_set_action_unknown_name_returns_none() {
+        use librefang_types::config::{
+            McpTaintPolicy, McpTaintRuleSetAction, McpTaintToolPolicy, NamedTaintRuleSet,
+        };
+        use librefang_types::taint::TaintRuleId;
+
+        // Tool references "audit_typo" but registry only has "audit".
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "noisy_tool".to_string(),
+            McpTaintToolPolicy {
+                rule_sets: vec!["audit_typo".to_string()],
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+        let registry = vec![NamedTaintRuleSet {
+            name: "audit".to_string(),
+            action: McpTaintRuleSetAction::Log,
+            rules: vec![TaintRuleId::PiiEmail],
+        }];
+
+        // Unknown name is silently skipped (returns None so caller blocks
+        // on the default path) and triggers a one-shot WARN — not exposed
+        // through the return value but verified to not panic / mutate state
+        // beyond the dedup set.
+        let action = lookup_rule_set_action(
+            Some(&policy),
+            "noisy_tool",
+            &TaintRuleId::PiiEmail,
+            &registry,
+        );
+        assert_eq!(action, None);
+
+        // Calling twice for the same name is also a no-op (the dedup
+        // guard means the second call doesn't re-warn but the return
+        // shape stays consistent).
+        let action2 = lookup_rule_set_action(
+            Some(&policy),
+            "noisy_tool",
+            &TaintRuleId::PiiEmail,
+            &registry,
+        );
+        assert_eq!(action2, None);
+    }
+
+    #[test]
+    fn test_path_wildcard_skips_apply_via_policy() {
+        use librefang_types::config::{McpTaintPathPolicy, McpTaintPolicy, McpTaintToolPolicy};
+        use librefang_types::taint::TaintRuleId;
+
+        // `$.metadata.*` should exempt every direct child key of `metadata`.
+        let mut paths = std::collections::HashMap::new();
+        paths.insert(
+            "$.metadata.*".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![TaintRuleId::SensitiveKeyName],
+            },
+        );
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            "read_file".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let args = serde_json::json!({
+            "metadata": { "api_key": "x", "etag": "y" }
+        });
+        assert!(
+            scan_mcp_arguments_for_taint_with_policy(&args, Some(&policy), &[], "read_file")
+                .is_none(),
+            "wildcard $.metadata.* must exempt all direct children"
+        );
     }
 
     #[test]
@@ -2237,6 +3031,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
 
@@ -2269,6 +3064,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&sse_config).unwrap();
@@ -2305,6 +3101,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&http_compat_config).unwrap();
@@ -2336,6 +3133,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         };
         let json = serde_json::to_string(&http_config).unwrap();
@@ -2383,6 +3181,7 @@ mod tests {
                 oauth_config: None,
                 taint_scanning: true,
                 taint_policy: None,
+                taint_rule_sets: empty_taint_rule_sets_handle(),
                 roots: vec![],
             },
             tools: Vec::new(),
@@ -2551,6 +3350,7 @@ mod tests {
             oauth_config: None,
             taint_scanning: true,
             taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
             roots: vec![],
         })
         .await
@@ -2633,5 +3433,149 @@ mod tests {
 
         let err = ClientInitializeError::ConnectionClosed("simulated".to_string());
         assert!(McpConnection::extract_auth_header_from_error(&err).is_none());
+    }
+
+    // ── inject_annotation_class — MCP tool annotation propagation ────────
+
+    #[test]
+    fn inject_annotation_readonly_sets_readonly_search() {
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(
+            schema["metadata"]["tool_class"].as_str(),
+            Some("readonly_search")
+        );
+    }
+
+    #[test]
+    fn inject_annotation_destructive_sets_mutating() {
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_default_destructive_when_missing() {
+        // Per MCP spec, when destructiveHint is missing the default is true,
+        // so the tool must be classified as `mutating`.
+        let mut schema = serde_json::json!({"type": "object"});
+        let ann = serde_json::json!({"readOnlyHint": false});
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_no_annotations_preserves_schema() {
+        let original = serde_json::json!({
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+        });
+        let mut schema = original.clone();
+        inject_annotation_class(&mut schema, None);
+        assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn inject_annotation_preserves_existing_metadata() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "metadata": {"foo": "bar"},
+        });
+        let ann = serde_json::json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["foo"].as_str(), Some("bar"));
+        assert_eq!(
+            schema["metadata"]["tool_class"].as_str(),
+            Some("readonly_search")
+        );
+    }
+
+    #[test]
+    fn inject_annotation_existing_tool_class_overwritten() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "metadata": {"tool_class": "readonly_search"},
+        });
+        let ann = serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+        });
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema["metadata"]["tool_class"].as_str(), Some("mutating"));
+    }
+
+    #[test]
+    fn inject_annotation_non_object_schema_is_noop() {
+        // Defensive: a malformed schema (e.g. a bare bool) must not panic.
+        let mut schema = serde_json::json!(true);
+        let ann = serde_json::json!({"readOnlyHint": true});
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema, serde_json::json!(true));
+    }
+
+    #[test]
+    fn inject_annotation_non_object_annotations_is_noop() {
+        let original = serde_json::json!({"type": "object"});
+        let mut schema = original.clone();
+        let ann = serde_json::json!("not-an-object");
+        inject_annotation_class(&mut schema, Some(&ann));
+        assert_eq!(schema, original);
+    }
+
+    /// Producer/consumer string contract: the literals `inject_annotation_class`
+    /// emits must round-trip through `ToolApprovalClass::from_snake_case` to
+    /// the corresponding variants. Without this, a typo or a future rename in
+    /// either crate would silently fall back to `Unknown` → `WriteShared` and
+    /// the whole MCP-tool parallelisation fix becomes a no-op.
+    #[test]
+    fn injected_class_strings_parse_into_approval_class() {
+        use librefang_types::tool_class::ToolApprovalClass;
+
+        // readOnly + non-destructive → "readonly_search" → ReadonlySearch
+        let mut schema_ro = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_ro,
+            Some(&serde_json::json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+            })),
+        );
+        let class_str = schema_ro["metadata"]["tool_class"]
+            .as_str()
+            .expect("readonly path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::ReadonlySearch),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
+
+        // destructive → "mutating" → Mutating
+        let mut schema_mut = serde_json::json!({"type": "object"});
+        inject_annotation_class(
+            &mut schema_mut,
+            Some(&serde_json::json!({
+                "readOnlyHint": false,
+                "destructiveHint": true,
+            })),
+        );
+        let class_str = schema_mut["metadata"]["tool_class"]
+            .as_str()
+            .expect("mutating path must produce a string");
+        assert_eq!(
+            ToolApprovalClass::from_snake_case(class_str),
+            Some(ToolApprovalClass::Mutating),
+            "producer string {class_str:?} must parse on the consumer side"
+        );
     }
 }

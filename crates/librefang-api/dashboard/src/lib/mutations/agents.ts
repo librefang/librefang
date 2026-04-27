@@ -9,6 +9,8 @@ import {
   deleteAgent,
   patchAgent,
   patchAgentConfig,
+  patchHandAgentRuntimeConfig,
+  clearHandAgentRuntimeConfig,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -20,8 +22,33 @@ import {
   pauseExperiment,
   completeExperiment,
   resolveApproval,
+  uploadAgentFile,
 } from "../http/client";
-import { agentKeys, approvalKeys, overviewKeys, sessionKeys } from "../queries/keys";
+import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
+
+/**
+ * Unified payload type for the two agent-config PATCH endpoints.
+ *
+ * Both `/agents/{id}/config` (standalone agent) and
+ * `/agents/{id}/hand-runtime-config` (hand-role override) accept the same
+ * model-tuning subset; hand overrides additionally accept `api_key_env` and
+ * `base_url` which are tri-state on the server:
+ *   - absent       → leave existing override as-is
+ *   - empty string → clear that specific field
+ *   - non-empty    → set to the provided value
+ *
+ * Non-hand callers simply never send `api_key_env` / `base_url`; the backend
+ * ignores them on the standalone `/config` route.
+ */
+export type AgentConfigPatch = {
+  max_tokens?: number;
+  model?: string;
+  provider?: string;
+  temperature?: number;
+  api_key_env?: string;
+  base_url?: string;
+  web_search_augmentation?: "off" | "auto" | "always";
+};
 
 export function useSpawnAgent() {
   const qc = useQueryClient();
@@ -130,6 +157,15 @@ export function usePatchAgent() {
   });
 }
 
+/**
+ * PATCH /agents/{id}/config — model-tuning update for a **non-hand** agent.
+ *
+ * Hand-role agents MUST use `usePatchHandAgentRuntimeConfig` instead; the
+ * two backends write to different config slots and invalidation fan-out
+ * differs (hand overrides also dirty `handKeys.details()`). Branching on
+ * `is_hand` is the caller's job because only the caller knows — from the
+ * cached agent detail — whether this id refers to a hand role.
+ */
 export function usePatchAgentConfig() {
   const qc = useQueryClient();
   return useMutation({
@@ -138,17 +174,69 @@ export function usePatchAgentConfig() {
       config,
     }: {
       agentId: string;
-      config: {
-        max_tokens?: number;
-        model?: string;
-        provider?: string;
-        temperature?: number;
-        web_search_augmentation?: "off" | "auto" | "always";
-      };
+      config: AgentConfigPatch;
     }) => patchAgentConfig(agentId, config),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
+  });
+}
+
+/**
+ * PATCH /agents/{id}/hand-runtime-config — per-agent hand runtime override.
+ *
+ * Accepts the same model-tuning subset as `usePatchAgentConfig` plus
+ * `api_key_env` / `base_url` (tri-state; empty string clears).
+ *
+ * Invalidates:
+ * - `agentKeys.lists()` — the model/provider badge in the agent list row
+ *   reads from the live manifest which is what this override feeds into.
+ * - `agentKeys.detail(id)` — the config panel bound to this hook reads
+ *   the same manifest fields.
+ * - `handKeys.details()` — the hand-detail view shows per-role runtime
+ *   override state, so any cached hand detail referencing this agent's
+ *   role must refetch to stay consistent with
+ *   `useClearHandAgentRuntimeConfig`.
+ */
+export function usePatchHandAgentRuntimeConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      config,
+    }: {
+      agentId: string;
+      config: AgentConfigPatch;
+    }) => patchHandAgentRuntimeConfig(agentId, config),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: handKeys.details() });
+    },
+  });
+}
+
+/**
+ * DELETE the per-agent hand runtime override — restores the live manifest
+ * to the HAND.toml defaults on the server side. Invalidates:
+ *
+ * - `agentKeys.lists()` because the model/provider badge surfaced in the
+ *   agent list row comes from the live manifest.
+ * - `agentKeys.detail(agentId)` because the config panel bound to this
+ *   hook reads the same manifest fields.
+ * - `handKeys.details()` because the hand-detail view shows per-role
+ *   runtime override state; the coordinator agent's clear is observable
+ *   through any cached hand detail that references this agent's role.
+ */
+export function useClearHandAgentRuntimeConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) => clearHandAgentRuntimeConfig(agentId),
+    onSuccess: (_data, agentId) => {
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: handKeys.details() });
     },
   });
 }
@@ -300,6 +388,23 @@ export function useCompleteExperiment() {
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
+  });
+}
+
+// Upload a chat attachment for the given agent. Returns the metadata that
+// callers must thread back through the next /message or WS frame as
+// `attachments[]` — uploads not referenced by a message stay orphaned in
+// the registry until the daemon restarts.
+//
+// Intentionally does NOT call invalidateQueries: the upload only registers
+// a file_id server-side, and no React Query cache reads UPLOAD_REGISTRY
+// directly. The file becomes visible in the UI only after it's referenced
+// in a /message call, which goes through useSendAgentMessage and triggers
+// the appropriate session invalidation there.
+export function useUploadAgentFile() {
+  return useMutation({
+    mutationFn: ({ agentId, file }: { agentId: string; file: File }) =>
+      uploadAgentFile(agentId, file),
   });
 }
 

@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: librefang-tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # Link trace spans back to Prometheus metrics via the configured
+      # service name / operation labels. Grafana auto-fills these when
+      # both datasources are present.
+      tracesToMetrics:
+        datasourceUid: librefang-prometheus
+      nodeGraph:
+        enabled: true

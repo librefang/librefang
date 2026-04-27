@@ -1,10 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { useQuery } from "@tanstack/react-query";
-import { useMemoryHealth } from "./memory";
+import { useMemoryHealth, useAgentKvMemory } from "./memory";
 import { healthDetailQueryOptions } from "./runtime";
-import { runtimeKeys } from "./keys";
+import { runtimeKeys, memoryKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
+import * as httpClient from "../http/client";
+
+vi.mock("../http/client", async () => {
+  const actual = await vi.importActual<typeof import("../http/client")>("../http/client");
+  return {
+    ...actual,
+    getAgentKvMemory: vi.fn(),
+  };
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("useMemoryHealth", () => {
   it("should return true when data.memory.embedding_available is true", async () => {
@@ -81,5 +94,64 @@ describe("useMemoryHealth", () => {
 
     expect(healthResult.current.data).toBe(sharedQueryState);
     expect(queryClient.getQueryData(runtimeKeys.healthDetail())).toBe(sharedQueryState);
+  });
+});
+
+describe("useAgentKvMemory", () => {
+  it("should be disabled when agentId is empty string", () => {
+    const { result } = renderHook(() => useAgentKvMemory(""), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(httpClient.getAgentKvMemory).not.toHaveBeenCalled();
+  });
+
+  it("should fetch and unwrap kv_pairs when agentId is provided", async () => {
+    vi.mocked(httpClient.getAgentKvMemory).mockResolvedValue({
+      kv_pairs: [
+        { key: "name", value: "alice" },
+        { key: "tz", value: "UTC" },
+      ],
+    });
+
+    const { result } = renderHook(() => useAgentKvMemory("agent-1"), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(httpClient.getAgentKvMemory).toHaveBeenCalledWith("agent-1");
+    expect(result.current.data).toEqual([
+      { key: "name", value: "alice" },
+      { key: "tz", value: "UTC" },
+    ]);
+  });
+
+  it("should normalize missing kv_pairs to an empty array", async () => {
+    vi.mocked(httpClient.getAgentKvMemory).mockResolvedValue({});
+
+    const { result } = renderHook(() => useAgentKvMemory("agent-1"), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+  });
+
+  it("should cache under memoryKeys.agentKv(agentId)", async () => {
+    vi.mocked(httpClient.getAgentKvMemory).mockResolvedValue({
+      kv_pairs: [{ key: "k", value: "v" }],
+    });
+    const { queryClient, wrapper } = createQueryClientWrapper();
+
+    renderHook(() => useAgentKvMemory("agent-xyz"), { wrapper });
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(memoryKeys.agentKv("agent-xyz"))).toEqual([
+        { key: "k", value: "v" },
+      ]);
+    });
   });
 });

@@ -8,7 +8,7 @@ use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::taint::{TaintLabel, TaintSink, TaintedValue};
-use librefang_types::tool::{ToolDefinition, ToolResult};
+use librefang_types::tool::{ToolDefinition, ToolExecutionStatus, ToolResult};
 use librefang_types::tool_compat::normalize_tool_name;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -302,6 +302,13 @@ pub fn current_agent_depth() -> u32 {
 pub struct ToolExecContext<'a> {
     pub kernel: Option<&'a Arc<dyn KernelHandle>>,
     pub allowed_tools: Option<&'a [String]>,
+    /// Full `ToolDefinition` list for the agent's granted tools (builtin +
+    /// MCP + skills). When `Some`, lazy-load meta-tools (`tool_load`,
+    /// `tool_search`) consult this as the source of truth so non-builtin
+    /// tools remain loadable after the eager schema trim (issue #3044).
+    /// `None` falls back to the builtin catalog — kept for legacy/test call
+    /// sites that don't have the list on hand.
+    pub available_tools: Option<&'a [ToolDefinition]>,
     pub caller_agent_id: Option<&'a str>,
     pub skill_registry: Option<&'a SkillRegistry>,
     /// Skill allowlist for the calling agent. Empty slice = all skills allowed.
@@ -360,9 +367,26 @@ pub async fn execute_tool_raw(
         return tool_notify_owner(tool_use_id, input);
     }
 
+    // Lazy tool loading meta-tools (issue #3044). `tool_load` carries the
+    // loaded schema via `ToolResult.loaded_tool` side-channel which the agent
+    // loop reads to extend the next request's tools list. Both are dispatched
+    // before the generic Result<String, String> wrapper so the side-channel
+    // survives.
+    if tool_name == "tool_load" {
+        let mut r = tool_meta_load(input, ctx.available_tools);
+        r.tool_use_id = tool_use_id.to_string();
+        return r;
+    }
+    if tool_name == "tool_search" {
+        let mut r = tool_meta_search(input, ctx.available_tools);
+        r.tool_use_id = tool_use_id.to_string();
+        return r;
+    }
+
     let ToolExecContext {
         kernel,
         allowed_tools,
+        available_tools: _,
         caller_agent_id,
         skill_registry,
         allowed_skills,
@@ -387,7 +411,11 @@ pub async fn execute_tool_raw(
 
     let result = match tool_name {
         // Filesystem tools
-        "file_read" => tool_file_read(input, *workspace_root).await,
+        "file_read" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_read(input, *workspace_root, &extra_refs).await
+        }
         "file_write" => {
             // Enforce named workspace read-only restrictions before the sandbox resolves the path.
             // Agents learn absolute workspace paths from TOOLS.md; an absolute path that falls
@@ -410,12 +438,21 @@ pub async fn execute_tool_raw(
                 }
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
-            tool_file_write(input, *workspace_root).await
+            let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_write(input, *workspace_root, &extra_refs).await
         }
-        "file_list" => tool_file_list(input, *workspace_root).await,
+        "file_list" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_file_list(input, *workspace_root, &extra_refs).await
+        }
         "apply_patch" => {
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch").await;
-            tool_apply_patch(input, *workspace_root).await
+            // apply_patch needs write access — restrict to rw named workspaces only.
+            let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_apply_patch(input, *workspace_root, &extra_refs).await
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -609,7 +646,7 @@ pub async fn execute_tool_raw(
         }
 
         // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, *kernel).await,
+        "agent_send" => tool_agent_send(input, *kernel, *caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
@@ -886,11 +923,13 @@ pub async fn execute_tool_raw(
                 if let Some(skill) = registry.find_tool_provider(other) {
                     debug!(tool = other, skill = %skill.manifest.skill.name, "Dispatching to skill");
                     let skill_dir = skill.path.clone();
+                    let env_policy = kernel.and_then(|k| k.skill_env_passthrough_policy());
                     match librefang_skills::loader::execute_skill_tool(
                         &skill.manifest,
                         &skill.path,
                         other,
                         input,
+                        env_policy.as_ref(),
                     )
                     .await
                     {
@@ -976,6 +1015,7 @@ pub async fn execute_tool(
     dangerous_command_checker: Option<
         &Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>,
     >,
+    available_tools: Option<&[ToolDefinition]>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1000,7 +1040,7 @@ pub async fn execute_tool(
         }
     }
 
-    let skip_approval_for_full_exec = tool_name == "shell_exec"
+    let shell_exec_full_mode = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
     // Approval gate: check if this tool requires human approval before execution.
@@ -1018,8 +1058,38 @@ pub async fn execute_tool(
             };
         }
 
+        // Per-user RBAC gate (RBAC M3, issue #3054 Phase 2). Layered on
+        // top of the existing channel deny: an explicit `Deny` here
+        // hard-blocks the call; `NeedsApproval` flips the call into
+        // approval-required mode regardless of the global require list;
+        // `Allow` defers to the existing approval logic.
+        let user_gate = kh.resolve_user_tool_decision(tool_name, sender_id, channel);
+        let force_approval = match &user_gate {
+            librefang_types::user_policy::UserToolGate::Allow => false,
+            librefang_types::user_policy::UserToolGate::Deny { reason } => {
+                warn!(tool_name, channel, %reason, "Execution denied by per-user policy");
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Execution denied: {reason}"),
+                    is_error: true,
+                    ..Default::default()
+                };
+            }
+            librefang_types::user_policy::UserToolGate::NeedsApproval { reason } => {
+                debug!(tool_name, %reason, "Per-user policy escalating to approval");
+                true
+            }
+        };
+
+        // SECURITY: the shell-Full bypass only applies to the global
+        // `require_approval` list — a user-policy `NeedsApproval` MUST
+        // still route through the approval queue. Without `!force_approval`
+        // here, a user whose RBAC policy demanded approval would have the
+        // call execute directly under Full mode, defeating Phase-2.
+        let skip_approval_for_full_exec = shell_exec_full_mode && !force_approval;
+
         if !skip_approval_for_full_exec
-            && kh.requires_approval_with_context(tool_name, sender_id, channel)
+            && (force_approval || kh.requires_approval_with_context(tool_name, sender_id, channel))
         {
             let agent_id_str = caller_agent_id.unwrap_or("unknown");
             let input_str = input.to_string();
@@ -1049,6 +1119,9 @@ pub async fn execute_tool(
                 sender_id: sender_id.map(|s| s.to_string()),
                 channel: channel.map(|c| c.to_string()),
                 workspace_root: workspace_root.map(|p| p.to_path_buf()),
+                // When the user gate demanded approval, hand-tagged agents
+                // must NOT auto-approve — see kernel `submit_tool_approval`.
+                force_human: force_approval,
             };
             match kh
                 .submit_tool_approval(agent_id_str, tool_name, &summary, deferred, session_id)
@@ -1103,6 +1176,7 @@ pub async fn execute_tool(
     let ctx = ToolExecContext {
         kernel,
         allowed_tools,
+        available_tools,
         caller_agent_id,
         skill_registry,
         allowed_skills,
@@ -1125,6 +1199,65 @@ pub async fn execute_tool(
         dangerous_command_checker,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
+}
+
+/// Tools that are always shipped as full JSON schemas in every LLM request,
+/// regardless of lazy-loading settings.
+///
+/// Rationale (issue #3044): shipping all ~75 builtin tool schemas on every
+/// turn burns ~6k tokens of request payload. Most conversations only use a
+/// handful of tools — and the ones below are the ones agents reach for most
+/// often, so it's worth paying their declaration cost upfront to avoid a
+/// `tool_load` round-trip on the common path.
+///
+/// Everything else in [`builtin_tool_definitions`] is available via the
+/// `tool_load(name)` meta-tool (declared as part of this list so the LLM can
+/// always discover new tools) and `tool_search(query)`.
+///
+/// Order matters only for readability in logs — the final list is a Vec, so
+/// the order is preserved into the request body.
+pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
+    // Meta: discovery + loading. Without these, the LLM cannot escape the
+    // lazy-load regime on its own.
+    "tool_load",
+    "tool_search",
+    // Memory: used on nearly every turn of a multi-turn conversation.
+    "memory_store",
+    "memory_recall",
+    "memory_list",
+    // Web: the most common "go find something" action.
+    "web_search",
+    "web_fetch",
+    // Files: reading is near-universal; writing and listing round out the
+    // core file-flow so agents don't round-trip to load each one.
+    "file_read",
+    // Agent-to-agent / messaging: common proactive output path.
+    "agent_send",
+    "agent_list",
+    "channel_send",
+    // Private channel to the owner — intentionally cheap so agents never
+    // skip using it because of declaration cost.
+    "notify_owner",
+    // Skill evolution helpers stay native because they're also in the
+    // always-available set enforced by the kernel.
+    "skill_read_file",
+    "skill_evolve_create",
+    "skill_evolve_update",
+    "skill_evolve_patch",
+    "skill_evolve_delete",
+    "skill_evolve_rollback",
+    "skill_evolve_write_file",
+    "skill_evolve_remove_file",
+];
+
+/// Select the subset of `all` whose names appear in [`ALWAYS_NATIVE_TOOLS`].
+/// Used by the agent loop to build the lazy-mode tools list.
+pub fn select_native_tools(all: &[ToolDefinition]) -> Vec<ToolDefinition> {
+    let want: std::collections::HashSet<&str> = ALWAYS_NATIVE_TOOLS.iter().copied().collect();
+    all.iter()
+        .filter(|t| want.contains(t.name.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Get definitions for all built-in tools.
@@ -2081,6 +2214,30 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["name", "path"]
             }),
         },
+        // --- Meta-tools: lazy tool loading (issue #3044) ---
+        ToolDefinition {
+            name: "tool_load".to_string(),
+            description: "Load the full JSON schema for a tool by name. Call this before using a tool that is listed in the catalog but not yet declared with a full schema. The loaded tool becomes callable on the next turn.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Tool name to load (e.g., 'file_write', 'browser_navigate')" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Find tools by keyword. Returns matching tool names and one-line hints from the full catalog.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Keyword(s) to match against tool names and descriptions (e.g., 'read file', 'screenshot')" },
+                    "limit": { "type": "integer", "description": "Max results (default 10)", "minimum": 1, "maximum": 50 }
+                },
+                "required": ["query"]
+            }),
+        },
     ]
 }
 
@@ -2094,11 +2251,55 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 /// unrestricted filesystem access. All file operations MUST be confined
 /// to the agent's workspace directory.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
+    resolve_file_path_ext(raw_path, workspace_root, &[])
+}
+
+/// Like [`resolve_file_path`] but accepts additional canonical roots that
+/// should also be considered "inside the sandbox" — used to honor named
+/// workspaces declared in the agent's manifest.
+fn resolve_file_path_ext(
+    raw_path: &str,
+    workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
+) -> Result<PathBuf, String> {
     let root = workspace_root.ok_or(
         "Workspace sandbox not configured: file operations are disabled. \
          Set a workspace_root in the agent manifest or kernel config to enable file tools.",
     )?;
-    crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
+    crate::workspace_sandbox::resolve_sandbox_path_ext(raw_path, root, additional_roots)
+}
+
+/// Fetch the named-workspace prefixes (all modes) for the calling agent.
+/// Returns an empty vec when either kernel or agent id is missing.
+fn named_ws_prefixes(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k
+            .named_workspace_prefixes(aid)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Like [`named_ws_prefixes`] but only returns prefixes for read-write
+/// workspaces. Used by `file_write` to widen the writable allowlist.
+fn named_ws_prefixes_writable(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k
+            .named_workspace_prefixes(aid)
+            .into_iter()
+            .filter(|(_, mode)| *mode == librefang_types::agent::WorkspaceMode::ReadWrite)
+            .map(|(p, _)| p)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2160,9 +2361,10 @@ async fn maybe_snapshot(
 async fn tool_file_read(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     tokio::fs::read_to_string(&resolved)
         .await
         .map_err(|e| format!("Failed to read file: {e}"))
@@ -2171,9 +2373,10 @@ async fn tool_file_read(
 async fn tool_file_write(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     let content = input["content"]
         .as_str()
         .ok_or("Missing 'content' parameter")?;
@@ -2195,11 +2398,12 @@ async fn tool_file_write(
 async fn tool_file_list(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or(
         "Missing 'path' parameter — retry with {\"path\": \".\"} to list the workspace root",
     )?;
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
     let mut entries = tokio::fs::read_dir(&resolved)
         .await
         .map_err(|e| format!("Failed to list directory: {e}"))?;
@@ -2228,11 +2432,12 @@ async fn tool_file_list(
 async fn tool_apply_patch(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let patch_str = input["patch"].as_str().ok_or("Missing 'patch' parameter")?;
     let root = workspace_root.ok_or("apply_patch requires a workspace root")?;
     let ops = crate::apply_patch::parse_patch(patch_str)?;
-    let result = crate::apply_patch::apply_patch(&ops, root).await;
+    let result = crate::apply_patch::apply_patch(&ops, root, additional_roots).await;
     if result.is_ok() {
         Ok(result.summary())
     } else {
@@ -2529,6 +2734,7 @@ fn require_kernel(
 async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = input["agent_id"]
@@ -2563,7 +2769,14 @@ async fn tool_agent_send(
 
     AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(current_depth + 1), async {
-            kh.send_to_agent(agent_id, message).await
+            // When we know the caller, use the cascade-aware entry so a
+            // parent `/stop` propagates into the callee (issue #3044).
+            // System-initiated calls (caller_agent_id = None) fall back to
+            // the legacy path.
+            match caller_agent_id {
+                Some(parent) => kh.send_to_agent_as(agent_id, message, parent).await,
+                None => kh.send_to_agent(agent_id, message).await,
+            }
         })
         .await
 }
@@ -2746,6 +2959,152 @@ fn tool_agent_kill(
 ///
 /// Errors are returned via `ToolResult.is_error = true` with a descriptive
 /// message; the model is expected to retry with corrected arguments.
+/// Resolve the pool `tool_load` / `tool_search` search against.
+///
+/// - `Some(pool)` — the agent's granted `ToolDefinition` list from the
+///   agent-loop (builtin + MCP + skills). The authoritative source: if the
+///   caller supplied one, we honor it verbatim — including an empty slice,
+///   which means "nothing is granted". Falling back to builtin on empty
+///   would leak the catalog to an agent that has none of it.
+/// - `None` — caller didn't thread the granted list through (legacy
+///   `execute_tool` paths: REST/MCP bridges, approval resume, unit tests).
+///   Fall back to the builtin catalog so these code paths keep working.
+fn meta_lookup_pool(available: Option<&[ToolDefinition]>) -> Vec<ToolDefinition> {
+    match available {
+        Some(list) => list.to_vec(),
+        None => builtin_tool_definitions(),
+    }
+}
+
+/// Meta-tool: load a tool's full schema by name (issue #3044). The returned
+/// schema is both printed into `content` for the LLM to read AND attached as
+/// `ToolResult.loaded_tool` so the agent loop can register it in the session's
+/// lazy-load cache — making the tool callable on the next turn.
+fn tool_meta_load(
+    input: &serde_json::Value,
+    available_tools: Option<&[ToolDefinition]>,
+) -> ToolResult {
+    let name = input
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return ToolResult::error(
+            "".to_string(),
+            "tool_load requires a 'name' string".to_string(),
+        );
+    }
+    let pool = meta_lookup_pool(available_tools);
+    match pool.into_iter().find(|t| t.name == name) {
+        Some(def) => {
+            let schema = serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "input_schema": def.input_schema,
+            });
+            let content = format!(
+                "Loaded tool '{}'. Schema:\n{}\n\nYou can call this tool on your next turn.",
+                def.name,
+                serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string()),
+            );
+            ToolResult {
+                tool_use_id: String::new(),
+                content,
+                is_error: false,
+                status: ToolExecutionStatus::Completed,
+                loaded_tool: Some(def),
+                ..Default::default()
+            }
+        }
+        None => ToolResult::error(
+            String::new(),
+            format!(
+                "Unknown tool '{}'. Call tool_search(query) to find available tools.",
+                name
+            ),
+        ),
+    }
+}
+
+/// Meta-tool: search the tool catalog by keyword (issue #3044). Returns a
+/// short list of matching tool names and one-line hints sourced from the
+/// prompt_builder catalog.
+fn tool_meta_search(
+    input: &serde_json::Value,
+    available_tools: Option<&[ToolDefinition]>,
+) -> ToolResult {
+    let query = input
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if query.is_empty() {
+        return ToolResult::error(
+            String::new(),
+            "tool_search requires a non-empty 'query' string".to_string(),
+        );
+    }
+    let limit = input
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 50) as usize;
+
+    // Tokenize query — any token in the tool name, description, or hint makes a hit.
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    let mut matches: Vec<(usize, String, String)> = Vec::new();
+    for def in meta_lookup_pool(available_tools) {
+        let name_lc = def.name.to_lowercase();
+        let desc_lc = def.description.to_lowercase();
+        let hint = crate::prompt_builder::tool_hint(&def.name);
+        let hint_lc = hint.to_lowercase();
+        let score = tokens.iter().fold(0usize, |acc, tok| {
+            let tok = tok.trim();
+            if tok.is_empty() {
+                return acc;
+            }
+            acc + (name_lc.contains(tok) as usize) * 3
+                + (hint_lc.contains(tok) as usize) * 2
+                + (desc_lc.contains(tok) as usize)
+        });
+        if score > 0 {
+            matches.push((score, def.name, hint.to_string()));
+        }
+    }
+    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
+    matches.truncate(limit);
+
+    if matches.is_empty() {
+        return ToolResult::ok(
+            String::new(),
+            format!(
+                "No tools matched '{}'. Browse the tool catalog in the system prompt.",
+                query
+            ),
+        );
+    }
+    let lines: Vec<String> = matches
+        .into_iter()
+        .map(|(_, name, hint)| {
+            if hint.is_empty() {
+                name
+            } else {
+                format!("{name}: {hint}")
+            }
+        })
+        .collect();
+    ToolResult::ok(
+        String::new(),
+        format!(
+            "Matches for '{}' (call tool_load(name) to get a tool's schema):\n{}",
+            query,
+            lines.join("\n")
+        ),
+    )
+}
+
 fn tool_notify_owner(tool_use_id: &str, input: &serde_json::Value) -> ToolResult {
     let reason = input
         .get("reason")
@@ -5737,6 +6096,7 @@ mod tests {
     async fn test_tool_a2a_send_blocks_secret_in_message() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "agent_url": "https://example.com/a2a",
@@ -5755,6 +6115,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_text_message() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -5774,6 +6135,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_image_caption() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -5794,6 +6156,7 @@ mod tests {
     async fn test_tool_channel_send_blocks_secret_in_poll_question() {
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
         });
         let input = serde_json::json!({
             "channel": "telegram",
@@ -5812,6 +6175,18 @@ mod tests {
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,
+        /// RBAC M3 — overrides what `resolve_user_tool_decision` returns
+        /// for every call. `None` keeps the default-impl behaviour
+        /// (`UserToolGate::Allow`) so pre-RBAC tests are unaffected.
+        user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
+    }
+
+    /// Captures the `DeferredToolExecution.force_human` flag so tests
+    /// can assert that the user-gate escalation propagates through.
+    struct ForceHumanCapturingKernel {
+        approval_requests: Arc<AtomicUsize>,
+        last_force_human: Arc<std::sync::Mutex<Option<bool>>>,
+        user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
     }
 
     #[async_trait]
@@ -5965,6 +6340,257 @@ mod tests {
                 request_id: uuid::Uuid::new_v4(),
             })
         }
+
+        fn resolve_user_tool_decision(
+            &self,
+            _tool_name: &str,
+            _sender_id: Option<&str>,
+            _channel: Option<&str>,
+        ) -> librefang_types::user_policy::UserToolGate {
+            self.user_gate_override
+                .clone()
+                .unwrap_or(librefang_types::user_policy::UserToolGate::Allow)
+        }
+    }
+
+    #[async_trait]
+    impl KernelHandle for ForceHumanCapturingKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("not used".to_string())
+        }
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
+
+        fn requires_approval(&self, tool_name: &str) -> bool {
+            tool_name == "shell_exec"
+        }
+
+        async fn submit_tool_approval(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _action_summary: &str,
+            deferred: librefang_types::tool::DeferredToolExecution,
+            _session_id: Option<&str>,
+        ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+            self.approval_requests.fetch_add(1, Ordering::SeqCst);
+            *self.last_force_human.lock().unwrap() = Some(deferred.force_human);
+            Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
+                request_id: uuid::Uuid::new_v4(),
+            })
+        }
+
+        fn resolve_user_tool_decision(
+            &self,
+            _tool_name: &str,
+            _sender_id: Option<&str>,
+            _channel: Option<&str>,
+        ) -> librefang_types::user_policy::UserToolGate {
+            self.user_gate_override
+                .clone()
+                .unwrap_or(librefang_types::user_policy::UserToolGate::Allow)
+        }
+    }
+
+    /// Regression: when the per-user gate returns `NeedsApproval`, the
+    /// `DeferredToolExecution.force_human` flag MUST be set so the
+    /// kernel's `submit_tool_approval` can disable the hand-agent
+    /// auto-approve carve-out. (B3 of PR #3205 review.)
+    #[tokio::test]
+    async fn tool_runner_rbac_force_human_propagates_to_deferred() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let last = Arc::new(std::sync::Mutex::new(None));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ForceHumanCapturingKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            last_force_human: Arc::clone(&last),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+                reason: "user policy escalated".to_string(),
+            }),
+        });
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let _ = execute_tool(
+            "tu-1",
+            "file_write",
+            &serde_json::json!({"path": "scratch.txt", "content": "hi"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *last.lock().unwrap(),
+            Some(true),
+            "force_human must be true when user policy escalated"
+        );
+    }
+
+    /// Sanity: when the user gate is `Allow` and only the global
+    /// `require_approval` list pulls the call into approval, `force_human`
+    /// stays false — hand-agent auto-approval keeps working in the
+    /// non-RBAC path.
+    #[tokio::test]
+    async fn tool_runner_rbac_force_human_stays_false_for_global_require_approval() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let last = Arc::new(std::sync::Mutex::new(None));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ForceHumanCapturingKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            last_force_human: Arc::clone(&last),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::Allow),
+        });
+
+        let _ = execute_tool(
+            "tu-1",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alice"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(*last.lock().unwrap(), Some(false));
     }
 
     #[test]
@@ -6102,6 +6728,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -6141,6 +6768,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6177,6 +6805,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6213,10 +6842,493 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
         assert!(result.content.contains("traversal"));
+    }
+
+    // ── Named-workspace read-side support ────────────────────────────────
+    //
+    // Mock kernel that surfaces a configurable list of named workspaces
+    // (paired with their access modes) via `named_workspace_prefixes`.
+    // `readonly_workspace_prefixes` is derived from that list so the existing
+    // file_write denial path stays consistent.
+
+    struct NamedWsKernel {
+        named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+    }
+
+    #[async_trait]
+    impl KernelHandle for NamedWsKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("not used".to_string())
+        }
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+            Err("not used".to_string())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
+        fn named_workspace_prefixes(
+            &self,
+            _agent_id: &str,
+        ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
+            self.named.clone()
+        }
+        fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
+            self.named
+                .iter()
+                .filter(|(_, m)| *m == librefang_types::agent::WorkspaceMode::ReadOnly)
+                .map(|(p, _)| p.clone())
+                .collect()
+        }
+    }
+
+    fn make_named_ws_kernel(
+        named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+    ) -> Arc<dyn KernelHandle> {
+        Arc::new(NamedWsKernel { named })
+    }
+
+    #[tokio::test]
+    async fn test_file_read_allows_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("note.txt");
+        std::fs::write(&target, "hello shared").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000001"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert_eq!(result.content, "hello shared");
+    }
+
+    #[tokio::test]
+    async fn test_file_list_allows_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        std::fs::write(shared_canon.join("a.txt"), "a").unwrap();
+        std::fs::write(shared_canon.join("b.txt"), "b").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": shared_canon.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000002"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert!(result.content.contains("a.txt"));
+        assert!(result.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_file_write_allows_rw_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("out.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "wrote-it",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000003"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "wrote-it");
+    }
+
+    #[tokio::test]
+    async fn test_file_write_denies_readonly_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("out.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "should-not-write",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000004"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("read-only"),
+            "expected read-only denial, got: {}",
+            result.content
+        );
+        assert!(!target.exists(), "file should not have been written");
+    }
+
+    #[tokio::test]
+    async fn test_file_read_outside_all_workspaces_still_blocked() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let other = tempfile::tempdir().expect("other");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let other_path = other.path().canonicalize().unwrap().join("nope.txt");
+        std::fs::write(&other_path, "secret").unwrap();
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon, WorkspaceMode::ReadWrite)]);
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": other_path.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000005"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Access denied"),
+            "expected sandbox denial, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_allows_rw_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("added.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadWrite)]);
+
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+hello-from-patch\n*** End Patch\n",
+            target.to_str().unwrap()
+        );
+
+        let result = execute_tool(
+            "test-id",
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000006"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "hello-from-patch");
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_denies_readonly_named_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+        let target = shared_canon.join("added.txt");
+
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: {}\n+should-not-write\n*** End Patch\n",
+            target.to_str().unwrap()
+        );
+
+        let result = execute_tool(
+            "test-id",
+            "apply_patch",
+            &serde_json::json!({"patch": patch}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000007"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error, "expected denial, got: {}", result.content);
+        assert!(!target.exists(), "file should not have been written");
     }
 
     #[tokio::test]
@@ -6248,6 +7360,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -6283,6 +7396,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6318,6 +7432,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6354,6 +7469,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6391,6 +7507,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for path resolution, NOT for permission denied
@@ -6454,6 +7571,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -6495,6 +7613,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6509,6 +7628,7 @@ mod tests {
         let approval_requests = Arc::new(AtomicUsize::new(0));
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
         });
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Full,
@@ -6543,6 +7663,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -6559,6 +7680,7 @@ mod tests {
         let approval_requests = Arc::new(AtomicUsize::new(0));
         let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
             approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
         });
         let policy = librefang_types::config::ExecPolicy {
             mode: librefang_types::config::ExecSecurityMode::Allowlist,
@@ -6592,6 +7714,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -6603,6 +7726,238 @@ mod tests {
             "content should mention approval requirement, got: {}",
             result.content
         );
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval
+        );
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    // ---- RBAC M3 — per-user tool policy gate (#3054) ----
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_deny_returns_hard_error() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::Deny {
+                reason: "user 'Bob' (role: user) is not permitted to invoke 'shell_exec'"
+                    .to_string(),
+            }),
+        });
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            None,
+            None, // media_engine
+            None, // media_drivers
+            None, // exec_policy
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_error, "user-policy deny must produce an error");
+        assert!(
+            result.content.contains("Execution denied"),
+            "content should announce the deny: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("user 'Bob'"),
+            "deny reason must surface to the model: {}",
+            result.content
+        );
+        // No approval was requested — the deny short-circuits.
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_needs_approval_routes_through_approval_queue() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            // file_write is NOT in the default require_approval list (which
+            // would already gate it). The point of this test is to prove the
+            // user gate flips it into approval-required mode regardless of
+            // the global policy.
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+                reason: "tool 'file_write' requires admin approval for user 'Bob'".to_string(),
+            }),
+        });
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({"path": "scratch.txt", "content": "hi"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            Some(workspace.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // User gate forced approval — the tool is deferred (NotBlocked).
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval,
+            "expected WaitingApproval status, got content: {}",
+            result.content
+        );
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression: shell_exec under `ExecPolicy.mode = Full` MUST still
+    /// route through the approval queue when the per-user gate returned
+    /// `NeedsApproval`. Without the `!force_approval` guard added in B2
+    /// of PR #3205 review, the Full-mode bypass silently dropped the
+    /// user-gate escalation and the call ran without human review.
+    #[tokio::test]
+    async fn tool_runner_rbac_full_mode_does_not_bypass_user_needs_approval() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::NeedsApproval {
+                reason: "tool 'shell_exec' requires admin approval for user 'Bob'".to_string(),
+            }),
+        });
+
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Full,
+            ..Default::default()
+        };
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace.path()),
+            None,
+            None,
+            Some(&policy), // Full mode!
+            None,
+            None,
+            None,
+            None,
+            Some("bob"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.status,
+            librefang_types::tool::ToolExecutionStatus::WaitingApproval,
+            "Full mode + user NeedsApproval must still demand approval, got content: {}",
+            result.content
+        );
+        assert_eq!(
+            approval_requests.load(Ordering::SeqCst),
+            1,
+            "exactly one approval request should be submitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_runner_rbac_user_allow_falls_through_to_existing_approval_logic() {
+        // user_gate_override = Allow → behaviour matches the pre-RBAC
+        // approval flow. shell_exec is in the default require_approval
+        // list and ApprovalKernel.requires_approval() returns true for it,
+        // so we still expect WaitingApproval — proving Allow is a true
+        // pass-through, not a bypass.
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: Some(librefang_types::user_policy::UserToolGate::Allow),
+        });
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("alice"),
+            Some("telegram"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
         assert_eq!(
             result.status,
             librefang_types::tool::ToolExecutionStatus::WaitingApproval
@@ -6652,6 +8007,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
 
@@ -6848,6 +8204,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -6906,6 +8263,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7123,6 +8481,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7166,6 +8525,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7209,6 +8569,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7261,6 +8622,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7317,6 +8679,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7416,6 +8779,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7458,6 +8822,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -7509,6 +8874,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should NOT be a permission-denied error
@@ -7550,6 +8916,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(result.is_error);
@@ -7591,6 +8958,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7631,6 +8999,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         assert!(
@@ -7671,6 +9040,7 @@ mod tests {
             None, // interrupt
             None, // session_id
             None, // dangerous_command_checker
+            None, // available_tools
         )
         .await;
         // Should fail for "MCP not available", not "Permission denied"
@@ -8128,6 +9498,195 @@ description = "test"
             assert!(r.is_error, "expected error for input {input:?}");
             assert!(r.owner_notice.is_none());
         }
+    }
+
+    // ── Lazy tool loading (issue #3044) ───────────────────────────────────
+
+    #[test]
+    fn test_tool_meta_load_returns_schema_and_side_channel() {
+        let input = serde_json::json!({"name": "file_write"});
+        let r = tool_meta_load(&input, None);
+        assert!(!r.is_error);
+        assert!(r.content.contains("file_write"));
+        assert!(r.content.contains("input_schema") || r.content.contains("content"));
+        // Side-channel must carry the full ToolDefinition for the agent loop.
+        let def = r
+            .loaded_tool
+            .expect("loaded_tool side-channel must be populated");
+        assert_eq!(def.name, "file_write");
+        assert!(!def.description.is_empty());
+    }
+
+    #[test]
+    fn test_tool_meta_load_rejects_unknown_name() {
+        let r = tool_meta_load(&serde_json::json!({"name": "not_a_real_tool"}), None);
+        assert!(r.is_error);
+        assert!(r.loaded_tool.is_none());
+        assert!(r.content.to_lowercase().contains("unknown"));
+    }
+
+    #[test]
+    fn test_tool_meta_load_rejects_missing_name() {
+        let r = tool_meta_load(&serde_json::json!({}), None);
+        assert!(r.is_error);
+        assert!(r.loaded_tool.is_none());
+    }
+
+    #[test]
+    fn test_tool_meta_search_finds_by_keyword() {
+        let r = tool_meta_search(&serde_json::json!({"query": "write"}), None);
+        assert!(!r.is_error);
+        assert!(r.content.contains("file_write") || r.content.contains("memory_store"));
+        assert!(r.loaded_tool.is_none()); // search doesn't load; only load loads.
+    }
+
+    #[test]
+    fn test_tool_meta_search_respects_limit() {
+        let r = tool_meta_search(&serde_json::json!({"query": "file", "limit": 2}), None);
+        assert!(!r.is_error);
+        // At most 2 result lines (header line + max 2 match lines).
+        let match_lines = r.content.lines().filter(|l| l.contains(": ")).count();
+        assert!(match_lines <= 2, "expected ≤2 matches, got {match_lines}");
+    }
+
+    #[test]
+    fn test_tool_meta_search_rejects_empty_query() {
+        let r = tool_meta_search(&serde_json::json!({"query": ""}), None);
+        assert!(r.is_error);
+    }
+
+    #[test]
+    fn test_always_native_tools_includes_meta_tools() {
+        // The meta-tools MUST be in the always-native set — otherwise the LLM
+        // can never escape eager mode when the loop trims the tool list.
+        assert!(ALWAYS_NATIVE_TOOLS.contains(&"tool_load"));
+        assert!(ALWAYS_NATIVE_TOOLS.contains(&"tool_search"));
+    }
+
+    #[test]
+    fn test_builtin_tool_definitions_declares_meta_tools() {
+        let defs = builtin_tool_definitions();
+        assert!(defs.iter().any(|t| t.name == "tool_load"));
+        assert!(defs.iter().any(|t| t.name == "tool_search"));
+    }
+
+    #[test]
+    fn test_select_native_tools_trims_to_native_set() {
+        let defs = builtin_tool_definitions();
+        let native = select_native_tools(&defs);
+        // Result is a subset of the full builtin set.
+        assert!(native.len() < defs.len());
+        // Every returned tool's name is in ALWAYS_NATIVE_TOOLS.
+        for t in &native {
+            assert!(
+                ALWAYS_NATIVE_TOOLS.contains(&t.name.as_str()),
+                "unexpected native tool: {}",
+                t.name
+            );
+        }
+        // Every name in ALWAYS_NATIVE_TOOLS that exists in builtins must be present.
+        let builtin_names: std::collections::HashSet<&str> =
+            defs.iter().map(|t| t.name.as_str()).collect();
+        for want in ALWAYS_NATIVE_TOOLS {
+            if builtin_names.contains(want) {
+                assert!(
+                    native.iter().any(|t| t.name == *want),
+                    "native set missing expected tool: {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lazy_mode_reduces_serialized_tool_payload() {
+        // Quantify the savings this PR is claiming (issue #3044). The lazy
+        // set serialized as JSON should be dramatically smaller than the
+        // full builtin set.
+        let full = builtin_tool_definitions();
+        let native = select_native_tools(&full);
+        let full_bytes = serde_json::to_vec(&full).unwrap().len();
+        let native_bytes = serde_json::to_vec(&native).unwrap().len();
+        // Expect at least a 50% reduction — in practice it's ~75%.
+        assert!(
+            native_bytes * 2 < full_bytes,
+            "native set ({native_bytes}B) should be less than half the full set ({full_bytes}B)"
+        );
+    }
+
+    #[test]
+    fn test_tool_meta_load_resolves_non_builtin_from_available_tools() {
+        // Regression for PR #3047 codex review P1: a non-builtin tool
+        // (MCP/skill-provided) must be loadable via tool_load as long as it
+        // exists in the agent's granted `available_tools` pool. Before the
+        // fix `tool_meta_load` only scanned `builtin_tool_definitions()`,
+        // so dynamic tools were stripped by lazy mode and unreachable.
+        let dynamic = ToolDefinition {
+            name: "mcp_custom_thing".to_string(),
+            description: "A dynamically-registered MCP tool".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            }),
+        };
+        let pool = vec![dynamic.clone()];
+        let r = tool_meta_load(
+            &serde_json::json!({"name": "mcp_custom_thing"}),
+            Some(&pool),
+        );
+        assert!(!r.is_error, "expected success, got: {}", r.content);
+        let loaded = r
+            .loaded_tool
+            .expect("loaded_tool must populate for granted non-builtin");
+        assert_eq!(loaded.name, "mcp_custom_thing");
+        assert_eq!(loaded.description, dynamic.description);
+    }
+
+    #[test]
+    fn test_tool_meta_load_empty_pool_is_not_builtin_fallback() {
+        // `Some(&[])` must mean "granted pool is empty" — NOT "caller didn't
+        // provide one, please leak the builtin catalog". Only `None` falls
+        // back to builtins (for legacy execute_tool paths). This keeps the
+        // semantics unambiguous for future callers.
+        let empty: Vec<ToolDefinition> = Vec::new();
+        let r = tool_meta_load(&serde_json::json!({"name": "file_write"}), Some(&empty));
+        assert!(
+            r.is_error,
+            "Some(&[]) must resolve as empty pool, got content: {}",
+            r.content
+        );
+        assert!(r.loaded_tool.is_none());
+        // Sanity: None still falls back to builtin and resolves file_write.
+        let r_none = tool_meta_load(&serde_json::json!({"name": "file_write"}), None);
+        assert!(!r_none.is_error);
+        assert_eq!(
+            r_none.loaded_tool.map(|d| d.name).as_deref(),
+            Some("file_write")
+        );
+    }
+
+    #[test]
+    fn test_tool_meta_search_scopes_to_available_tools_when_provided() {
+        // Search must also prefer the agent's granted pool so results never
+        // hallucinate tools the agent can't actually call.
+        let only = vec![ToolDefinition {
+            name: "mcp_unique_name_zzz".to_string(),
+            description: "keyword_zzz".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let r = tool_meta_search(&serde_json::json!({"query": "keyword_zzz"}), Some(&only));
+        assert!(!r.is_error);
+        assert!(
+            r.content.contains("mcp_unique_name_zzz"),
+            "expected the granted tool to appear, got: {}",
+            r.content
+        );
+        // builtin 'file_write' must NOT show up when the pool is scoped.
+        assert!(
+            !r.content.contains("file_write"),
+            "search leaked outside the supplied pool: {}",
+            r.content
+        );
     }
 }
 

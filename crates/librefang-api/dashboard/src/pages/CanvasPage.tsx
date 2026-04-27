@@ -26,6 +26,7 @@ import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, getWorkflow, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
+import { Modal } from "../components/ui/Modal";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
@@ -331,10 +332,9 @@ function TemplateBrowser({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm p-0 sm:p-4" onClick={onClose}>
-      <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] flex flex-col animate-fade-in-scale" onClick={e => e.stopPropagation()}>
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
+    <Modal isOpen onClose={onClose} variant="panel-right" size="2xl" hideCloseButton>
+        {/* Header — matches the existing inline icon + custom X. */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface z-10">
           <div className="flex items-center gap-2">
             <LayoutTemplate className="w-4 h-4 text-primary" />
             <h3 className="text-sm font-bold">{t("canvas.browse_templates")}</h3>
@@ -391,8 +391,8 @@ function TemplateBrowser({
             </Button>
           </div>
         ) : (
-          /* Template list */
-          <div className="flex-1 overflow-y-auto">
+          /* Template list — Modal handles outer scroll */
+          <div>
             {/* Search */}
             <div className="px-5 pt-4 pb-2">
               <div className="relative">
@@ -447,8 +447,7 @@ function TemplateBrowser({
             )}
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }
 

@@ -14,7 +14,9 @@ pub use librefang_storage::{
 };
 
 /// DM (direct message) policy for a channel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DmPolicy {
     /// Respond to all DMs.
@@ -27,7 +29,9 @@ pub enum DmPolicy {
 }
 
 /// Group message policy for a channel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupPolicy {
     /// Respond to all group messages.
@@ -41,8 +45,35 @@ pub enum GroupPolicy {
     Ignore,
 }
 
+/// Prefix style applied to outbound agent messages on a channel.
+///
+/// When enabled, the channel bridge wraps the responding agent's reply with
+/// its name so end-users can tell which agent authored the message when
+/// multiple agents share the same channel. Default is `Off` to preserve
+/// existing behavior.
+///
+/// Platform-native identity (e.g. Slack per-message bot username override,
+/// Discord embed author field) is intentionally out of scope here.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixStyle {
+    /// No prefix — byte-identical to pre-feature behavior.
+    #[default]
+    Off,
+    /// Plain bracketed name: `[agent-name] text`.
+    Bracket,
+    /// Bold bracketed name via markdown: `**[agent-name]** text`.
+    /// Renders bold on platforms that support markdown (Discord, Telegram
+    /// markdown mode, Slack mrkdwn treats it as bold too).
+    BoldBracket,
+}
+
 /// Output format hint for channel-specific message formatting.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// Standard Markdown (default).
@@ -57,7 +88,7 @@ pub enum OutputFormat {
 }
 
 /// Auto-routing strategy for a channel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoRouteStrategy {
     /// Disable auto-routing entirely (default). Channel messages always go to
@@ -77,7 +108,7 @@ pub enum AutoRouteStrategy {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
@@ -174,6 +205,12 @@ pub struct ChannelOverrides {
     /// re-classification in `sticky_heuristic` mode.
     #[serde(default = "default_auto_route_divergence")]
     pub auto_route_divergence_count: u32,
+    /// Prefix outbound messages with the responding agent's name.
+    ///
+    /// Defaults to `PrefixStyle::Off` so enabling this feature is opt-in per
+    /// channel and existing configs keep their current output byte-for-byte.
+    #[serde(default)]
+    pub prefix_agent_name: PrefixStyle,
 }
 
 impl Default for ChannelOverrides {
@@ -204,6 +241,7 @@ impl Default for ChannelOverrides {
             auto_route_confidence_threshold: default_auto_route_confidence(),
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
+            prefix_agent_name: PrefixStyle::Off,
         }
     }
 }
@@ -233,7 +271,9 @@ fn default_auto_route_divergence() -> u32 {
 }
 
 /// Controls what usage info appears in response footers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageFooterMode {
     /// Don't show usage info.
@@ -248,7 +288,9 @@ pub enum UsageFooterMode {
 }
 
 /// Kernel operating mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum KernelMode {
     /// Conservative mode — no auto-updates, pinned models, stability-first.
@@ -266,7 +308,9 @@ pub enum KernelMode {
 /// - **Stable**: only non-prerelease tags (default).
 /// - **Beta**: stable + beta tags (excludes `-rc`).
 /// - **Rc**: all tags including release candidates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     #[default]
@@ -300,7 +344,7 @@ impl std::str::FromStr for UpdateChannel {
 }
 
 /// User configuration for RBAC multi-user support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserConfig {
     /// User display name.
     pub name: String,
@@ -314,14 +358,191 @@ pub struct UserConfig {
     /// Optional API key hash for API authentication.
     #[serde(default)]
     pub api_key_hash: Option<String>,
+    /// RBAC M5: per-user spend caps. `None` means "no per-user cap" — the
+    /// user is still bounded by global / per-agent / per-provider budgets.
+    /// See [`UserBudgetConfig`] for the supported windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<UserBudgetConfig>,
+    /// Per-user tool allow/deny lists. Layered ON TOP of the per-agent
+    /// `ToolPolicy` and any channel rules in `ApprovalPolicy`.
+    /// `None` means "no per-user policy — defer to other layers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<crate::user_policy::UserToolPolicy>,
+    /// Bulk allow/deny by `ToolGroup` category (groups are declared in
+    /// `KernelConfig.tool_policy.groups`). Lets admins say
+    /// `denied_groups = ["dangerous"]` without listing each tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_categories: Option<crate::user_policy::UserToolCategories>,
+    /// Memory namespace ACL — controls reads/writes to memory scopes
+    /// (`proactive`, `kv:*`, etc.) and PII redaction. `None` means
+    /// "use the role default ACL".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_access: Option<crate::user_policy::UserMemoryAccess>,
+    /// Per-channel tool overrides for THIS user. Keyed by channel adapter
+    /// name (e.g. `"telegram"`, `"discord"`). Layers on top of the global
+    /// `ApprovalPolicy.channel_rules` — both must agree to allow.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_tool_rules: HashMap<String, crate::user_policy::ChannelToolPolicy>,
 }
 
 fn default_role() -> String {
     "user".to_string()
 }
 
+impl Default for UserConfig {
+    fn default() -> Self {
+        // Mirrors the per-field `#[serde(default)]` attributes above so a
+        // hand-built `UserConfig::default()` matches what
+        // `serde::from_str("name = \"x\"")` would produce. Tests use
+        // `UserConfig { name: ..., role: ..., api_key_hash: ...,
+        // ..Default::default() }` to avoid restating every optional
+        // RBAC field at every fixture site.
+        Self {
+            name: String::new(),
+            role: default_role(),
+            channel_bindings: HashMap::new(),
+            api_key_hash: None,
+            budget: None,
+            tool_policy: None,
+            tool_categories: None,
+            memory_access: None,
+            channel_tool_rules: HashMap::new(),
+        }
+    }
+}
+
+/// RBAC M5: per-user spending budget.
+///
+/// Mirrors the global [`BudgetConfig`] window structure (hourly / daily /
+/// monthly) so the same cost-attribution pipeline can enforce both. Set
+/// any limit to `0.0` for "unlimited on that window". `alert_threshold`
+/// is the fraction of any limit at which the metering layer should emit
+/// a `BudgetExceeded` audit pre-warning (default 0.8, clamped to 0..=1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct UserBudgetConfig {
+    /// Maximum cost in USD per hour for this user (0.0 = unlimited).
+    pub max_hourly_usd: f64,
+    /// Maximum cost in USD per day for this user (0.0 = unlimited).
+    pub max_daily_usd: f64,
+    /// Maximum cost in USD per month for this user (0.0 = unlimited).
+    pub max_monthly_usd: f64,
+    /// Alert threshold (0..=1). Metering surfaces a BudgetExceeded audit
+    /// when *any* window reaches this fraction of its limit. Defaults to
+    /// 0.8 — same default as the global budget — for consistency.
+    pub alert_threshold: f64,
+}
+
+impl Default for UserBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_hourly_usd: 0.0,
+            max_daily_usd: 0.0,
+            max_monthly_usd: 0.0,
+            alert_threshold: 0.8,
+        }
+    }
+}
+
+/// Maps platform-native group/server roles (Telegram admin, Discord guild role,
+/// Slack workspace owner, etc.) to LibreFang `UserRole` values.
+///
+/// Resolution order in `AuthManager::resolve_role_for_sender` is:
+/// 1. Explicit `UserConfig.role` for a registered user — wins outright.
+/// 2. Channel-derived role from this mapping — applied when the user is
+///    recognised on a platform but has no explicit `UserConfig` role.
+/// 3. Default-deny — fall through to `guest`.
+///
+/// All sub-tables are optional — a missing channel just means "no
+/// channel-derived role" for that platform. Each per-channel struct keeps
+/// platform-shaped fields rather than a single uniform schema because the
+/// underlying APIs disagree about role granularity (Telegram has 3 fixed
+/// statuses, Discord has named guild roles, Slack collapses to
+/// owner/admin/member/guest).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ChannelRoleMapping {
+    /// Telegram chat-status → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<TelegramRoleMapping>,
+    /// Discord guild-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordRoleMapping>,
+    /// Slack workspace-role → LibreFang role mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackRoleMapping>,
+}
+
+impl ChannelRoleMapping {
+    /// Returns true when no platform mapping is configured.
+    pub fn is_empty(&self) -> bool {
+        self.telegram.is_none() && self.discord.is_none() && self.slack.is_none()
+    }
+}
+
+/// Telegram-side mapping. Telegram exposes three statuses for a member of a
+/// chat: `creator`, `administrator`, `member` (plus `restricted`/`left`/
+/// `kicked` which we collapse into "no derived role").
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TelegramRoleMapping {
+    /// LibreFang role assigned when Telegram reports `status = "administrator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "creator"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_role: Option<String>,
+    /// LibreFang role assigned when Telegram reports `status = "member"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+}
+
+/// Discord-side mapping. A user may hold any number of guild roles
+/// simultaneously; the resolver walks **every** role the user has,
+/// looks each one up in `role_map`, and picks the **highest-privilege**
+/// match (`Owner` > `Admin` > `User` > `Viewer`). Declaration order
+/// in `config.toml` is irrelevant — the privilege ordering on the
+/// LibreFang side decides the winner. This protects against Discord-
+/// side role ordering (which is outside our control) deciding the
+/// effective LibreFang permissions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DiscordRoleMapping {
+    /// Discord role name → LibreFang role string (`owner` / `admin` /
+    /// `user` / `viewer` / `guest`). Iteration order is irrelevant —
+    /// the translator scans every match the user holds and returns the
+    /// most privileged. Typo'd LibreFang role strings (e.g. `"admn"`)
+    /// are silently skipped, falling back to default-deny `Viewer`.
+    pub role_map: HashMap<String, String>,
+}
+
+/// Slack-side mapping. Slack's `users.info` exposes `is_owner` /
+/// `is_admin` / `is_restricted` / `is_ultra_restricted`. Precedence
+/// (owner > admin > guest > member) is collapsed inside the channel
+/// adapter (`SlackAdapter::parse_users_info_response`) into a single
+/// platform token before this mapping ever sees it; the translator
+/// here is a flat lookup, not a precedence ladder. Each step is
+/// optional — leave a field unset to fall through to default-deny
+/// `Viewer` for that platform tier.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SlackRoleMapping {
+    /// LibreFang role for `is_owner = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_role: Option<String>,
+    /// LibreFang role for `is_admin = true` users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_role: Option<String>,
+    /// LibreFang role for regular workspace members.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+    /// LibreFang role for single/multi-channel guests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_role: Option<String>,
+}
+
 /// Web search provider selection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchProvider {
     /// Brave Search API.
@@ -334,13 +555,16 @@ pub enum SearchProvider {
     Jina,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Jina → Perplexity → DuckDuckGo).
+    /// SearXNG self-hosted search (no API key needed).
+    Searxng,
+    /// Auto-select based on available API keys
+    /// (Tavily → Brave → Jina → Perplexity → Searxng → DuckDuckGo).
     #[default]
     Auto,
 }
 
 /// Web tools configuration (search + fetch).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebConfig {
     /// Which search provider to use.
@@ -359,6 +583,8 @@ pub struct WebConfig {
     pub perplexity: PerplexitySearchConfig,
     /// Jina Search configuration.
     pub jina: JinaSearchConfig,
+    /// SearXNG self-hosted search configuration.
+    pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -377,13 +603,14 @@ impl Default for WebConfig {
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
             jina: JinaSearchConfig::default(),
+            searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
 }
 
 /// Brave Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BraveSearchConfig {
     /// Env var name holding the API key.
@@ -411,7 +638,7 @@ impl Default for BraveSearchConfig {
 }
 
 /// Tavily Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TavilySearchConfig {
     /// Env var name holding the API key.
@@ -436,7 +663,7 @@ impl Default for TavilySearchConfig {
 }
 
 /// Perplexity Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PerplexitySearchConfig {
     /// Env var name holding the API key.
@@ -455,7 +682,7 @@ impl Default for PerplexitySearchConfig {
 }
 
 /// Jina Search API configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct JinaSearchConfig {
     /// Env var name holding the API key.
@@ -485,8 +712,21 @@ impl Default for JinaSearchConfig {
     }
 }
 
+/// SearXNG self-hosted search configuration.
+///
+/// Requires only a `url`; SearXNG public instances reject `limit` and the
+/// LLM-facing `max_results` is taken from the per-call `tool_args` (the
+/// runtime truncates client-side after fetching).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct SearxngSearchConfig {
+    /// Base URL of the SearXNG instance (e.g., "https://search.example.com").
+    /// Empty means the provider is disabled.
+    pub url: String,
+}
+
 /// Web fetch configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebFetchConfig {
     /// Maximum characters to return in content.
@@ -516,7 +756,7 @@ impl Default for WebFetchConfig {
 }
 
 /// Browser automation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BrowserConfig {
     /// Enable the built-in CDP browser tools (browser_navigate, browser_click,
@@ -579,7 +819,9 @@ impl Default for BrowserConfig {
 }
 
 /// Config hot-reload mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReloadMode {
     /// No automatic reloading.
@@ -594,7 +836,7 @@ pub enum ReloadMode {
 }
 
 /// Configuration for config file watching and hot-reload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ReloadConfig {
     /// Reload mode. Default: hybrid.
@@ -616,7 +858,7 @@ impl Default for ReloadConfig {
 ///
 /// Controls GCRA token-bucket rate limiting for HTTP API requests and
 /// per-connection limits for WebSocket connections.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RateLimitConfig {
     /// API token budget per minute per IP (GCRA algorithm). Default: 500.
@@ -698,7 +940,7 @@ impl Default for RateLimitConfig {
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
 /// systems to trigger agent actions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebhookTriggerConfig {
     /// Enable webhook trigger endpoints. Default: false.
@@ -731,7 +973,7 @@ impl Default for WebhookTriggerConfig {
 /// provider = "ollama"
 /// model = "llama3.2:latest"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FallbackProviderConfig {
     /// Provider name (e.g., "ollama", "groq").
     pub provider: String,
@@ -746,7 +988,7 @@ pub struct FallbackProviderConfig {
 }
 
 /// Text-to-speech configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
@@ -780,7 +1022,7 @@ impl Default for TtsConfig {
 }
 
 /// OpenAI TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsOpenAiConfig {
     /// Voice: alloy, echo, fable, onyx, nova, shimmer. Default: "alloy".
@@ -805,7 +1047,7 @@ impl Default for TtsOpenAiConfig {
 }
 
 /// ElevenLabs TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsElevenLabsConfig {
     /// Voice ID. Default: "21m00Tcm4TlvDq8ikWAM" (Rachel).
@@ -830,7 +1072,7 @@ impl Default for TtsElevenLabsConfig {
 }
 
 /// Google Cloud TTS settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsGoogleConfig {
     /// Voice name (e.g. "en-US-Standard-F", "pl-PL-Wavenet-A"). Default: "en-US-Standard-F".
@@ -858,7 +1100,7 @@ impl Default for TtsGoogleConfig {
 }
 
 /// Docker container sandbox configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DockerSandboxConfig {
     /// Enable Docker sandbox. Default: false.
@@ -941,7 +1183,7 @@ impl Default for DockerSandboxConfig {
 }
 
 /// Device pairing configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PairingConfig {
     /// Enable device pairing. Default: false.
@@ -972,7 +1214,7 @@ impl Default for PairingConfig {
 }
 
 /// Skills configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SkillsConfig {
     /// Whether user-installed skills from the skills directory are loaded. Default: true.
@@ -987,6 +1229,83 @@ pub struct SkillsConfig {
     /// its directory. Matching is case-sensitive on the skill manifest name.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Operator-side gate over skill `env_passthrough` requests: glob
+    /// patterns that block matching env-var names regardless of what the
+    /// skill manifest declares. Defaults to a deny list covering common
+    /// credential conventions (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`,
+    /// `*_API_KEY`, `AWS_*`, `GITHUB_*`). Set to an empty list to disable
+    /// the operator deny check; the built-in `FORBIDDEN_PASSTHROUGH` and
+    /// kernel-reserved hard blocks still apply.
+    #[serde(default = "default_env_passthrough_denied_patterns")]
+    pub env_passthrough_denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Lets the operator grant a
+    /// specific skill an env var that would otherwise be blocked by
+    /// `env_passthrough_denied_patterns`. Cannot bypass the built-in
+    /// `FORBIDDEN_PASSTHROUGH` hard block.
+    ///
+    /// Example: `{ "gog" = ["GOG_KEYRING_PASSWORD"] }`.
+    #[serde(default)]
+    pub env_passthrough_per_skill: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Operator-side gate over skill `env_passthrough` requests.
+///
+/// The skill manifest declares which host env vars the skill *wants*; this
+/// policy is the operator's final say on which of those requests get
+/// granted. Constructed from `[skills]` config at the call site in the
+/// runtime; the resolution algorithm lives in `librefang-skills::loader`.
+///
+/// Resolution order (applied per-skill):
+///
+/// 1. Hard block: names in the built-in `FORBIDDEN_PASSTHROUGH` list
+///    (`LD_PRELOAD`, `PYTHONPATH`, …) — never overridable.
+/// 2. Hard block: names the kernel sets explicitly per-runtime
+///    (`PATH`, `HOME`, `PYTHONIOENCODING`, …).
+/// 3. Operator deny: names matching `denied_patterns` are dropped *unless*
+///    listed in `per_skill_overrides[skill_name]`.
+/// 4. Anything else is forwarded to the subprocess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvPassthroughPolicy {
+    /// Glob patterns that block matching env-var names regardless of skill
+    /// manifest. Operators can override per-skill via `per_skill_overrides`.
+    pub denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Keyed by skill manifest name.
+    /// Cannot bypass the built-in `FORBIDDEN_PASSTHROUGH` hard block.
+    pub per_skill_overrides: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl EnvPassthroughPolicy {
+    /// Construct a policy from a `[skills]` config block, or `None` when the
+    /// config carries neither deny patterns nor per-skill overrides. Returning
+    /// `None` lets the caller (and `KernelHandle::skill_env_passthrough_policy`)
+    /// skip the operator-gate plumbing entirely — only the built-in
+    /// `FORBIDDEN_PASSTHROUGH` and kernel-reserved hard blocks apply in that
+    /// case. Note that `SkillsConfig::default()` ships with a non-empty deny
+    /// list, so the default config still produces `Some(...)`; `None` only
+    /// arises when an operator has explicitly cleared both fields.
+    pub fn from_skills_config(cfg: &SkillsConfig) -> Option<Self> {
+        if cfg.env_passthrough_denied_patterns.is_empty()
+            && cfg.env_passthrough_per_skill.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            denied_patterns: cfg.env_passthrough_denied_patterns.clone(),
+            per_skill_overrides: cfg.env_passthrough_per_skill.clone(),
+        })
+    }
+}
+
+fn default_env_passthrough_denied_patterns() -> Vec<String> {
+    vec![
+        "*_KEY".to_string(),
+        "*_TOKEN".to_string(),
+        "*_PASSWORD".to_string(),
+        "*_SECRET".to_string(),
+        "*_API_KEY".to_string(),
+        "AWS_*".to_string(),
+        "GITHUB_*".to_string(),
+    ]
 }
 
 impl Default for SkillsConfig {
@@ -995,12 +1314,14 @@ impl Default for SkillsConfig {
             load_user: true,
             extra_dirs: Vec::new(),
             disabled: Vec::new(),
+            env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
+            env_passthrough_per_skill: std::collections::HashMap::new(),
         }
     }
 }
 
 /// Extensions & integrations configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExtensionsConfig {
     /// Enable auto-reconnect for MCP integrations.
@@ -1025,7 +1346,7 @@ impl Default for ExtensionsConfig {
 }
 
 /// Credential vault configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VaultConfig {
     /// Whether the vault is enabled (auto-detected if vault.enc exists).
@@ -1044,7 +1365,7 @@ impl Default for VaultConfig {
 }
 
 /// Agent binding — routes specific channel/account/peer patterns to agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentBinding {
     /// Target agent name or ID.
     pub agent: String,
@@ -1053,7 +1374,7 @@ pub struct AgentBinding {
 }
 
 /// Match rule for agent bindings. All specified (non-None) fields must match.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BindingMatchRule {
     /// Channel type (e.g., "discord", "telegram", "slack").
     pub channel: Option<String>,
@@ -1093,7 +1414,7 @@ impl BindingMatchRule {
 }
 
 /// Broadcast config — send same message to multiple agents.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BroadcastConfig {
     /// Broadcast strategy.
@@ -1103,7 +1424,9 @@ pub struct BroadcastConfig {
 }
 
 /// Broadcast delivery strategy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum BroadcastStrategy {
     /// Send to all agents simultaneously.
@@ -1114,7 +1437,7 @@ pub enum BroadcastStrategy {
 }
 
 /// Auto-reply engine configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoReplyConfig {
     /// Enable auto-reply engine. Default: false.
@@ -1143,7 +1466,7 @@ impl Default for AutoReplyConfig {
 /// When enabled, the kernel polls a directory for text files and dispatches
 /// their contents as messages to agents.  Files are moved to a `processed/`
 /// subdirectory after delivery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct InboxConfig {
     /// Enable inbox watcher. Default: false.
@@ -1177,7 +1500,7 @@ impl Default for InboxConfig {
 /// sample_rate = 1.0
 /// prometheus_enabled = true                   # Prometheus metrics at /api/metrics
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TelemetryConfig {
     /// Enable OpenTelemetry OTLP tracing export.
@@ -1190,6 +1513,17 @@ pub struct TelemetryConfig {
     pub sample_rate: f64,
     /// Enable Prometheus metrics endpoint at /api/metrics.
     pub prometheus_enabled: bool,
+    /// Auto-start the bundled observability Docker stack (Grafana, Prometheus,
+    /// Tempo, OTel collector) on daemon boot. Default: `false`.
+    ///
+    /// Off by default because spinning up four containers on every `librefang
+    /// start` is a strong implicit side-effect — operators usually prefer
+    /// `librefang start` to leave the host untouched. Existing dashboards /
+    /// custom OTel collectors keep working as long as `otlp_endpoint` points
+    /// at them; the stack is only useful for the bundled local view.
+    ///
+    /// Issue #3136.
+    pub auto_start_observability_stack: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -1200,12 +1534,13 @@ impl Default for TelemetryConfig {
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
+            auto_start_observability_stack: false,
         }
     }
 }
 
 /// Configuration for prompt versioning and A/B testing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PromptIntelligenceConfig {
     /// Enable prompt versioning and A/B testing. Default: false.
@@ -1227,7 +1562,7 @@ impl Default for PromptIntelligenceConfig {
 }
 
 /// Canvas (Agent-to-UI) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CanvasConfig {
     /// Enable canvas tool. Default: false.
@@ -1250,7 +1585,9 @@ impl Default for CanvasConfig {
 }
 
 /// Shell/exec security mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecSecurityMode {
     /// Block all shell execution.
@@ -1266,7 +1603,7 @@ pub enum ExecSecurityMode {
 }
 
 /// Shell/exec security policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExecPolicy {
     /// Security mode: "deny" blocks all, "allowlist" only allows listed,
@@ -1336,7 +1673,7 @@ pub enum TerminationReason {
 ///
 /// Multiple profiles can be configured per provider to enable key rotation
 /// when one key gets rate-limited or has billing issues.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AuthProfile {
     /// Profile name (e.g., "primary", "secondary").
     pub name: String,
@@ -1363,7 +1700,9 @@ impl std::fmt::Debug for AuthProfile {
 // ---------------------------------------------------------------------------
 
 /// Docker sandbox activation mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DockerSandboxMode {
     /// Docker sandbox disabled.
@@ -1376,7 +1715,9 @@ pub enum DockerSandboxMode {
 }
 
 /// Docker container lifecycle scope.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DockerScope {
     /// Container per session (destroyed when session ends).
@@ -1393,7 +1734,9 @@ pub enum DockerScope {
 // ---------------------------------------------------------------------------
 
 /// Typing indicator behavior mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingMode {
     /// Send typing indicator immediately on message receipt (default).
@@ -1412,7 +1755,7 @@ pub enum TypingMode {
 // ---------------------------------------------------------------------------
 
 /// Extended thinking configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThinkingConfig {
     /// Maximum tokens for thinking (budget).
@@ -1441,7 +1784,7 @@ impl Default for ThinkingConfig {
 /// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
 ///   `json_schema` mode; for providers without native support the schema is
 ///   injected into the system prompt).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
     /// Free-form text (default behaviour).
@@ -1474,7 +1817,7 @@ pub enum ResponseFormat {
 /// args = ["adapters/telegram_adapter.py"]
 /// env = { TELEGRAM_BOT_TOKEN = "xxx" }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SidecarChannelConfig {
     /// Display name for this adapter.
     pub name: String,
@@ -1496,7 +1839,7 @@ pub struct SidecarChannelConfig {
 // ---------------------------------------------------------------------------
 
 /// Which automatic-reset strategy is active for a session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionResetMode {
     /// No automatic reset. Sessions persist indefinitely. (default)
@@ -1511,7 +1854,7 @@ pub enum SessionResetMode {
 }
 
 /// Why a session was last reset (stored on [`AgentEntry`] for observability).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionResetReason {
     /// Last-active exceeded `idle_minutes`.
@@ -1548,7 +1891,7 @@ impl std::fmt::Display for SessionResetReason {
 /// idle_minutes = 60
 /// daily_at_hour = 4
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SessionResetPolicy {
     /// Which reset strategy (or strategies) to apply.
@@ -1585,7 +1928,7 @@ impl Default for SessionResetPolicy {
 /// cleanup_interval_hours = 24
 /// reset_prompt = "You are a helpful coding assistant. Always respond in English."
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SessionConfig {
     /// Maximum age for idle sessions before automatic cleanup (days, 0 = unlimited).
@@ -1631,7 +1974,7 @@ impl Default for SessionConfig {
 /// Controls when and how the LLM-based history compaction runs.
 /// Internal algorithmic ratios (base_chunk_ratio, safety_margin, etc.) are kept
 /// as private constants inside the runtime compactor and are not exposed here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompactionTomlConfig {
     /// Number of messages that triggers compaction (default: 30).
@@ -1689,7 +2032,7 @@ impl Default for CompactionTomlConfig {
 }
 
 /// Where a context injection should be placed in the session message list.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InjectionPosition {
     /// Prepended to the system prompt area.
@@ -1702,7 +2045,7 @@ pub enum InjectionPosition {
 }
 
 /// A single context injection entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContextInjection {
     /// A short label for logging / debugging.
     pub name: String,
@@ -1728,7 +2071,7 @@ pub struct ContextInjection {
 /// max_depth_global = 1000
 /// task_ttl_secs = 3600
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QueueConfig {
     /// Max queue depth per agent (0 = unlimited).
@@ -1761,8 +2104,10 @@ impl Default for QueueConfig {
 /// main_lane = 3
 /// cron_lane = 2
 /// subagent_lane = 3
+/// trigger_lane = 8
+/// default_per_agent = 1
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QueueConcurrencyConfig {
     /// Main lane concurrent limit (user messages).
@@ -1771,6 +2116,19 @@ pub struct QueueConcurrencyConfig {
     pub cron_lane: usize,
     /// Subagent lane concurrent limit (child agents).
     pub subagent_lane: usize,
+    /// Trigger lane concurrent limit — global cap on event-trigger
+    /// (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the
+    /// same time, across all agents. Acquired BEFORE the per-agent
+    /// semaphore so a single hot agent cannot starve the kernel.
+    /// Default `8`. `0` is rewritten to `1` by validation.
+    pub trigger_lane: usize,
+    /// Default per-agent invocation cap when an agent's manifest does
+    /// not set `max_concurrent_invocations`. `1` reproduces the
+    /// legacy per-agent-mutex serialization that pre-existed this
+    /// knob — change deliberately. `0` is rewritten to `1` by
+    /// validation. Typed `usize` to match the sibling lane fields and
+    /// to feed `Semaphore::new` without a cast.
+    pub default_per_agent: usize,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -1779,6 +2137,8 @@ impl Default for QueueConcurrencyConfig {
             main_lane: 3,
             cron_lane: 2,
             subagent_lane: 3,
+            trigger_lane: 8,
+            default_per_agent: 1,
         }
     }
 }
@@ -1805,7 +2165,7 @@ impl Default for QueueConcurrencyConfig {
 /// Setting `claim_ttl_secs = 0` disables the sweeper entirely — useful
 /// for long-running human-in-the-loop tasks where a 10 minute reset
 /// would be wrong.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TaskBoardConfig {
     /// How long an `in_progress` task may stay claimed before the sweeper
@@ -1840,7 +2200,7 @@ impl Default for TaskBoardConfig {
 ///
 /// Environment variables `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are also
 /// respected as fallbacks when the config fields are empty.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProxyConfig {
     /// HTTP proxy URL (e.g. `http://proxy:8080`).
@@ -1906,7 +2266,7 @@ fn default_max_workflow_secs() -> u64 {
 }
 
 /// Event-driven trigger system configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TriggersConfig {
     /// Default cooldown between trigger firings in seconds (default: 5).
     #[serde(default = "default_trigger_cooldown_secs")]
@@ -1938,7 +2298,7 @@ impl Default for TriggersConfig {
 /// All fields are optional; unset values fall back to the corresponding
 /// `UAR_LLM__*` / `LLM_*` environment variables that the UAR driver already
 /// consults at runtime.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct UarConfig {
     /// LLM API key forwarded to the UAR `LiterLlmDriver`.
@@ -1987,7 +2347,7 @@ pub struct UarConfig {
 }
 
 /// Top-level kernel configuration.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KernelConfig {
     /// Configuration schema version for automatic migration.
@@ -2018,8 +2378,40 @@ pub struct KernelConfig {
     /// hostnames without port, e.g. `"dash.example.com"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_hosts: Vec<String>,
+    /// Host directories under which `agent.toml: [workspaces].<name>.mount`
+    /// declarations may resolve. Each declared mount is canonicalized at
+    /// boot and must be a path prefix of one of these (also canonicalized)
+    /// roots; otherwise it is rejected with a warning. Empty (default)
+    /// denies all external mounts — the safe default. See issue #3230.
+    ///
+    /// Example:
+    /// ```toml
+    /// allowed_mount_roots = [
+    ///   "/Users/alice/Documents",
+    ///   "/data/shared",
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_mount_roots: Vec<PathBuf>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
+    /// Operator override for the agent-loop iteration cap. When set, any
+    /// agent without its own `[autonomous] max_iterations` uses this value
+    /// instead of the compiled-in default
+    /// (`AutonomousConfig::DEFAULT_MAX_ITERATIONS`). Lower it when running
+    /// cheap models to bound cost per turn; raise it for long-horizon
+    /// autonomous agents. `None` means "use the compiled-in default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_max_iterations: Option<u32>,
+    /// Operator override for the agent message-history trim cap. When set,
+    /// any agent without its own `max_history_messages` uses this value
+    /// instead of the compiled-in default
+    /// (`agent_loop::DEFAULT_MAX_HISTORY_MESSAGES`). Lower it to bound
+    /// per-turn token cost; raise it for long-context models. `None` means
+    /// "use the compiled-in default". Values below 4 are silently clamped
+    /// at runtime with a warning log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_history_messages: Option<usize>,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -2099,9 +2491,29 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
+    /// Maps platform-native channel roles (Telegram admin, Discord guild
+    /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
+    /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
+    /// is consulted (explicit beats channel-derived; both beat default-deny).
+    #[serde(default, skip_serializing_if = "ChannelRoleMapping::is_empty")]
+    pub channel_role_mapping: ChannelRoleMapping,
     /// MCP server configurations for external tool integration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfigEntry>,
+    /// Reusable named taint rule sets referenced by
+    /// [`McpTaintToolPolicy::rule_sets`]. Each entry defines a group of
+    /// taint rules with a severity action (block / warn / log) that the
+    /// MCP scanner applies to every tool that opts in.
+    ///
+    /// **Hot-reload caveat:** the kernel snapshots this list onto each
+    /// connected MCP server at install / reload time. Edits to
+    /// `[[taint_rules]]` followed by a config reload do NOT propagate to
+    /// already-connected MCP servers until the server itself is reloaded
+    /// (e.g. via `reload_mcp_server_config` or a daemon restart). The
+    /// snapshot keeps the scanner's view stable for the lifetime of a
+    /// single tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_rules: Vec<NamedTaintRuleSet>,
     /// A2A (Agent-to-Agent) protocol configuration.
     #[serde(default)]
     pub a2a: Option<A2aConfig>,
@@ -2248,6 +2660,19 @@ pub struct KernelConfig {
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
     #[serde(default)]
     pub provider_api_keys: HashMap<String, String>,
+    /// Interval in seconds between reachability probes of local providers
+    /// (Ollama, vLLM, LM Studio, lemonade).
+    ///
+    /// Lower values make the dashboard react faster to `brew services
+    /// start/stop ollama` at the cost of extra HTTP calls to `/api/tags`.
+    /// 60 s is the default — it keeps the UI responsive without noticeably
+    /// loading a local Ollama daemon. Dev machines flipping Ollama on/off
+    /// frequently can drop to 10; long-lived production boxes can raise to
+    /// 300+ since the state rarely changes.
+    ///
+    /// Zero or values below the probe timeout (2 s) are treated as 60.
+    #[serde(default = "default_local_probe_interval_secs")]
+    pub local_probe_interval_secs: u64,
     /// Vertex AI provider configuration.
     #[serde(default)]
     pub vertex_ai: VertexAiConfig,
@@ -2420,10 +2845,23 @@ pub struct KernelConfig {
     /// parameters and credential references.
     #[serde(default)]
     pub storage: StorageConfig,
+
+    /// Direct tool-invocation endpoint allowlist. Fail-closed: the
+    /// `POST /api/tools/{name}/invoke` route rejects every request unless
+    /// `tool_invoke.enabled` is `true` and the tool name matches a pattern
+    /// in `tool_invoke.allowlist`.
+    #[serde(default)]
+    pub tool_invoke: ToolInvokeConfig,
+    /// Parallel-tool dispatcher configuration. PR-3 schema only — runtime
+    /// integration lands in PR-4. See [`ParallelToolsConfig`].
+    #[serde(default)]
+    pub parallel_tools: ParallelToolsConfig,
 }
 
 /// Input sanitization mode for channel messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
     /// No checking — all messages pass through (default).
@@ -2443,7 +2881,7 @@ pub enum SanitizeMode {
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SanitizeConfig {
     /// Sanitization mode.
@@ -2480,7 +2918,7 @@ impl Default for SanitizeConfig {
 /// - `AZURE_OPENAI_API_VERSION` for the API version (default: "2024-02-01")
 /// - `AZURE_OPENAI_DEPLOYMENT` for the deployment name
 /// - `AZURE_OPENAI_API_KEY` for the API key
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AzureOpenAiConfig {
     /// Azure resource endpoint URL (e.g., "https://my-resource.openai.azure.com").
@@ -2510,7 +2948,7 @@ pub struct AzureOpenAiConfig {
 /// 2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` env var
 /// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (file path)
 /// 4. `gcloud auth print-access-token` CLI fallback
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VertexAiConfig {
     /// GCP project ID. Falls back to `VERTEX_AI_PROJECT_ID`,
@@ -2591,7 +3029,7 @@ pub struct VertexAiConfig {
 /// ingest = "~/.librefang/scripts/my_recall.py"
 /// after_turn = "~/.librefang/scripts/my_indexer.py"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ContextEngineTomlConfig {
     /// Built-in engine name. Supported values:
@@ -2667,7 +3105,7 @@ impl Default for ContextEngineTomlConfig {
 /// name = "My Company"
 /// github_repo = "acme-corp/librefang-plugins"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginRegistrySource {
     /// Human-readable label shown in the dashboard.
     pub name: String,
@@ -2689,7 +3127,7 @@ fn default_plugin_registries() -> Vec<PluginRegistrySource> {
 /// they read one JSON object from stdin and emit one JSON line on stdout.
 /// The `runtime` field picks which interpreter / launcher to use; it defaults
 /// to `"python"` so existing Python plugins keep working without edits.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ContextEngineHooks {
     /// Script for the `ingest` hook (called on new user message).
@@ -2933,7 +3371,7 @@ pub struct ContextEngineHooks {
 }
 
 /// Circuit-breaker settings for a hook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CircuitBreakerConfig {
     /// Consecutive failures before the circuit opens.
     #[serde(default = "default_cb_max_failures")]
@@ -2958,7 +3396,7 @@ fn default_true_bool() -> bool {
 }
 
 /// Per-hook input/output JSON Schema definition.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HookSchema {
     /// JSON Schema for the value sent to the hook script on stdin.
     #[serde(default)]
@@ -2973,7 +3411,7 @@ fn default_hook_retry_delay_ms() -> u64 {
 }
 
 /// What to do when a hook script invocation fails.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HookFailurePolicy {
     /// Log a warning and continue with the engine's built-in fallback (default).
@@ -2988,7 +3426,7 @@ pub enum HookFailurePolicy {
 /// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
 /// Type of a plugin config field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginConfigFieldType {
     #[default]
@@ -2998,7 +3436,7 @@ pub enum PluginConfigFieldType {
 }
 
 /// A single user-configurable field declared in `[config]` of plugin.toml.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct PluginConfigField {
     /// Field value type.
     #[serde(rename = "type", default)]
@@ -3023,7 +3461,7 @@ pub struct PluginConfigField {
 /// ingest = "hooks/ingest.py"      # relative to plugin dir
 /// after_turn = "hooks/after_turn.py"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginManifest {
     /// Plugin name (must match directory name).
     pub name: String,
@@ -3119,7 +3557,7 @@ pub struct PluginManifest {
 }
 
 /// A single system-binary requirement declared in `plugin.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct PluginSystemRequirement {
     /// Name of the binary that must exist on `PATH`.
     pub binary: String,
@@ -3131,7 +3569,7 @@ pub struct PluginSystemRequirement {
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
 /// scopes = ["read:user", "user:email"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ExternalAuthConfig {
     /// Whether external auth is enabled.
@@ -3174,7 +3612,7 @@ pub struct ExternalAuthConfig {
 /// `.well-known/openid-configuration` discovery, as well as non-OIDC OAuth2
 /// providers (GitHub) where explicit `auth_url`, `token_url`, and `userinfo_url`
 /// are specified.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OidcProvider {
     /// Unique identifier for this provider (e.g., "google", "github", "keycloak").
     pub id: String,
@@ -3260,7 +3698,7 @@ impl Default for ExternalAuthConfig {
 /// google_client_id = "your-google-client-id"
 /// github_client_id = "your-github-client-id"
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct OAuthConfig {
     /// Google OAuth2 client ID for PKCE flow.
@@ -3280,7 +3718,7 @@ pub struct OAuthConfig {
 /// default to 0 which means "unlimited" — only non-zero limits are enforced.
 /// Keyed by the provider id in `BudgetConfig.providers`, which must match
 /// the `model.provider` field of the agent's `ModelConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProviderBudget {
     /// Maximum cost in USD per hour for this provider (0.0 = unlimited).
@@ -3296,7 +3734,7 @@ pub struct ProviderBudget {
 /// Global spending budget configuration.
 ///
 /// Set limits to 0.0 for unlimited. All limits apply across all agents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BudgetConfig {
     /// Maximum total cost in USD per hour (0.0 = unlimited).
@@ -3369,11 +3807,26 @@ fn default_max_request_body_bytes() -> usize {
 /// # paths resolve against `data_dir`. Leave unset for the default
 /// # `data_dir/audit.anchor`.
 /// anchor_path = "/var/log/librefang/audit.anchor"
+///
+/// [audit.retention]
+/// trim_interval_secs = 3600
+/// max_in_memory_entries = 50000
+///
+/// [audit.retention.retention_days_by_action]
+/// ToolInvoke = 14
+/// LlmCompletion = 14
+/// RoleChange = 365
+/// PermissionDenied = 365
+/// BudgetExceeded = 365
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuditConfig {
     /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
+    ///
+    /// **Coarse global retention.** This drives the legacy day-based prune
+    /// over the SQLite table. For per-category in-memory retention with
+    /// chain-anchor-preserving trim, see `retention` below.
     pub retention_days: u32,
     /// Optional override for the external Merkle-tip anchor file that
     /// `AuditLog::with_db_anchored` uses to detect full rewrites of
@@ -3387,6 +3840,10 @@ pub struct AuditConfig {
     /// `logger`. Relative paths are resolved against `data_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_path: Option<PathBuf>,
+    /// Per-`AuditAction` retention policy used by the periodic trim job
+    /// over the in-memory audit window. Defaults preserve every entry.
+    #[serde(default)]
+    pub retention: AuditRetentionConfig,
 }
 
 impl Default for AuditConfig {
@@ -3394,15 +3851,51 @@ impl Default for AuditConfig {
         Self {
             retention_days: 90,
             anchor_path: None,
+            retention: AuditRetentionConfig::default(),
         }
     }
+}
+
+/// Per-`AuditAction` retention policy for the in-memory audit window.
+///
+/// The audit log is a Merkle-style hash chain — every entry's hash mixes
+/// the previous entry's hash. Naively dropping a prefix would break
+/// chain verification of the surviving entries because their `prev_hash`
+/// would point at a hash no longer present. The trim implementation
+/// solves this by remembering the last-dropped entry's hash as a
+/// **chain anchor** so verification of the surviving prefix can validate
+/// continuity against the anchor instead of a missing row.
+///
+/// Critical actions (`RoleChange`, `PermissionDenied`, `BudgetExceeded`)
+/// should keep long retention windows; noisy actions (`ToolInvoke`) can
+/// be pruned far more aggressively. Actions absent from the map are
+/// kept forever so operators that don't opt in never silently lose
+/// audit history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct AuditRetentionConfig {
+    /// How often the trim job runs. `None` (or 0) disables periodic trimming.
+    /// Reasonable default for production: 3600 (one hour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_interval_secs: Option<u64>,
+    /// Per-`AuditAction` retention windows in days. Key is the
+    /// `AuditAction` `Display` string (e.g. `"ToolInvoke"`). Missing
+    /// entries mean "keep forever".
+    #[serde(default)]
+    pub retention_days_by_action: HashMap<String, u32>,
+    /// Hard cap on the in-memory audit window — protects against runaway
+    /// growth even when no per-action policy is configured. `None` or 0
+    /// means unlimited. When the cap is exceeded the trim job drops the
+    /// oldest entries down to the cap regardless of their action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_memory_entries: Option<usize>,
 }
 
 /// PII privacy mode for LLM context filtering.
 ///
 /// Controls how personally identifiable information is handled before
 /// messages are sent to LLM providers.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyMode {
     /// No PII filtering — messages are sent as-is.
@@ -3427,7 +3920,7 @@ pub enum PrivacyMode {
 /// mode = "pseudonymize"  # off | redact | pseudonymize
 /// redact_patterns = ["\\b(CUSTOM_ID_\\d+)\\b"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PrivacyConfig {
     /// Privacy mode: off, redact, or pseudonymize.
@@ -3455,7 +3948,7 @@ impl Default for PrivacyConfig {
 /// [health_check]
 /// health_check_interval_secs = 60
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HealthCheckConfig {
     /// Interval in seconds between periodic health checks of LLM providers. Default: 60.
@@ -3479,7 +3972,7 @@ impl Default for HealthCheckConfig {
 /// default_timeout_secs = 60
 /// keep_recent = 10
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct HeartbeatTomlConfig {
     /// How often to run the heartbeat check (seconds). Default: 30.
@@ -3520,7 +4013,7 @@ impl Default for HeartbeatTomlConfig {
 /// min_sessions = 5
 /// check_interval_secs = 86400
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AutoDreamConfig {
     /// Master toggle. Default: disabled — when false, no dream fires regardless
@@ -3601,7 +4094,7 @@ impl Default for AutoDreamConfig {
 /// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
 /// registry_mirror = ""
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RegistryConfig {
     /// Cache TTL for registry sync in seconds (default: 86400 = 24 hours).
@@ -3639,7 +4132,7 @@ impl Default for RegistryConfig {
 /// [plugins]
 /// plugin_registries = ["librefang/plugin-registry"]
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PluginsConfig {
     /// Additional GitHub `owner/repo` plugin registries to search.
@@ -3652,7 +4145,19 @@ fn default_prompt_caching() -> bool {
 }
 
 /// Taint skip rules for a single argument path within a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// The policy key is a minimal JSONPath expression matched by the runtime
+/// scanner. Supported wildcard syntax:
+///
+/// - `$.foo`      — exact property at any depth specified literally.
+/// - `$.foo.*`    — any direct child of `$.foo` (single segment, non-array).
+/// - `$.foo[*]`   — any array element of `$.foo` (e.g. `$.foo[0]`, `$.foo[42]`).
+/// - `$.*`        — any top-level property.
+///
+/// Wildcards do NOT span multiple segments: `$.foo.*` matches `$.foo.bar`
+/// but not `$.foo.bar.baz`. Use exact paths plus rule_sets for deep
+/// exemptions across many paths.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPathPolicy {
     /// Rule IDs to skip when scanning this path.  An empty list means
     /// all rules apply (no exemption).
@@ -3660,14 +4165,42 @@ pub struct McpTaintPathPolicy {
     pub skip_rules: Vec<crate::taint::TaintRuleId>,
 }
 
+/// What the scanner does for a tool's argument paths NOT matched by any
+/// entry in [`McpTaintToolPolicy::paths`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintToolAction {
+    /// Apply the full taint rule set to every argument leaf (current behaviour).
+    #[default]
+    Scan,
+    /// Bypass scanning entirely for this tool. Even sensitive object keys are
+    /// allowed through. Use as a tool-level kill switch when a tool's arguments
+    /// are by-design opaque (browser tab handles, DB session IDs, etc.).
+    Skip,
+}
+
 /// Per-tool taint policy for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintToolPolicy {
+    /// What to do for argument paths not matched by `paths`.
+    /// Defaults to [`McpTaintToolAction::Scan`] (current behaviour).
+    ///
+    /// Set to [`McpTaintToolAction::Skip`] to bypass scanning for the whole
+    /// tool with one line, instead of enumerating every argument path.
+    #[serde(default)]
+    pub default: McpTaintToolAction,
     /// Per-path exemptions.  The key is a minimal JSONPath expression
     /// (e.g. `$.tabId`, `$.headers.*`, `$.items[*]`).  Paths not
-    /// listed here have all rules applied.
+    /// listed here have all rules applied (subject to `default`).
     #[serde(default)]
     pub paths: HashMap<String, McpTaintPathPolicy>,
+    /// Names of top-level `[[taint_rules]]` rule sets to apply to every
+    /// argument leaf of this tool. Each referenced set's `action` controls
+    /// whether the listed rules block, warn, or log when they fire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_sets: Vec<String>,
 }
 
 /// Per-server taint policy that lets operators disable specific taint
@@ -3675,11 +4208,14 @@ pub struct McpTaintToolPolicy {
 ///
 /// Example config.toml:
 /// ```toml
-/// [mcp_servers.my_firefox.taint_policy.tools.navigate.paths]
-/// "$.tabId"     = { skip_rules = ["opaque_token"] }
-/// "$.sessionId" = { skip_rules = ["opaque_token"] }
+/// [mcp_servers.my_firefox.taint_policy.tools.navigate]
+/// default = "skip"   # bypass scanning entirely for `navigate`
+///
+/// [mcp_servers.my_firefox.taint_policy.tools.read_file.paths]
+/// "$.content"   = { skip_rules = ["opaque_token"] }
+/// "$.metadata.*" = { skip_rules = ["sensitive_key_name"] }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct McpTaintPolicy {
     /// Per-tool exemptions.  The key is the tool name as it appears in
     /// the MCP server's tool list (without the `mcp_<server>_` prefix).
@@ -3687,11 +4223,72 @@ pub struct McpTaintPolicy {
     pub tools: HashMap<String, McpTaintToolPolicy>,
 }
 
+/// Severity action for a [`NamedTaintRuleSet`] when one of its rules fires
+/// during MCP argument scanning.
+///
+/// **Overlap resolution: most permissive wins.** When a tool's `rule_sets`
+/// list references multiple sets that all cover the same `TaintRuleId`,
+/// the scanner applies the *most permissive* action — `Log` > `Warn` >
+/// `Block`. This is intentional (it lets a narrow `audit_only` set carve
+/// out exceptions to a broad `Block` set without rewriting the broad set),
+/// but it means **adding an audit-only set with `action = log` will
+/// silently neutralise any `block` set that overlaps on the same rule**.
+/// The dashboard surfaces a hint next to the `rule_sets` field; operators
+/// authoring config by hand should keep this in mind.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTaintRuleSetAction {
+    /// Abort the MCP tool call and surface a violation error to the LLM
+    /// (current scanner default).
+    #[default]
+    Block,
+    /// Allow the call through, but emit a structured WARN-level tracing
+    /// event so operators can see exemptions firing.
+    Warn,
+    /// Allow the call through and emit at INFO level. Useful for building
+    /// an exemption baseline before flipping a rule set to `block`.
+    Log,
+}
+
+/// A reusable, named group of taint rules with an associated severity action.
+///
+/// Defined as `[[taint_rules]]` in `config.toml` and referenced by
+/// [`McpTaintToolPolicy::rule_sets`]:
+///
+/// ```toml
+/// [[taint_rules]]
+/// name = "browser_handles"
+/// action = "warn"
+/// rules = ["opaque_token"]
+///
+/// [mcp_servers.camofox.taint_policy.tools.navigate]
+/// rule_sets = ["browser_handles"]
+/// ```
+///
+/// `PartialEq + Eq` are derived so the kernel's reload-plan diff can
+/// detect `[[taint_rules]]` changes and emit
+/// `HotAction::ReloadTaintRules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NamedTaintRuleSet {
+    /// Identifier referenced by [`McpTaintToolPolicy::rule_sets`]. Must be
+    /// unique within a [`KernelConfig`]; duplicate names are resolved by
+    /// last-wins ordering.
+    pub name: String,
+    /// What happens when one of `rules` fires during scanning.
+    #[serde(default)]
+    pub action: McpTaintRuleSetAction,
+    /// `TaintRuleId` variants this set covers.
+    #[serde(default)]
+    pub rules: Vec<crate::taint::TaintRuleId>,
+}
+
 /// Configuration entry for an MCP server.
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -3755,7 +4352,7 @@ fn default_http_compat_input_schema() -> serde_json::Value {
 }
 
 /// HTTP request method for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatMethod {
     Get,
@@ -3767,7 +4364,7 @@ pub enum HttpCompatMethod {
 }
 
 /// How tool arguments are mapped onto an outbound HTTP request.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatRequestMode {
     #[default]
@@ -3777,7 +4374,7 @@ pub enum HttpCompatRequestMode {
 }
 
 /// How the built-in HTTP compatibility transport formats responses.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatResponseMode {
     #[default]
@@ -3786,7 +4383,7 @@ pub enum HttpCompatResponseMode {
 }
 
 /// Header injection config for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct HttpCompatHeaderConfig {
     pub name: String,
     #[serde(default)]
@@ -3796,7 +4393,7 @@ pub struct HttpCompatHeaderConfig {
 }
 
 /// Declarative tool mapping for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct HttpCompatToolConfig {
     pub name: String,
     #[serde(default)]
@@ -3813,7 +4410,7 @@ pub struct HttpCompatToolConfig {
 }
 
 /// Transport configuration for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpTransportEntry {
     /// Subprocess with JSON-RPC over stdin/stdout.
@@ -3855,7 +4452,7 @@ pub enum McpTransportEntry {
 /// client_id = "my-client-id"
 /// scopes = ["read", "write"]
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpOAuthConfig {
     #[serde(default)]
     pub auth_url: Option<String>,
@@ -3872,7 +4469,7 @@ pub struct McpOAuthConfig {
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct A2aConfig {
     /// Whether A2A is enabled.
@@ -3900,7 +4497,7 @@ fn default_a2a_path() -> String {
 }
 
 /// An external A2A agent to discover and interact with.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExternalAgent {
     /// Display name.
     pub name: String,
@@ -3953,6 +4550,8 @@ impl Default for KernelConfig {
             log_level: "info".to_string(),
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
+            agent_max_iterations: None,
+            max_history_messages: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
@@ -3966,7 +4565,9 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
+            taint_rules: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
             stable_prefix_mode: false,
@@ -4005,6 +4606,7 @@ impl Default for KernelConfig {
             provider_request_timeout_secs: HashMap::new(),
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
+            local_probe_interval_secs: default_local_probe_interval_secs(),
             vertex_ai: VertexAiConfig::default(),
             azure_openai: AzureOpenAiConfig::default(),
             oauth: OAuthConfig::default(),
@@ -4027,6 +4629,7 @@ impl Default for KernelConfig {
             registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
+            allowed_mount_roots: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
@@ -4045,6 +4648,8 @@ impl Default for KernelConfig {
             terminal: TerminalConfig::default(),
             uar: None,
             storage: StorageConfig::default(),
+            tool_invoke: ToolInvokeConfig::default(),
+            parallel_tools: ParallelToolsConfig::default(),
         }
     }
 }
@@ -4212,7 +4817,7 @@ fn librefang_home_dir() -> PathBuf {
 }
 
 /// Default LLM model configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DefaultModelConfig {
     /// Provider name (e.g., "anthropic", "openai").
@@ -4261,7 +4866,7 @@ impl Default for DefaultModelConfig {
 }
 
 /// Memory substrate configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Path to SQLite database file.
@@ -4314,7 +4919,7 @@ pub struct MemoryConfig {
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChunkConfig {
     /// Whether chunking is enabled. When false, text is stored as a single blob.
@@ -4363,7 +4968,7 @@ impl Default for MemoryConfig {
 ///
 /// When enabled, memories that have not been accessed within their scope's TTL
 /// are automatically deleted during periodic decay runs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MemoryDecayConfig {
     /// Whether time-based decay is enabled.
@@ -4388,7 +4993,7 @@ impl Default for MemoryDecayConfig {
 }
 
 /// Network layer configuration.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NetworkConfig {
     /// libp2p listen addresses.
@@ -4439,7 +5044,7 @@ impl std::fmt::Debug for NetworkConfig {
 ///
 /// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
 /// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Telegram bot configuration(s).
@@ -4551,7 +5156,7 @@ fn default_file_download_max_bytes() -> u64 {
 }
 
 /// Telegram channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TelegramConfig {
     /// Env var name holding the bot token (NOT the token itself).
@@ -4617,7 +5222,7 @@ impl Default for TelegramConfig {
 }
 
 /// Discord channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
@@ -4675,7 +5280,7 @@ impl Default for DiscordConfig {
 }
 
 /// Slack channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SlackConfig {
     /// Env var name holding the app-level token (xapp-) for Socket Mode.
@@ -4728,7 +5333,7 @@ impl Default for SlackConfig {
 }
 
 /// WhatsApp Cloud API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WhatsAppConfig {
     /// Env var name holding the access token (Cloud API mode).
@@ -4768,6 +5373,10 @@ fn default_conversation_ttl_hours() -> u32 {
     24
 }
 
+fn default_local_probe_interval_secs() -> u64 {
+    60
+}
+
 impl Default for WhatsAppConfig {
     fn default() -> Self {
         Self {
@@ -4787,7 +5396,7 @@ impl Default for WhatsAppConfig {
 }
 
 /// Signal channel adapter configuration (via signal-cli REST API).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SignalConfig {
     /// URL of the signal-cli REST API (e.g., "http://localhost:8080").
@@ -4825,7 +5434,7 @@ impl Default for SignalConfig {
 }
 
 /// Matrix protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MatrixConfig {
     /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
@@ -4874,7 +5483,7 @@ impl Default for MatrixConfig {
 }
 
 /// Email (IMAP/SMTP) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct EmailConfig {
     /// IMAP server host.
@@ -4927,7 +5536,7 @@ impl Default for EmailConfig {
 }
 
 /// Microsoft Teams (Bot Framework v3) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TeamsConfig {
     /// Azure Bot App ID.
@@ -4964,7 +5573,7 @@ impl Default for TeamsConfig {
 }
 
 /// Mattermost channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MattermostConfig {
     /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
@@ -5006,7 +5615,7 @@ impl Default for MattermostConfig {
 }
 
 /// IRC channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IrcConfig {
     /// IRC server hostname.
@@ -5057,7 +5666,7 @@ impl Default for IrcConfig {
 }
 
 /// Google Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GoogleChatConfig {
     /// Env var name holding the service account JSON key.
@@ -5096,7 +5705,7 @@ impl Default for GoogleChatConfig {
 }
 
 /// Twitch chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TwitchConfig {
     /// Env var name holding the OAuth token.
@@ -5130,7 +5739,7 @@ impl Default for TwitchConfig {
 }
 
 /// Rocket.Chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RocketChatConfig {
     /// Rocket.Chat server URL.
@@ -5167,7 +5776,7 @@ impl Default for RocketChatConfig {
 }
 
 /// Zulip channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ZulipConfig {
     /// Zulip server URL.
@@ -5204,7 +5813,7 @@ impl Default for ZulipConfig {
 }
 
 /// XMPP/Jabber channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct XmppConfig {
     /// JID (e.g., "bot@jabber.org").
@@ -5246,7 +5855,7 @@ impl Default for XmppConfig {
 // ── Wave 3 channel configs ─────────────────────────────────────────
 
 /// LINE Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LineConfig {
     /// Env var name holding the channel secret.
@@ -5279,7 +5888,7 @@ impl Default for LineConfig {
 }
 
 /// Viber Bot API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ViberConfig {
     /// Env var name holding the auth token.
@@ -5312,7 +5921,7 @@ impl Default for ViberConfig {
 }
 
 /// Facebook Messenger Platform channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MessengerConfig {
     /// Env var name holding the page access token.
@@ -5345,7 +5954,7 @@ impl Default for MessengerConfig {
 }
 
 /// Reddit API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RedditConfig {
     /// Reddit app client ID.
@@ -5385,7 +5994,7 @@ impl Default for RedditConfig {
 }
 
 /// Mastodon Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MastodonConfig {
     /// Mastodon instance URL (e.g., `"https://mastodon.social"`).
@@ -5415,7 +6024,7 @@ impl Default for MastodonConfig {
 }
 
 /// Bluesky/AT Protocol channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BlueskyConfig {
     /// Bluesky identifier (handle or DID).
@@ -5453,7 +6062,7 @@ impl Default for BlueskyConfig {
 /// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
 /// controls whether the adapter uses a webhook HTTP server or a long-lived
 /// WebSocket connection (default) to receive events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FeishuConfig {
     /// Feishu app ID.
@@ -5506,7 +6115,9 @@ impl Default for FeishuConfig {
 }
 
 /// Connection mode for the WeCom intelligent bot adapter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WeComMode {
     /// WebSocket long-connection (no public endpoint required).
@@ -5521,7 +6132,7 @@ pub enum WeComMode {
 /// Supports two connection modes:
 /// - `websocket` (default): connects to `wss://openws.work.weixin.qq.com`
 /// - `callback`: starts an HTTP server to receive message callbacks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WeComConfig {
     /// Bot ID obtained from the WeCom admin console.
@@ -5563,7 +6174,7 @@ impl Default for WeComConfig {
 }
 
 /// WeChat personal account (iLink protocol) adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WeChatConfig {
     /// Env var name holding the bot token from a previous QR login session.
@@ -5603,13 +6214,18 @@ impl Default for WeChatConfig {
 }
 
 /// Revolt (Discord-like) channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
-    /// Revolt API URL.
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
     pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -5625,6 +6241,8 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -5635,7 +6253,7 @@ impl Default for RevoltConfig {
 // ── Wave 4 channel configs ─────────────────────────────────────────
 
 /// Nextcloud Talk channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NextcloudConfig {
     /// Nextcloud server URL.
@@ -5669,7 +6287,7 @@ impl Default for NextcloudConfig {
 }
 
 /// Guilded bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GuildedConfig {
     /// Env var name holding the bot token.
@@ -5700,7 +6318,7 @@ impl Default for GuildedConfig {
 }
 
 /// Keybase chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KeybaseConfig {
     /// Keybase username.
@@ -5734,7 +6352,7 @@ impl Default for KeybaseConfig {
 }
 
 /// Threema Gateway channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThreemaConfig {
     /// Threema Gateway ID.
@@ -5767,7 +6385,7 @@ impl Default for ThreemaConfig {
 }
 
 /// Nostr relay channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NostrConfig {
     /// Env var name holding the private key (nsec or hex).
@@ -5798,7 +6416,7 @@ impl Default for NostrConfig {
 }
 
 /// Webex bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebexConfig {
     /// Env var name holding the bot token.
@@ -5829,7 +6447,7 @@ impl Default for WebexConfig {
 }
 
 /// Pumble bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PumbleConfig {
     /// Env var name holding the bot token.
@@ -5859,7 +6477,7 @@ impl Default for PumbleConfig {
 }
 
 /// Flock bot channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FlockConfig {
     /// Env var name holding the bot token.
@@ -5889,7 +6507,7 @@ impl Default for FlockConfig {
 }
 
 /// Twist API v3 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TwistConfig {
     /// Env var name holding the API token.
@@ -5925,7 +6543,7 @@ impl Default for TwistConfig {
 // ── Wave 5 channel configs ─────────────────────────────────────────
 
 /// Mumble text chat channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MumbleConfig {
     /// Mumble server hostname.
@@ -5964,7 +6582,9 @@ impl Default for MumbleConfig {
 }
 
 /// How the DingTalk adapter receives inbound events.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DingTalkReceiveMode {
     /// HTTP webhook server (requires public IP / reverse proxy).
@@ -5981,7 +6601,7 @@ pub enum DingTalkReceiveMode {
 ///   WebSocket connection via the DingTalk Stream protocol. No public IP needed.
 /// - **Webhook** (legacy): HTTP server that receives callback POST requests.
 ///   Requires `access_token` and `secret` for HMAC-SHA256 verification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DingTalkConfig {
     /// How to receive inbound messages (stream or webhook).
@@ -6030,7 +6650,7 @@ impl Default for DingTalkConfig {
 }
 
 /// QQ Bot API v2 channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct QqConfig {
     /// QQ Bot application ID.
@@ -6064,7 +6684,7 @@ impl Default for QqConfig {
 }
 
 /// Discourse forum channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DiscourseConfig {
     /// Discourse base URL.
@@ -6101,7 +6721,7 @@ impl Default for DiscourseConfig {
 }
 
 /// Gitter Streaming API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GitterConfig {
     /// Env var name holding the auth token.
@@ -6131,7 +6751,7 @@ impl Default for GitterConfig {
 }
 
 /// ntfy.sh pub/sub channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct NtfyConfig {
     /// ntfy server URL.
@@ -6164,7 +6784,7 @@ impl Default for NtfyConfig {
 }
 
 /// Gotify WebSocket channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GotifyConfig {
     /// Gotify server URL.
@@ -6197,7 +6817,7 @@ impl Default for GotifyConfig {
 }
 
 /// Generic webhook channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WebhookConfig {
     /// Env var name holding the HMAC signing secret.
@@ -6253,7 +6873,7 @@ impl Default for WebhookConfig {
 /// tts_url = "https://api.openai.com"
 /// tts_voice = "alloy"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct VoiceConfig {
     /// WebSocket server listen port (default: 4546).
@@ -6295,7 +6915,7 @@ impl Default for VoiceConfig {
 }
 
 /// LinkedIn Messaging API channel adapter configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LinkedInConfig {
     /// Env var name holding the OAuth2 access token.
@@ -6328,7 +6948,7 @@ impl Default for LinkedInConfig {
 ///
 /// Controls which clients may connect to the interactive terminal (WebSocket)
 /// and how locality is determined.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Master switch — set to false to disable the terminal entirely.
@@ -6401,6 +7021,107 @@ impl Default for TerminalConfig {
             tmux_enabled: true,
             max_windows: 16,
             tmux_binary_path: None,
+        }
+    }
+}
+
+/// Configuration for `POST /api/tools/{name}/invoke`.
+///
+/// The direct-invoke endpoint bypasses the agent loop, so the usual
+/// capability gate (agent manifest `tools` list) does not apply. To avoid
+/// a situation where any holder of an API key can call any tool, this
+/// endpoint is fail-closed: disabled by default, and — when enabled — only
+/// the tools whose names match one of the glob patterns in `allowlist` may
+/// be executed.
+///
+/// ```toml
+/// [tool_invoke]
+/// enabled = true
+/// allowlist = ["web_search", "web_fetch", "file_read"]
+/// ```
+///
+/// Pitfall: `allowlist = ["*"]` matches every tool and effectively turns
+/// the endpoint into "give API-key holders the same power as the kernel".
+/// Prefer narrow globs (`"file_*"`, `"web_*"`) — reserve `"*"` for
+/// trusted single-tenant dev environments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ToolInvokeConfig {
+    /// Master switch. When `false` (default) the endpoint rejects every
+    /// request with 403 regardless of the allowlist.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Glob patterns of tool names that may be invoked via the REST
+    /// endpoint (e.g. `"web_*"`, `"file_read"`). Empty list denies all
+    /// invocations even when `enabled = true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowlist: Vec<String>,
+}
+
+impl ToolInvokeConfig {
+    /// Whether the endpoint is configured to accept `tool_name`.
+    ///
+    /// Returns `true` only when `enabled = true` AND at least one allowlist
+    /// pattern matches. Patterns use the same glob semantics as agent
+    /// capability grants (`*` wildcards).
+    pub fn permits(&self, tool_name: &str) -> bool {
+        self.enabled
+            && self
+                .allowlist
+                .iter()
+                .any(|pattern| crate::capability::glob_matches(pattern, tool_name))
+    }
+}
+
+/// Configuration for the agent loop's parallel tool dispatcher.
+///
+/// PR-3 ships the schema only; the agent loop still runs tool calls
+/// strictly sequentially. PR-4 wires the dispatcher into the runtime
+/// and PR-5 flips `enabled` on by default.
+///
+/// ```toml
+/// [parallel_tools]
+/// enabled = false
+/// max_concurrent = 4
+/// mcp_default_safety = "write_shared"   # or "read_only"
+/// mcp_readonly_allowlist = ["mcp__github__list_issues"]
+/// ```
+///
+/// Falls back to fully sequential execution when `enabled = false`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ParallelToolsConfig {
+    /// Master switch. Default `false` so PR-3 ships with no behaviour
+    /// change. PR-5 will flip the default to `true` after the streaming
+    /// dispatcher integration lands.
+    pub enabled: bool,
+
+    /// Cap on concurrent tool calls within a single bucket. `0` =
+    /// uncapped (use the bucket size). The dispatcher honours this
+    /// when launching futures via `join_all`.
+    pub max_concurrent: u32,
+
+    /// Default `ParallelSafety` class assigned to MCP tools whose
+    /// servers don't carry `readOnlyHint` annotations. Conservative
+    /// default `"write_shared"` keeps unannotated MCP tools serialised
+    /// (one per bucket) instead of optimistically parallelising.
+    /// Accepted values: `"read_only"` | `"write_shared"`. PR-4 will
+    /// promote this to a typed enum once the dispatcher consumes it.
+    pub mcp_default_safety: String,
+
+    /// Explicit allowlist of MCP tool names that should be treated as
+    /// `ReadOnly` regardless of `mcp_default_safety`. Names match the
+    /// fully-namespaced form (`mcp__server__name`).
+    pub mcp_readonly_allowlist: Vec<String>,
+}
+
+impl Default for ParallelToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent: 4,
+            mcp_default_safety: "write_shared".to_string(),
+            mcp_readonly_allowlist: Vec::new(),
         }
     }
 }
@@ -6686,5 +7407,295 @@ max_tokens_per_hour = 500000
         assert!(!tc.tmux_enabled);
         assert_eq!(tc.max_windows, 4);
         assert_eq!(tc.tmux_binary_path.as_deref(), Some("/usr/bin/tmux"));
+    }
+
+    // ---- ToolInvokeConfig tests ----
+
+    #[test]
+    fn test_tool_invoke_config_default_is_fail_closed() {
+        let c = ToolInvokeConfig::default();
+        assert!(!c.enabled, "tool_invoke must be disabled by default");
+        assert!(c.allowlist.is_empty());
+        assert!(
+            !c.permits("web_search"),
+            "default config must deny every tool"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_enabled_without_allowlist_denies_all() {
+        let c = ToolInvokeConfig {
+            enabled: true,
+            allowlist: Vec::new(),
+        };
+        assert!(
+            !c.permits("web_search"),
+            "empty allowlist denies all even when enabled"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_allowlist_without_enabled_denies_all() {
+        let c = ToolInvokeConfig {
+            enabled: false,
+            allowlist: vec!["web_search".to_string()],
+        };
+        assert!(
+            !c.permits("web_search"),
+            "disabled endpoint denies all regardless of allowlist"
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_config_exact_match_and_glob() {
+        let c = ToolInvokeConfig {
+            enabled: true,
+            allowlist: vec!["web_search".to_string(), "file_*".to_string()],
+        };
+        assert!(c.permits("web_search"));
+        assert!(c.permits("file_read"));
+        assert!(c.permits("file_write"));
+        assert!(!c.permits("shell_exec"));
+        assert!(!c.permits("web_fetch"));
+    }
+
+    #[test]
+    fn test_kernel_config_includes_tool_invoke_default() {
+        let cfg = KernelConfig::default();
+        assert!(!cfg.tool_invoke.enabled);
+        assert!(cfg.tool_invoke.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_tool_invoke_config_empty_toml_uses_defaults() {
+        let c: ToolInvokeConfig = toml::from_str("").unwrap();
+        assert!(!c.enabled);
+        assert!(c.allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_tool_invoke_config_toml_roundtrip() {
+        let toml_str = r#"
+            enabled = true
+            allowlist = ["web_search", "file_*"]
+        "#;
+        let c: ToolInvokeConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.allowlist, vec!["web_search", "file_*"]);
+
+        let back = toml::to_string(&c).unwrap();
+        let again: ToolInvokeConfig = toml::from_str(&back).unwrap();
+        assert_eq!(c, again);
+    }
+
+    // -------- ParallelToolsConfig (PR-3 schema only) --------
+
+    #[test]
+    fn parallel_tools_default_is_disabled() {
+        let c = ParallelToolsConfig::default();
+        assert!(!c.enabled, "PR-3 must ship with the dispatcher off");
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
+
+        // KernelConfig::default() must wire the field through.
+        let cfg = KernelConfig::default();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+    }
+
+    #[test]
+    fn parallel_tools_serde_round_trip() {
+        let original = ParallelToolsConfig {
+            enabled: true,
+            max_concurrent: 8,
+            mcp_default_safety: "read_only".to_string(),
+            mcp_readonly_allowlist: vec![
+                "mcp__github__list_issues".to_string(),
+                "mcp__fs__read_file".to_string(),
+            ],
+        };
+
+        // TOML round-trip.
+        let toml_str = toml::to_string(&original).unwrap();
+        let from_toml: ParallelToolsConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(from_toml, original);
+
+        // JSON round-trip.
+        let json_str = serde_json::to_string(&original).unwrap();
+        let from_json: ParallelToolsConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(from_json, original);
+    }
+
+    #[test]
+    fn parallel_tools_missing_in_kernel_config_uses_default() {
+        // Old config.toml predating PR-3 has no [parallel_tools] section.
+        // KernelConfig deserialisation must hydrate the field with Default.
+        let toml_str = r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.parallel_tools, ParallelToolsConfig::default());
+        assert!(!cfg.parallel_tools.enabled);
+    }
+
+    #[test]
+    fn parallel_tools_partial_section_fills_remaining_with_default() {
+        // User supplies only `enabled = true`; remaining fields fall back
+        // to Default — verifies #[serde(default)] on the struct itself.
+        let toml_str = r#"
+            enabled = true
+        "#;
+        let c: ParallelToolsConfig = toml::from_str(toml_str).unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.max_concurrent, 4);
+        assert_eq!(c.mcp_default_safety, "write_shared");
+        assert!(c.mcp_readonly_allowlist.is_empty());
+    }
+
+    // ── Issue #3050: granular MCP taint policy ─────────────────────────────
+
+    #[test]
+    fn mcp_taint_tool_policy_default_is_scan_and_omits_optional_fields() {
+        // Backward compat: a bare `[tool_policy.tools.foo]` table must
+        // deserialise into `default = Scan`, no paths, no rule_sets.
+        let toml_str = "default = \"scan\"\n";
+        let policy: McpTaintToolPolicy = toml::from_str(toml_str).unwrap();
+        assert_eq!(policy.default, McpTaintToolAction::Scan);
+        assert!(policy.paths.is_empty());
+        assert!(policy.rule_sets.is_empty());
+
+        let empty: McpTaintToolPolicy = toml::from_str("").unwrap();
+        assert_eq!(empty.default, McpTaintToolAction::Scan);
+    }
+
+    #[test]
+    fn mcp_taint_tool_action_skip_round_trips() {
+        let mut tools = HashMap::new();
+        tools.insert(
+            "navigate".to_string(),
+            McpTaintToolPolicy {
+                default: McpTaintToolAction::Skip,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+
+        // TOML round-trip — primary surface for operators.
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back_toml: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back_toml.tools.get("navigate").unwrap().default,
+            McpTaintToolAction::Skip
+        );
+    }
+
+    #[test]
+    fn mcp_taint_path_policy_round_trips_with_wildcards() {
+        let mut paths = HashMap::new();
+        paths.insert(
+            "$.metadata.*".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::SensitiveKeyName],
+            },
+        );
+        paths.insert(
+            "$.items[*]".to_string(),
+            McpTaintPathPolicy {
+                skip_rules: vec![crate::taint::TaintRuleId::OpaqueToken],
+            },
+        );
+        let mut tools = HashMap::new();
+        tools.insert(
+            "read_file".to_string(),
+            McpTaintToolPolicy {
+                paths,
+                ..Default::default()
+            },
+        );
+        let policy = McpTaintPolicy { tools };
+
+        let toml_str = toml::to_string(&policy).unwrap();
+        let back: McpTaintPolicy = toml::from_str(&toml_str).unwrap();
+        let read_paths = &back.tools.get("read_file").unwrap().paths;
+        assert!(read_paths.contains_key("$.metadata.*"));
+        assert!(read_paths.contains_key("$.items[*]"));
+    }
+
+    #[test]
+    fn mcp_taint_rule_set_actions_round_trip() {
+        // Inline TOML covers all three severity tiers.
+        let toml_str = r#"
+[[taint_rules]]
+name = "browser_handles"
+action = "warn"
+rules = ["opaque_token"]
+
+[[taint_rules]]
+name = "pii_baseline"
+action = "log"
+rules = ["pii_email", "pii_phone"]
+
+[[taint_rules]]
+name = "strict_default"
+rules = ["authorization_literal"]
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.taint_rules.len(), 3);
+        assert_eq!(cfg.taint_rules[0].name, "browser_handles");
+        assert_eq!(cfg.taint_rules[0].action, McpTaintRuleSetAction::Warn);
+        assert_eq!(cfg.taint_rules[1].action, McpTaintRuleSetAction::Log);
+        // Default action when omitted: Block.
+        assert_eq!(cfg.taint_rules[2].action, McpTaintRuleSetAction::Block);
+    }
+
+    #[test]
+    fn tool_policy_rule_sets_reference_round_trips() {
+        // `McpTaintPolicy` has a single field `tools` — the test deserialises
+        // the policy directly, not the surrounding `[mcp_servers.<name>.taint_policy]`
+        // table. Using the un-prefixed `[tools.<name>]` shape keeps the test
+        // focused on the policy struct.
+        let toml_str = r#"
+[tools.navigate]
+default = "skip"
+rule_sets = ["browser_handles"]
+
+[tools.read_file]
+rule_sets = ["browser_handles", "pii_baseline"]
+
+[tools.read_file.paths]
+"$.content" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Skip);
+        assert_eq!(nav.rule_sets, vec!["browser_handles"]);
+
+        let rf = policy.tools.get("read_file").unwrap();
+        assert_eq!(rf.default, McpTaintToolAction::Scan);
+        assert_eq!(rf.rule_sets.len(), 2);
+        assert!(rf.paths.contains_key("$.content"));
+    }
+
+    #[test]
+    fn legacy_taint_policy_without_new_fields_still_loads() {
+        // Pre-issue #3050 config.toml shape — must continue to deserialise
+        // identically with `default = Scan`, empty `rule_sets`.
+        let toml_str = r#"
+[tools.navigate.paths]
+"$.tabId" = { skip_rules = ["opaque_token"] }
+"#;
+        let policy: McpTaintPolicy = toml::from_str(toml_str).unwrap();
+        let nav = policy.tools.get("navigate").unwrap();
+        assert_eq!(nav.default, McpTaintToolAction::Scan);
+        assert!(nav.rule_sets.is_empty());
+        assert_eq!(nav.paths.len(), 1);
     }
 }

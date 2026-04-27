@@ -2,7 +2,7 @@
 
 [package]
 name = "librefang"
-version = "2026.4.23-beta4"
+version = "2026.4.27-beta6"
 edition = "2021"
 description = "Official Rust client for LibreFang Agent OS"
 license = "MIT"
@@ -11,12 +11,8 @@ keywords = ["librefang", "agent", "ai"]
 authors = ["LibreFang Team"]
 
 [dependencies]
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 futures = "0.3"
-
-[dev-dependencies]
-tokio-test = "0.4"

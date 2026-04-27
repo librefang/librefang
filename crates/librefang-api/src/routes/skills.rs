@@ -164,6 +164,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/mcp/servers/{name}/reconnect",
             axum::routing::post(reconnect_mcp_server_handler),
         )
+        .route(
+            "/mcp/servers/{name}/taint",
+            axum::routing::patch(patch_mcp_server_taint),
+        )
         // MCP OAuth auth endpoints (existing, unchanged)
         .route(
             "/mcp/servers/{name}/auth/status",
@@ -190,6 +194,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
         // Health + reload (covers all configured servers)
         .route("/mcp/health", axum::routing::get(mcp_health_handler))
         .route("/mcp/reload", axum::routing::post(reload_mcp_handler))
+        // Read-only registry of named `[[taint_rules]]` for dashboard
+        // validation (issue #3050 follow-up — typo'd rule_set names
+        // would otherwise be silent no-ops in scanner).
+        .route("/mcp/taint-rules", axum::routing::get(list_mcp_taint_rules))
         // Extensions — kept as dashboard-friendly aliases over the unified store.
         .route("/extensions", axum::routing::get(list_extensions))
         .route(
@@ -3323,6 +3331,41 @@ fn serialize_mcp_transport(
     }
 }
 
+/// GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.
+///
+/// Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references
+/// rule-set names by free-form string. Without this read-only endpoint,
+/// the editor cannot tell the operator that a typed name doesn't match
+/// any registered set — and the scanner silently treats unknown names
+/// as no-ops (one-shot WARN in
+/// `librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard
+/// uses this list to render an inline validation hint next to the
+/// `rule_sets` field.
+#[utoipa::path(
+    get,
+    path = "/api/mcp/taint-rules",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "List configured named taint rule sets", body = serde_json::Value)
+    )
+)]
+pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let payload: Vec<serde_json::Value> = state
+        .kernel
+        .config_ref()
+        .taint_rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "action": r.action,
+                "rule_count": r.rules.len(),
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(payload))
+}
+
 /// GET /api/mcp/servers — List configured MCP servers and their tools.
 #[utoipa::path(
     get,
@@ -3365,6 +3408,10 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 "timeout_secs": s.timeout_secs,
                 "env": s.env,
                 "auth_state": auth_state,
+                // Issue #3050: surface taint config so the dashboard tree
+                // editor can hydrate without a separate fetch.
+                "taint_scanning": s.taint_scanning,
+                "taint_policy": s.taint_policy,
             })
         })
         .collect();
@@ -3462,6 +3509,10 @@ pub async fn get_mcp_server(
         "timeout_secs": entry.timeout_secs,
         "env": entry.env,
         "connected": false,
+        // Issue #3050: surface taint config so the dashboard tree editor
+        // can hydrate without a separate fetch.
+        "taint_scanning": entry.taint_scanning,
+        "taint_policy": entry.taint_policy,
     });
 
     // Check live connection status
@@ -3762,6 +3813,123 @@ pub async fn update_mcp_server(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         &format!("mcp_server updated: {name}"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "name": name,
+            "reload": reload_status,
+        })),
+    )
+}
+
+/// PATCH /api/mcp/servers/{name}/taint — Partial update of taint settings.
+///
+/// Accepts a body of `{ "taint_scanning"?: bool, "taint_policy"?: McpTaintPolicy }`
+/// and merges it into the existing entry. Unlike PUT this does NOT require
+/// the caller to round-trip every other server field (transport, env, etc.) —
+/// the dashboard taint editor in particular needs only these two fields and
+/// shouldn't risk silently dropping unrelated fields it doesn't render.
+// `McpTaintPolicy` (in `librefang-types`) doesn't carry `utoipa::ToSchema`,
+// so deriving `ToSchema` here would fail. The OpenAPI annotation uses
+// `serde_json::Value` for the body schema, which keeps the spec accurate
+// without forcing a downstream derive.
+#[derive(serde::Deserialize)]
+pub(crate) struct PatchMcpTaintRequest {
+    /// When supplied, replaces `taint_scanning` on the existing entry.
+    #[serde(default)]
+    pub taint_scanning: Option<bool>,
+    /// When supplied, replaces `taint_policy` on the existing entry.
+    /// Pass `{}` (empty object) to clear all per-tool policies; pass `null`
+    /// (or omit) to leave existing policies untouched.
+    #[serde(default)]
+    pub taint_policy: Option<librefang_types::config::McpTaintPolicy>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/mcp/servers/{name}/taint",
+    tag = "mcp",
+    params(("name" = String, Path, description = "Server name")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Taint settings updated", body = serde_json::Value),
+        (status = 404, description = "Server not found", body = serde_json::Value),
+    )
+)]
+#[allow(private_interfaces)]
+pub async fn patch_mcp_server_taint(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<PatchMcpTaintRequest>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Locate and clone the existing entry so we mutate a fresh copy that's
+    // safe to pass to upsert_mcp_server_config without touching the live
+    // config until persistence succeeds.
+    let mut entry = match state
+        .kernel
+        .config_ref()
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+    {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(
+                t.t_args("api-error-mcp-not-found", &[("name", &name)]),
+            )
+            .into_json_tuple();
+        }
+    };
+
+    if let Some(scanning) = body.taint_scanning {
+        entry.taint_scanning = scanning;
+    }
+    if let Some(policy) = body.taint_policy {
+        entry.taint_policy = Some(policy);
+    }
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
+        return ApiErrorResponse::internal(t.t_args(
+            "api-error-config-write-failed",
+            &[("error", &e.to_string())],
+        ))
+        .into_json_tuple();
+    }
+    // Drop ErrorTranslator before .await — FluentBundle is !Send and cannot
+    // be held across an async suspension point.
+    drop(t);
+
+    let reload_status = match state.kernel.reload_config().await {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    };
+
+    // Reconnect so the new taint_policy snapshot reaches the live
+    // `McpServerConfig.taint_policy` field. The shared `taint_rules_swap`
+    // already updates via `reload_config` without a reconnect.
+    state.kernel.disconnect_mcp_server(&name).await;
+    let kernel = std::sync::Arc::clone(&state.kernel);
+    tokio::spawn(async move { kernel.connect_mcp_servers().await });
+
+    state.kernel.audit().record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        &format!("mcp_server taint updated: {name}"),
         "completed",
     );
 
@@ -4728,6 +4896,13 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 // ── Config.toml channel management helpers ──────────────────────────
 
 /// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
+///
+/// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
+/// formatting of unrelated sections (providers, agents, etc.). The previous
+/// `toml::Value` round-trip silently rewrote the entire file on every
+/// channel write — see issue #3183. Callers must hold
+/// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
+/// which performs an asymmetric read-modify-write on the same file.
 pub(crate) fn upsert_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -4741,65 +4916,60 @@ pub(crate) fn upsert_channel_config(
         String::new()
     };
 
-    let mut doc: toml::Value = if content.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
+    let mut doc: toml_edit::DocumentMut = if content.trim().is_empty() {
+        toml_edit::DocumentMut::new()
     } else {
-        toml::from_str(&content)?
+        content.parse()?
     };
 
-    let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
-
     // Ensure [channels] table exists
-    if !root.contains_key("channels") {
-        root.insert(
-            "channels".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
+    if !doc.contains_table("channels") {
+        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    let channels_table = root
-        .get_mut("channels")
-        .and_then(|v| v.as_table_mut())
+    let channels_table = doc["channels"]
+        .as_table_mut()
         .ok_or("channels is not a table")?;
 
     // Build channel sub-table with correct TOML types
-    let mut ch_table = toml::map::Map::new();
+    let mut ch_table = toml_edit::Table::new();
     for (k, (v, ft)) in fields {
-        let toml_val = match ft {
+        let item = match ft {
             FieldType::Number => {
                 if let Ok(n) = v.parse::<i64>() {
-                    toml::Value::Integer(n)
+                    toml_edit::value(n)
                 } else {
-                    toml::Value::String(v.clone())
+                    toml_edit::value(v.clone())
                 }
             }
             FieldType::List => {
                 // Always store list items as strings so that numeric IDs
                 // (e.g. Discord guild snowflakes, Telegram user IDs) are
                 // deserialized correctly into Vec<String> config fields.
-                let items: Vec<toml::Value> = v
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| toml::Value::String(s.to_string()))
-                    .collect();
-                toml::Value::Array(items)
+                let mut arr = toml_edit::Array::new();
+                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    arr.push(s);
+                }
+                toml_edit::value(arr)
             }
-            _ => toml::Value::String(v.clone()),
+            _ => toml_edit::value(v.clone()),
         };
-        ch_table.insert(k.clone(), toml_val);
+        ch_table.insert(k, item);
     }
-    channels_table.insert(channel_name.to_string(), toml::Value::Table(ch_table));
+    channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
 
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    std::fs::write(config_path, doc.to_string())?;
     Ok(())
 }
 
 /// Remove a `[channels.<name>]` section from config.toml.
+///
+/// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
+/// callers must hold `AppState::config_write_lock`.
 pub(crate) fn remove_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -4815,17 +4985,13 @@ pub(crate) fn remove_channel_config(
         return Ok(());
     }
 
-    let mut doc: toml::Value = toml::from_str(&content)?;
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
 
-    if let Some(channels) = doc
-        .as_table_mut()
-        .and_then(|r| r.get_mut("channels"))
-        .and_then(|c| c.as_table_mut())
-    {
+    if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
         channels.remove(channel_name);
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    std::fs::write(config_path, doc.to_string())?;
     Ok(())
 }
 
@@ -5523,5 +5689,123 @@ mod tests {
             Some(McpTransportEntry::Http { url }) => assert_eq!(url, "http://new:9090/mcp"),
             other => panic!("expected http transport, got {other:?}"),
         }
+    }
+
+    /// Regression for #3183: writing a channel section must not destroy
+    /// unrelated provider settings (or the user's comments and key order)
+    /// in `config.toml`. The previous `toml::Value` round-trip rebuilt the
+    /// entire document on every channel write, which dropped comments and
+    /// — combined with the missing `config_write_lock` — could clobber a
+    /// concurrent provider write from `POST /api/config/set`.
+    #[test]
+    fn upsert_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# Top-of-file comment that must survive channel writes
+api_port = 4545
+
+[providers.nim]
+# NVIDIA NIM provider — issue #3183 repro
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+api_key_env = \"NIM_API_KEY\"
+
+[channels.discord]
+bot_token_env = \"OLD_DISCORD_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("DISCORD_BOT_TOKEN".to_string(), FieldType::Text),
+        );
+        fields.insert(
+            "guild_ids".to_string(),
+            ("123, 456".to_string(), FieldType::List),
+        );
+
+        upsert_channel_config(&config_path, "discord", &fields).expect("upsert should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+
+        // Provider section must be intact — this is the original bug.
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] section was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("base_url = \"https://integrate.api.nvidia.com/v1\""),
+            "NIM base_url was dropped — got:\n{raw}"
+        );
+
+        // Comments and the top-level scalar must survive the rewrite.
+        assert!(
+            raw.contains("# Top-of-file comment that must survive channel writes"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# NVIDIA NIM provider"),
+            "in-section comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("api_port = 4545"),
+            "top-level scalar was dropped — got:\n{raw}"
+        );
+
+        // The new channel fields must be written with correct TOML types
+        // (list of strings, not list of integers — see the FieldType::List
+        // comment about Discord guild snowflakes).
+        #[derive(serde::Deserialize)]
+        struct Discord {
+            bot_token_env: String,
+            guild_ids: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Channels {
+            discord: Discord,
+        }
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            channels: Channels,
+        }
+        let parsed: Wrapper = toml::from_str(&raw).expect("config must round-trip");
+        assert_eq!(parsed.channels.discord.bot_token_env, "DISCORD_BOT_TOKEN");
+        assert_eq!(parsed.channels.discord.guild_ids, vec!["123", "456"]);
+    }
+
+    /// Companion to the upsert test: removing a channel must also leave
+    /// every other section untouched.
+    #[test]
+    fn remove_channel_config_preserves_unrelated_sections_and_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let original = "\
+# keep me
+[providers.nim]
+kind = \"openai-compat\"
+base_url = \"https://integrate.api.nvidia.com/v1\"
+
+[channels.discord]
+bot_token_env = \"DISCORD_BOT_TOKEN\"
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        remove_channel_config(&config_path, "discord").expect("remove should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            raw.contains("[providers.nim]"),
+            "[providers.nim] was dropped — got:\n{raw}"
+        );
+        assert!(
+            raw.contains("# keep me"),
+            "top-level comment was dropped — got:\n{raw}"
+        );
+        assert!(
+            !raw.contains("[channels.discord]"),
+            "channel section should have been removed — got:\n{raw}"
+        );
     }
 }

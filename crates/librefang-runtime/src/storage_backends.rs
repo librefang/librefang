@@ -13,7 +13,7 @@
 //! continue to live as inherent methods on the concrete types until the
 //! Surreal implementations land.
 
-use crate::audit::{AuditAction, AuditEntry, AuditLog};
+use crate::audit::{AuditAction, AuditEntry, AuditLog, TrimReport};
 use crate::context_engine::HookTrace;
 #[cfg(feature = "sqlite-backend")]
 use crate::trace_store::TraceStore;
@@ -44,6 +44,22 @@ pub trait AuditStore: Send + Sync {
     /// Append a new entry to the chain.
     fn record(&self, agent_id: &str, action: AuditAction, detail: &str, outcome: &str);
 
+    /// Append a new entry with optional user / channel attribution (RBAC M1).
+    ///
+    /// Defaults to `record()` so existing impls compile without changes.
+    fn record_with_context(
+        &self,
+        agent_id: &str,
+        action: AuditAction,
+        detail: &str,
+        outcome: &str,
+        user_id: Option<librefang_types::agent::UserId>,
+        channel: Option<String>,
+    ) {
+        let _ = (user_id, channel);
+        self.record(agent_id, action, detail, outcome);
+    }
+
     /// Verify the integrity of every entry in the chain.
     fn verify_integrity(&self) -> Result<(), String>;
 
@@ -61,11 +77,49 @@ pub trait AuditStore: Send + Sync {
 
     /// Drop entries older than `retention_days`. Returns the number pruned.
     fn prune(&self, retention_days: u32) -> usize;
+
+    /// Apply a full [`AuditRetentionConfig`] policy and return a [`TrimReport`].
+    ///
+    /// Defaults to a simple `prune()` using the minimum per-action retention
+    /// so existing impls compile without changes.
+    fn trim(
+        &self,
+        config: &librefang_types::config::AuditRetentionConfig,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> TrimReport {
+        let days = config
+            .retention_days_by_action
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(u32::MAX);
+        if days == u32::MAX {
+            return TrimReport::default();
+        }
+        let _ = now;
+        let pruned = self.prune(days);
+        TrimReport {
+            total_dropped: pruned,
+            ..Default::default()
+        }
+    }
 }
 
 impl AuditStore for AuditLog {
     fn record(&self, agent_id: &str, action: AuditAction, detail: &str, outcome: &str) {
         AuditLog::record(self, agent_id, action, detail, outcome);
+    }
+
+    fn record_with_context(
+        &self,
+        agent_id: &str,
+        action: AuditAction,
+        detail: &str,
+        outcome: &str,
+        user_id: Option<librefang_types::agent::UserId>,
+        channel: Option<String>,
+    ) {
+        AuditLog::record_with_context(self, agent_id, action, detail, outcome, user_id, channel);
     }
 
     fn verify_integrity(&self) -> Result<(), String> {
@@ -90,6 +144,14 @@ impl AuditStore for AuditLog {
 
     fn prune(&self, retention_days: u32) -> usize {
         AuditLog::prune(self, retention_days)
+    }
+
+    fn trim(
+        &self,
+        config: &librefang_types::config::AuditRetentionConfig,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> TrimReport {
+        AuditLog::trim(self, config, now)
     }
 }
 

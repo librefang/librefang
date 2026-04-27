@@ -216,6 +216,7 @@ mod tests {
                 source: None,
                 config: std::collections::HashMap::new(),
                 config_vars,
+                env_passthrough: Vec::new(),
             },
             path: PathBuf::from("/tmp/fake"),
             enabled: true,

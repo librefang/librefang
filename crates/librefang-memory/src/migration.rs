@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 21;
+const SCHEMA_VERSION: u32 = 23;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -93,6 +93,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 21 {
         migrate_v21(conn)?;
+    }
+
+    if current_version < 22 {
+        migrate_v22(conn)?;
+    }
+
+    if current_version < 23 {
+        migrate_v23(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -690,6 +698,64 @@ fn migrate_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 22: Add user_id and channel columns to audit_entries for RBAC M1.
+///
+/// Both columns are nullable so pre-M1 entries (no user attribution) keep
+/// verifying with their original Merkle hashes — the hash function omits
+/// absent fields, so NULL columns produce the pre-migration hash unchanged.
+fn migrate_v22(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "audit_entries", "user_id") {
+        conn.execute("ALTER TABLE audit_entries ADD COLUMN user_id TEXT", [])?;
+    }
+    if !column_exists(conn, "audit_entries", "channel") {
+        conn.execute("ALTER TABLE audit_entries ADD COLUMN channel TEXT", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_entries(user_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_channel ON audit_entries(channel)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (22, datetime('now'), 'Add user_id and channel columns to audit_entries for RBAC M1 attribution')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 23 (RBAC M5): attribute usage events to a user / channel.
+///
+/// Adds two NULL-able columns to `usage_events` and indexes them so
+/// `/api/budget/users` and `/api/budget/users/{id}` can roll spend up by
+/// user without scanning the whole table. Pre-M5 rows return NULL — they
+/// fall outside any per-user filter, which is the right default (cost
+/// existed before the user attribution layer was added).
+fn migrate_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "usage_events", "user_id") {
+        conn.execute("ALTER TABLE usage_events ADD COLUMN user_id TEXT", [])?;
+    }
+    if !column_exists(conn, "usage_events", "channel") {
+        conn.execute("ALTER TABLE usage_events ADD COLUMN channel TEXT", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_events(user_id, timestamp)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_channel_time ON usage_events(channel, timestamp)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (23, datetime('now'), 'Add user_id and channel columns to usage_events for RBAC M5 per-user spend rollup')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -741,5 +807,153 @@ mod tests {
         assert!(tables.contains(&"prompt_experiments".to_string()));
         assert!(tables.contains(&"experiment_variants".to_string()));
         assert!(tables.contains(&"experiment_metrics".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_v22_adds_user_id_and_channel_columns() {
+        // RBAC M1: pre-existing audit_entries rows must keep working after
+        // the schema upgrade — both columns must be NULL-able.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "audit_entries", "user_id"));
+        assert!(column_exists(&conn, "audit_entries", "channel"));
+
+        // Insert with the legacy column list (omitting user_id/channel) —
+        // must succeed with NULLs. This is the path callers using the
+        // pre-M1 INSERT signature take.
+        conn.execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                0_i64,
+                "2026-04-26T00:00:00+00:00",
+                "agent-1",
+                "AgentSpawn",
+                "boot",
+                "ok",
+                "0".repeat(64),
+                "deadbeef".repeat(8),
+            ],
+        )
+        .expect("legacy INSERT must still work after v22");
+
+        let (uid, ch): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT user_id, channel FROM audit_entries WHERE seq = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(uid, None);
+        assert_eq!(ch, None);
+    }
+
+    #[test]
+    fn test_migrate_v22_preserves_existing_rows() {
+        // Simulate an upgrade from v21: create a v21-shape audit_entries
+        // table by hand, drop in a row, then run migrations. The row must
+        // survive intact and gain NULL user_id / channel columns.
+        let conn = Connection::open_in_memory().unwrap();
+        // Run the pre-v22 migrations only by stopping at v21 state.
+        // Easiest: run all migrations, drop the column, and re-add via v22
+        // logic. But that defeats the test. Instead build the legacy
+        // schema explicitly.
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            CREATE TABLE migrations (version INTEGER PRIMARY KEY, applied_at TEXT, description TEXT);
+            INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) \
+              VALUES (0, '2026-01-01T00:00:00+00:00', 'agent-1', 'AgentSpawn', 'boot', 'ok', '0', 'h');",
+        )
+        .unwrap();
+
+        // Apply just the v22 step.
+        migrate_v22(&conn).unwrap();
+
+        assert!(column_exists(&conn, "audit_entries", "user_id"));
+        assert!(column_exists(&conn, "audit_entries", "channel"));
+
+        // Original row must be intact, with NULL for the new columns.
+        let (agent, uid, ch): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, user_id, channel FROM audit_entries WHERE seq = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(agent, "agent-1");
+        assert_eq!(uid, None);
+        assert_eq!(ch, None);
+    }
+
+    #[test]
+    fn test_migrate_v22_is_idempotent() {
+        // Running run_migrations twice on the same DB must be a no-op
+        // for the v22 step — `column_exists` guards the ALTER TABLE so
+        // re-running does not try to add the same column twice.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Second run on already-v22 schema must succeed.
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "audit_entries", "user_id"));
+        assert!(column_exists(&conn, "audit_entries", "channel"));
+        // Schema version stays at the latest.
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_v23_adds_user_id_and_channel_to_usage_events() {
+        // RBAC M5: usage_events gains NULL-able user_id / channel columns
+        // for per-user spend rollup. Pre-M5 INSERTs (no user_id/channel in
+        // the column list) must keep working with NULL values.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "usage_events", "user_id"));
+        assert!(column_exists(&conn, "usage_events", "channel"));
+
+        // Pre-M5 INSERT path — must still work, columns default to NULL.
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "u1",
+                "agent-1",
+                "2026-04-26T00:00:00+00:00",
+                "claude-haiku",
+                100_i64,
+                50_i64,
+                0.001_f64,
+                0_i64,
+            ],
+        )
+        .expect("legacy INSERT must still work after v23");
+
+        let (uid, ch): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT user_id, channel FROM usage_events WHERE id = 'u1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(uid, None);
+        assert_eq!(ch, None);
+    }
+
+    #[test]
+    fn test_migrate_v23_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "usage_events", "user_id"));
+        assert!(column_exists(&conn, "usage_events", "channel"));
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
     }
 }

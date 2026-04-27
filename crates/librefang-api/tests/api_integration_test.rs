@@ -16,6 +16,7 @@ use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::audit::AuditAction;
+use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,6 +114,7 @@ async fn start_test_server_with_provider(
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -135,6 +137,14 @@ async fn start_test_server_with_provider(
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(routes::export_session_trajectory),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
         )
         .route(
             "/api/agents/{id}/metrics",
@@ -507,7 +517,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
     )
     .unwrap();
 
-    let request = Request::builder()
+    let mut request = Request::builder()
         .method("POST")
         .uri("/api/migrate")
         .header("content-type", "application/json")
@@ -521,6 +531,16 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
             .unwrap(),
         ))
         .unwrap();
+    // Simulate a loopback connection so the unauth-fail-closed branch
+    // (when api_key is empty) treats this oneshot as a localhost caller
+    // rather than a non-loopback origin. Production gets ConnectInfo from
+    // axum's connection layer; oneshot bypasses that, so we inject it.
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
 
     let response = harness.app.clone().oneshot(request).await.unwrap();
 
@@ -696,6 +716,243 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+}
+
+/// Regression test for the cross-agent session-read guard added in PR #3071.
+///
+/// `GET /api/agents/{A}/session?session_id={B's session}` MUST NOT return
+/// agent B's history under agent A's id — otherwise one agent id can read
+/// another agent's conversation by guessing a session UUID.
+///
+/// Also verifies the malformed-uuid case returns 400 (typed query param
+/// validation) and that passing the agent's own session_id round-trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_session_rejects_cross_agent_session_id() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent A.
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_a: serde_json::Value = resp.json().await.unwrap();
+    let agent_a = body_a["agent_id"].as_str().unwrap().to_string();
+
+    // Spawn agent B (distinct name so the manifest validates).
+    const TEST_MANIFEST_B: &str = r#"
+name = "test-agent-b"
+version = "0.1.0"
+description = "Integration test agent B"
+author = "test"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST_B}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body_b: serde_json::Value = resp.json().await.unwrap();
+    let agent_b = body_b["agent_id"].as_str().unwrap().to_string();
+
+    // Discover B's session id (canonical-active).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_b
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let b_session: serde_json::Value = resp.json().await.unwrap();
+    let b_session_id = b_session["session_id"].as_str().unwrap().to_string();
+
+    // Cross-agent read: A's id with B's session_id → 404 (the guard).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, b_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-agent session read must be rejected"
+    );
+
+    // Malformed UUID → 400 (typed serde validation).
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id=not-a-uuid",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Same-agent round-trip: A's id with A's own session_id → 200.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    let a_session: serde_json::Value = resp.json().await.unwrap();
+    let a_session_id = a_session["session_id"].as_str().unwrap().to_string();
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session?session_id={}",
+            server.base_url, agent_a, a_session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"].as_str().unwrap(), a_session_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_trajectory_export_empty() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // Read session to discover session_id.
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/session",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let session_body: serde_json::Value = resp.json().await.unwrap();
+    let session_id = session_body["session_id"].as_str().unwrap().to_string();
+
+    // Default (json) format
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory",
+            server.base_url, agent_id, session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ct.starts_with("application/json"), "got content-type: {ct}");
+    let disp = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        disp.contains("trajectory-") && disp.contains(".json"),
+        "got disposition: {disp}"
+    );
+    let bundle: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(bundle["schema_version"], 1);
+    assert_eq!(bundle["metadata"]["agent_id"], agent_id);
+    assert_eq!(bundle["metadata"]["session_id"], session_id);
+    assert_eq!(bundle["metadata"]["model"], "test-model");
+    assert_eq!(bundle["metadata"]["provider"], "ollama");
+    assert!(bundle["metadata"]["system_prompt_sha256"].is_string());
+    assert!(bundle["metadata"]["librefang_version"].is_string());
+    assert_eq!(bundle["metadata"]["message_count"], 0);
+    assert!(bundle["messages"].as_array().unwrap().is_empty());
+
+    // jsonl format
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory?format=jsonl",
+            server.base_url, agent_id, session_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.starts_with("application/x-ndjson"),
+        "got content-type: {ct}"
+    );
+    let body_text = resp.text().await.unwrap();
+    let lines: Vec<&str> = body_text.lines().collect();
+    // empty session → only metadata header line
+    assert_eq!(lines.len(), 1, "expected 1 line, got {}", lines.len());
+    assert!(lines[0].contains("\"kind\":\"metadata\""));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_trajectory_404_on_unknown_session() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent so we have a valid agent_id
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // Random valid-shape session UUID that doesn't exist.
+    let bogus = uuid::Uuid::new_v4().to_string();
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/trajectory",
+            server.base_url, agent_id, bogus
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1352,6 +1609,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         kernel.config_ref().api_key.clone(),
     ));
 
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
     let state = Arc::new(AppState {
         kernel,
         started_at: Instant::now(),
@@ -1371,6 +1630,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         media_drivers: librefang_runtime::media::MediaDriverCache::new(),
         webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
         api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
     });
@@ -1379,8 +1639,12 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         api_key_lock,
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: Arc::new(Vec::new()),
+        user_api_keys: user_api_keys_lock.clone(),
         require_auth_for_reads: false,
+        // Tests synthesize requests without ConnectInfo, so opt in to the
+        // open-server path to keep them green.
+        allow_no_auth: true,
+        audit_log: None,
     };
 
     let app = Router::new()
@@ -1397,6 +1661,14 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/trajectory",
+            axum::routing::get(routes::export_session_trajectory),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{session_id}/stream",
+            axum::routing::get(routes::attach_session_stream),
         )
         .route(
             "/api/agents/{id}/metrics",
@@ -1716,6 +1988,180 @@ metrics = []
     assert_eq!(agent_ids_obj["linter"], linter_id.to_string());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn hand_runtime_config_patch_supports_tristate_and_404() {
+    use std::collections::HashMap;
+
+    let harness = start_full_router("secret-key-123").await;
+
+    let instance = match harness
+        .state
+        .kernel
+        .activate_hand("apitester", HashMap::new())
+    {
+        Ok(inst) => inst,
+        Err(e) if e.to_string().contains("unsatisfied requirements") => {
+            eprintln!("Skipping test: {e}");
+            return;
+        }
+        Err(e) => panic!("apitester hand should activate: {e}"),
+    };
+    let agent_id = instance.agent_id().expect("apitester agent id");
+
+    let set_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "patched-model",
+                        "provider": "patched-provider",
+                        "api_key_env": "PATCHED_API_KEY_ENV",
+                        "base_url": "https://patched.invalid/v1",
+                        "max_tokens": 777,
+                        "temperature": 0.7,
+                        "web_search_augmentation": "always"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("set override request should succeed");
+    assert_eq!(set_response.status(), StatusCode::OK);
+
+    let set_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after set");
+    assert_eq!(set_entry.manifest.model.model, "patched-model");
+    assert_eq!(set_entry.manifest.model.provider, "patched-provider");
+    assert_eq!(
+        set_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV")
+    );
+    assert_eq!(
+        set_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1")
+    );
+    assert_eq!(set_entry.manifest.model.max_tokens, 777);
+    assert!((set_entry.manifest.model.temperature - 0.7).abs() < 1e-6);
+    assert_eq!(
+        set_entry.manifest.web_search_augmentation,
+        WebSearchAugmentationMode::Always
+    );
+
+    let preserve_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "preserved-model",
+                        "api_key_env": null,
+                        "base_url": null
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("preserve override request should succeed");
+    assert_eq!(preserve_response.status(), StatusCode::OK);
+
+    let preserved_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after preserve");
+    assert_eq!(preserved_entry.manifest.model.model, "preserved-model");
+    assert_eq!(
+        preserved_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV"),
+        "missing api_key_env field must leave prior override unchanged"
+    );
+    assert_eq!(
+        preserved_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1"),
+        "missing base_url field must leave prior override unchanged"
+    );
+
+    let clear_response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/agents/{agent_id}/hand-runtime-config"))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "api_key_env": "   ",
+                        "base_url": ""
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("clear override request should succeed");
+    assert_eq!(clear_response.status(), StatusCode::OK);
+
+    let cleared_entry = harness
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .expect("apitester entry after clear");
+    assert_ne!(
+        cleared_entry.manifest.model.api_key_env.as_deref(),
+        Some("PATCHED_API_KEY_ENV"),
+        "empty api_key_env must clear the prior runtime override"
+    );
+    assert_ne!(
+        cleared_entry.manifest.model.base_url.as_deref(),
+        Some("https://patched.invalid/v1"),
+        "empty base_url must clear the prior runtime override"
+    );
+    assert_eq!(
+        cleared_entry.manifest.model.model, "preserved-model",
+        "clearing nullable fields must not disturb unrelated non-nullable overrides"
+    );
+
+    let not_found = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/agents/{}/hand-runtime-config",
+                    librefang_types::agent::AgentId::new()
+                ))
+                .header("authorization", "Bearer secret-key-123")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"model": "x"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("404 request should complete");
+    assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+}
+
 // ── issue #2699: `/mcp` must rehydrate caller context from the
 // `X-LibreFang-Agent-Id` header so CLI drivers (claude-code) can call
 // workspace/cron/media tools without every invocation failing.
@@ -1932,5 +2378,1796 @@ async fn test_mcp_http_enforces_agent_tool_allowlist() {
     assert!(
         content.contains("Permission denied") || content.contains("capability"),
         "denial must mention permission/capability; got: {content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-client session attach (GET /api/agents/{id}/sessions/{sid}/stream)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_404_for_unknown_agent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let bogus_agent = uuid::Uuid::new_v4();
+    let bogus_session = uuid::Uuid::new_v4();
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/sessions/{}/stream",
+            server.base_url, bogus_agent, bogus_session
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_attach_session_stream_fans_out_to_multiple_clients() {
+    use futures::StreamExt as _;
+    use librefang_runtime::llm_driver::StreamEvent;
+    use std::time::Duration;
+
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent (ollama, no LLM call needed).
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({ "manifest_toml": TEST_MANIFEST }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id_str = body["agent_id"].as_str().unwrap().to_string();
+    let agent_id: librefang_types::agent::AgentId = agent_id_str.parse().unwrap();
+
+    // Pull the agent's canonical session id from the registry — the attach
+    // route validates the session belongs to the agent.
+    let session_id = server
+        .state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .unwrap()
+        .session_id;
+
+    let url = format!(
+        "{}/api/agents/{}/sessions/{}/stream",
+        server.base_url, agent_id_str, session_id
+    );
+
+    // Helper that opens an SSE attach connection and reads until it sees a
+    // complete SSE frame (one `\n\n` boundary) or the timeout elapses. Returns
+    // the bytes accumulated so the test can assert on the published payload.
+    async fn read_first_frame(client: reqwest::Client, url: String) -> String {
+        let resp = client.get(url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(chunk)) = stream.next().await {
+                buf.extend_from_slice(&chunk);
+                if buf.windows(2).any(|w| w == b"\n\n") {
+                    return;
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    let attacher_a = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+    let attacher_b = tokio::spawn(read_first_frame(client.clone(), url.clone()));
+
+    // Wait until both attachers have completed `subscribe()` inside the
+    // handler before publishing — broadcast is fire-and-forget for events
+    // that arrive with zero subscribers, so a sleep-based wait would be
+    // racy on slow CI. Poll receiver_count until it reaches 2.
+    let hub = server.state.kernel.session_stream_hub();
+    let sender = hub.sender(session_id);
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if sender.receiver_count() >= 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "both attachers should subscribe within 5s; receiver_count={}",
+        sender.receiver_count()
+    );
+
+    let receiver_count = sender
+        .send(StreamEvent::TextDelta {
+            text: "hello-multiattach".to_string(),
+        })
+        .expect("at least one receiver should be attached");
+    assert!(
+        receiver_count >= 2,
+        "expected both attachers to be subscribed before publish; got {receiver_count}"
+    );
+
+    let body_a = attacher_a.await.unwrap();
+    let body_b = attacher_b.await.unwrap();
+
+    assert!(
+        body_a.contains("hello-multiattach"),
+        "client A body should contain published event: {body_a}"
+    );
+    assert!(
+        body_b.contains("hello-multiattach"),
+        "client B body should contain published event: {body_b}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Memory endpoint regression tests for issue #3070:
+// When `[proactive_memory] enabled = false`, GET /api/memory and
+// GET /api/memory/stats must return 200 with `proactive_enabled: false`,
+// not 500. Disabled is a config state, not a server error.
+// ---------------------------------------------------------------------------
+
+/// Build a router harness with `proactive_memory.enabled` toggleable.
+async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    librefang_runtime::registry_sync::sync_registry(
+        tmp.path(),
+        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
+    );
+
+    let proactive = librefang_types::memory::ProactiveMemoryConfig {
+        enabled,
+        ..librefang_types::memory::ProactiveMemoryConfig::default()
+    };
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        proactive_memory: proactive,
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
+/// Build a GET request to `uri` and inject loopback `ConnectInfo` so the
+/// auth middleware treats it as a localhost caller (matching production
+/// dev-UX semantics). Without this, oneshot tests have no `ConnectInfo`
+/// extension and the fail-closed branch returns 401 for non-public paths.
+fn loopback_get(uri: &str) -> Request<Body> {
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+    request
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert_eq!(json["total"], serde_json::json!(0));
+    assert!(
+        json["memories"].as_array().is_some_and(|a| a.is_empty()),
+        "memories must be an empty array, got {}",
+        json["memories"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_returns_200_when_proactive_disabled() {
+    let harness = start_full_router_with_proactive(false).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "/api/memory/stats must not 500 when proactive memory is disabled"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(false));
+    assert!(
+        json["stats"].is_null(),
+        "stats must be null when disabled, got {}",
+        json["stats"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_list_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // When enabled the legacy fields stay intact and `proactive_enabled: true`
+    // is added so the dashboard can branch on a single field.
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    assert!(json["memories"].is_array(), "memories must be an array");
+    assert!(json["total"].is_number(), "total must be a number");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_memory_stats_includes_proactive_enabled_when_enabled() {
+    let harness = start_full_router_with_proactive(true).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(loopback_get("/api/memory/stats"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["proactive_enabled"], serde_json::json!(true));
+    // Existing fields remain present; we only assert their types so we don't
+    // couple to a specific empty-database snapshot.
+    assert!(json["total"].is_number() || json["total"].is_null());
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// RBAC M5 — admin-only audit/budget endpoints
+//
+// These pin the contract for the four new HTTP endpoints
+// (`/api/audit/query`, `/api/audit/export`, `/api/budget/users`,
+// `/api/budget/users/{id}`):
+//
+//   1. Anonymous callers (loopback / `LIBREFANG_ALLOW_NO_AUTH=1`) MUST be
+//      rejected — even on a no-auth deployment, the audit chain is too
+//      sensitive to expose without an admin api_key.
+//   2. Sub-Admin authenticated callers MUST be rejected by the in-handler
+//      `require_admin` gate. Middleware lets every authenticated GET
+//      through regardless of role; the in-handler check is the only thing
+//      stopping a Viewer from reading the chain. This test exists so a
+//      future refactor that drops the in-handler gate surfaces as a
+//      failure rather than as silent privacy exposure.
+//   3. CSV export MUST emit the documented `Content-Type` and
+//      `Content-Disposition` so the dashboard download flow keeps working.
+//   4. `/api/budget/users/{id}` MUST surface `enforced: false` so the M6
+//      dashboard can warn users that `alert_breach` is informational
+//      until the M5-followup per-user budget enforcement lands.
+// ───────────────────────────────────────────────────────────────────────
+
+use librefang_kernel::auth::UserRole as KernelUserRole;
+use librefang_types::config::UserConfig;
+
+/// Build a test server with RBAC users wired into both `KernelConfig.users`
+/// and `AuthState.user_api_keys`, plus the audit + budget routes from
+/// `routes::audit::router()` / `routes::budget::router()`.
+///
+/// Each tuple is `(name, role_str, api_key)`. The api_key hash is
+/// computed via `librefang_api::password_hash::hash_password` so the
+/// auth middleware accepts the corresponding `Bearer` header.
+///
+/// Audit log handle is plumbed into `AuthState.audit_log` so denials
+/// from the in-handler `require_admin` are recorded — same as
+/// production (`server.rs::build_router`).
+async fn start_test_server_with_rbac_users(
+    api_key: &str,
+    users: Vec<(&str, &str, &str)>,
+) -> TestServer {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
+    let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
+    for (name, role_str, key) in &users {
+        let hash =
+            librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
+        user_configs.push(UserConfig {
+            name: (*name).to_string(),
+            role: (*role_str).to_string(),
+            channel_bindings: std::collections::HashMap::new(),
+            api_key_hash: Some(hash.clone()),
+            ..Default::default()
+        });
+        api_user_records.push(middleware::ApiUserAuth {
+            name: (*name).to_string(),
+            role: KernelUserRole::from_str_role(role_str),
+            api_key_hash: hash,
+            user_id: librefang_types::agent::UserId::from_name(name),
+        });
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        users: user_configs,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
+        kernel.config_ref().api_key.clone(),
+    ));
+
+    let audit_log = kernel.audit().clone();
+
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
+    let state = Arc::new(AppState {
+        kernel,
+        started_at: Instant::now(),
+        peer_registry: None,
+        bridge_manager: tokio::sync::Mutex::new(None),
+        channels_config: tokio::sync::RwLock::new(Default::default()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        skillhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
+        provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let api_key_state = middleware::AuthState {
+        api_key_lock,
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: user_api_keys_lock.clone(),
+        require_auth_for_reads: false,
+        // Anonymous-rejection tests rely on this — we synthesize requests
+        // without a Bearer header and need them to flow through to the
+        // in-handler `require_admin` gate (where they get 403'd). Without
+        // `allow_no_auth = true` the middleware would 401 first.
+        allow_no_auth: true,
+        audit_log: Some(audit_log),
+    };
+
+    let app = Router::new()
+        // Wire the admin-gated RBAC routes under `/api/` — sufficient for
+        // these tests. Other RBAC layers (channel bindings, tool policy)
+        // are exercised by the kernel-level tests. The authz router is
+        // mounted alongside audit/budget so the effective-permissions
+        // tests can hit it through the same auth middleware. The users
+        // router is mounted so M3 (#3205) policy PUT/GET tests run the
+        // full middleware stack (owner-only gate).
+        .nest("/api", routes::audit::router())
+        .nest("/api", routes::budget::router())
+        .nest("/api", routes::authz::router())
+        .nest("/api", routes::users::router())
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn(middleware::request_logging))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    TestServer {
+        base_url: format!("http://{}", addr),
+        config_path,
+        state,
+        _tmp: tmp,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_query_rejects_anonymous() {
+    // Anonymous (no Bearer header) callers MUST be denied — the audit
+    // chain is too sensitive to leak. With both `api_key` and
+    // `user_api_keys` configured, `allow_no_auth` no longer short-circuits
+    // (see middleware.rs:501-526) so the request is rejected at the
+    // middleware layer with 401 BEFORE reaching the in-handler
+    // `require_admin` gate. That's an earlier, stricter rejection — the
+    // safety property ("anonymous cannot read audit") still holds.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/audit/query must be rejected at the middleware (401)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_query_rejects_viewer_admin_returns_200() {
+    // Pins the in-handler `require_admin` gate. The middleware lets a
+    // Viewer GET through (`user_role_allows_request` returns true for
+    // every GET); only the handler-side `require_admin` stops it. A
+    // refactor that drops that gate must be caught here, NOT in
+    // production.
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "admin", "alice-admin-key"),
+            ("Eve", "viewer", "eve-viewer-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Viewer → 403
+    let viewer = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        viewer.status(),
+        403,
+        "Viewer must be denied at the in-handler require_admin gate"
+    );
+
+    // Admin → 200 with valid JSON shape
+    let admin = client
+        .get(format!("{}/api/audit/query", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin.status(), 200, "Admin must be allowed");
+    let body: serde_json::Value = admin.json().await.unwrap();
+    // Shape contract: `entries` array, `count`, `limit` fields all
+    // present even on an empty audit log.
+    assert!(body["entries"].is_array(), "response must carry entries[]");
+    assert!(body["count"].is_number(), "response must carry count");
+    assert!(body["limit"].is_number(), "response must carry limit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_audit_export_csv_emits_documented_headers() {
+    // The dashboard download flow keys off `Content-Type: text/csv` and
+    // a filename in `Content-Disposition`. Pin both so a future refactor
+    // of `stream_csv` doesn't silently break the download.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/audit/export?format=csv", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Admin CSV export must succeed");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/csv"),
+        "CSV export must set text/csv; got {ct:?}"
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cd.contains("attachment") && cd.contains("audit.csv"),
+        "Content-Disposition must trigger an `audit.csv` download; got {cd:?}"
+    );
+    // First line must be the documented header row, regardless of how
+    // many entries the chain holds.
+    let text = resp.text().await.unwrap();
+    let first_line = text.lines().next().unwrap_or("");
+    assert_eq!(
+        first_line, "seq,timestamp,agent_id,action,detail,outcome,user_id,channel,hash,prev_hash",
+        "CSV header row schema must remain stable for downstream parsers; \
+         `prev_hash` is the last column so a verifier can replay the chain"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_detail_includes_enforced_true() {
+    // Per-user budget enforcement landed in commit 4a00a646 ("RBAC M5 —
+    // wire per-user budget enforcement"): AuthManager::budget_for,
+    // MeteringEngine::check_user_budget, and the post-call arm in
+    // kernel::execute_llm_agent now actually deny over-budget calls.
+    // `/api/budget/users/{id}` reports `enforced: true` accordingly.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["enforced"],
+        serde_json::json!(true),
+        "enforced flag must be `true` now that per-user budget enforcement is wired"
+    );
+    // Defensive: the spend numerics must also be present so the
+    // dashboard can render even on an empty database.
+    assert!(body["hourly"]["spend"].is_number());
+    assert!(body["daily"]["spend"].is_number());
+    assert!(body["monthly"]["spend"].is_number());
+    assert!(body["alert_breach"].is_boolean());
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Effective-permissions snapshot — `/api/authz/effective/{user_id}`
+//
+// Pins:
+//   1. Admin GET returns 200 with every documented section populated for
+//      a user that was seeded with non-default tool_policy / memory_access
+//      / budget. Catches a regression where the kernel-side getter starts
+//      collapsing slices to None or the route serialiser drops fields.
+//   2. Viewer GET is rejected at the in-handler `require_admin` gate
+//      (403). The middleware lets Viewer through GETs by default — only
+//      the handler stops them.
+//   3. Unknown user IDs return 404 (NOT a synthesised "guest defaults"
+//      payload — the simulator's job is to show what's configured).
+//   4. Anonymous (no Bearer header) is rejected — same model as audit.
+// ───────────────────────────────────────────────────────────────────────
+
+use librefang_types::user_policy::{
+    ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
+};
+
+/// Variant of `start_test_server_with_rbac_users` that lets the caller
+/// inject pre-built `UserConfig` rows so per-user policy fields
+/// (`tool_policy`, `memory_access`, `budget`, …) can be seeded for
+/// the effective-permissions tests.
+async fn start_test_server_with_full_user_configs(
+    api_key: &str,
+    users: Vec<(UserConfig, &str)>,
+) -> TestServer {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
+    let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
+    for (cfg, key) in &users {
+        let hash =
+            librefang_api::password_hash::hash_password(key).expect("password hash should succeed");
+        let mut cfg = cfg.clone();
+        cfg.api_key_hash = Some(hash.clone());
+        api_user_records.push(middleware::ApiUserAuth {
+            name: cfg.name.clone(),
+            role: KernelUserRole::from_str_role(&cfg.role),
+            api_key_hash: hash,
+            user_id: librefang_types::agent::UserId::from_name(&cfg.name),
+        });
+        user_configs.push(cfg);
+    }
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        users: user_configs,
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: std::collections::HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
+        kernel.config_ref().api_key.clone(),
+    ));
+
+    let audit_log = kernel.audit().clone();
+
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
+
+    let state = Arc::new(AppState {
+        kernel,
+        started_at: Instant::now(),
+        peer_registry: None,
+        bridge_manager: tokio::sync::Mutex::new(None),
+        channels_config: tokio::sync::RwLock::new(Default::default()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        clawhub_cache: dashmap::DashMap::new(),
+        skillhub_cache: dashmap::DashMap::new(),
+        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
+        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
+        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+        api_key_lock: api_key_lock.clone(),
+        user_api_keys: user_api_keys_lock.clone(),
+        provider_test_cache: dashmap::DashMap::new(),
+        config_write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    let api_key_state = middleware::AuthState {
+        api_key_lock,
+        active_sessions: state.active_sessions.clone(),
+        dashboard_auth_enabled: false,
+        user_api_keys: user_api_keys_lock.clone(),
+        require_auth_for_reads: false,
+        allow_no_auth: true,
+        audit_log: Some(audit_log),
+    };
+
+    let app = Router::new()
+        .nest("/api", routes::audit::router())
+        .nest("/api", routes::budget::router())
+        .nest("/api", routes::authz::router())
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn(middleware::request_logging))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    TestServer {
+        base_url: format!("http://{}", addr),
+        config_path,
+        state,
+        _tmp: tmp,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_admin_returns_200_with_full_payload() {
+    // Seed Alice with non-default values for every per-user RBAC slice
+    // so the snapshot must surface each one. A regression that drops a
+    // slice from the response (e.g. forgetting to expose `budget` or
+    // collapsing `memory_access` to `None`) will fail one of the
+    // assertions below.
+    let mut alice_bindings = std::collections::HashMap::new();
+    alice_bindings.insert("telegram".to_string(), "555111".to_string());
+    alice_bindings.insert("discord".to_string(), "8001".to_string());
+
+    let mut alice_channel_rules = std::collections::HashMap::new();
+    alice_channel_rules.insert(
+        "telegram".to_string(),
+        ChannelToolPolicy {
+            allowed_tools: vec!["web_*".to_string()],
+            denied_tools: vec!["shell_*".to_string()],
+        },
+    );
+
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: alice_bindings,
+        api_key_hash: None,
+        budget: Some(librefang_types::config::UserBudgetConfig {
+            max_hourly_usd: 1.0,
+            max_daily_usd: 10.0,
+            max_monthly_usd: 100.0,
+            alert_threshold: 0.75,
+        }),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["read_*".to_string(), "list_*".to_string()],
+            denied_tools: vec!["dangerous_tool".to_string()],
+        }),
+        tool_categories: Some(UserToolCategories {
+            allowed_groups: vec!["safe".to_string()],
+            denied_groups: vec!["destructive".to_string()],
+        }),
+        memory_access: Some(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".to_string(), "kv:*".to_string()],
+            writable_namespaces: vec!["kv:*".to_string()],
+            pii_access: true,
+            export_allowed: false,
+            delete_allowed: true,
+        }),
+        channel_tool_rules: alice_channel_rules,
+    };
+
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Admin must receive 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // Identity fields
+    assert_eq!(body["name"], "Alice");
+    assert_eq!(body["role"], "admin");
+    assert!(
+        body["user_id"].is_string() && !body["user_id"].as_str().unwrap().is_empty(),
+        "user_id must be a non-empty stringified UUID"
+    );
+
+    // Per-user tool policy round-trip
+    assert_eq!(
+        body["tool_policy"]["allowed_tools"],
+        serde_json::json!(["read_*", "list_*"])
+    );
+    assert_eq!(
+        body["tool_policy"]["denied_tools"],
+        serde_json::json!(["dangerous_tool"])
+    );
+
+    // Tool categories
+    assert_eq!(
+        body["tool_categories"]["allowed_groups"],
+        serde_json::json!(["safe"])
+    );
+    assert_eq!(
+        body["tool_categories"]["denied_groups"],
+        serde_json::json!(["destructive"])
+    );
+
+    // Memory access (PII flag is the load-bearing one for the dashboard
+    // badge — pin it)
+    assert_eq!(body["memory_access"]["pii_access"], serde_json::json!(true));
+    assert_eq!(
+        body["memory_access"]["readable_namespaces"],
+        serde_json::json!(["proactive", "kv:*"])
+    );
+    assert_eq!(
+        body["memory_access"]["writable_namespaces"],
+        serde_json::json!(["kv:*"])
+    );
+    assert_eq!(
+        body["memory_access"]["export_allowed"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        body["memory_access"]["delete_allowed"],
+        serde_json::json!(true)
+    );
+
+    // Budget
+    assert_eq!(body["budget"]["max_hourly_usd"], serde_json::json!(1.0));
+    assert_eq!(body["budget"]["max_daily_usd"], serde_json::json!(10.0));
+    assert_eq!(body["budget"]["max_monthly_usd"], serde_json::json!(100.0));
+    assert_eq!(body["budget"]["alert_threshold"], serde_json::json!(0.75));
+
+    // Channel rules
+    assert_eq!(
+        body["channel_tool_rules"]["telegram"]["allowed_tools"],
+        serde_json::json!(["web_*"])
+    );
+    assert_eq!(
+        body["channel_tool_rules"]["telegram"]["denied_tools"],
+        serde_json::json!(["shell_*"])
+    );
+
+    // Channel bindings (cross-platform identity)
+    assert_eq!(
+        body["channel_bindings"]["telegram"],
+        serde_json::json!("555111")
+    );
+    assert_eq!(
+        body["channel_bindings"]["discord"],
+        serde_json::json!("8001")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_viewer_rejected_403() {
+    // Pins the in-handler `require_admin` gate. The middleware lets
+    // Viewer GET through; only the handler stops them with 403. A
+    // refactor that drops that gate must surface here, not in
+    // production where the leak would be silent.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let eve = UserConfig {
+        name: "Eve".to_string(),
+        role: "viewer".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (eve, "eve-viewer-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .header("authorization", "Bearer eve-viewer-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Viewer must be denied by the in-handler require_admin gate"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_unknown_user_404() {
+    // Unknown user → 404 with a useful message. We deliberately do NOT
+    // synthesise "guest defaults" — the simulator's job is to show what
+    // an admin configured, not to invent inputs that no AuthManager
+    // entry actually carries.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Nobody", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "Unknown user must be 404, not a synthesised guest payload"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_rejects_anonymous() {
+    // Anonymous (no Bearer header) callers MUST be denied. Same
+    // contract as `/api/audit/query` — the snapshot exposes per-user
+    // policy and channel bindings, which is too sensitive to leak even
+    // on loopback. With both `api_key` and `user_api_keys` configured,
+    // the middleware short-circuits to 401 before reaching the handler;
+    // either status code (401 / 403) is an acceptable rejection.
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/authz/effective/Alice", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/authz/effective must be rejected at the middleware (401)"
+    );
+}
+
+/// Pins the "raw Option" discrimination on the snapshot. A user that
+/// declared `tool_policy: None` (omitted in TOML) and a user that
+/// declared `tool_policy: Some(UserToolPolicy::default())` (explicit
+/// empty allow/deny lists) MUST surface distinctly in the JSON:
+/// `null` vs `{"allowed_tools": [], "denied_tools": []}`. Same for
+/// `tool_categories` and `memory_access`.
+///
+/// Regression: an earlier draft collapsed both shapes to `None` by
+/// comparing the resolved struct to its `Default::default()` after
+/// `populate`'s `unwrap_or_default()`. That made the "Configured /
+/// Not configured" badge in the simulator silently lie about
+/// explicit-empty configs. This test fails closed if `populate`
+/// drops the raw `Option<...>` again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_effective_permissions_distinguishes_none_from_empty() {
+    let bare = UserConfig {
+        name: "Bare".to_string(),
+        role: "user".to_string(),
+        // tool_policy / tool_categories / memory_access default to None.
+        ..Default::default()
+    };
+    let explicit_empty = UserConfig {
+        name: "Empty".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy::default()),
+        tool_categories: Some(UserToolCategories::default()),
+        memory_access: Some(UserMemoryAccess::default()),
+        ..Default::default()
+    };
+    let admin = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![
+            (admin, "alice-admin-key"),
+            (bare, "bare-key"),
+            (explicit_empty, "empty-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let bare_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Bare", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        bare_body["tool_policy"].is_null(),
+        "tool_policy must be null when UserConfig.tool_policy = None, got {:?}",
+        bare_body["tool_policy"]
+    );
+    assert!(
+        bare_body["tool_categories"].is_null(),
+        "tool_categories must be null when omitted"
+    );
+    assert!(
+        bare_body["memory_access"].is_null(),
+        "memory_access must be null when omitted"
+    );
+
+    let empty_body: serde_json::Value = client
+        .get(format!("{}/api/authz/effective/Empty", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        empty_body["tool_policy"].is_object(),
+        "tool_policy must be an object (not null) when UserConfig.tool_policy = Some(default), got {:?}",
+        empty_body["tool_policy"]
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["allowed_tools"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        empty_body["tool_policy"]["denied_tools"],
+        serde_json::json!([])
+    );
+    assert!(empty_body["tool_categories"].is_object());
+    assert!(empty_body["memory_access"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_allow_for_permitted_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec![],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "allow");
+    assert_eq!(body["allowed"], true);
+    assert!(body["reason"].is_null());
+    // `scope` advertises that this is a user-policy-only decision and
+    // does NOT consult per-agent ToolPolicy or channel_rules. Operators
+    // and any future dashboard consumer rely on this marker to display
+    // the "runtime gate may differ" disclaimer.
+    assert_eq!(
+        body["scope"], "user_policy_only",
+        "scope must mark the decision as user-policy-only — see authz.rs::check docstring"
+    );
+}
+
+/// Regression for #3231 follow-up: a typical query must always carry
+/// `scope: "user_policy_only"` so callers can render the disclaimer
+/// that the runtime gate may still deny or require approval (per-agent
+/// ToolPolicy + ApprovalPolicy.channel_rules are not consulted by this
+/// endpoint).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_response_advertises_user_policy_only_scope() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec!["web_search".to_string()],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Allow case.
+    let allow: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=web_search&channel=api",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(allow["decision"], "allow");
+    assert_eq!(
+        allow["scope"], "user_policy_only",
+        "allow path must carry scope marker"
+    );
+
+    // Deny case — scope marker must travel with every decision class.
+    let deny: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deny["decision"], "deny");
+    assert_eq!(
+        deny["scope"], "user_policy_only",
+        "deny path must carry scope marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_returns_deny_for_blocked_tool() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        tool_policy: Some(UserToolPolicy {
+            allowed_tools: vec![],
+            denied_tools: vec!["shell_exec".to_string()],
+        }),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/api/authz/check?user=Bob&action=shell_exec",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["decision"], "deny");
+    assert_eq!(body["allowed"], false);
+    assert!(body["reason"].as_str().unwrap_or("").contains("shell_exec"));
+    assert_eq!(body["scope"], "user_policy_only");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_unknown_user_returns_404() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Nobody&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "unknown user must surface as 404 — silent guest fallback would mask config gaps"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_viewer_caller_rejected_403() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let viewer = UserConfig {
+        name: "Vince".to_string(),
+        role: "viewer".to_string(),
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (viewer, "vince-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .header("authorization", "Bearer vince-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not query authz/check");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_authz_check_rejects_anonymous() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        ..Default::default()
+    };
+    let server =
+        start_test_server_with_full_user_configs("any-key", vec![(alice, "alice-admin-key")]).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "{}/api/authz/check?user=Alice&action=web_search",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "anonymous /api/authz/check must be 401'd at the middleware (same as other admin endpoints)"
+    );
+}
+/// Round-trip: PUT a budget, GET reflects the new limits, DELETE clears
+/// it back to "no cap" (limit = 0 in the response).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_get_delete_round_trip() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // Initial GET — no cap configured, all limits are 0.
+    let initial: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial["hourly"]["limit"], serde_json::json!(0.0));
+
+    // PUT a real cap.
+    let put_resp = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.5,
+            "max_daily_usd": 12.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.75,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
+
+    // GET should reflect the new caps.
+    let after_put: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_put["hourly"]["limit"], serde_json::json!(1.5));
+    assert_eq!(after_put["daily"]["limit"], serde_json::json!(12.0));
+    assert_eq!(after_put["monthly"]["limit"], serde_json::json!(100.0));
+    assert_eq!(after_put["alert_threshold"], serde_json::json!(0.75));
+
+    // DELETE clears.
+    let del_resp = client
+        .delete(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), 200, "DELETE should clear the cap");
+
+    // GET again — back to limit = 0.
+    let after_delete: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after_delete["hourly"]["limit"],
+        serde_json::json!(0.0),
+        "DELETE must reset limit back to 0 (no cap)"
+    );
+}
+
+/// Pin the new audit-detail diff format introduced by review item #21
+/// follow-up: every PUT to `/api/budget/users/{user}` must emit a
+/// ConfigChange row whose `detail` carries `old → new` for every field,
+/// and whose `user_id` is the calling admin (not the target user, not
+/// the literal `system`). Without this an audit reader has to correlate
+/// multiple rows to reconstruct what was rotated; a single row should
+/// be self-describing.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_audit_records_old_new_diff_and_caller() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // First PUT — old budget is `none` (no prior cap).
+    let _ = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Second PUT — bumps hourly 1.0 → 5.0 so the diff is unambiguous.
+    let _ = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 5.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Pull recent audit rows, filter to ConfigChange.
+    let q: serde_json::Value = client
+        .get(format!(
+            "{}/api/audit/query?action=ConfigChange",
+            server.base_url
+        ))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = q["entries"].as_array().expect("entries[] present");
+    assert!(
+        !entries.is_empty(),
+        "ConfigChange audit row must be emitted by /api/budget/users/{{user}} PUT"
+    );
+
+    // Newest first: the second PUT's row carries the 1.0→5.0 transition.
+    let bump = entries
+        .iter()
+        .find(|e| {
+            e["detail"]
+                .as_str()
+                .map(|s| s.contains("hourly: 1→5"))
+                .unwrap_or(false)
+        })
+        .expect("audit detail must record old→new diff (e.g. hourly: 1→5)");
+    let detail = bump["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("user_budget updated for "),
+        "detail prefix pins forensic search: {detail}"
+    );
+    assert!(detail.contains("→"), "diff arrow must be present: {detail}");
+
+    // Caller attribution: user_id must be the admin (Alice), not the
+    // target user (also Alice in this test — but distinguishable from
+    // `null` which would mean anonymous).
+    let alice = librefang_types::agent::UserId::from_name("Alice").to_string();
+    assert_eq!(
+        bump["user_id"].as_str().unwrap_or(""),
+        alice,
+        "audit row must attribute the action to the calling admin"
+    );
+    assert_eq!(
+        bump["agent_id"].as_str().unwrap_or(""),
+        "system",
+        "config-mutation rows are not agent-scoped — agent_id stays 'system'"
+    );
+
+    // The first PUT's row had old=none → new=1: walk the array for it.
+    let first = entries
+        .iter()
+        .find(|e| {
+            e["detail"]
+                .as_str()
+                .map(|s| s.contains("hourly: none→1"))
+                .unwrap_or(false)
+        })
+        .expect("first PUT must render old=none → new=1");
+    assert!(first["detail"]
+        .as_str()
+        .unwrap()
+        .contains("alert: none→0.8"));
+}
+
+/// Validation: PUT with negative or out-of-range values is rejected
+/// before touching disk. Each case is a full-shape payload with exactly
+/// one offending field — proves the per-field validators fire, not just
+/// the "missing key" gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_invalid_payload() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    let base = serde_json::json!({
+        "max_hourly_usd": 1.0,
+        "max_daily_usd": 10.0,
+        "max_monthly_usd": 100.0,
+        "alert_threshold": 0.8,
+    });
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("max_hourly_usd", serde_json::json!(-1.0)),
+        ("alert_threshold", serde_json::json!(1.5)),
+        ("alert_threshold", serde_json::json!(-0.1)),
+    ] {
+        let mut body = base.clone();
+        body[field] = value;
+        cases.push(body);
+    }
+
+    for bad in cases {
+        let resp = client
+            .put(&url)
+            .header("authorization", "Bearer alice-admin-key")
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "expected 400 for invalid payload {bad:?}"
+        );
+    }
+}
+
+/// Regression: a partial body must NOT be accepted as an upsert. Without
+/// this guard, `UserBudgetConfig`'s `#[serde(default)]` would silently
+/// fill missing fields with `0.0` / `0.8` and clear an existing cap on
+/// the windows the caller didn't mention.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_partial_payload() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/budget/users/Alice", server.base_url);
+
+    // Seed a real cap so we can confirm it stays put when a partial PUT
+    // gets rejected.
+    let put_full = client
+        .put(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 2.0,
+            "max_daily_usd": 20.0,
+            "max_monthly_usd": 200.0,
+            "alert_threshold": 0.6,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_full.status(), 200);
+
+    // Each partial body omits at least one required key and must be
+    // rejected with 400.
+    for partial in [
+        serde_json::json!({"max_hourly_usd": 5.0}),
+        serde_json::json!({"max_daily_usd": 50.0, "max_monthly_usd": 500.0}),
+        serde_json::json!({}),
+        // Wrong type should also 400, not be coerced to 0.
+        serde_json::json!({
+            "max_hourly_usd": "1.0",
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }),
+    ] {
+        let resp = client
+            .put(&url)
+            .header("authorization", "Bearer alice-admin-key")
+            .json(&partial)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "expected 400 for partial / wrong-typed payload {partial:?}"
+        );
+    }
+
+    // Original cap survived all rejected partials.
+    let after: serde_json::Value = client
+        .get(&url)
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["hourly"]["limit"], serde_json::json!(2.0));
+    assert_eq!(after["daily"]["limit"], serde_json::json!(20.0));
+    assert_eq!(after["monthly"]["limit"], serde_json::json!(200.0));
+    assert_eq!(after["alert_threshold"], serde_json::json!(0.6));
+}
+
+/// Authz: a non-admin caller is rejected even when the URL is well-formed.
+/// The body is intentionally partial — the admin gate must fire before
+/// body validation, so a viewer's request never reaches the parser.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_rejects_viewer_with_403() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Alice", "admin", "alice-admin-key"),
+            ("Bob", "viewer", "bob-viewer-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer bob-viewer-key")
+        .json(&serde_json::json!({"max_hourly_usd": 1.0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "Viewer must not write user budget");
+}
+
+/// 404 path: PUT against an unknown user surfaces a real error (not a
+/// silent insert). Requires a full-shape body so the request reaches the
+/// persist step (a partial body would be 400'd earlier).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_put_unknown_user_returns_404() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!("{}/api/budget/users/NonExistent", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "max_hourly_usd": 1.0,
+            "max_daily_usd": 10.0,
+            "max_monthly_usd": 100.0,
+            "alert_threshold": 0.8,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// RBAC M3 (#3205) follow-up — `PUT /api/users/{name}/policy` rewrites the
+/// caller's authorization surface, so it must travel through the same
+/// owner-only gate as `POST /api/users` and `DELETE /api/users/{name}`.
+/// An Admin api key has to be 403'd here; otherwise an Admin could
+/// silently grant themselves `denied_tools = []` and bypass downstream
+/// per-user denials.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_policy_put_owner_only() {
+    let server = start_test_server_with_rbac_users(
+        "any-key",
+        vec![
+            ("Owner1", "owner", "owner-key"),
+            ("Alice", "admin", "alice-admin-key"),
+        ],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!("{}/api/users/Alice/policy", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .json(&serde_json::json!({
+            "tool_policy": { "allowed_tools": ["web_*"], "denied_tools": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must be denied PUT /api/users/{{name}}/policy by the owner-only middleware gate"
+    );
+
+    let resp = client
+        .put(format!("{}/api/users/Alice/policy", server.base_url))
+        .header("authorization", "Bearer owner-key")
+        .json(&serde_json::json!({
+            "tool_policy": { "allowed_tools": ["web_*"], "denied_tools": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "Owner must be allowed to upsert per-user policy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// API-key rotation owner-only gate (RBAC follow-up to #3054 / M3 / M6)
+// ---------------------------------------------------------------------------
+
+/// Pins the owner-only gate on `POST /api/users/{name}/rotate-key`.
+/// Without `is_owner_only_write` covering the rotation path, an Admin
+/// per-user API key could rotate any other user's key — including the
+/// Owner's — and lock everyone else out. This is the same blast radius
+/// as user create/delete, which is why all of `/api/users/*` non-GET goes
+/// through the `Owner` gate at `middleware.rs:109`.
+#[tokio::test(flavor = "multi_thread")]
+async fn users_rotate_key_admin_returns_403() {
+    let alice = UserConfig {
+        name: "Alice".to_string(),
+        role: "admin".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: None, // populated by helper
+        ..Default::default()
+    };
+    let bob = UserConfig {
+        name: "Bob".to_string(),
+        role: "user".to_string(),
+        channel_bindings: std::collections::HashMap::new(),
+        api_key_hash: None,
+        ..Default::default()
+    };
+    let server = start_test_server_with_full_user_configs(
+        "any-key",
+        vec![(alice, "alice-admin-key"), (bob, "bob-user-key")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    // Admin attempting to rotate Bob's key — must be rejected by the
+    // middleware's owner-only gate before the handler is even invoked.
+    let resp = client
+        .post(format!("{}/api/users/Bob/rotate-key", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Admin must NOT be able to rotate another user's key — only Owner. \
+         If this returns 200, an admin can self-promote by rotating the owner's key."
+    );
+
+    // Bob attempting to self-rotate is also rejected — same gate. The
+    // self-service "rotate my own key" workflow is intentionally NOT
+    // supported through this endpoint; users should ask an Owner. This
+    // matches the kernel's `Action::ManageUsers` posture.
+    let resp = client
+        .post(format!("{}/api/users/Bob/rotate-key", server.base_url))
+        .header("authorization", "Bearer bob-user-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "Non-Owner users (incl. self-rotate) must be rejected"
     );
 }

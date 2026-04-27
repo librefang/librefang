@@ -6,7 +6,6 @@ license.workspace = true
 description = "Skill system for LibreFang — registry, loader, marketplace, and OpenClaw compatibility"
 
 [dependencies]
-dirs = "6"
 librefang-types = { path = "../librefang-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,7 +14,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 walkdir = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
@@ -31,4 +29,4 @@ fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-test = { workspace = true }
+serial_test = "3"

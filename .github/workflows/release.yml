@@ -177,11 +177,12 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
 
           {
-            echo "## What's New"
+            echo "## Full Changelog"
             echo ""
             cat /tmp/changelog.md
             echo ""
-            echo "## Installation"
+            echo "<details>"
+            echo "<summary>Install / Upgrade</summary>"
             echo ""
             echo '**Homebrew (macOS):**'
             echo '```bash'
@@ -194,44 +195,17 @@ jobs:
             echo 'brew install --cask librefang-rc    # Desktop (rc channel)'
             echo '```'
             echo ""
-            echo '**CLI (Linux/macOS):**'
-            echo '```bash'
-            echo 'curl -fsSL https://librefang.ai/install.sh | sh'
-            echo '```'
+            echo '**CLI (Linux/macOS):** `curl -fsSL https://librefang.ai/install.sh | sh`'
             echo ""
-            echo '**npm:**'
-            echo '```bash'
-            echo 'npm install -g @librefang/cli'
-            echo '```'
+            echo '**npm:** `npm install -g @librefang/cli` &nbsp;·&nbsp; **pip:** `pip install librefang` &nbsp;·&nbsp; **cargo:** `cargo install librefang`'
             echo ""
-            echo '**pip:**'
-            echo '```bash'
-            echo 'pip install librefang'
-            echo '```'
+            echo '**Docker:** `docker pull ghcr.io/librefang/librefang:latest`'
             echo ""
-            echo '**Cargo:**'
-            echo '```bash'
-            echo 'cargo install librefang'
-            echo '```'
+            echo '**Coming from OpenClaw / OpenFang?** `librefang migrate --from openclaw` (or `--from openfang`)'
             echo ""
-            echo '**Docker:**'
-            echo '```bash'
-            echo 'docker pull ghcr.io/librefang/librefang:latest'
-            echo '```'
+            echo "</details>"
             echo ""
-            echo "## Migration"
-            echo ""
-            echo '**Coming from OpenClaw or OpenFang?**'
-            echo '```bash'
-            echo 'librefang migrate --from openclaw'
-            echo 'librefang migrate --from openfang'
-            echo '```'
-            echo ""
-            echo "## Links"
-            echo ""
-            echo "- [Documentation](https://librefang.ai)"
-            echo "- [Discord](https://discord.gg/DzTYqAZZmc)"
-            echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
+            echo "[Documentation](https://librefang.ai) &nbsp;·&nbsp; [Discord](https://discord.gg/DzTYqAZZmc) &nbsp;·&nbsp; [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)"
             echo ""
             PREV=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "$TAG" | head -1)
             if [ -n "$PREV" ]; then

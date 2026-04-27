@@ -96,6 +96,42 @@ impl fmt::Display for AuthStatus {
     }
 }
 
+/// Model modality — what kind of output the model produces.
+///
+/// Mirrors the `modality` field in the librefang-registry schema. Text models
+/// follow the usual chat/completion flow (context_window + max_output_tokens
+/// are required). Image, audio, video, and music models are priced per-call
+/// or per-asset but have no conventional context window, so their
+/// `context_window` / `max_output_tokens` fields may be zero/absent in the
+/// catalog TOML.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Modality {
+    /// Chat / completion / reasoning model. Default when the field is absent.
+    #[default]
+    Text,
+    /// Image-generation model (e.g. OpenAI gpt-image-2).
+    Image,
+    /// Speech / audio model (TTS, STT).
+    Audio,
+    /// Video-generation model (e.g. ByteDance Seedance, MiniMax Hailuo).
+    Video,
+    /// Music / lyrics generation model.
+    Music,
+}
+
+impl fmt::Display for Modality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Modality::Text => write!(f, "text"),
+            Modality::Image => write!(f, "image"),
+            Modality::Audio => write!(f, "audio"),
+            Modality::Video => write!(f, "video"),
+            Modality::Music => write!(f, "music"),
+        }
+    }
+}
+
 /// A single model entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
@@ -111,14 +147,32 @@ pub struct ModelCatalogEntry {
     pub provider: String,
     /// Capability tier.
     pub tier: ModelTier,
-    /// Context window size in tokens.
+    /// Model modality. Defaults to `Text` when absent in the catalog TOML.
+    #[serde(default)]
+    pub modality: Modality,
+    /// Context window size in tokens. `0` or absent means "unknown / not
+    /// applicable" — image and audio models in the registry omit this field.
+    /// Consumers MUST treat `0` as unknown and supply their own default;
+    /// never propagate `0` into compaction thresholds or budget math.
+    #[serde(default)]
     pub context_window: u64,
-    /// Maximum output tokens.
+    /// Maximum output tokens. `0` or absent means "unknown / not applicable".
+    /// Same handling rule as `context_window`: do not feed `0` into
+    /// downstream calculations.
+    #[serde(default)]
     pub max_output_tokens: u64,
-    /// Cost per million input tokens (USD).
+    /// Cost per million input tokens (USD) — text tokens for image/audio models.
     pub input_cost_per_m: f64,
-    /// Cost per million output tokens (USD).
+    /// Cost per million output tokens (USD) — text tokens for image/audio models.
     pub output_cost_per_m: f64,
+    /// Cost per million image input tokens (USD). Only set for image/multimodal
+    /// models where image pixels are priced separately from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_cost_per_m: Option<f64>,
+    /// Cost per million image output tokens (USD). Only set for image-generation
+    /// models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_output_cost_per_m: Option<f64>,
     /// Whether the model supports tool/function calling.
     #[serde(default)]
     pub supports_tools: bool,
@@ -136,6 +190,39 @@ pub struct ModelCatalogEntry {
     pub aliases: Vec<String>,
 }
 
+impl ModelCatalogEntry {
+    /// Returns true if this entry is an image-generation model.
+    pub fn is_image_generation(&self) -> bool {
+        self.modality == Modality::Image
+    }
+
+    /// Modality-aware schema check applied after TOML deserialization.
+    ///
+    /// `context_window` and `max_output_tokens` use `#[serde(default)]` so
+    /// image and audio entries (which don't have a token context) can omit
+    /// the fields. Without this check, a malformed `Modality::Text` entry
+    /// missing those fields would silently load with `0` and propagate that
+    /// `0` into compaction thresholds and budget math downstream. Catalog
+    /// loaders MUST call this and reject entries that fail.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.modality == Modality::Text {
+            if self.context_window == 0 {
+                return Err(format!(
+                    "text model {}/{} is missing context_window",
+                    self.provider, self.id
+                ));
+            }
+            if self.max_output_tokens == 0 {
+                return Err(format!(
+                    "text model {}/{} is missing max_output_tokens",
+                    self.provider, self.id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for ModelCatalogEntry {
     fn default() -> Self {
         Self {
@@ -143,10 +230,13 @@ impl Default for ModelCatalogEntry {
             display_name: String::new(),
             provider: String::new(),
             tier: ModelTier::default(),
+            modality: Modality::default(),
             context_window: 0,
             max_output_tokens: 0,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
+            image_input_cost_per_m: None,
+            image_output_cost_per_m: None,
             supports_tools: false,
             supports_vision: false,
             supports_streaming: false,
@@ -466,6 +556,64 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_text_requires_nonzero_limits() {
+        // A text entry parsed from TOML that omitted both fields would
+        // land here with zeros — validate() must reject it so callers
+        // never propagate `0` into compaction / budget math.
+        let entry = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            ..Default::default()
+        };
+        let err = entry.validate().unwrap_err();
+        assert!(err.contains("context_window"), "got: {err}");
+
+        // max_output_tokens missing while context_window is set still fails.
+        let partial = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let err2 = partial.validate().unwrap_err();
+        assert!(err2.contains("max_output_tokens"), "got: {err2}");
+
+        // Both populated → ok.
+        let ok = ModelCatalogEntry {
+            id: "gpt-x".into(),
+            provider: "openai".into(),
+            modality: Modality::Text,
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_image_models_skip_token_check() {
+        // Image entries legitimately omit context_window / max_output_tokens
+        // — validate() must not require them.
+        let img = ModelCatalogEntry {
+            id: "dall-e-3".into(),
+            provider: "openai".into(),
+            modality: Modality::Image,
+            ..Default::default()
+        };
+        assert!(img.validate().is_ok());
+
+        let audio = ModelCatalogEntry {
+            id: "whisper-1".into(),
+            provider: "openai".into(),
+            modality: Modality::Audio,
+            ..Default::default()
+        };
+        assert!(audio.validate().is_ok());
+    }
+
+    #[test]
     fn test_provider_info_default() {
         let info = ProviderInfo::default();
         assert!(info.id.is_empty());
@@ -507,12 +655,60 @@ mod tests {
             supports_streaming: true,
             supports_thinking: true,
             aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
+            ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: ModelCatalogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, entry.id);
         assert_eq!(parsed.tier, ModelTier::Smart);
         assert_eq!(parsed.aliases.len(), 2);
+    }
+
+    #[test]
+    fn test_image_generation_model_parses_without_context_window() {
+        // gpt-image-2 style entry: no context_window / max_output_tokens, has
+        // modality + image cost fields. Before the Modality + #[serde(default)]
+        // changes this panicked with "missing field `context_window`" and the
+        // whole providers/openai.toml would fail to parse, silently dropping
+        // every OpenAI model.
+        let toml_str = r#"
+id = "gpt-image-2"
+display_name = "GPT Image 2"
+tier = "frontier"
+modality = "image"
+input_cost_per_m = 5.00
+output_cost_per_m = 10.00
+image_input_cost_per_m = 8.00
+image_output_cost_per_m = 30.00
+supports_tools = false
+supports_vision = true
+supports_streaming = false
+aliases = ["gpt-image-2-2026-04-21"]
+"#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("parse image model");
+        assert_eq!(entry.modality, Modality::Image);
+        assert!(entry.is_image_generation());
+        assert_eq!(entry.context_window, 0);
+        assert_eq!(entry.max_output_tokens, 0);
+        assert_eq!(entry.image_input_cost_per_m, Some(8.0));
+        assert_eq!(entry.image_output_cost_per_m, Some(30.0));
+    }
+
+    #[test]
+    fn test_text_model_defaults_to_text_modality() {
+        let toml_str = r#"
+id = "gpt-4.1"
+display_name = "GPT-4.1"
+tier = "frontier"
+context_window = 1047576
+max_output_tokens = 32768
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+"#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("parse text model");
+        assert_eq!(entry.modality, Modality::Text);
+        assert!(!entry.is_image_generation());
+        assert!(entry.image_input_cost_per_m.is_none());
     }
 
     #[test]

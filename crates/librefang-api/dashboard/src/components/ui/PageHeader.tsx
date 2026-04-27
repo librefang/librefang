@@ -7,13 +7,15 @@ interface PageHeaderProps {
   icon: ReactNode;
   title: string;
   subtitle?: string;
+  /** Optional small label rendered next to the title (e.g. "Beta", count, or a <Badge/> element). */
+  badge?: ReactNode;
   actions?: ReactNode;
   isFetching?: boolean;
   onRefresh?: () => void;
   helpText?: string;
 }
 
-export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefresh, helpText }: PageHeaderProps) {
+export function PageHeader({ icon, title, subtitle, badge, actions, isFetching, onRefresh, helpText }: PageHeaderProps) {
   const { t } = useTranslation();
   const [showHelp, setShowHelp] = useState(false);
 
@@ -23,7 +25,14 @@ export function PageHeader({ icon, title, subtitle, actions, isFetching, onRefre
         <div className="flex items-center gap-2 min-w-0">
           <div className="p-1.5 rounded-lg bg-primary/10 text-primary shrink-0">{icon}</div>
           <div className="min-w-0">
-            <h1 className="text-base font-extrabold tracking-tight">{title}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-extrabold tracking-tight">{title}</h1>
+              {badge && (
+                <span className="inline-flex items-center rounded-md border border-border-subtle bg-main/40 px-1.5 py-0.5 text-[10px] font-semibold text-text-dim">
+                  {badge}
+                </span>
+              )}
+            </div>
             {subtitle && <p className="text-[11px] text-text-dim hidden sm:block">{subtitle}</p>}
           </div>
         </div>

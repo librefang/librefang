@@ -1153,6 +1153,10 @@ impl LlmDriver for GeminiDriver {
             message: "Max retries exceeded".to_string(),
         })
     }
+
+    fn family(&self) -> crate::llm_driver::LlmFamily {
+        crate::llm_driver::LlmFamily::Google
+    }
 }
 
 #[cfg(test)]
@@ -1314,6 +1318,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1337,6 +1342,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            cache_ttl: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

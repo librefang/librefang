@@ -432,7 +432,7 @@ Retry-After: 60
 | POST | `/api/approvals/totp/setup` | 生成 TOTP 注册密钥 |
 | POST | `/api/approvals/totp/confirm` | 确认 TOTP 注册 |
 | GET | `/api/approvals/totp/status` | 查询 TOTP 注册状态 |
-| DELETE | `/api/approvals/totp` | 撤销 TOTP 注册 |
+| POST | `/api/approvals/totp/revoke` | 撤销 TOTP 注册 |
 | **绑定和命令** | | |
 | GET | `/api/bindings` | 列出 UI 绑定 |
 | POST | `/api/bindings` | 添加绑定 |
@@ -457,3 +457,69 @@ Retry-After: 60
 | **OpenAI 兼容** | | |
 | POST | `/v1/chat/completions` | OpenAI 兼容聊天 |
 | GET | `/v1/models` | OpenAI 兼容模型列表 |
+| **Plugins(生命周期与自检)** | | |
+| GET | `/api/plugins/doctor` | 跨所有已装 plugin 诊断问题 |
+| GET | `/api/plugins/{name}/status` | Plugin 运行状态 |
+| GET | `/api/plugins/{name}/health` | Plugin 健康探针 |
+| GET | `/api/plugins/{name}/env` | Plugin 环境变量(脱敏) |
+| GET | `/api/plugins/{name}/export` | 导出 plugin 定义 |
+| GET | `/api/plugins/{name}/lint` | Lint plugin manifest |
+| POST | `/api/plugins/{name}/enable` | 启用 / 激活 plugin |
+| POST | `/api/plugins/{name}/reload` | 热加载 plugin |
+| POST | `/api/plugins/{name}/sign` | 签名 plugin manifest(Ed25519) |
+| POST | `/api/plugins/prewarm` | 启动时预热 plugin 实例 |
+| **Skills(注册表与运行时)** | | |
+| GET | `/api/skills/{name}` | 获取单个 skill 详情 |
+| GET | `/api/skills/{name}/file` | 取 skill 支持文件(`references/`、`templates/`、`scripts/`、`assets/`) |
+| GET | `/api/skills/registry` | 列出 skill 市场注册表 |
+| POST | `/api/skills/reload` | 热加载已装 skills |
+| **Tools(直接调用)** | | |
+| POST | `/api/tools/{name}/invoke` | 从 REST 客户端直调工具(受 `[tool_invoke]` 允许列表限制) |
+| **Terminal** | | |
+| GET | `/api/terminal/health` | 终端服务健康检查 |
+| GET | `/api/terminal/ws` | 终端 WebSocket 会话 |
+| **A2A(扩展任务 API)** | | |
+| GET | `/api/a2a/tasks/{id}` | 按 ID 取外部 A2A 任务 |
+| POST | `/api/a2a/tasks/send` | 向外部 A2A agent 提交新任务 |
+| **MCP(HTTP transport)** | | |
+| POST | `/api/mcp` | MCP HTTP transport(JSON-RPC 2.0)—— 不鉴权的 `/mcp` 挂载点的另一选项 |
+| **Config 与 Registry** | | |
+| GET | `/api/config/export` | 导出完整生效配置 |
+| GET | `/api/registry/schema` | 配置 JSON schema(给编辑器工具用) |
+| GET | `/api/models/{*id}` | 通配模型查询(处理带斜杠的模型 ID 如 `vendor/model-name`) |
+| GET | `/api/templates/{name}/toml` | 原始 agent-template TOML(给编辑器用) |
+| **Goals 与 Inbox** | | |
+| GET | `/api/goals/templates` | 列出 goal 模板 |
+| GET | `/api/inbox/status` | Inbox 概要(按来源 pending 计数) |
+| GET | `/api/sessions/search` | 带过滤条件搜索 sessions |
+| **Approvals(扩展)** | | |
+| GET | `/api/approvals/audit` | Approval 决策的审计轨迹 |
+| GET | `/api/approvals/count` | 待处理 approval 数量 |
+| POST | `/api/approvals/batch` | 原子地批量处理多个 approval |
+| **Auto-Dream** | | |
+| GET | `/api/auto-dream/status` | Auto-dream 自动化状态 |
+| **Hands(扩展)** | | |
+| DELETE | `/api/hands/{hand_id}` | 卸载 hand |
+| POST | `/api/hands/reload` | 从磁盘热加载 hand 定义 |
+| **Media(扩展)** | | |
+| POST | `/api/media/transcribe` | 音频转文本 |
+| **ClawHub 中国镜像** | | |
+| GET | `/api/clawhub-cn/browse` | 浏览 ClawHub 中国镜像目录 |
+| GET | `/api/clawhub-cn/search` | 搜索 ClawHub 中国镜像 |
+| **Init** | | |
+| POST | `/api/init` | 快速初始化向导(被 `librefang setup --quick` 调用) |
+| **Dashboard 鉴权** | | |
+| POST | `/auth/logout` | 清掉 dashboard session cookie |
+| **Prompt 版本化 & A/B 测试**(`[prompt_intelligence] enabled = true` 时) | | |
+| GET | `/agents/{agent_id}/prompts/versions` | 列出 agent 的 prompt 版本 |
+| POST | `/agents/{agent_id}/prompts/versions` | 保存新 prompt 版本 |
+| GET | `/prompts/versions/{id}` | 取单个 prompt 版本 |
+| DELETE | `/prompts/versions/{id}` | 删除 prompt 版本 |
+| POST | `/prompts/versions/{id}/activate` | 把这个版本激活给该 agent |
+| GET | `/agents/{agent_id}/prompts/experiments` | 列出 agent 的 A/B 实验 |
+| POST | `/agents/{agent_id}/prompts/experiments` | 创建 A/B 实验 |
+| GET | `/prompts/experiments/{id}` | 实验详情 |
+| POST | `/prompts/experiments/{id}/start` | 启动实验(开始采样) |
+| POST | `/prompts/experiments/{id}/pause` | 暂停实验 |
+| POST | `/prompts/experiments/{id}/complete` | 完成实验 + 记录胜者 |
+| GET | `/prompts/experiments/{id}/metrics` | 按 arm 的指标(impression / wins / cost / latency) |

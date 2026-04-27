@@ -8,11 +8,54 @@ LibreFang 内置了完整的模型目录，覆盖 **3 个原生 LLM 驱动**、*
 
 ## 目录
 
-- [托管 API](/zh/configuration/providers/hosted) -- Anthropic、OpenAI、Gemini、DeepSeek、Groq、OpenRouter、Mistral、Together、Fireworks、Perplexity、Cohere、AI21、Cerebras、SambaNova、Hugging Face、xAI
+- [托管 API](/zh/configuration/providers/hosted) -- Anthropic、OpenAI、Gemini、DeepSeek、Groq、OpenRouter、Mistral、Together、Fireworks、Perplexity、Cohere、Cerebras、SambaNova、Hugging Face、xAI、Alibaba Coding Plan、Moonshot、Novita、AWS Bedrock
 - [本地与自托管](/zh/configuration/providers/local) -- Ollama、vLLM、LM Studio
-- [平台与托管端点](/zh/configuration/providers/platforms) -- Replicate、NVIDIA NIM、Voyage AI、Anyscale、DeepInfra、Azure OpenAI、Amazon Bedrock、Qwen (DashScope)、MiniMax、Vertex AI
-- [开发工具](/zh/configuration/providers/tools) -- Claude Code、GitHub Copilot、Aider、Claude Code CLI、Codex CLI、Gemini CLI、Qwen Code
+- [平台与托管端点](/zh/configuration/providers/platforms) -- Replicate、NVIDIA NIM、DeepInfra、Azure OpenAI、Qwen (DashScope)、MiniMax、Qianfan(百度)、VolcEngine(豆包)、BytePlus ModelArk、Zhipu(GLM)、Zhipu Coding、Z.ai、Vertex AI
+- [开发工具](/zh/configuration/providers/tools) -- Claude Code、GitHub Copilot、ChatGPT(会话)、Kimi Coding、Aider、Claude Code CLI、Codex CLI、Gemini CLI、Qwen Code
 - [提供商管理](/zh/configuration/providers/management) -- 动态加载、模型目录、别名、路由、配额、后备、API 端点、频道命令、环境变量、安全说明
+
+---
+
+## 能力矩阵
+
+一眼看清各 provider 支持哪些能力。✓ = 驱动里已接,○ = 部分支持/取决于具体模型,✗ = LibreFang 中此 provider 不暴露此能力。这里的 embedding 指推理时 embedding,不是本地 Ollama 自动检测梯队。
+
+| Provider | Vision | 工具 | Embedding | 文件上传 | Prompt 缓存 | 图像生成 | 音频 |
+|---|---|---|---|---|---|---|---|
+| Anthropic | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| OpenAI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Google Gemini | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ✗ |
+| DeepSeek | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Groq | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| OpenRouter | ✓ | ✓ | ✗ | ○ | ○ | ✓ | ○ |
+| Mistral AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Together AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Fireworks AI | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Perplexity | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Cohere | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Cerebras | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| SambaNova | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Hugging Face | ○ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| xAI | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Alibaba Coding | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Moonshot (Kimi) | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Novita AI | ○ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| AWS Bedrock | ✗ | ✓ | ✓ | ✗ | ○ | ✗ | ○ |
+| Replicate | ✓ | ✗ | ✓ | ○ | ✗ | ✓ | ✓ |
+| Azure OpenAI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Qwen (DashScope) | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| MiniMax | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Qianfan(百度) | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ○ |
+| VolcEngine(豆包) | ✓ | ✓ | ✗ | ○ | ✗ | ✗ | ✗ |
+| BytePlus ModelArk | ✓ | ✓ | ✗ | ○ | ✗ | ✗ | ✗ |
+| Zhipu (GLM) | ✓ | ✓ | ✓ | ○ | ✗ | ✗ | ✗ |
+| Vertex AI | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ○ |
+| GitHub Copilot | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| ChatGPT(会话) | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ○ |
+| Kimi Coding | ✓ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Ollama(本地) | ○ | ○ | ✓ | ✗ | ✗ | ✗ | ✗ |
+
+完整 provider 目录(含全部别名和模型)用 `librefang models list` 对运行中的 daemon 查询 —— 进程内注册表才是 source of truth。
 
 ---
 
