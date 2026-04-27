@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use librefang_types::agent::AgentId;
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -183,6 +183,10 @@ pub enum WorkflowRunState {
     Paused {
         resume_token: Uuid,
         reason: String,
+        /// Wall-clock pause time. Surfaced in logs / UI today; future
+        /// follow-up will use this to drive a TTL-based GC sweep that
+        /// auto-expires Paused runs older than a configurable threshold
+        /// (#3335 GC follow-up).
         paused_at: DateTime<Utc>,
     },
     Completed,
@@ -236,14 +240,31 @@ pub struct WorkflowRun {
     /// Variable bindings as of the pause point. Restored into the local
     /// `variables` map on resume so subsequent steps see the same
     /// `{{var_name}}` substitutions they would have seen if the workflow
-    /// had not paused.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub paused_variables: HashMap<String, String>,
+    /// had not paused. `BTreeMap` rather than `HashMap` so the persisted
+    /// JSON has a stable key order — re-serializing a paused run twice
+    /// in a row produces byte-identical output, which keeps audit logs
+    /// and external snapshots clean.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub paused_variables: BTreeMap<String, String>,
     /// `current_input` (output of the last completed step) as of the
     /// pause point. Restored on resume so the paused step receives the
     /// same `{{input}}` it would have seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_current_input: Option<String>,
+}
+
+impl WorkflowRun {
+    /// Wipe every pause-related field on the run. Called from terminal
+    /// transitions (Completed / Failed) so a Pause request lodged after
+    /// the loop's last boundary check or a snapshot left over from a
+    /// failed resume does not survive on a finished run as ghost data.
+    /// See #3335 review.
+    fn clear_pause_state(&mut self) {
+        self.pause_request = None;
+        self.paused_step_index = None;
+        self.paused_variables.clear();
+        self.paused_current_input = None;
+    }
 }
 
 /// External pause request lodged on a `WorkflowRun`. Pre-generates the
@@ -699,7 +720,7 @@ impl WorkflowEngine {
             completed_at: None,
             pause_request: None,
             paused_step_index: None,
-            paused_variables: HashMap::new(),
+            paused_variables: BTreeMap::new(),
             paused_current_input: None,
         };
 
@@ -1099,6 +1120,7 @@ impl WorkflowEngine {
             self.execute_run_sequential(run_id, &workflow, "", &agent_resolver, &send_message)
                 .await
         };
+        self.cleanup_terminal_pause_state(run_id).await;
         self.persist_runs_async().await;
         result
     }
@@ -1147,19 +1169,35 @@ impl WorkflowEngine {
 
         // Check if any step has non-empty depends_on — if so, use DAG execution
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
-        if has_dag_deps {
-            let result = self
-                .execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
-                .await;
-            self.persist_runs_async().await;
-            return result;
-        }
-
-        let result = self
-            .execute_run_sequential(run_id, &workflow, &input, &agent_resolver, &send_message)
-            .await;
+        let result = if has_dag_deps {
+            self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
+                .await
+        } else {
+            self.execute_run_sequential(run_id, &workflow, &input, &agent_resolver, &send_message)
+                .await
+        };
+        self.cleanup_terminal_pause_state(run_id).await;
         self.persist_runs_async().await;
         result
+    }
+
+    /// Wipe pause-related fields on the run if it ended up in a terminal
+    /// state (Completed / Failed). Called once at the bottom of
+    /// `execute_run` and `resume_run` so every terminal transition gets
+    /// the same cleanup, regardless of which inner branch (sequential
+    /// happy path, DAG entry-guard refuse, mid-step Failed) ran. Avoids
+    /// scattering identical clear-five-fields blocks across ~10 sites.
+    /// See #3335 review.
+    async fn cleanup_terminal_pause_state(&self, run_id: WorkflowRunId) {
+        let mut runs = self.runs.write().await;
+        if let Some(run) = runs.get_mut(&run_id) {
+            if matches!(
+                run.state,
+                WorkflowRunState::Completed | WorkflowRunState::Failed
+            ) {
+                run.clear_pause_state();
+            }
+        }
     }
 
     /// Sequential workflow execution (extracted for persistence wrapping).
@@ -1177,15 +1215,23 @@ impl WorkflowEngine {
     {
         // Resume snapshot: when the run was previously paused, the prior
         // execution stored `(step_index, variables, current_input)` on the
-        // run before transitioning to `Paused`. Restore them here so the
-        // loop picks up exactly where it stopped, then clear the snapshot
-        // so a future pause sets fresh values.
+        // run before transitioning to `Paused`. Clone (not take!) so a
+        // mid-resume failure leaves the snapshot intact for future
+        // retry-from-failure paths — the snapshot is only authoritatively
+        // cleared on successful completion, see the Completed transition
+        // at the bottom of this function. The pause-mid-loop branch
+        // overwrites the snapshot with fresh values when it transitions
+        // back to Paused.
         let (mut current_input, mut variables, mut i) = {
-            let mut runs = self.runs.write().await;
-            if let Some(run) = runs.get_mut(&run_id) {
-                if let Some(saved_idx) = run.paused_step_index.take() {
-                    let saved_vars = std::mem::take(&mut run.paused_variables);
-                    let saved_input = run.paused_current_input.take().unwrap_or_default();
+            let runs = self.runs.read().await;
+            if let Some(run) = runs.get(&run_id) {
+                if let Some(saved_idx) = run.paused_step_index {
+                    let saved_vars: HashMap<String, String> = run
+                        .paused_variables
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let saved_input = run.paused_current_input.clone().unwrap_or_default();
                     debug!(
                         run_id = %run_id,
                         resume_step = saved_idx,
@@ -1215,7 +1261,10 @@ impl WorkflowEngine {
                 let mut runs = self.runs.write().await;
                 if let Some(run) = runs.get_mut(&run_id) {
                     run.paused_step_index = Some(i);
-                    run.paused_variables = variables.clone();
+                    run.paused_variables = variables
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
                     run.paused_current_input = Some(current_input.clone());
                     run.pause_request = None;
                     run.state = WorkflowRunState::Paused {
@@ -1652,12 +1701,20 @@ impl WorkflowEngine {
             i += 1;
         }
 
-        // Mark workflow as completed
+        // Mark workflow as completed. Clear the pause snapshot fields and
+        // any orphan `pause_request` that may have been lodged after the
+        // last step boundary check — a pause requested between the loop's
+        // final iteration and this transition would otherwise survive on a
+        // Completed run as dead data.
         let final_output = current_input.clone();
         if let Some(r) = self.runs.write().await.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
+            r.pause_request = None;
+            r.paused_step_index = None;
+            r.paused_variables.clear();
+            r.paused_current_input = None;
         }
 
         info!(run_id = %run_id, "Workflow completed successfully");
@@ -1695,6 +1752,24 @@ impl WorkflowEngine {
                 .and_then(|r| r.pause_request.as_ref().map(|p| p.reason.clone()))
         };
         if let Some(reason) = dag_pause_requested {
+            // Mark the run Failed and consume the lingering pause_request
+            // before returning. Without this the run stays Running with
+            // `pause_request: Some(_)` forever, looking like a live
+            // workflow that just never executes — and `cleanup_terminal_pause_state`
+            // (called by execute_run after we return) wouldn't run because
+            // state isn't terminal. Set Failed so the cleanup pass picks it up.
+            {
+                let mut runs = self.runs.write().await;
+                if let Some(run) = runs.get_mut(&run_id) {
+                    run.state = WorkflowRunState::Failed;
+                    run.error = Some(format!(
+                        "DAG workflow refused to start: pause requested ({reason}) \
+                         but pause/resume is supported on the sequential path only \
+                         (#3335 follow-up)"
+                    ));
+                    run.completed_at = Some(Utc::now());
+                }
+            }
             return Err(format!(
                 "Pause requested ({reason}) but the workflow uses DAG dependencies; \
                  pause/resume is supported on the sequential path only (#3335 follow-up)"
@@ -4014,7 +4089,7 @@ prompt_template = "do {{x}}"
             completed_at: Some(Utc::now()),
             pause_request: None,
             paused_step_index: None,
-            paused_variables: HashMap::new(),
+            paused_variables: BTreeMap::new(),
             paused_current_input: None,
         }
     }
@@ -4081,7 +4156,7 @@ prompt_template = "do {{x}}"
             completed_at: None,
             pause_request: None,
             paused_step_index: None,
-            paused_variables: HashMap::new(),
+            paused_variables: BTreeMap::new(),
             paused_current_input: None,
         };
         let running_id = running.id;
