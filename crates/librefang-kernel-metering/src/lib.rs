@@ -602,13 +602,46 @@ mod tests {
         assert!((cost - 4.0).abs() < 0.01); // $1.00 + $3.00
     }
 
+    /// Build a synthetic two-entry catalog (canonical id + alias) so the
+    /// next two tests don't depend on registry state. They previously
+    /// hardcoded `claude-sonnet-4-20250514` / `sonnet` against the live
+    /// catalog and broke the moment the registry retired that id in
+    /// favour of the 4.5 variant — same anti-pattern the
+    /// `_chatgpt_zero_price_*` test already moved away from.
+    fn synthetic_priced_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
+        use librefang_types::model_catalog::{ModelCatalogEntry, ModelCatalogFile, ModelTier};
+        let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+            &std::path::PathBuf::from("/nonexistent"),
+        );
+        catalog.merge_catalog_file(ModelCatalogFile {
+            provider: None,
+            models: vec![ModelCatalogEntry {
+                id: "synthetic-priced-frontier".to_string(),
+                display_name: "Synthetic Priced Frontier".to_string(),
+                provider: "anthropic".to_string(),
+                tier: ModelTier::Smart,
+                context_window: 200_000,
+                max_output_tokens: 64_000,
+                input_cost_per_m: 3.0,
+                output_cost_per_m: 15.0,
+                supports_tools: true,
+                supports_vision: true,
+                supports_streaming: true,
+                supports_thinking: false,
+                aliases: vec!["synthetic-priced-alias".to_string()],
+                ..Default::default()
+            }],
+        });
+        catalog
+    }
+
     #[test]
     fn test_estimate_cost_with_catalog() {
-        let catalog = test_catalog();
-        // Sonnet: $3/M input, $15/M output
+        let catalog = synthetic_priced_catalog();
+        // 1M input * $3/M + 1M output * $15/M = $18.
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
-            "claude-sonnet-4-20250514",
+            "synthetic-priced-frontier",
             1_000_000,
             1_000_000,
             0,
@@ -619,10 +652,15 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_alias() {
-        let catalog = test_catalog();
-        // "sonnet" alias should resolve to same pricing
+        let catalog = synthetic_priced_catalog();
+        // Alias should resolve to the same pricing as the canonical id.
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &catalog, "sonnet", 1_000_000, 1_000_000, 0, 0,
+            &catalog,
+            "synthetic-priced-alias",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
         );
         assert!((cost - 18.0).abs() < 0.01);
     }
@@ -708,11 +746,11 @@ mod tests {
         // Output: 1M * $3/M = $3.00
         // Total = $3.55
         let cost = MeteringEngine::estimate_cost(
-            "claude-sonnet-4-20250514",
-            1_000_000, // total input
-            1_000_000, // output
-            500_000,   // cache_read
-            0,         // cache_creation
+            "test-model", // estimate_cost is catalog-agnostic; id is just a label
+            1_000_000,    // total input
+            1_000_000,    // output
+            500_000,      // cache_read
+            0,            // cache_creation
         );
         assert!((cost - 3.55).abs() < 0.01);
     }
@@ -726,11 +764,11 @@ mod tests {
         // Output: 1M * $3/M = $3.00
         // Total = $4.05
         let cost = MeteringEngine::estimate_cost(
-            "claude-sonnet-4-20250514",
-            1_000_000, // total input
-            1_000_000, // output
-            0,         // cache_read
-            200_000,   // cache_creation
+            "test-model", // estimate_cost is catalog-agnostic; id is just a label
+            1_000_000,    // total input
+            1_000_000,    // output
+            0,            // cache_read
+            200_000,      // cache_creation
         );
         assert!((cost - 4.05).abs() < 0.01);
     }
@@ -745,11 +783,11 @@ mod tests {
         // Output: 1M * $3/M = $3.00
         // Total = $3.665
         let cost = MeteringEngine::estimate_cost(
-            "claude-sonnet-4-20250514",
-            1_000_000, // total input
-            1_000_000, // output
-            400_000,   // cache_read
-            100_000,   // cache_creation
+            "test-model", // estimate_cost is catalog-agnostic; id is just a label
+            1_000_000,    // total input
+            1_000_000,    // output
+            400_000,      // cache_read
+            100_000,      // cache_creation
         );
         assert!((cost - 3.665).abs() < 0.01);
     }
@@ -758,7 +796,8 @@ mod tests {
     fn test_estimate_cost_zero_cache_matches_no_cache() {
         // estimate_cost uses default rates: $1/M input, $3/M output
         // With zero cache tokens, should match the original behavior
-        let cost_with_cache = MeteringEngine::estimate_cost("gpt-4o", 1_000_000, 1_000_000, 0, 0);
+        let cost_with_cache =
+            MeteringEngine::estimate_cost("test-model", 1_000_000, 1_000_000, 0, 0);
         let expected = 4.00; // $1.00 + $3.00
         assert!((cost_with_cache - expected).abs() < 0.01);
     }

@@ -4072,6 +4072,7 @@ dependencies = [
  "librefang-extensions",
  "librefang-hands",
  "librefang-kernel",
+ "librefang-llm-drivers",
  "librefang-memory",
  "librefang-migrate",
  "librefang-runtime",
