@@ -4447,6 +4447,21 @@ system_prompt = "You are a helpful assistant."
                 .as_ref()
                 .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
 
+            let agent_id_str = agent_id.0.to_string();
+            let hook_ctx = librefang_runtime::hooks::HookContext {
+                agent_name: &manifest.name,
+                agent_id: agent_id_str.as_str(),
+                event: librefang_types::agent::HookEvent::BeforePromptBuild,
+                data: serde_json::json!({
+                    "phase": "build",
+                    "call_site": "ephemeral",
+                    "user_message": message,
+                    "is_subagent": false,
+                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                }),
+            };
+            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -4494,6 +4509,7 @@ system_prompt = "You are a helpful assistant."
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
+                dynamic_sections,
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -5692,6 +5708,29 @@ system_prompt = "You are a helpful assistant."
                 Some(self.cached_skill_metadata(&manifest.skills))
             };
 
+            let is_subagent_flag = manifest
+                .metadata
+                .get("is_subagent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let agent_id_str = agent_id.0.to_string();
+            let hook_ctx = librefang_runtime::hooks::HookContext {
+                agent_name: &manifest.name,
+                agent_id: agent_id_str.as_str(),
+                event: librefang_types::agent::HookEvent::BeforePromptBuild,
+                data: serde_json::json!({
+                    "phase": "build",
+                    "call_site": "streaming",
+                    "user_message": message,
+                    "session_id": effective_session_id.to_string(),
+                    "channel_type": sender_context.map(|s| s.channel.clone()),
+                    "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
+                    "is_subagent": is_subagent_flag,
+                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                }),
+            };
+            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -5734,11 +5773,7 @@ system_prompt = "You are a helpful assistant."
                 sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
                 was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
-                is_subagent: manifest
-                    .metadata
-                    .get("is_subagent")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                is_subagent: is_subagent_flag,
                 is_autonomous: manifest.autonomous.is_some(),
                 agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
                 bootstrap_md: ws_meta.as_ref().and_then(|m| m.bootstrap_md.clone()),
@@ -5759,6 +5794,7 @@ system_prompt = "You are a helpful assistant."
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
+                dynamic_sections,
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -7178,6 +7214,29 @@ system_prompt = "You are a helpful assistant."
                 Some(self.cached_skill_metadata(&manifest.skills))
             };
 
+            let is_subagent_flag = manifest
+                .metadata
+                .get("is_subagent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let agent_id_str = agent_id.0.to_string();
+            let hook_ctx = librefang_runtime::hooks::HookContext {
+                agent_name: &manifest.name,
+                agent_id: agent_id_str.as_str(),
+                event: librefang_types::agent::HookEvent::BeforePromptBuild,
+                data: serde_json::json!({
+                    "phase": "build",
+                    "call_site": "execute_llm",
+                    "user_message": message,
+                    "session_id": effective_session_id.to_string(),
+                    "channel_type": sender_context.map(|s| s.channel.clone()),
+                    "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
+                    "is_subagent": is_subagent_flag,
+                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                }),
+            };
+            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -7220,11 +7279,7 @@ system_prompt = "You are a helpful assistant."
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
                 is_group: sender_context.map(|s| s.is_group).unwrap_or(false),
                 was_mentioned: sender_context.map(|s| s.was_mentioned).unwrap_or(false),
-                is_subagent: manifest
-                    .metadata
-                    .get("is_subagent")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                is_subagent: is_subagent_flag,
                 is_autonomous: manifest.autonomous.is_some(),
                 agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
                 bootstrap_md: ws_meta.as_ref().and_then(|m| m.bootstrap_md.clone()),
@@ -7245,6 +7300,7 @@ system_prompt = "You are a helpful assistant."
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
+                dynamic_sections,
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);

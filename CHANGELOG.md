@@ -75,6 +75,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Channel field as dynamic dropdown with custom fallback (#3248) (@houko)
 - URL-synced filters, JSON export, row detail modal (#3252) (@houko)
 - Move filters into right-docked drawer (#3254) (@houko)
+- BeforePromptBuild hook can contribute labeled DynamicSection injected into the system prompt, with 8KiB per-section / 32KiB total caps (closes #3326) (#3358) (@houko)
 
 ### Fixed
 
