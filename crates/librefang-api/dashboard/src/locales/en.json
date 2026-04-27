@@ -1604,7 +1604,7 @@
     "auto_dream_status_completed": "Completed",
     "auto_dream_status_failed": "Failed",
     "auto_dream_status_aborted": "Aborted",
-    "help": "Configure system preferences. Switch theme, language, navigation layout, and browse available tools.",
+    "help": "Dashboard preferences and account-level controls. This is the place to change your local UI settings, manage TOTP, and trigger Auto-Dream runs — it does not edit kernel configuration on disk (that's the Config page).\n\nWhat lives on this page:\n\n  · UI preferences — language (English / 中文), theme (light / dark), sidebar collapse default. Stored in browser localStorage; per-device.\n  · TOTP enrollment — protect destructive actions (approvals, schedule deletes, plugin install) with a 6-digit one-time code. Setup gives you a QR code and recovery codes; revoke removes the requirement.\n  · Auto-Dream — periodic background pass where the agent reviews its own conversation log and emits memory updates. Trigger one manually, watch a running pass, or enable the daily schedule.\n\nSettings (this page) vs. Config:\n\n  · Settings — per-user, per-browser, lightweight UI / account toggles.\n  · Config (/dashboard/config) — kernel-level TOML editor: providers, channels, MCP servers, plugin policies, runtime caps. Changes there require kernel reload.\n\nThings to know:\n\n  · TOTP secrets are stored encrypted in the kernel vault. If you lose both your authenticator and recovery codes, an admin has to reset by editing config + redeploying.\n  · Auto-Dream runs in the kernel under the agent's own session, so it counts toward that agent's budget. The \"Run now\" button is gated by TOTP if you have it enrolled.\n  · Theme / language changes are instant. The kernel does not need a reload.",
     "backup": "Backup",
     "export_config_btn": "Export Config",
     "export_config_desc": "Download your current configuration as a TOML file.",
@@ -2905,7 +2905,8 @@
     "clear": "Clear cap",
     "clearing": "Clearing…",
     "discard": "Discard",
-    "zero_means_unlimited": "Set any window to 0 for unlimited on that window. Threshold is the fraction of any limit at which a BudgetExceeded audit fires."
+    "zero_means_unlimited": "Set any window to 0 for unlimited on that window. Threshold is the fraction of any limit at which a BudgetExceeded audit fires.",
+    "help": "Per-user spend cap. Anything one user does — across every agent, every channel — counts against this cap. Set caps here when you want to give a teammate access to your LibreFang instance without them being able to drain your provider credit.\n\nHow budgets stack:\n\n  · Global budget (set in /dashboard/runtime) — kernel-wide ceiling. Hits this and every agent stops.\n  · Per-agent budget (set in agent.toml) — caps a specific agent's spend.\n  · Per-user budget (this page) — caps a specific user's combined spend.\n  · The most restrictive limit wins. If global has $5 left and the user has $50 left, the user can spend $5.\n\nWhat you see here:\n\n  · Current spend (this period), the cap, percent used, and the rolling window (daily / weekly / monthly).\n  · \"alert_breach\" badge appears when the user has crossed an alert threshold but is still under the hard cap.\n  · Per-provider breakdown: which providers contributed how much to the user's spend.\n\nThings to know:\n\n  · A user with no budget configured is unlimited (still subject to global / per-agent caps).\n  · Edits take effect on the next request the user makes — already-running LLM calls continue.\n  · Spend totals are persisted in SQLite; deleting the user does not delete history (audit trail)."
   },
   "user_policy": {
     "title": "Permission matrix",
@@ -2942,7 +2943,8 @@
     "add_channel_placeholder": "wechat, matrix, …",
     "add_channel_hint": "Channel adapter name (lowercase). Must match the key the bridge emits.",
     "add_channel_err_empty": "Channel name is required.",
-    "add_channel_err_duplicate": "Channel '{{key}}' already has a rule slot."
+    "add_channel_err_duplicate": "Channel '{{key}}' already has a rule slot.",
+    "help": "The full RBAC picture for one user: which tools they can call, which categories are allowed, which channel rules apply to them, and which agents they can talk to. Read-only summary — to change values, edit the user via the Users page or the kernel config.\n\nThree slices contribute to every gate decision:\n\n  · Per-user tool_policy / tool_categories — overrides on this page.\n  · Per-agent ToolPolicy — set in agent.toml.\n  · Per-channel rules — set in [channels.<name>] config.\n\nHow to use:\n\n  1. Pick the user (header). The page is scoped to that user across all sections.\n  2. Each slice shows: configured rules + \"not configured\" markers (which mean \"fall through to the next layer\").\n  3. Use the Permission Simulator (/dashboard/permission-simulator) to see what the gate decides for a specific tool call once all three slices intersect.\n\nPermission matrix (this page) vs. Permission simulator:\n\n  · Matrix — raw configured slices, no decision logic.\n  · Simulator — runs the actual intersection for a specific (user, agent, tool, channel) tuple and tells you the verdict.\n\nThings to know:\n\n  · \"Not configured\" never means \"denied\". It means \"defer to other layers\". A user with no tool_policy is still bound by per-agent and per-channel rules.\n  · Channel rules are evaluated only when the request comes via that channel; web-dashboard and CLI calls bypass channel rules.\n  · This page is read-only. Edits are at /dashboard/users → click the user → edit modal."
   },
   "tool_policy": {
     "allowed_tools": "Allowed tools",

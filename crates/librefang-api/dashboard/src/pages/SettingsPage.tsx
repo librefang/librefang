@@ -100,7 +100,7 @@ export function SettingsPage() {
         title={t("settings.title")}
         subtitle={t("settings.subtitle")}
         icon={<Settings className="h-4 w-4" />}
-
+        helpText={t("settings.help")}
       />
 
       <div className="rounded-2xl border border-border-subtle bg-surface">
