@@ -490,7 +490,11 @@ export function TelemetryPage() {
               {agentsByTokens.length === 0 ? (
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
-                <div className="space-y-4">
+                // Cap height so a workspace with dozens of agents doesn't
+                // make the whole card balloon and shove the rest of the
+                // page off-screen. Sibling endpoints card uses the same
+                // policy so the two columns stay roughly the same height.
+                <div className="space-y-4 max-h-[420px] overflow-y-auto overscroll-contain scrollbar-thin pr-1">
                   {agentsByTokens.map((a) => {
                     // Fall back to total if input/output histograms are
                     // empty (older daemon, or pre-instrumentation traffic).
@@ -498,12 +502,21 @@ export function TelemetryPage() {
                     const inputPct = inOut > 0 ? (a.inputTokens / inOut) * 100 : 0;
                     return (
                       <div key={a.agent} className="space-y-1.5">
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="text-sm font-semibold flex-1 min-w-0 truncate">{a.agent}</span>
                           {(a.provider || a.model) && (
-                            <Badge variant="default" className="font-mono text-[10px]">{a.provider}/{a.model}</Badge>
+                            // Cap badge width so long provider/model
+                            // strings (e.g. byteplus_coding/ark-code-latest)
+                            // can't push the token total off the row.
+                            <Badge
+                              variant="default"
+                              className="font-mono text-[10px] max-w-[160px] truncate shrink"
+                              title={`${a.provider}/${a.model}`}
+                            >
+                              {a.provider}/{a.model}
+                            </Badge>
                           )}
-                          <span className="text-sm font-black text-brand text-right tabular-nums" title={a.tokens.toLocaleString()}>
+                          <span className="text-sm font-black text-brand text-right tabular-nums shrink-0" title={a.tokens.toLocaleString()}>
                             {formatCompact(a.tokens)}
                             <span className="text-[10px] font-normal text-text-dim ml-0.5">tok</span>
                           </span>
@@ -542,13 +555,13 @@ export function TelemetryPage() {
               {endpointRollups.length === 0 ? (
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
-                <div className="space-y-2.5">
+                <div className="space-y-2.5 max-h-[420px] overflow-y-auto overscroll-contain scrollbar-thin pr-1">
                   {endpointRollups.map((r) => (
-                    <div key={r.method + r.path} className="flex items-center gap-3">
+                    <div key={r.method + r.path} className="flex items-center gap-3 min-w-0">
                       <Badge variant="default" className="font-mono text-[10px] w-14 justify-center shrink-0">{r.method}</Badge>
-                      <span className="text-xs font-mono flex-1 truncate" title={r.path}>{r.path}</span>
+                      <span className="text-xs font-mono flex-1 min-w-0 truncate" title={r.path}>{r.path}</span>
                       <StatusBar ok={r.ok} redirect={r.redirect} client={r.client} server={r.server} total={r.total} />
-                      <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
+                      <span className="text-sm font-black text-brand text-right tabular-nums w-14 shrink-0" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
                     </div>
                   ))}
                 </div>
