@@ -211,7 +211,10 @@ export function UsersPage() {
               value={roleFilter}
               options={[
                 { value: "all", label: t("users.all_roles", "All roles") },
-                ...ROLES.map(r => ({ value: r, label: r })),
+                ...ROLES.map(r => ({
+                  value: r,
+                  label: t(`users.roles.${r}`, r),
+                })),
               ]}
               onChange={e =>
                 setRoleFilter(e.target.value as "all" | RoleName)
@@ -244,7 +247,9 @@ export function UsersPage() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="text-sm font-bold truncate">{u.name}</p>
-                    <Badge variant={roleVariant(u.role)}>{u.role}</Badge>
+                    <Badge variant={roleVariant(u.role)}>
+                      {t(`users.roles.${u.role}`, u.role)}
+                    </Badge>
                     {u.has_api_key ? (
                       <Badge variant="brand">
                         <KeyRound className="h-3 w-3 mr-1 inline" />
@@ -692,7 +697,10 @@ function UserFormModal({
         <Select
           label={t("users.role_label", "Role")}
           value={role}
-          options={ROLES.map(r => ({ value: r, label: r }))}
+          options={ROLES.map(r => ({
+            value: r,
+            label: t(`users.roles.${r}`, r),
+          }))}
           onChange={e => setRole(e.target.value as RoleName)}
           disabled={busy}
         />
@@ -725,7 +733,7 @@ function UserFormModal({
                     value={k}
                     options={PLATFORM_TILES.map(p => ({
                       value: p.key,
-                      label: p.label,
+                      label: t(`users.platforms.${p.key}.label`, p.label),
                     }))}
                     onChange={e => {
                       const next = [...bindings];
@@ -876,7 +884,9 @@ function IdentityWizardModal({
               <Card padding="md">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-bold">{user.name}</span>
-                  <Badge variant={roleVariant(user.role)}>{user.role}</Badge>
+                  <Badge variant={roleVariant(user.role)}>
+                    {t(`users.roles.${user.role}`, user.role)}
+                  </Badge>
                 </div>
                 <p className="mt-1 text-[11px] text-text-dim">
                   {Object.keys(user.channel_bindings).length}{" "}
@@ -906,8 +916,12 @@ function IdentityWizardModal({
                         : "border-border-subtle hover:border-brand/30"
                     }`}
                   >
-                    <p className="text-sm font-bold">{p.label}</p>
-                    <p className="mt-1 text-[11px] text-text-dim">{p.hint}</p>
+                    <p className="text-sm font-bold">
+                      {t(`users.platforms.${p.key}.label`, p.label)}
+                    </p>
+                    <p className="mt-1 text-[11px] text-text-dim">
+                      {t(`users.platforms.${p.key}.hint`, p.hint)}
+                    </p>
                   </button>
                 ))}
               </div>
@@ -924,10 +938,15 @@ function IdentityWizardModal({
               </p>
               {tile ? (
                 <Card padding="md">
-                  <p className="text-sm font-bold">{tile.label}</p>
-                  <p className="mt-1 text-[11px] text-text-dim">{tile.hint}</p>
+                  <p className="text-sm font-bold">
+                    {t(`users.platforms.${tile.key}.label`, tile.label)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-text-dim">
+                    {t(`users.platforms.${tile.key}.hint`, tile.hint)}
+                  </p>
                   <p className="mt-2 text-[11px] font-mono text-text-dim">
-                    {t("users.wizard_example", "Example")}: {tile.example}
+                    {t("users.wizard_example", "Example")}:{" "}
+                    {t(`users.platforms.${tile.key}.example`, tile.example)}
                   </p>
                 </Card>
               ) : null}
@@ -935,7 +954,11 @@ function IdentityWizardModal({
                 label={t("users.wizard_id_label", "platform_id")}
                 value={platformId}
                 onChange={e => setPlatformId(e.target.value)}
-                placeholder={tile?.example}
+                placeholder={
+                  tile
+                    ? t(`users.platforms.${tile.key}.example`, tile.example)
+                    : undefined
+                }
               />
             </div>
           ) : null}
@@ -1158,9 +1181,13 @@ function BulkImportModal({
                 <li key={i} className="flex gap-2">
                   <span className="font-mono text-text-dim w-6">{i + 1}</span>
                   <span className="font-bold">{r.name}</span>
-                  <Badge variant={roleVariant(r.role)}>{r.role}</Badge>
+                  <Badge variant={roleVariant(r.role)}>
+                    {t(`users.roles.${r.role}`, r.role)}
+                  </Badge>
                   <span className="text-text-dim">
-                    {Object.keys(r.channel_bindings ?? {}).length} bindings
+                    {t("users.import_bindings_count", "{{count}} bindings", {
+                      count: Object.keys(r.channel_bindings ?? {}).length,
+                    })}
                   </span>
                 </li>
               ))}
@@ -1183,8 +1210,15 @@ function BulkImportModal({
                 : t("users.import_summary", "Import complete")}
             </p>
             <p className="mt-1 text-xs text-text-dim">
-              {result.created} created · {result.updated} updated ·{" "}
-              {result.failed} failed
+              {t(
+                "users.import_result_counts",
+                "{{created}} created · {{updated}} updated · {{failed}} failed",
+                {
+                  created: result.created,
+                  updated: result.updated,
+                  failed: result.failed,
+                },
+              )}
             </p>
             {result.rows.some(r => r.error) ? (
               <ul className="mt-2 space-y-0.5 text-[11px] text-error">
@@ -1192,7 +1226,15 @@ function BulkImportModal({
                   .filter(r => r.error)
                   .map(r => (
                     <li key={r.index}>
-                      row {r.index + 1} ({r.name}): {r.error}
+                      {t(
+                        "users.import_row_error",
+                        "row {{row}} ({{name}}): {{error}}",
+                        {
+                          row: r.index + 1,
+                          name: r.name,
+                          error: r.error,
+                        },
+                      )}
                     </li>
                   ))}
               </ul>

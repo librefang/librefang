@@ -106,15 +106,25 @@ function policyToForm(policy: PermissionPolicy | undefined): FormState {
 // Mirror of the daemon's validators in `routes/users.rs`. We surface
 // errors inline before the PUT round-trip so a typo doesn't waste a
 // request, but the daemon revalidates so this layer is convenience only.
-function validateForm(form: FormState): string | null {
+type ValidatorT = (key: string, fallback: string, vars?: Record<string, unknown>) => string;
+
+function validateForm(form: FormState, t: ValidatorT): string | null {
   const checkList = (label: string, items: string[]): string | null => {
     const seen = new Set<string>();
     for (const item of items) {
       if (item.length === 0) {
-        return `${label} contains an empty entry`;
+        return t(
+          "userPolicy.errors.empty_entry",
+          "{{field}} contains an empty entry",
+          { field: label },
+        );
       }
       if (seen.has(item)) {
-        return `${label} contains duplicate entry '${item}'`;
+        return t(
+          "userPolicy.errors.duplicate_entry",
+          "{{field}} contains duplicate entry '{{item}}'",
+          { field: label, item },
+        );
       }
       seen.add(item);
     }
@@ -125,28 +135,38 @@ function validateForm(form: FormState): string | null {
     const allowed = parseList(form.tool_policy.allowed);
     const denied = parseList(form.tool_policy.denied);
     const e =
-      checkList("tool_policy.allowed_tools", allowed) ??
-      checkList("tool_policy.denied_tools", denied);
+      checkList(t("tool_policy.allowed_tools", "Allowed tools"), allowed) ??
+      checkList(t("tool_policy.denied_tools", "Denied tools"), denied);
     if (e) return e;
   }
   if (form.tool_categories.enabled) {
     const allowed = parseList(form.tool_categories.allowed);
     const denied = parseList(form.tool_categories.denied);
     const e =
-      checkList("tool_categories.allowed_groups", allowed) ??
-      checkList("tool_categories.denied_groups", denied);
+      checkList(t("tool_categories.allowed_groups", "Allowed groups"), allowed) ??
+      checkList(t("tool_categories.denied_groups", "Denied groups"), denied);
     if (e) return e;
   }
   if (form.memory_access.enabled) {
     const readable = parseList(form.memory_access.readable);
     const writable = parseList(form.memory_access.writable);
     const e =
-      checkList("memory_access.readable_namespaces", readable) ??
-      checkList("memory_access.writable_namespaces", writable);
+      checkList(
+        t("memory_access.readable_namespaces", "Readable namespaces"),
+        readable,
+      ) ??
+      checkList(
+        t("memory_access.writable_namespaces", "Writable namespaces"),
+        writable,
+      );
     if (e) return e;
     for (const w of writable) {
       if (!readable.includes(w)) {
-        return `memory_access.writable_namespaces['${w}'] is not in readable_namespaces (writable must be a subset of readable)`;
+        return t(
+          "userPolicy.errors.writable_not_subset",
+          "memory_access.writable_namespaces['{{ns}}'] is not in readable_namespaces (writable must be a subset of readable)",
+          { ns: w },
+        );
       }
     }
   }
@@ -231,7 +251,13 @@ export function UserPolicyPage() {
     }
   }, [policyQuery.data]);
 
-  const validationError = useMemo(() => validateForm(form), [form]);
+  const validationError = useMemo(
+    () =>
+      validateForm(form, (key, fallback, vars) =>
+        t(key, fallback, vars as Record<string, unknown> | undefined) as string,
+      ),
+    [form, t],
+  );
 
   const handleAddChannel = () => {
     const key = normalizeChannelKey(newChannel);
@@ -691,6 +717,7 @@ interface SectionHeaderProps {
 }
 
 function SectionHeader({ title, description, enabled, onToggle }: SectionHeaderProps) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
@@ -698,7 +725,11 @@ function SectionHeader({ title, description, enabled, onToggle }: SectionHeaderP
         <p className="mt-1 text-xs text-text-dim">{description}</p>
       </div>
       <CheckboxLabel
-        label={enabled ? "Configured" : "Not set"}
+        label={
+          enabled
+            ? t("userPolicy.toggle.configured", "Configured")
+            : t("userPolicy.toggle.not_set", "Not set")
+        }
         checked={enabled}
         onChange={onToggle}
       />

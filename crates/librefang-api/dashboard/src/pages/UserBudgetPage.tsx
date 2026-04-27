@@ -73,12 +73,23 @@ export function UserBudgetPage() {
 
     for (const [k, v] of Object.entries(payload)) {
       if (Number.isNaN(v) || !Number.isFinite(v) || v < 0) {
-        setError(`${k} must be a finite, non-negative number`);
+        setError(
+          t(
+            "userBudget.errors.non_negative",
+            "{{field}} must be a finite, non-negative number",
+            { field: k },
+          ),
+        );
         return;
       }
     }
     if (payload.alert_threshold > 1) {
-      setError("alert_threshold must be in 0.0..=1.0");
+      setError(
+        t(
+          "userBudget.errors.threshold_range",
+          "alert_threshold must be in 0.0..=1.0",
+        ),
+      );
       return;
     }
 
@@ -210,10 +221,25 @@ export function UserBudgetPage() {
         <form onSubmit={onSubmit} className="grid grid-cols-2 gap-4">
           {(
             [
-              ["max_hourly_usd", "Max hourly USD"],
-              ["max_daily_usd", "Max daily USD"],
-              ["max_monthly_usd", "Max monthly USD"],
-              ["alert_threshold", "Alert threshold (0–1)"],
+              [
+                "max_hourly_usd",
+                t("userBudget.fields.max_hourly", "Max hourly USD"),
+              ],
+              [
+                "max_daily_usd",
+                t("userBudget.fields.max_daily", "Max daily USD"),
+              ],
+              [
+                "max_monthly_usd",
+                t("userBudget.fields.max_monthly", "Max monthly USD"),
+              ],
+              [
+                "alert_threshold",
+                t(
+                  "userBudget.fields.alert_threshold",
+                  "Alert threshold (0–1)",
+                ),
+              ],
             ] as const
           ).map(([key, label]) => (
             <label key={key} className="flex flex-col gap-1 text-xs">
