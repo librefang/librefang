@@ -245,22 +245,36 @@ function SectionHeader({ icon, label, badge }: { icon: ReactNode; label: string;
   );
 }
 
-// Inline status distribution bar — width is proportional inside each
-// row so the eye can compare endpoint health without doing arithmetic.
-function StatusBar({ ok, redirect, client, server, total }: {
-  ok: number; redirect: number; client: number; server: number; total: number;
+// Inline status bar. Two dimensions are encoded:
+//   1. Length — proportional to `total / maxTotal` so the visual length
+//      matches the popularity ranking (without this, every row is the
+//      same width and the bar looks broken to anyone scanning a "top
+//      endpoints" list).
+//   2. Color segmentation — within the filled portion, ok/3xx/4xx/5xx
+//      take their proportional share of `total` so endpoint health is
+//      readable at a glance.
+// Outer column stays a fixed `w-24` so the surrounding flex layout
+// doesn't jitter as rows reorder.
+function StatusBar({ ok, redirect, client, server, total, maxTotal }: {
+  ok: number; redirect: number; client: number; server: number; total: number; maxTotal: number;
 }) {
   if (total === 0) return null;
-  const pct = (n: number) => (n / total) * 100;
+  const innerPct = (n: number) => (n / total) * 100;
+  // Floor at a small min so the busiest endpoints don't dwarf the rest
+  // into invisible 1-pixel slivers — a row with 1 hit on a board where
+  // the top is 10k still gets a perceptible bar.
+  const fillPct = maxTotal > 0 ? Math.max((total / maxTotal) * 100, 6) : 0;
   return (
     <div
-      className="flex h-1.5 w-24 rounded-full overflow-hidden bg-border-subtle/40 shrink-0"
+      className="h-1.5 w-24 rounded-full overflow-hidden bg-border-subtle/40 shrink-0"
       title={`${ok} OK · ${redirect} 3xx · ${client} 4xx · ${server} 5xx`}
     >
-      {ok > 0 && <div style={{ width: `${pct(ok)}%` }} className="bg-success" />}
-      {redirect > 0 && <div style={{ width: `${pct(redirect)}%` }} className="bg-text-dim/40" />}
-      {client > 0 && <div style={{ width: `${pct(client)}%` }} className="bg-warning" />}
-      {server > 0 && <div style={{ width: `${pct(server)}%` }} className="bg-error" />}
+      <div className="flex h-full" style={{ width: `${fillPct}%` }}>
+        {ok > 0 && <div style={{ width: `${innerPct(ok)}%` }} className="bg-success" />}
+        {redirect > 0 && <div style={{ width: `${innerPct(redirect)}%` }} className="bg-text-dim/40" />}
+        {client > 0 && <div style={{ width: `${innerPct(client)}%` }} className="bg-warning" />}
+        {server > 0 && <div style={{ width: `${innerPct(server)}%` }} className="bg-error" />}
+      </div>
     </div>
   );
 }
@@ -543,14 +557,22 @@ export function TelemetryPage() {
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
                 <div className="space-y-2.5">
-                  {endpointRollups.map((r) => (
-                    <div key={r.method + r.path} className="flex items-center gap-3">
-                      <Badge variant="default" className="font-mono text-[10px] w-14 justify-center shrink-0">{r.method}</Badge>
-                      <span className="text-xs font-mono flex-1 truncate" title={r.path}>{r.path}</span>
-                      <StatusBar ok={r.ok} redirect={r.redirect} client={r.client} server={r.server} total={r.total} />
-                      <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
-                    </div>
-                  ))}
+                  {(() => {
+                    // Single-pass max so every row's bar length is
+                    // relative to the busiest endpoint on the board.
+                    const maxTotal = endpointRollups.reduce(
+                      (acc, r) => (r.total > acc ? r.total : acc),
+                      0,
+                    );
+                    return endpointRollups.map((r) => (
+                      <div key={r.method + r.path} className="flex items-center gap-3">
+                        <Badge variant="default" className="font-mono text-[10px] w-14 justify-center shrink-0">{r.method}</Badge>
+                        <span className="text-xs font-mono flex-1 truncate" title={r.path}>{r.path}</span>
+                        <StatusBar ok={r.ok} redirect={r.redirect} client={r.client} server={r.server} total={r.total} maxTotal={maxTotal} />
+                        <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
+                      </div>
+                    ));
+                  })()}
                 </div>
               )}
             </Card>
