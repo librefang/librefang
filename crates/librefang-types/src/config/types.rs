@@ -1537,8 +1537,7 @@ impl TelemetryConfig {
     ///
     /// Operators with an external collector on the default port should either
     /// flip `auto_start_observability_stack = true` (if they want our stack)
-    /// or set `otlp_endpoint` explicitly (e.g. `http://127.0.0.1:4317`) to opt
-    /// back in.
+    /// or set `otlp_endpoint` to the collector's address to opt back in.
     pub fn otlp_export_disabled(&self) -> bool {
         if self.otlp_endpoint.is_empty() {
             return true;
