@@ -644,6 +644,33 @@ pub trait KernelHandle: Send + Sync {
     /// Called by the runtime at the start of each agent loop iteration.
     fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}
 
+    /// Record a per-call media generation for billing.
+    ///
+    /// Called by media tools (image_generate, video_generate,
+    /// music_generate, text_to_speech) after the underlying provider
+    /// call succeeds. The kernel resolves the model's `per_call_cost`
+    /// from the catalog, builds a `UsageRecord` with `cost_usd` set
+    /// from that flat rate (or 0.0 if the catalog entry omits it,
+    /// with a one-shot WARN), and writes it through the metering
+    /// engine — so per-agent / global / provider budgets see the
+    /// spend just like LLM token calls.
+    ///
+    /// `agent_id` may be `None` for kernel-internal media calls
+    /// (very rare); in that case the metering layer skips per-agent
+    /// quota checks but still records the spend against global /
+    /// provider budgets.
+    ///
+    /// Default: no-op. Tests / stubs that don't carry a metering
+    /// engine simply discard the call.
+    fn record_media_usage(
+        &self,
+        _agent_id: Option<&str>,
+        _provider: &str,
+        _model: &str,
+        _latency_ms: u64,
+    ) {
+    }
+
     /// Return the canonicalized absolute paths of named workspaces declared as `read-only`
     /// for the given agent. Used by file-write tools to enforce workspace access modes.
     /// Default: no read-only prefixes (all writes allowed by the sandbox).

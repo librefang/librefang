@@ -839,6 +839,8 @@ pub async fn add_custom_model(
     let modality = match body.get("modality").and_then(|v| v.as_str()) {
         Some("image") => librefang_types::model_catalog::Modality::Image,
         Some("audio") => librefang_types::model_catalog::Modality::Audio,
+        Some("video") => librefang_types::model_catalog::Modality::Video,
+        Some("music") => librefang_types::model_catalog::Modality::Music,
         _ => librefang_types::model_catalog::Modality::Text,
     };
 
@@ -860,6 +862,7 @@ pub async fn add_custom_model(
             .unwrap_or(0.0),
         image_input_cost_per_m: body.get("image_input_cost_per_m").and_then(|v| v.as_f64()),
         image_output_cost_per_m: body.get("image_output_cost_per_m").and_then(|v| v.as_f64()),
+        per_call_cost: body.get("per_call_cost").and_then(|v| v.as_f64()),
         supports_tools: body
             .get("supports_tools")
             .and_then(|v| v.as_bool())

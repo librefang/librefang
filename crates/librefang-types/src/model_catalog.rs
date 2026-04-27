@@ -113,6 +113,10 @@ pub enum Modality {
     Image,
     /// Speech / audio model (TTS, STT).
     Audio,
+    /// Video-generation model (e.g. MiniMax Hailuo).
+    Video,
+    /// Music-generation model (e.g. MiniMax Music).
+    Music,
 }
 
 impl fmt::Display for Modality {
@@ -121,6 +125,8 @@ impl fmt::Display for Modality {
             Modality::Text => write!(f, "text"),
             Modality::Image => write!(f, "image"),
             Modality::Audio => write!(f, "audio"),
+            Modality::Video => write!(f, "video"),
+            Modality::Music => write!(f, "music"),
         }
     }
 }
@@ -166,6 +172,14 @@ pub struct ModelCatalogEntry {
     /// models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_output_cost_per_m: Option<f64>,
+    /// Per-call cost in USD. Required for `Modality::Video` and
+    /// `Modality::Music` models, which are billed per generation rather
+    /// than per token. May also be populated for image models that quote
+    /// flat per-image pricing. The metering layer reads this when the
+    /// model is invoked through a media driver and falls back to
+    /// per-token math only when this is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_call_cost: Option<f64>,
     /// Whether the model supports tool/function calling.
     #[serde(default)]
     pub supports_tools: bool,
@@ -187,6 +201,45 @@ impl ModelCatalogEntry {
     /// Returns true if this entry is an image-generation model.
     pub fn is_image_generation(&self) -> bool {
         self.modality == Modality::Image
+    }
+
+    /// Returns true if this entry is a video-generation model.
+    pub fn is_video_generation(&self) -> bool {
+        self.modality == Modality::Video
+    }
+
+    /// Returns true if this entry is a music-generation model.
+    pub fn is_music_generation(&self) -> bool {
+        self.modality == Modality::Music
+    }
+
+    /// Returns true if this entry is a speech / audio model (TTS or STT).
+    pub fn is_audio_generation(&self) -> bool {
+        self.modality == Modality::Audio
+    }
+
+    /// Returns true if this entry is any non-text media-generation model.
+    pub fn is_media_generation(&self) -> bool {
+        !matches!(self.modality, Modality::Text)
+    }
+
+    /// Map this entry's `Modality` to the `MediaCapability` that a
+    /// `MediaDriver` would advertise for it. Returns `None` for
+    /// `Modality::Text` (LLM models go through the regular llm-driver
+    /// path, not the media subsystem).
+    ///
+    /// `Modality::Audio` maps to `TextToSpeech` because the registry
+    /// currently uses the `audio` modality exclusively for TTS-style
+    /// models; STT does not have a separate capability today.
+    pub fn media_capability(&self) -> Option<crate::media::MediaCapability> {
+        use crate::media::MediaCapability;
+        match self.modality {
+            Modality::Text => None,
+            Modality::Image => Some(MediaCapability::ImageGeneration),
+            Modality::Audio => Some(MediaCapability::TextToSpeech),
+            Modality::Video => Some(MediaCapability::VideoGeneration),
+            Modality::Music => Some(MediaCapability::MusicGeneration),
+        }
     }
 
     /// Modality-aware schema check applied after TOML deserialization.
@@ -214,6 +267,28 @@ impl ModelCatalogEntry {
         }
         Ok(())
     }
+
+    /// Returns true if this entry is billed per generation (video/music),
+    /// or an image/audio model with an explicit `per_call_cost`. The
+    /// metering layer uses this to choose between per-token math and
+    /// flat-rate accounting.
+    pub fn is_per_call_billed(&self) -> bool {
+        match self.modality {
+            Modality::Video | Modality::Music => true,
+            Modality::Image | Modality::Audio => self.per_call_cost.is_some(),
+            Modality::Text => false,
+        }
+    }
+
+    /// Resolve the flat per-invocation cost in USD for this model, if
+    /// any. For video/music models the catalog SHOULD declare
+    /// `per_call_cost`; when it's missing the loader emits a WARN and
+    /// this returns 0.0 so the call still goes through (but is
+    /// recorded as $0). The kernel logs the WARN once per
+    /// (provider, model) pair to avoid log spam.
+    pub fn per_call_cost_or_zero(&self) -> f64 {
+        self.per_call_cost.unwrap_or(0.0)
+    }
 }
 
 impl Default for ModelCatalogEntry {
@@ -230,6 +305,7 @@ impl Default for ModelCatalogEntry {
             output_cost_per_m: 0.0,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
+            per_call_cost: None,
             supports_tools: false,
             supports_vision: false,
             supports_streaming: false,
@@ -959,5 +1035,85 @@ aliases = []
             resolved_default,
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
+    }
+
+    #[test]
+    fn test_media_capability_mapping() {
+        use crate::media::MediaCapability;
+
+        let mut e = ModelCatalogEntry::default();
+        e.modality = Modality::Text;
+        assert_eq!(e.media_capability(), None);
+        e.modality = Modality::Image;
+        assert_eq!(e.media_capability(), Some(MediaCapability::ImageGeneration));
+        e.modality = Modality::Audio;
+        assert_eq!(e.media_capability(), Some(MediaCapability::TextToSpeech));
+        e.modality = Modality::Video;
+        assert_eq!(e.media_capability(), Some(MediaCapability::VideoGeneration));
+        e.modality = Modality::Music;
+        assert_eq!(e.media_capability(), Some(MediaCapability::MusicGeneration));
+    }
+
+    #[test]
+    fn test_is_per_call_billed() {
+        let mut e = ModelCatalogEntry::default();
+        e.modality = Modality::Text;
+        assert!(!e.is_per_call_billed());
+        e.modality = Modality::Video;
+        assert!(e.is_per_call_billed(), "video is always per-call");
+        e.modality = Modality::Music;
+        assert!(e.is_per_call_billed(), "music is always per-call");
+        e.modality = Modality::Image;
+        assert!(
+            !e.is_per_call_billed(),
+            "image without per_call_cost = per-token"
+        );
+        e.per_call_cost = Some(0.01);
+        assert!(
+            e.is_per_call_billed(),
+            "image with per_call_cost = per-call"
+        );
+    }
+
+    #[test]
+    fn test_per_call_cost_or_zero() {
+        let mut e = ModelCatalogEntry::default();
+        assert_eq!(e.per_call_cost_or_zero(), 0.0);
+        e.per_call_cost = Some(0.56);
+        assert_eq!(e.per_call_cost_or_zero(), 0.56);
+    }
+
+    #[test]
+    fn test_video_music_modality_serde_roundtrip() {
+        // Catch the regression that triggered this whole change: TOML
+        // with `modality = "video"` / `"music"` must parse, and the
+        // resulting Display string must round-trip back to the same
+        // value (otherwise the catalog write path would corrupt it).
+        let toml_video = r#"
+            id = "x"
+            display_name = "X"
+            provider = "p"
+            tier = "fast"
+            modality = "video"
+            input_cost_per_m = 0.0
+            output_cost_per_m = 0.0
+        "#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_video).unwrap();
+        assert_eq!(entry.modality, Modality::Video);
+        assert_eq!(entry.modality.to_string(), "video");
+
+        let toml_music = r#"
+            id = "x"
+            display_name = "X"
+            provider = "p"
+            tier = "fast"
+            modality = "music"
+            input_cost_per_m = 0.0
+            output_cost_per_m = 0.0
+            per_call_cost = 0.15
+        "#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_music).unwrap();
+        assert_eq!(entry.modality, Modality::Music);
+        assert_eq!(entry.per_call_cost, Some(0.15));
     }
 }

@@ -16992,6 +16992,82 @@ impl KernelHandle for LibreFangKernel {
         );
     }
 
+    fn record_media_usage(
+        &self,
+        agent_id: Option<&str>,
+        provider: &str,
+        model: &str,
+        latency_ms: u64,
+    ) {
+        let cost_usd = match self.model_catalog.read() {
+            Ok(cat) => match cat.find_model_for_provider(provider, model) {
+                Some(entry) => {
+                    let c = entry.per_call_cost_or_zero();
+                    if entry.is_per_call_billed() && entry.per_call_cost.is_none() {
+                        tracing::warn!(
+                            provider = provider,
+                            model = model,
+                            "media model has no per_call_cost in catalog — billing recorded as $0"
+                        );
+                    }
+                    c
+                }
+                None => {
+                    tracing::warn!(
+                        provider = provider,
+                        model = model,
+                        "media model not found in catalog — billing recorded as $0"
+                    );
+                    0.0
+                }
+            },
+            Err(_) => 0.0,
+        };
+
+        let Some(parsed_agent) = agent_id.and_then(|s| s.parse::<AgentId>().ok()) else {
+            // No caller agent — skip the spend record. Media tools always
+            // run inside an agent loop today, so this branch only fires
+            // for stub/test call sites that we don't want polluting the
+            // usage table.
+            tracing::debug!(
+                provider,
+                model,
+                "record_media_usage called without a caller agent_id; skipping"
+            );
+            return;
+        };
+
+        let usage_record = librefang_memory::usage::UsageRecord {
+            agent_id: parsed_agent,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd,
+            tool_calls: 0,
+            latency_ms,
+            user_id: None,
+            channel: None,
+        };
+
+        if let Some(entry) = self.registry.get(parsed_agent) {
+            if let Err(e) = self.metering.check_all_and_record(
+                &usage_record,
+                &entry.manifest.resources,
+                &self.budget_config(),
+            ) {
+                tracing::warn!(
+                    agent_id = %parsed_agent,
+                    error = %e,
+                    "Media post-call quota check failed; recording usage anyway"
+                );
+                let _ = self.metering.record(&usage_record);
+            }
+            return;
+        }
+        let _ = self.metering.record(&usage_record);
+    }
+
     async fn run_workflow(
         &self,
         workflow_id: &str,

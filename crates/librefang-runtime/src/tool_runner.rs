@@ -684,14 +684,42 @@ pub async fn execute_tool_raw(
         "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
-        "video_generate" => tool_video_generate(input, *media_drivers).await,
+        "image_generate" => {
+            tool_image_generate(
+                input,
+                *media_drivers,
+                *workspace_root,
+                *kernel,
+                *caller_agent_id,
+            )
+            .await
+        }
+        "video_generate" => {
+            tool_video_generate(input, *media_drivers, *kernel, *caller_agent_id).await
+        }
         "video_status" => tool_video_status(input, *media_drivers).await,
-        "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
+        "music_generate" => {
+            tool_music_generate(
+                input,
+                *media_drivers,
+                *workspace_root,
+                *kernel,
+                *caller_agent_id,
+            )
+            .await
+        }
 
         // TTS/STT tools
         "text_to_speech" => {
-            tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
+            tool_text_to_speech(
+                input,
+                *media_drivers,
+                *tts_engine,
+                *workspace_root,
+                *kernel,
+                *caller_agent_id,
+            )
+            .await
         }
         "speech_to_text" => tool_speech_to_text(input, *media_engine, *workspace_root).await,
 
@@ -4585,7 +4613,10 @@ async fn tool_image_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let prompt = input["prompt"]
         .as_str()
         .ok_or("Missing 'prompt' parameter")?;
@@ -4625,6 +4656,15 @@ async fn tool_image_generate(
             .generate_image(&request)
             .await
             .map_err(|e| e.to_string())?;
+
+        if let Some(k) = kernel {
+            k.record_media_usage(
+                caller_agent_id,
+                &result.provider,
+                &result.model,
+                started.elapsed().as_millis() as u64,
+            );
+        }
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
@@ -4669,6 +4709,15 @@ async fn tool_image_generate(
     };
 
     let result = crate::image_gen::generate_image(&request).await?;
+
+    if let Some(k) = kernel {
+        k.record_media_usage(
+            caller_agent_id,
+            "openai",
+            &result.model,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     let saved_paths = if let Some(workspace) = workspace_root {
         match crate::image_gen::save_images_to_workspace(&result, workspace) {
@@ -4772,7 +4821,10 @@ fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage
 async fn tool_video_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let cache =
         media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
     let prompt = input["prompt"]
@@ -4806,6 +4858,22 @@ async fn tool_video_generate(
         .submit_video(&request)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Bill on successful submit. Video providers charge at submit time
+    // regardless of whether the caller polls to completion, so the
+    // metering record fires here rather than in `tool_video_status`.
+    if let Some(k) = kernel {
+        let model_for_billing = request
+            .model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        k.record_media_usage(
+            caller_agent_id,
+            &result.provider,
+            &model_for_billing,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     let response = serde_json::json!({
         "task_id": result.task_id,
@@ -4875,7 +4943,10 @@ async fn tool_music_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let cache =
         media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
 
@@ -4905,6 +4976,15 @@ async fn tool_music_generate(
         .generate_music(&request)
         .await
         .map_err(|e| e.to_string())?;
+
+    if let Some(k) = kernel {
+        k.record_media_usage(
+            caller_agent_id,
+            &result.provider,
+            &result.model,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     // Save audio to workspace output/ directory (same pattern as text_to_speech)
     let saved_path = if let Some(workspace) = workspace_root {
@@ -4955,7 +5035,10 @@ async fn tool_text_to_speech(
     media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
     workspace_root: Option<&Path>,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let text = input["text"].as_str().ok_or("Missing 'text' parameter")?;
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
@@ -5008,6 +5091,15 @@ async fn tool_text_to_speech(
                 .await
                 .map_err(|e| e.to_string())?;
 
+            if let Some(k) = kernel {
+                k.record_media_usage(
+                    caller_agent_id,
+                    &result.provider,
+                    &result.model,
+                    started.elapsed().as_millis() as u64,
+                );
+            }
+
             return finish_tts_result(
                 &result.audio_data,
                 &result.format,
@@ -5026,6 +5118,22 @@ async fn tool_text_to_speech(
         tts_engine.ok_or("TTS not available. No media driver or TTS engine configured.")?;
 
     let result = engine.synthesize(text, voice, format).await?;
+
+    if let Some(k) = kernel {
+        // Legacy TtsEngine doesn't expose a model id on its result; pick
+        // the configured provider's default so the catalog lookup can
+        // resolve a flat per-call price when one is set.
+        let model = match result.provider.as_str() {
+            "openai" => engine.tts_config().openai.model.clone(),
+            _ => "unknown".to_string(),
+        };
+        k.record_media_usage(
+            caller_agent_id,
+            &result.provider,
+            &model,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     finish_tts_result(
         &result.audio_data,
