@@ -1113,6 +1113,7 @@ export async function patchAgent(agentId: string, body: { name?: string; descrip
 }
 
 export interface AgentToolsResponse {
+  capabilities_tools?: string[] | null;
   tool_allowlist?: string[] | null;
   tool_blocklist?: string[] | null;
   disabled?: boolean;
@@ -1127,7 +1128,7 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
+export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
