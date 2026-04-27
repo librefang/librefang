@@ -342,6 +342,7 @@ export function UserPolicyPage() {
           icon={<ListChecks className="h-4 w-4" />}
           title={t("user_policy.title", "Permission matrix")}
           subtitle={name}
+          helpText={t("user_policy.help")}
         />
         <CardSkeleton />
       </div>
@@ -355,6 +356,7 @@ export function UserPolicyPage() {
           icon={<ListChecks className="h-4 w-4" />}
           title={t("user_policy.title", "Permission matrix")}
           subtitle={name}
+          helpText={t("user_policy.help")}
         />
         <EmptyState
           icon={<AlertTriangle className="h-6 w-6" />}
@@ -378,6 +380,7 @@ export function UserPolicyPage() {
         icon={<ListChecks className="h-4 w-4" />}
         title={t("user_policy.title", "Permission matrix")}
         subtitle={name}
+        helpText={t("user_policy.help")}
         actions={
           <div className="flex items-center gap-3">
             <Link

@@ -165,6 +165,7 @@ export function UserBudgetPage() {
         icon={<Wallet className="h-4 w-4" />}
         title={t("user_budget.title", "User budget")}
         subtitle={name}
+        helpText={t("user_budget.help")}
         badge={
           query.data?.alert_breach ? (
             <Badge variant="warning">

@@ -1541,7 +1541,7 @@
     "auto_dream_status_completed": "已完成",
     "auto_dream_status_failed": "失败",
     "auto_dream_status_aborted": "已中止",
-    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。",
+    "help": "Dashboard 偏好与账号级开关。改本地 UI 设置、管理 TOTP、触发 Auto-Dream 都在这里——这里不修改磁盘上的 kernel 配置（那是 Config 页的工作）。\n\n页面内容：\n\n  · UI 偏好——语言（English / 中文）、主题（明 / 暗）、侧栏默认折叠。存在浏览器 localStorage，按设备隔离。\n  · TOTP 启用——给敏感操作（审批、删调度、装插件）加一道 6 位验证码。Setup 给你二维码和恢复码；Revoke 移除该校验。\n  · Auto-Dream——定期后台跑一遍，agent 复盘自己的会话日志、产生记忆更新。可手动触发、看正在跑的进度、开/关每日定时。\n\nSettings（本页）vs Config：\n\n  · Settings——单用户、单浏览器的轻量级 UI / 账号开关。\n  · Config (/dashboard/config)——kernel 级 TOML 编辑器：providers、channels、MCP servers、plugin 策略、运行时上限。那里改完要重载 kernel。\n\n注意事项：\n\n  · TOTP 密钥加密存在 kernel vault 里。Authenticator 和恢复码都丢的话，要管理员改配置并重启才能恢复。\n  · Auto-Dream 跑在 kernel 里，用 agent 自己的 session，会计入该 agent 的预算。如果你启用了 TOTP，\"Run now\" 按钮也要 6 位码。\n  · 主题/语言切换即时生效，不需要重载 kernel。",
     "backup": "备份",
     "export_config_btn": "导出配置",
     "export_config_desc": "将当前配置下载为 TOML 文件。",
@@ -2863,7 +2863,7 @@
     "fetch_error": "加载预算失败",
     "set_limits": "设置消费上限",
     "current_spend": "当前消费 (USD)",
-    "alert_breach": "告警阈值已超出",
+    "alert_breach": "已触发告警",
     "enforced": "已强制执行",
     "deferred": "强制执行已延迟",
     "save": "保存",
@@ -2871,7 +2871,8 @@
     "clear": "清除上限",
     "clearing": "清除中…",
     "discard": "放弃更改",
-    "zero_means_unlimited": "将任意时间窗口设为 0 表示该窗口不限额。阈值是任一限额触发 BudgetExceeded 审计事件时的比例。"
+    "zero_means_unlimited": "将任意时间窗口设为 0 表示该窗口不限额。阈值是任一限额触发 BudgetExceeded 审计事件时的比例。",
+    "help": "单个用户的开销上限。这个用户在所有 agent、所有 channel 上的总花销都计入这个上限。给同事或外人开放你的 LibreFang 实例又不想被刷爆 provider 额度时用。\n\n预算如何叠加：\n\n  · 全局预算（/dashboard/runtime 设置）——kernel 整体上限。撞到了所有 agent 都停。\n  · 单 agent 预算（agent.toml 里设）——限制某个 agent。\n  · 单用户预算（本页）——限制某个用户的总花销。\n  · **最严格的限额生效**。全局还剩 $5、用户还剩 $50，那这个用户就只能再花 $5。\n\n本页显示：\n\n  · 当前周期花销、上限、已用百分比、滚动窗口（日 / 周 / 月）。\n  · 跨过告警阈值但未撞硬上限时显示 \"alert breach\" 徽章。\n  · 按 provider 拆分：每家 provider 在这个用户身上花了多少。\n\n注意事项：\n\n  · 没配预算的用户是无限额（仍受全局和 agent 级上限约束）。\n  · 改动在用户下一次请求时生效，正在跑的 LLM 调用不会被中断。\n  · 花销历史持久化在 SQLite，删用户不会删历史（审计需要）。"
   },
   "user_policy": {
     "title": "权限矩阵",
@@ -2908,7 +2909,8 @@
     "add_channel_placeholder": "wechat, matrix, …",
     "add_channel_hint": "渠道适配器名称（小写）。必须与桥接器发出的键匹配。",
     "add_channel_err_empty": "渠道名称必填。",
-    "add_channel_err_duplicate": "渠道 '{{key}}' 已存在规则。"
+    "add_channel_err_duplicate": "渠道 '{{key}}' 已存在规则。",
+    "help": "单个用户的 RBAC 全貌：能调哪些工具、放行哪些 category、哪些 channel 规则套在他身上、能跟哪些 agent 对话。**只读视图**——要改值请去 Users 页编辑用户，或者直接改 kernel 配置。\n\n三层叠加产生最终判定：\n\n  · 用户级 tool_policy / tool_categories——本页显示的覆盖。\n  · agent 级 ToolPolicy——agent.toml 里配。\n  · channel 级规则——[channels.<name>] 配置里设。\n\n使用步骤：\n\n  1. 顶部选用户。本页所有区段都按这个用户筛选。\n  2. 每一层显示：已配规则 + \"未配置\"标记（意思是\"穿透到下一层\"）。\n  3. 想看一次具体调用的最终判定，去 Permission Simulator (/dashboard/permission-simulator)，它会按 (user, agent, tool, channel) 跑完整交集。\n\n权限矩阵（本页）vs 权限模拟器：\n\n  · 矩阵——原始配置切片，不做决策逻辑。\n  · 模拟器——按具体场景跑三层交集，告诉你结果。\n\n注意事项：\n\n  · \"未配置\" 不等于\"拒绝\"，意思是\"穿透到其他层\"。某用户没配 tool_policy，仍然受 agent 和 channel 层规则约束。\n  · channel 规则只在请求经由该 channel 时才生效；web dashboard 和 CLI 调用绕过 channel 规则。\n  · 本页只读，编辑入口在 /dashboard/users → 点用户 → 编辑弹窗。"
   },
   "tool_policy": {
     "allowed_tools": "允许的工具",
