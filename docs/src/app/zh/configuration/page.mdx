@@ -115,7 +115,7 @@ include = ["channels.toml", "mcp.toml", "overrides/prod.toml"]
 
 [default_model]
 provider = "anthropic"
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 ```
 
@@ -178,7 +178,7 @@ shell_exec = 300                       # shell_exec 工具的覆盖
 # --- 默认 LLM 提供商 ---
 [default_model]
 provider = "anthropic"
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 # base_url = "https://api.anthropic.com"  # 可选覆盖
 
@@ -538,7 +538,7 @@ plugin_registries = []
 ```toml
 [default_model]
 provider = "anthropic"
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 # base_url = "https://api.anthropic.com"
 ```
@@ -546,7 +546,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `provider` | string | `"anthropic"` | 提供商名称。支持：`anthropic`、`gemini`、`openai`、`groq`、`openrouter`、`deepseek`、`together`、`mistral`、`fireworks`、`ollama`、`vllm`、`lmstudio`、`perplexity`、`cohere`、`ai21`、`cerebras`、`sambanova`、`huggingface`、`xai`、`replicate`。 |
-| `model` | string | `"sonnet"` | 模型标识符。别名（如 `sonnet`、`haiku`、`gpt-4o`、`gemini-flash`）由模型目录自动解析。 |
+| `model` | string | `"claude-sonnet-4-20250514"` | 模型标识符。别名（如 `sonnet`、`haiku`、`gpt-4o`、`gemini-flash`）由模型目录自动解析。 |
 | `api_key_env` | string | `"ANTHROPIC_API_KEY"` | 存放 API Key 的环境变量名称。实际密钥在运行时从该环境变量读取，绝不存储在配置文件中。 |
 | `base_url` | string 或 null | `null` | 覆盖 API 基础 URL。适用于代理或自托管端点。为 `null` 时，使用模型目录中提供商的默认 URL。 |
 
@@ -3025,8 +3025,8 @@ max_retries = 3               # LLM 摘要的最大重试次数
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `simple_model` | `"claude-haiku-4-5-20251001"` | 简单查询使用的模型。 |
-| `medium_model` | `"sonnet"` | 中等复杂度查询使用的模型。 |
-| `complex_model` | `"sonnet"` | 复杂查询使用的模型。 |
+| `medium_model` | `"claude-sonnet-4-20250514"` | 中等复杂度查询使用的模型。 |
+| `complex_model` | `"claude-sonnet-4-20250514"` | 复杂查询使用的模型。 |
 | `simple_threshold` | `100` | Token 数低于此值的查询被归类为简单查询。 |
 | `complex_threshold` | `500` | Token 数高于此值的查询被归类为复杂查询。 |
 

@@ -81,9 +81,9 @@ pub struct ModelRoutingConfig {
 impl Default for ModelRoutingConfig {
     fn default() -> Self {
         Self {
-            simple_model: "haiku".to_string(),
-            medium_model: "sonnet".to_string(),
-            complex_model: "sonnet".to_string(),
+            simple_model: "claude-haiku-4-5-20251001".to_string(),
+            medium_model: "claude-sonnet-4-20250514".to_string(),
+            complex_model: "claude-sonnet-4-20250514".to_string(),
             simple_threshold: 100,
             complex_threshold: 500,
         }

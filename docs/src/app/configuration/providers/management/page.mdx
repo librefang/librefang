@@ -100,7 +100,7 @@ The complete catalog of all 230+ builtin models, sorted by provider. Pricing is 
 | # | Model ID | Display Name | Provider | Tier | Context Window | Max Output | Input $/M | Output $/M | Tools | Vision |
 |---|----------|-------------|----------|------|---------------|------------|-----------|------------|-------|--------|
 | 1 | `claude-opus-4-20250514` | Claude Opus 4 | anthropic | Frontier | 200,000 | 32,000 | $15.00 | $75.00 | Yes | Yes |
-| 2 | `sonnet` | Claude Sonnet 4 | anthropic | Smart | 200,000 | 64,000 | $3.00 | $15.00 | Yes | Yes |
+| 2 | `claude-sonnet-4-20250514` | Claude Sonnet 4 | anthropic | Smart | 200,000 | 64,000 | $3.00 | $15.00 | Yes | Yes |
 | 3 | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | anthropic | Fast | 200,000 | 8,192 | $0.25 | $1.25 | Yes | Yes |
 | 4 | `gpt-4.1` | GPT-4.1 | openai | Frontier | 1,047,576 | 32,768 | $2.00 | $8.00 | Yes | Yes |
 | 5 | `gpt-4o` | GPT-4o | openai | Smart | 128,000 | 16,384 | $2.50 | $10.00 | Yes | Yes |
@@ -175,8 +175,8 @@ All 23 aliases resolve to canonical model IDs. Aliases are case-insensitive.
 
 | Alias | Resolves To |
 |-------|------------|
-| `sonnet` | `sonnet` |
-| `claude-sonnet` | `sonnet` |
+| `sonnet` | `claude-sonnet-4-20250514` |
+| `claude-sonnet` | `claude-sonnet-4-20250514` |
 | `haiku` | `claude-haiku-4-5-20251001` |
 | `claude-haiku` | `claude-haiku-4-5-20251001` |
 | `opus` | `claude-opus-4-20250514` |
@@ -210,7 +210,7 @@ Each agent in your `config.toml` can specify its own model, overriding the globa
 ```toml
 # Global default model
 [agents.defaults]
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 
 # Per-agent override: use an alias or full model ID
 [[agents]]
@@ -232,7 +232,7 @@ model = "sonar-pro"                 # Perplexity with built-in web search
 # You can also pin a model in the agent manifest TOML
 [[agents]]
 name = "production-bot"
-pinned_model = "sonnet"  # never auto-routed
+pinned_model = "claude-sonnet-4-20250514"  # never auto-routed
 ```
 
 When `pinned_model` is set on an agent manifest, that agent always uses the specified model regardless of routing configuration. This is used in **Stabilisation mode** (`KernelMode::Stable`) where the model is frozen for production reliability.
@@ -264,8 +264,8 @@ LibreFang can automatically select the cheapest model capable of handling each q
 | Complexity | Score Range | Default Model |
 |-----------|-------------|---------------|
 | Simple | `score < 100` | `claude-haiku-4-5-20251001` |
-| Medium | `100 <= score < 500` | `sonnet` |
-| Complex | `score >= 500` | `sonnet` |
+| Medium | `100 <= score < 500` | `claude-sonnet-4-20250514` |
+| Complex | `score >= 500` | `claude-sonnet-4-20250514` |
 
 ### Configuration
 
@@ -276,14 +276,14 @@ Model routing is configured **per-agent in the agent manifest** — not as a top
 [routing]
 simple_model = "claude-haiku-4-5-20251001"
 medium_model = "gemini-2.5-flash"
-complex_model = "sonnet"
+complex_model = "claude-sonnet-4-20250514"
 simple_threshold = 100
 complex_threshold = 500
 ```
 
 The router also integrates with the model catalog:
 - **`validate_models()`** checks that all configured model IDs exist in the catalog
-- **`resolve_aliases()`** expands aliases to canonical IDs (e.g., `"sonnet"` becomes `"sonnet"`)
+- **`resolve_aliases()`** expands aliases to canonical IDs (e.g., `"sonnet"` becomes `"claude-sonnet-4-20250514"`)
 
 ---
 
@@ -350,7 +350,7 @@ max_cost_per_hour_usd = 5.00   # cap at $5/hour
 The usage footer (when enabled) appends cost information to each response:
 
 ```
-> Cost: $0.0042 | Tokens: 1,200 in / 340 out | Model: sonnet
+> Cost: $0.0042 | Tokens: 1,200 in / 340 out | Model: claude-sonnet-4-20250514
 ```
 
 ---
@@ -374,7 +374,7 @@ Fallback chains are configured in your agent manifest or `config.toml`. The `Fal
 # Example: primary Anthropic, fallback to Gemini, then Groq
 [[agents]]
 name = "production-bot"
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 fallback_models = ["gemini-2.5-flash", "llama-3.3-70b-versatile"]
 ```
 
@@ -396,7 +396,7 @@ Returns the complete model catalog with metadata, pricing, and feature flags.
 ```json
 [
   {
-    "id": "sonnet",
+    "id": "claude-sonnet-4-20250514",
     "display_name": "Claude Sonnet 4",
     "provider": "anthropic",
     "tier": "Smart",
@@ -422,7 +422,7 @@ Returns a single model entry. Supports both canonical IDs and aliases.
 
 ```
 GET /api/models/sonnet
-GET /api/models/sonnet
+GET /api/models/claude-sonnet-4-20250514
 ```
 
 ### List Aliases
@@ -436,7 +436,7 @@ Returns a map of all alias-to-canonical-ID mappings.
 **Response:**
 ```json
 {
-  "sonnet": "sonnet",
+  "sonnet": "claude-sonnet-4-20250514",
   "haiku": "claude-haiku-4-5-20251001",
   "flash": "gemini-2.5-flash",
   "grok": "grok-2"
@@ -527,7 +527,7 @@ Frontier:
   gemini-2.5-pro (Google Gemini) — 1M ctx
 
 Smart:
-  sonnet (Anthropic) — 200K ctx
+  claude-sonnet-4-20250514 (Anthropic) — 200K ctx
   gemini-2.5-flash (Google Gemini) — 1M ctx
   deepseek-chat (DeepSeek) — 64K ctx
 

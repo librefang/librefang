@@ -135,12 +135,9 @@ impl fmt::Display for Modality {
 /// A single model entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
-    /// Canonical model identifier — the exact string a provider's API
-    /// expects (e.g. an Anthropic Sonnet id, an OpenAI GPT id). The
-    /// concrete value depends on what the registry currently ships;
-    /// anything pinned in this comment would just go stale.
+    /// Canonical model identifier (e.g. "claude-sonnet-4-20250514").
     pub id: String,
-    /// Human-readable display name shown in the dashboard's model picker.
+    /// Human-readable display name (e.g. "Claude Sonnet 4").
     pub display_name: String,
     /// Provider identifier (e.g. "anthropic").
     ///
@@ -478,8 +475,8 @@ impl From<ProviderCatalogToml> for ProviderInfo {
 /// key_required = true
 ///
 /// [[models]]
-/// id = "<canonical-model-id>"
-/// display_name = "<Display Name>"
+/// id = "claude-sonnet-4-20250514"
+/// display_name = "Claude Sonnet 4"
 /// provider = "anthropic"
 /// tier = "smart"
 /// context_window = 200000
@@ -489,7 +486,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
 /// supports_tools = true
 /// supports_vision = true
 /// supports_streaming = true
-/// aliases = ["<short-alias>", "<other-alias>"]
+/// aliases = ["sonnet", "claude-sonnet"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogFile {
@@ -506,8 +503,8 @@ pub struct ModelCatalogFile {
 ///
 /// ```toml
 /// [aliases]
-/// <short-alias> = "<canonical-model-id>"
-/// <other-alias> = "<another-canonical-id>"
+/// sonnet = "claude-sonnet-4-20250514"
+/// haiku = "claude-haiku-4-5-20251001"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AliasesCatalogFile {

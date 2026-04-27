@@ -44,7 +44,7 @@ const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         name: "anthropic",
         env_var: "ANTHROPIC_API_KEY",
-        default_model: "sonnet",
+        default_model: "claude-sonnet-4-20250514",
         needs_key: true,
     },
     ProviderInfo {

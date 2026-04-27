@@ -149,8 +149,7 @@ impl ModelRouter {
 
     /// Resolve aliases in the routing config using the catalog.
     ///
-    /// For example, if "sonnet" is configured, resolves to whichever
-    /// canonical Sonnet id the catalog currently points to.
+    /// For example, if "sonnet" is configured, resolves to "claude-sonnet-4-6".
     pub fn resolve_aliases(&mut self, catalog: &crate::model_catalog::ModelCatalog) {
         if let Some(resolved) = catalog.resolve_alias(&self.config.simple_model) {
             self.config.simple_model = resolved.to_string();

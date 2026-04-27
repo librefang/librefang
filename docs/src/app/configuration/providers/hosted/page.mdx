@@ -41,7 +41,7 @@ This page covers internet-hosted model providers that authenticate with an API k
 
 **Available Models:**
 - `claude-opus-4-20250514` (Frontier)
-- `sonnet` (Smart)
+- `claude-sonnet-4-20250514` (Smart)
 - `claude-haiku-4-5-20251001` (Fast)
 
 **Setup:**
@@ -548,7 +548,7 @@ model = "<model-id-from-novita-catalog>"
 ```toml
 [default_model]
 provider = "bedrock"
-model = "anthropic.sonnet-v1:0"
+model = "anthropic.claude-sonnet-4-20250514-v1:0"
 ```
 
 The `model` field is passed verbatim into the endpoint path, so use the full Bedrock model identifier (including region prefixes like `eu.` or inference-profile IDs when required by the region).

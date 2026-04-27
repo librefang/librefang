@@ -7272,7 +7272,7 @@ system_prompt = "You are a helpful assistant."
             }
         } else if let Some(ref routing_config) = manifest.routing {
             let mut router = ModelRouter::new(routing_config.clone());
-            // Resolve aliases (e.g. "sonnet" -> the canonical Sonnet id in the registry) before scoring
+            // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
             router.resolve_aliases(&self.model_catalog.read().unwrap_or_else(|e| e.into_inner()));
             // Build a probe request to score complexity
             let probe = CompletionRequest {

@@ -47,7 +47,7 @@ Add the profile directories to your `config.toml`:
 ```toml
 [default_model]
 provider = "claude_code"
-model = "sonnet"
+model = "claude-sonnet-4-20250514"
 cli_profile_dirs = [
     "~/.claude",                          # primary account
     "~/.claude-profiles/account-2",       # secondary

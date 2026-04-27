@@ -407,7 +407,7 @@ impl Default for LegacyYamlConfig {
     fn default() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            model: "sonnet".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
             api_key_env: None,
             base_url: None,
             temperature: None,
@@ -1250,7 +1250,12 @@ fn migrate_config_from_json(
             OpenClawAgentModel::Detailed(d) => d.primary.clone(),
         })
         .map(|m| split_model_ref(&m))
-        .unwrap_or_else(|| ("anthropic".to_string(), "sonnet".to_string()));
+        .unwrap_or_else(|| {
+            (
+                "anthropic".to_string(),
+                "claude-sonnet-4-20250514".to_string(),
+            )
+        });
 
     let api_key_env = default_api_key_env(&provider);
 
@@ -1842,8 +1847,8 @@ fn convert_agent_from_json(
     let display_name = entry.name.clone().unwrap_or_else(|| id.clone());
 
     // Resolve model
-    let primary_ref =
-        extract_primary_model(entry, defaults).unwrap_or_else(|| "anthropic/sonnet".to_string());
+    let primary_ref = extract_primary_model(entry, defaults)
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string());
     let (provider, model) = split_model_ref(&primary_ref);
 
     // Resolve fallback models
@@ -2931,7 +2936,9 @@ fn convert_legacy_agent(
         .map(|p| map_provider(&p))
         .unwrap_or_else(|| "anthropic".to_string());
 
-    let model = oc.model.unwrap_or_else(|| "sonnet".to_string());
+    let model = oc
+        .model
+        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
 
     let system_prompt = oc.system_prompt.unwrap_or_else(|| {
         format!(
