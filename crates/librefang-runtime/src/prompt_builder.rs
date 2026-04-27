@@ -183,6 +183,11 @@ pub struct PromptContext {
     /// are reflected in the next LLM call. `None` when the file is absent or
     /// the agent has no workspace.
     pub context_md: Option<String>,
+    /// Sections contributed by `BeforePromptBuild` hook handlers via
+    /// [`crate::hooks::HookHandler::provide_prompt_section`]. Populated by the
+    /// kernel before each call to [`build_system_prompt`]. Each entry renders
+    /// as `## {heading}\n{body}` after the structural sections (Sections 1-15).
+    pub dynamic_sections: Vec<crate::hooks::DynamicSection>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -362,6 +367,21 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
                 ));
             }
         }
+    }
+
+    // Section 16 — Dynamic sections from `BeforePromptBuild` hook handlers.
+    // The kernel populates `ctx.dynamic_sections` after running
+    // `HookRegistry::collect_prompt_sections`, which already enforces
+    // per-section and total caps. Subagents see them too — providers that
+    // shouldn't fire for subagents should check `ctx.is_subagent` in
+    // `provide_prompt_section`.
+    for section in &ctx.dynamic_sections {
+        let heading = section.heading.trim();
+        let body = section.body.trim();
+        if heading.is_empty() && body.is_empty() {
+            continue;
+        }
+        sections.push(format!("## {heading}\n{body}"));
     }
 
     sections.join("\n\n")
@@ -1685,6 +1705,61 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("## Workspace"));
         assert!(prompt.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn test_dynamic_sections_appended_after_live_context() {
+        let mut ctx = basic_ctx();
+        ctx.context_md = Some("BTCUSD: 67000".into());
+        ctx.dynamic_sections = vec![
+            crate::hooks::DynamicSection {
+                provider: "active-memory".into(),
+                heading: "Active Memory".into(),
+                body: "User likes shorts on volatility spikes.".into(),
+            },
+            crate::hooks::DynamicSection {
+                provider: "diffs".into(),
+                heading: "Diffs Guidance".into(),
+                body: "Prefer `diffs mode=view` for review tasks.".into(),
+            },
+        ];
+        let prompt = build_system_prompt(&ctx);
+
+        // Both sections render with the expected headings.
+        assert!(prompt.contains("## Active Memory"));
+        assert!(prompt.contains("User likes shorts on volatility spikes."));
+        assert!(prompt.contains("## Diffs Guidance"));
+        assert!(prompt.contains("Prefer `diffs mode=view`"));
+
+        // Ordering: Live Context (section 15) before dynamic sections.
+        let live_pos = prompt.find("## Live Context").unwrap();
+        let mem_pos = prompt.find("## Active Memory").unwrap();
+        let diffs_pos = prompt.find("## Diffs Guidance").unwrap();
+        assert!(live_pos < mem_pos);
+        assert!(mem_pos < diffs_pos);
+    }
+
+    #[test]
+    fn test_dynamic_sections_empty_renders_nothing() {
+        let ctx = basic_ctx();
+        assert!(ctx.dynamic_sections.is_empty());
+        let prompt = build_system_prompt(&ctx);
+        // Sanity: no dangling "## " heading from a blank section.
+        assert!(!prompt.ends_with("## "));
+    }
+
+    #[test]
+    fn test_dynamic_sections_skip_when_heading_and_body_blank() {
+        let mut ctx_with = basic_ctx();
+        ctx_with.dynamic_sections = vec![crate::hooks::DynamicSection {
+            provider: "noop".into(),
+            heading: "   ".into(),
+            body: "\n\n".into(),
+        }];
+        let prompt_with = build_system_prompt(&ctx_with);
+        let prompt_without = build_system_prompt(&basic_ctx());
+        // A blank-heading + blank-body section must produce no extra output.
+        assert_eq!(prompt_with, prompt_without);
     }
 
     #[test]
