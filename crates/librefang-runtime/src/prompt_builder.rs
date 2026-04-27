@@ -381,6 +381,12 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         if heading.is_empty() && body.is_empty() {
             continue;
         }
+        if heading.is_empty() {
+            // Body without heading: render the body alone rather than a
+            // dangling "## " prefix that would confuse the LLM.
+            sections.push(body.to_string());
+            continue;
+        }
         sections.push(format!("## {heading}\n{body}"));
     }
 
@@ -1760,6 +1766,22 @@ mod tests {
         let prompt_without = build_system_prompt(&basic_ctx());
         // A blank-heading + blank-body section must produce no extra output.
         assert_eq!(prompt_with, prompt_without);
+    }
+
+    #[test]
+    fn test_dynamic_sections_blank_heading_with_body_renders_body_only() {
+        let mut ctx = basic_ctx();
+        ctx.dynamic_sections = vec![crate::hooks::DynamicSection {
+            provider: "fallback".into(),
+            heading: "".into(),
+            body: "raw body content".into(),
+        }];
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("raw body content"));
+        // No dangling "## " or "##\n" from the empty heading.
+        assert!(!prompt.contains("## \n"));
+        assert!(!prompt.contains("##\nraw body content"));
+        assert!(!prompt.contains("## raw body content"));
     }
 
     #[test]

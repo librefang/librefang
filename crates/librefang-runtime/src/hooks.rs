@@ -173,11 +173,13 @@ impl HookRegistry {
     /// remaining handlers are skipped and a WARN is logged per drop. Errors
     /// from individual handlers are logged at WARN and skipped (fail-open).
     ///
-    /// Note: this is a parallel surface to [`HookRegistry::fire`] for the same
-    /// `BeforePromptBuild` event. Observe-only handlers continue to use
-    /// `fire`; section-contributing handlers should override
-    /// [`HookHandler::provide_prompt_section`]. A single handler may override
-    /// both methods to do both jobs.
+    /// Each handler's `on_event` is also invoked here so observe-only
+    /// handlers receive a callback on every prompt build, including the
+    /// kernel-direct paths (`send_message_ephemeral`,
+    /// `send_message_streaming_with_sender_and_opts`, `execute_llm_agent`)
+    /// that don't go through `agent_loop`'s `fire(BeforePromptBuild)`.
+    /// `on_event` errors are logged at WARN and do not block section
+    /// collection.
     pub fn collect_prompt_sections(&self, ctx: &HookContext) -> Vec<DynamicSection> {
         let Some(handlers) = self.handlers.get(&HookEvent::BeforePromptBuild) else {
             return Vec::new();
@@ -187,6 +189,17 @@ impl HookRegistry {
         let mut total_chars: usize = 0;
 
         for handler in handlers.iter() {
+            // Fire on_event first so observe-only handlers don't miss the
+            // event when prompt is built directly from the kernel rather
+            // than via agent_loop's fire(BeforePromptBuild).
+            if let Err(reason) = handler.on_event(ctx) {
+                warn!(
+                    agent = ctx.agent_name,
+                    error = %reason,
+                    "BeforePromptBuild on_event returned error (continuing)"
+                );
+            }
+
             match handler.provide_prompt_section(ctx) {
                 Ok(Some(mut section)) => {
                     if section.body.chars().count() > PER_SECTION_CHAR_CAP {
@@ -528,5 +541,51 @@ mod tests {
         // which is under cap), the 5th would push over.
         assert_eq!(sections.len(), 4);
         assert_eq!(sections.last().unwrap().provider, "p3");
+    }
+
+    /// Records each `on_event` invocation. Used to verify that
+    /// `collect_prompt_sections` also fires the observe-only callback so
+    /// kernel-direct prompt builds (which don't go through agent_loop's
+    /// `fire(BeforePromptBuild)`) still notify observers.
+    struct OnEventCounter {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl HookHandler for OnEventCounter {
+        fn on_event(&self, _ctx: &HookContext) -> Result<(), String> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_collect_prompt_sections_also_fires_on_event() {
+        let registry = HookRegistry::new();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        registry.register(
+            HookEvent::BeforePromptBuild,
+            Arc::new(OnEventCounter {
+                count: count.clone(),
+            }),
+        );
+        // Also register a section-only handler to confirm both surfaces fire.
+        registry.register(
+            HookEvent::BeforePromptBuild,
+            Arc::new(SectionHandler {
+                provider: "s".into(),
+                heading: "S".into(),
+                body: "b".into(),
+            }),
+        );
+
+        let ctx = make_ctx(HookEvent::BeforePromptBuild);
+        let sections = registry.collect_prompt_sections(&ctx);
+
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "observe-only handler must receive on_event when collect_prompt_sections runs"
+        );
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].provider, "s");
     }
 }
