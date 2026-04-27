@@ -316,7 +316,12 @@ impl AuditLog {
                         db_tip = %current_tip,
                         "Audit anchor MISMATCH on boot — SQLite audit_entries may \
                          have been rewritten; `/api/audit/verify` will fail until \
-                         the database and anchor agree again"
+                         the database and anchor agree again. \
+                         Inspect with `librefang security verify`; if you accept the \
+                         loss of pre-break forensic value (typical in dev), \
+                         `librefang security audit-reset` truncates the chain and \
+                         re-anchors at zero. DO NOT run reset in compliance / \
+                         production environments."
                     );
                 }
             }
@@ -442,7 +447,14 @@ impl AuditLog {
         // Verify chain integrity on load
         if count > 0 {
             if let Err(e) = log.verify_integrity() {
-                tracing::error!("Audit trail integrity check FAILED on boot: {e}");
+                tracing::error!(
+                    "Audit trail integrity check FAILED on boot: {e}. \
+                     Run `librefang security verify` to inspect; if you accept the \
+                     loss of pre-break forensic value (typical in dev), \
+                     `librefang security audit-reset` truncates the chain and \
+                     re-anchors at zero. DO NOT run reset in compliance / \
+                     production environments."
+                );
             } else {
                 tracing::info!("Audit trail loaded: {count} entries, chain integrity OK");
             }
