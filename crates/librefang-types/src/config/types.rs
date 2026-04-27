@@ -205,6 +205,19 @@ pub struct ChannelOverrides {
     /// channel and existing configs keep their current output byte-for-byte.
     #[serde(default)]
     pub prefix_agent_name: PrefixStyle,
+    /// Whether thread-ownership claiming applies to this channel. When set
+    /// to `false`, every routed agent dispatches even if another agent
+    /// already replied in the same thread — useful for "broadcast" channels
+    /// where multiple agents are intended to chime in together. Default
+    /// `true`: a single agent owns each `(channel, thread)` for the
+    /// configured TTL (and an explicit @-mention re-claims for the new
+    /// agent). DMs always bypass the registry. See #3334.
+    #[serde(default = "default_thread_ownership_enabled")]
+    pub thread_ownership_enabled: bool,
+}
+
+fn default_thread_ownership_enabled() -> bool {
+    true
 }
 
 impl Default for ChannelOverrides {
@@ -236,6 +249,7 @@ impl Default for ChannelOverrides {
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
             prefix_agent_name: PrefixStyle::Off,
+            thread_ownership_enabled: true,
         }
     }
 }
