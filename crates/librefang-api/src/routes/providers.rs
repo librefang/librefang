@@ -1460,7 +1460,17 @@ pub async fn test_provider(
         ),
     );
 
-    if status_code == 401 || status_code == 403 {
+    // For Anthropic-protocol providers, 401/403/404 on /v1/models is a
+    // **listing-endpoint-not-exposed** signal, not an auth failure. The
+    // BytePlus and Volcengine "coding plan" tokens, for instance, work
+    // fine for /v1/messages (the real chat path) but the same key gets
+    // a 401 from /v1/models because that endpoint isn't part of the
+    // coding-plan scope. Reporting "Authentication failed" makes the
+    // dashboard show a red "broken provider" tile when the key is in
+    // fact valid for actual inference. Treat the same status codes that
+    // the background `probe_provider` already treats as `Ok` here too —
+    // both paths now converge on the same Anthropic-shape semantics.
+    if !is_anthropic_shape && (status_code == 401 || status_code == 403) {
         (
             StatusCode::OK,
             Json(serde_json::json!({
