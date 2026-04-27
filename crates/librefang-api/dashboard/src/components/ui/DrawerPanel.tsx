@@ -59,8 +59,18 @@ export function DrawerPanel({
   }, [isOpen, title, size, hideCloseButton, children, open]);
 
   // External close → bubble up to the parent so it can flip its state.
+  // Only fires on a real `true → false` transition. On first mount the
+  // store is still false (effect order: ref-update → push-to-store →
+  // this watcher), and treating that initial false as "the store was
+  // closed externally" would call parent.onClose() before the drawer
+  // ever rendered. This was the "drawer won't open" bug on pages that
+  // mount DrawerPanel conditionally with `isOpen` hard-coded to true
+  // (e.g. HandDetailPanel).
+  const prevDrawerOpenRef = useRef(false);
   useEffect(() => {
-    if (isOpen && !drawerOpen) {
+    const wasOpen = prevDrawerOpenRef.current;
+    prevDrawerOpenRef.current = drawerOpen;
+    if (isOpen && wasOpen && !drawerOpen) {
       onCloseRef.current();
     }
   }, [drawerOpen, isOpen]);
