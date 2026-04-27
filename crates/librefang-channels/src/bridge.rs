@@ -1025,10 +1025,15 @@ impl BridgeManager {
         let mut shutdown = self.shutdown_rx.clone();
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            // First tick fires immediately by default — skip it so the
-            // first sweep happens 60s after start, giving fresh claims a
-            // full TTL window before any sweep can act on them.
+            // Skip the immediate first tick so the first sweep happens 60s
+            // after start, giving fresh claims a full TTL window before any
+            // sweep can act on them.
             interval.tick().await;
+            // Default Burst mode replays missed ticks back-to-back if the
+            // task was paused (long GC, suspended thread, etc.). Switch to
+            // Delay so that after a stall we resume on a fresh 60s cadence
+            // rather than firing several sweeps in a row.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
