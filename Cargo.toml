@@ -241,10 +241,3 @@ opt-level = "s"
 inherits = "release"
 lto = "thin"
 codegen-units = 4
-
-# Local development override: build against the in-tree UAR checkout so that
-# changes made under ../../prometheus/universal-agent-runtime are picked up
-# without going through GitHub. Comment this out to use the upstream git rev
-# pinned in crates/librefang-llm-drivers/Cargo.toml.
-[patch."https://github.com/Prometheus-AGS/universal-agent-runtime.git"]
-universal-agent-runtime = { path = "../../prometheus/universal-agent-runtime" }
