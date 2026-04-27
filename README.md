@@ -234,3 +234,11 @@ See [Comparison](https://docs.librefang.ai/getting-started/comparison#16-securit
 ---
 
 <p align="center">MIT License</p>
+
+## 💰 Bounty Contribution
+
+- **Task:** [P3] Epic: mobile client support (iOS + Android via Tauri 2)
+- **Reward:** $99
+- **Source:** GitHub-Paid
+- **Date:** 2026-04-27
+
