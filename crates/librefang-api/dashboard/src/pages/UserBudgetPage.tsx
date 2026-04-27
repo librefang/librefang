@@ -6,7 +6,7 @@
 // 403'd by the in-handler `require_admin_for_user_budget` gate before this
 // loads.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import { Wallet, ArrowLeft, AlertTriangle, Check } from "lucide-react";
@@ -20,6 +20,7 @@ import {
   useUpdateUserBudget,
   useDeleteUserBudget,
 } from "../lib/mutations/userBudget";
+import { useUIStore } from "../lib/store";
 
 interface FormState {
   max_hourly_usd: string;
@@ -44,18 +45,53 @@ export function UserBudgetPage() {
 
   const [form, setForm] = useState<FormState>(ZERO_FORM);
   const [error, setError] = useState<string | null>(null);
+  const addToast = useUIStore((s) => s.addToast);
 
-  // Seed the form from the current limits whenever they refresh. Spend
-  // values are display-only; we only ever sync `limit` / `alert_threshold`.
+  // One-shot seed guard. React Query refetches on window focus and on
+  // mutation invalidation; without this, the form would clobber any
+  // in-progress edits every time `query.data` swapped reference.
+  const hasSeeded = useRef(false);
+  // Bumped after a successful save / clear so the next `query.data`
+  // delivery is allowed to reseed (so the form reflects the normalized
+  // server state, not the raw input we just sent).
+  const [lastSavedAt, setLastSavedAt] = useState(0);
+  const lastSeededSavedAt = useRef(0);
+
+  // Seed once on first successful load; reseed only after a save we
+  // initiated (tracked via `lastSavedAt`). All other refetches —
+  // window-focus revalidations, sibling-mutation invalidations — leave
+  // the form alone so the operator's edits survive.
   useEffect(() => {
     if (!query.data) return;
+    const justSaved =
+      lastSavedAt > 0 && lastSavedAt !== lastSeededSavedAt.current;
+    if (hasSeeded.current && !justSaved) return;
     setForm({
       max_hourly_usd: String(query.data.hourly.limit),
       max_daily_usd: String(query.data.daily.limit),
       max_monthly_usd: String(query.data.monthly.limit),
       alert_threshold: String(query.data.alert_threshold),
     });
-  }, [query.data]);
+    hasSeeded.current = true;
+    lastSeededSavedAt.current = lastSavedAt;
+  }, [query.data, lastSavedAt]);
+
+  // Server-truth snapshot for the dirty flag. Stringified so a refetch
+  // that returns identical numbers doesn't flicker the Save button.
+  const serverForm: FormState | null = query.data
+    ? {
+        max_hourly_usd: String(query.data.hourly.limit),
+        max_daily_usd: String(query.data.daily.limit),
+        max_monthly_usd: String(query.data.monthly.limit),
+        alert_threshold: String(query.data.alert_threshold),
+      }
+    : null;
+  const dirty =
+    serverForm !== null &&
+    (form.max_hourly_usd !== serverForm.max_hourly_usd ||
+      form.max_daily_usd !== serverForm.max_daily_usd ||
+      form.max_monthly_usd !== serverForm.max_monthly_usd ||
+      form.alert_threshold !== serverForm.alert_threshold);
 
   const isLoading = query.isLoading;
   const fetchError = query.error;
@@ -95,6 +131,9 @@ export function UserBudgetPage() {
 
     try {
       await updateMut.mutateAsync({ name, payload });
+      // Allow the next `query.data` delivery to reseed the form.
+      setLastSavedAt(Date.now());
+      addToast(t("userBudget.toast.saved", "Spend cap saved"), "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -105,9 +144,19 @@ export function UserBudgetPage() {
     try {
       await deleteMut.mutateAsync(name);
       setForm(ZERO_FORM);
+      // Clearing is also a save; trip the reseed gate so refetched
+      // (now-zeroed) limits replace ZERO_FORM cleanly.
+      setLastSavedAt(Date.now());
+      addToast(t("userBudget.toast.saved", "Spend cap saved"), "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const onDiscard = () => {
+    if (!serverForm) return;
+    setForm(serverForm);
+    setError(null);
   };
 
   return (
@@ -265,12 +314,20 @@ export function UserBudgetPage() {
           <div className="col-span-2 flex items-center gap-2 mt-2">
             <Button
               type="submit"
-              disabled={updateMut.isPending}
+              disabled={updateMut.isPending || !dirty}
               leftIcon={<Check className="h-3.5 w-3.5" />}
             >
               {updateMut.isPending
                 ? t("user_budget.saving", "Saving…")
                 : t("user_budget.save", "Save")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onDiscard}
+              disabled={!dirty}
+            >
+              {t("user_budget.discard", "Discard")}
             </Button>
             <Button
               type="button"

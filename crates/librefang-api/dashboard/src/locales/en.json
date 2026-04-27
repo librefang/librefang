@@ -2800,6 +2800,9 @@
     "errors": {
       "non_negative": "{{field}} must be a finite, non-negative number",
       "threshold_range": "alert_threshold must be in 0.0..=1.0"
+    },
+    "toast": {
+      "saved": "Spend cap saved"
     }
   },
   "userPolicy": {
@@ -2876,6 +2879,7 @@
     "saving": "Saving…",
     "clear": "Clear cap",
     "clearing": "Clearing…",
+    "discard": "Discard",
     "zero_means_unlimited": "Set any window to 0 for unlimited on that window. Threshold is the fraction of any limit at which a BudgetExceeded audit fires."
   },
   "user_policy": {
