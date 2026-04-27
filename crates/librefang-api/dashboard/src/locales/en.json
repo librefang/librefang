@@ -142,7 +142,11 @@
     "add": "Add",
     "remove": "Remove",
     "discard": "Discard",
-    "more_actions": "More actions"
+    "more_actions": "More actions",
+    "none": "None",
+    "metadata": "Metadata",
+    "size": "Size",
+    "path": "Path"
   },
   "status": {
     "running": "Running",
@@ -787,7 +791,11 @@
     "err_security_blocked": "Content was blocked by security scan. Please remove potentially dangerous patterns.",
     "err_invalid_name": "Invalid skill name. Use lowercase letters, numbers, hyphens, and underscores only.",
     "err_create_failed": "Failed to create skill. Please try again.",
-    "outputs": "Skill Outputs"
+    "outputs": "Skill Outputs",
+    "evo_load_failed": "Failed to load file",
+    "evo_action_failed": "Action failed",
+    "evo_delete_failed": "Delete failed",
+    "reload_failed": "Reload failed"
   },
   "hands": {
     "title": "Hands",
@@ -2433,7 +2441,9 @@
     "scaffold_failed": "Create failed",
     "scaffold_success": "Plugin created",
     "uninstall_failed": "Uninstall failed",
-    "uninstall_success": "Plugin removed"
+    "uninstall_success": "Plugin removed",
+    "invalid": "Invalid",
+    "hooks": "Hooks"
   },
   "schema_form": {
     "select_option": "Select...",
@@ -2607,7 +2617,11 @@
     "taint_skip_rule_sets_hint": "default = skip bypasses scanning entirely — rule_sets above will not fire (not even Log). Switch to default = scan for audit-only rule sets.",
     "taint_rule_sets_placeholder": "comma-separated names from [[taint_rules]]",
     "taint_rule_sets_overlap_hint": "When sets overlap on the same rule, the most permissive action wins (log > warn > block) — an audit-only set will silently neutralise a block set on the shared rule.",
-    "taint_rule_sets_unknown_hint": "Unknown rule_set name(s): {{names}} — not defined in any [[taint_rules]]. The scanner will treat them as no-ops."
+    "taint_rule_sets_unknown_hint": "Unknown rule_set name(s): {{names}} — not defined in any [[taint_rules]]. The scanner will treat them as no-ops.",
+    "view_detail": "View server details",
+    "transport": "Transport",
+    "required_env": "Required environment",
+    "setup_instructions": "Setup"
   },
   "toml_viewer": {
     "tab_toml": "TOML",

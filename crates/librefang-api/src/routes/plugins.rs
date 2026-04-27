@@ -6,9 +6,32 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
-use super::AppState;
+use super::{resolve_lang, AppState, RequestLanguage};
 
 use crate::types::ApiErrorResponse;
+
+/// Pick the localized `(name, description)` for `lang` from the
+/// `[i18n.<lang>]` table parsed off a plugin manifest. Falls back to the
+/// original English fields per-string when an entry or field is missing.
+fn resolve_plugin_i18n<'a>(
+    lang: &str,
+    en_name: &'a str,
+    en_description: &'a Option<String>,
+    i18n: &'a std::collections::HashMap<String, librefang_types::config::PluginI18n>,
+) -> (String, Option<String>) {
+    let entry = i18n.get(lang).or_else(|| {
+        // Soft fallback: "zh-TW" hits "zh-TW" first, then "zh".
+        lang.split_once('-').and_then(|(base, _)| i18n.get(base))
+    });
+    let name = entry
+        .and_then(|e| e.name.as_deref())
+        .unwrap_or(en_name)
+        .to_string();
+    let description = entry
+        .and_then(|e| e.description.clone())
+        .or_else(|| en_description.clone());
+    (name, description)
+}
 
 /// Validate a GitHub registry identifier supplied by a caller.
 ///
@@ -173,7 +196,11 @@ pub struct ListPluginsQuery {
         (status = 200, description = "List installed plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugins(Query(query): Query<ListPluginsQuery>) -> impl IntoResponse {
+pub async fn list_plugins(
+    Query(query): Query<ListPluginsQuery>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = resolve_lang(lang.as_ref());
     let mut plugins = librefang_runtime::plugin_manager::list_plugins();
 
     // Apply enabled filter
@@ -193,10 +220,16 @@ pub async fn list_plugins(Query(query): Query<ListPluginsQuery>) -> impl IntoRes
     let items: Vec<serde_json::Value> = plugins
         .iter()
         .map(|p| {
+            let (name, description) = resolve_plugin_i18n(
+                lang,
+                &p.manifest.name,
+                &p.manifest.description,
+                &p.manifest.i18n,
+            );
             serde_json::json!({
-                "name": p.manifest.name,
+                "name": name,
                 "version": p.manifest.version,
-                "description": p.manifest.description,
+                "description": description,
                 "author": p.manifest.author,
                 "hooks_valid": p.hooks_valid,
                 "size_bytes": p.size_bytes,
@@ -228,28 +261,40 @@ pub async fn list_plugins(Query(query): Query<ListPluginsQuery>) -> impl IntoRes
         (status = 404, description = "Plugin not found")
     )
 )]
-pub async fn get_plugin(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn get_plugin(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = resolve_lang(lang.as_ref());
     match librefang_runtime::plugin_manager::get_plugin_info(&name) {
-        Ok(info) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "name": info.manifest.name,
-                "version": info.manifest.version,
-                "description": info.manifest.description,
-                "author": info.manifest.author,
-                "hooks": {
-                    "ingest": info.manifest.hooks.ingest,
-                    "after_turn": info.manifest.hooks.after_turn,
-                },
-                "hooks_valid": info.hooks_valid,
-                "size_bytes": info.size_bytes,
-                "path": info.path.display().to_string(),
-                "enabled": info.enabled,
-                "requirements": info.manifest.requirements,
-                "plugin_depends": info.manifest.plugin_depends,
-                "integrity_count": info.manifest.integrity.len(),
-            })),
-        ),
+        Ok(info) => {
+            let (loc_name, description) = resolve_plugin_i18n(
+                lang,
+                &info.manifest.name,
+                &info.manifest.description,
+                &info.manifest.i18n,
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": loc_name,
+                    "version": info.manifest.version,
+                    "description": description,
+                    "author": info.manifest.author,
+                    "hooks": {
+                        "ingest": info.manifest.hooks.ingest,
+                        "after_turn": info.manifest.hooks.after_turn,
+                    },
+                    "hooks_valid": info.hooks_valid,
+                    "size_bytes": info.size_bytes,
+                    "path": info.path.display().to_string(),
+                    "enabled": info.enabled,
+                    "requirements": info.manifest.requirements,
+                    "plugin_depends": info.manifest.plugin_depends,
+                    "integrity_count": info.manifest.integrity.len(),
+                })),
+            )
+        }
         Err(e) => ApiErrorResponse::not_found(e).into_json_tuple(),
     }
 }
@@ -605,7 +650,11 @@ pub async fn context_engine_metrics(State(state): State<Arc<AppState>>) -> impl 
         (status = 200, description = "Configured registries with available plugins", body = serde_json::Value)
     )
 )]
-pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_plugin_registries(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = resolve_lang(lang.as_ref());
     // Ensure the official registry is always present.
     let mut registries = state
         .kernel
@@ -651,11 +700,13 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
             Ok(entries) => entries
                 .into_iter()
                 .map(|e| {
+                    let (name, description) =
+                        resolve_plugin_i18n(lang, &e.name, &e.description, &e.i18n);
                     serde_json::json!({
-                        "name": e.name,
+                        "name": name,
                         "installed": installed_names.contains(&e.name),
                         "version": e.version,
-                        "description": e.description,
+                        "description": description,
                         "author": e.author,
                         "hooks": e.hooks,
                     })
@@ -2574,5 +2625,108 @@ pub async fn install_plugin_with_deps_handler(
         )
             .into_response(),
         Err(e) => ApiErrorResponse::bad_request(e).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod resolve_plugin_i18n_tests {
+    use super::resolve_plugin_i18n;
+    use librefang_types::config::PluginI18n;
+    use std::collections::HashMap;
+
+    fn entry(name: Option<&str>, description: Option<&str>) -> PluginI18n {
+        PluginI18n {
+            name: name.map(String::from),
+            description: description.map(String::from),
+        }
+    }
+
+    /// No `[i18n.*]` block at all → English fields pass through untouched.
+    #[test]
+    fn empty_map_returns_english() {
+        let i18n: HashMap<String, PluginI18n> = HashMap::new();
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "English Name");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// Exact match on `lang` returns the localized fields.
+    #[test]
+    fn direct_match_overrides_both_fields() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文名"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文名");
+        assert_eq!(description.as_deref(), Some("中文描述"));
+    }
+
+    /// `zh-TW` request, only `zh-TW` registered → exact-match wins, no fallback hop.
+    #[test]
+    fn region_specific_match_preferred_over_base() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("简中"), Some("简中描述")));
+        i18n.insert(
+            "zh-TW".to_string(),
+            entry(Some("正體中文"), Some("繁中描述")),
+        );
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "正體中文");
+        assert_eq!(description.as_deref(), Some("繁中描述"));
+    }
+
+    /// `zh-TW` request, only `zh` registered → soft fallback to base tag.
+    #[test]
+    fn region_falls_back_to_base_tag() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文");
+        assert_eq!(description.as_deref(), Some("中文描述"));
+    }
+
+    /// Entry exists but only sets `name` → English description still fills in.
+    #[test]
+    fn partial_entry_falls_back_per_field() {
+        let mut i18n = HashMap::new();
+        i18n.insert("ja".to_string(), entry(Some("プラグイン"), None));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("ja", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "プラグイン");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// Unknown language and no fallback target → both fall back to English.
+    #[test]
+    fn unknown_lang_returns_english() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("ko", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "English Name");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// English description itself is `None` → propagates through cleanly.
+    #[test]
+    fn missing_english_description_propagates() {
+        let i18n: HashMap<String, PluginI18n> = HashMap::new();
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &None, &i18n);
+        assert_eq!(name, "English Name");
+        assert!(description.is_none());
+    }
+
+    /// Multi-segment tag `zh-Hant-TW` should still find `zh` via split_once
+    /// taking the first hyphen as separator.
+    #[test]
+    fn multi_segment_tag_falls_back_to_first_segment() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, _) = resolve_plugin_i18n("zh-Hant-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文");
     }
 }

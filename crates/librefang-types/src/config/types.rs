@@ -3620,6 +3620,30 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub requires: Vec<PluginSystemRequirement>,
+    /// Per-language translation overrides for `name` and `description`.
+    ///
+    /// Keyed by BCP-47 language tag (`zh`, `zh-TW`, `ja`, `ko`, `de`, `es`,
+    /// `fr`, …). API routes resolve `Accept-Language` against this table and
+    /// fall back to the top-level English fields when no entry matches.
+    ///
+    /// ```toml
+    /// [i18n.zh]
+    /// name = "自动摘要"
+    /// description = "持续维护会话摘要，帮助 Agent 在长对话中不丢失上下文。"
+    /// ```
+    #[serde(default)]
+    pub i18n: std::collections::HashMap<String, PluginI18n>,
+}
+
+/// A per-language override for a plugin's user-facing strings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginI18n {
+    /// Localized plugin name. Falls back to the top-level `name`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description. Falls back to the top-level `description`.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A single system-binary requirement declared in `plugin.toml`.

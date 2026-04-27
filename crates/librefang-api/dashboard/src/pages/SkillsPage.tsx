@@ -1031,7 +1031,7 @@ function SupportingFileViewer({
       )}
       {error && (
         <p className="text-xs text-error">
-          {error instanceof Error ? error.message : "Failed to load file"}
+          {error instanceof Error ? error.message : t("skills.evo_load_failed")}
         </p>
       )}
       {data && (
@@ -1099,7 +1099,7 @@ function SkillDetailModal({
       addToast(successMsg, "success");
       setPane("none");
     } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : "Action failed", "error");
+      addToast(e instanceof Error ? e.message : t("skills.evo_action_failed"), "error");
     } finally {
       setBusy(false);
     }
@@ -1160,7 +1160,7 @@ function SkillDetailModal({
         );
         onClose();
       } catch (e: unknown) {
-        addToast(e instanceof Error ? e.message : "Delete failed", "error");
+        addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
       } finally {
         setBusy(false);
       }
@@ -1632,7 +1632,7 @@ export function SkillsPage() {
         "success",
       );
     } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : "Reload failed", "error");
+      addToast(e instanceof Error ? e.message : t("skills.reload_failed"), "error");
     }
     void skillsQuery.refetch();
     void clawhubQuery.refetch();
